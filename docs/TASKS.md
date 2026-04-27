@@ -1,0 +1,123 @@
+# Tasks
+
+## Current Sprint — Foundation
+
+### Repo & Tooling
+- [ ] Initialize Go module (`packages/api/`) with basic project structure
+- [ ] Initialize React + TypeScript + Vite project (`packages/web/`)
+- [ ] Set up pnpm workspace (`pnpm-workspace.yaml`)
+- [ ] Add `golangci-lint` config (`.golangci.yml`)
+- [ ] Set up GitHub Actions CI: lint + test on PR
+- [ ] Write `docker-compose.yml` for local development
+
+### API — Core
+- [ ] DB abstraction layer with SQLite adapter (sqlc or sqlx)
+- [ ] Migration runner (auto-runs on startup)
+- [ ] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens
+- [ ] Auth: JWT issue/validate, password hash/verify, invite token generate/validate
+- [ ] `POST /auth/register` (invite token required)
+- [ ] `POST /auth/login`
+- [ ] `POST /auth/refresh`
+- [ ] `POST /teams` — create team
+- [ ] `POST /teams/:id/invites` — send invite
+- [ ] `GET /teams/:id/members`
+- [ ] `POST /teams/:id/events` — create event
+- [ ] `GET /teams/:id/events` — list events (date range filter)
+- [ ] `PATCH /events/:id` — update event
+- [ ] `DELETE /events/:id` — delete event
+
+### API — Real-Time
+- [ ] WebSocket hub (`internal/ws/`)
+- [ ] Team-scoped subscription model
+- [ ] Broadcast on `events.*` internal bus events
+
+### API — Timelines
+- [ ] `POST /teams/:id/timelines` — create timeline
+- [ ] `GET /timelines/:id` — fetch timeline (public or auth-gated)
+- [ ] `GET /timelines/share/:token` — public share link handler
+- [ ] Timeline access list enforcement
+
+### Web — Scaffold
+- [ ] Initialize shadcn/ui: `pnpm dlx shadcn@latest init`
+- [ ] Set color tokens in `src/index.css` once palette is decided
+- [ ] Set up dark mode toggle (localStorage + `prefers-color-scheme`)
+- [ ] Routing setup (React Router)
+- [ ] Auth flow: login, register (via invite), token storage
+- [ ] API client (TanStack Query + fetch wrapper using generated types)
+- [ ] WebSocket client hook (`useWebSocket`)
+
+### Web — Timeline View
+- [ ] Horizontal timeline component (person lanes, time blocks)
+- [ ] Event block: render title, color, icon, date range
+- [ ] Click block to view/edit event detail
+- [ ] Create block by click-and-drag on a lane
+- [ ] Real-time update: apply WebSocket deltas to timeline state
+
+### OpenAPI
+- [ ] Write initial `openapi.yaml` in `packages/shared/`
+- [ ] Set up TypeScript type generation from spec (openapi-typescript)
+
+## Up Next
+
+### API — Token Auth
+- [ ] `POST /tokens` — create API token (returns value once)
+- [ ] `GET /tokens` — list tokens for current user
+- [ ] `DELETE /tokens/:id` — revoke token
+- [ ] Middleware: accept Bearer token (JWT or API token) on all authenticated routes
+- [ ] Enforce token scope on writes (read-only tokens blocked from mutations)
+
+### API — Archive
+- [ ] `POST /events/:id/archive` and `POST /events/:id/unarchive`
+- [ ] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive`
+- [ ] All list endpoints exclude archived records by default; `?archived=true` to include
+
+### Team Configuration (API)
+- [ ] `team_statuses` migration and repository
+- [ ] Seed default statuses (Planned / In Progress / Done) on team creation
+- [ ] `GET /teams/:id/statuses` — list statuses in order
+- [ ] `POST /teams/:id/statuses` — create status
+- [ ] `PATCH /statuses/:id` — rename, recolor, reorder
+- [ ] `DELETE /statuses/:id` — requires `replacementStatusId` in body; migrates events
+- [ ] `color` field on `team_members` — set by admin or member
+
+### Timeline Views (Web)
+- [ ] Calendar view component: weekly, daily, monthly grid layouts
+- [ ] List view component: chronological event list
+- [ ] Kanban view component: columns = statuses (ordered), cards = events, color = member color
+- [ ] View switcher in timeline header
+
+### Calendar Sync
+- [ ] Google Calendar OAuth connect flow
+- [ ] Outbound sync: push draba events to Google Calendar on create/update/delete
+- [ ] Inbound sync: Google webhook handler → upsert event in draba
+- [ ] Built-in CalDAV server (`internal/caldav/`)
+- [ ] CalDAV connect flow (user provides URL + credentials)
+- [ ] Outbound sync: push draba events to CalDAV on create/update/delete
+- [ ] Team iCal feed endpoint: `GET /timelines/:ical_token/feed.ics` (public, sanitized — no notes)
+
+### Data Portability
+- [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
+- [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
+- [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
+
+### Polish
+- [ ] Password reset flow (email required — pick SMTP or transactional email provider)
+- [ ] Public timeline read-only view (no login)
+- [ ] Timeline restricted-access enforcement
+- [ ] Docker image: embed React build into Go binary, single artifact
+
+## Done
+- [x] Initialize repo scaffold — 2026-04-27
+- [x] Define requirements, architecture, conventions — 2026-04-27
+
+## Parking Lot
+- MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
+- CLI binary
+- MCP server for AI agent access
+- Mobile native apps (ship PWA first)
+- Microsoft/Outlook calendar sync (v2)
+- Multi-tenant cloud hosting
+- SSO / OAuth login (GitHub, Google)
+- Notifications (email, push)
+- List view (secondary to timeline)
+- Recurring event UI (RRULE editing)
