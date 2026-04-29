@@ -3,12 +3,12 @@
 ## Current Sprint — Foundation
 
 ### Repo & Tooling
-- [ ] Initialize Go module (`packages/api/`) with basic project structure
-- [ ] Initialize React + TypeScript + Vite project (`packages/web/`)
-- [ ] Set up pnpm workspace (`pnpm-workspace.yaml`)
-- [ ] Add `golangci-lint` config (`.golangci.yml`)
-- [ ] Set up GitHub Actions CI: lint + test on PR
-- [ ] Write `docker-compose.yml` for local development
+- [x] Initialize Go module (`packages/api/`) with basic project structure — 2026-04-29
+- [x] Initialize React + TypeScript + Vite project (`packages/web/`) — 2026-04-29
+- [x] Set up pnpm workspace (`pnpm-workspace.yaml`) — 2026-04-29
+- [x] Add `golangci-lint` config (`.golangci.yml`) — 2026-04-29
+- [x] Set up GitHub Actions CI: lint + test on PR — 2026-04-29
+- [x] Write `docker-compose.yml` for local development — 2026-04-29
 
 ### API — Core
 - [ ] DB abstraction layer with SQLite adapter (sqlc or sqlx)

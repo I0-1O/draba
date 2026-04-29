@@ -10,6 +10,36 @@ shadcn stores colors as bare HSL channels (no `hsl()` wrapper), e.g. `--primary:
 
 ---
 
+## Logo
+
+All variants are in `docs/design/assets/logo/`.
+
+### Variants
+
+| File | Description |
+|------|-------------|
+| `icon-color.svg` | Full color — teal header, orange pegs, light gray body. Use on white/off-white only. |
+| `icon-black.svg` | Solid black icon, no background. |
+| `icon-orange.svg` | Solid orange (`#F17B2B`) icon, no background. |
+| `icon-teal.svg` | Solid teal (`#1A97A2`) icon, no background. |
+| `icon-white-on-black-circle.svg` | White icon on filled black circle. Works on any background. |
+| `icon-knockout-black-circle.svg` | Black-filled circle with icon knocked out (transparent). Page/background color shows through the icon shape. |
+| `icon-knockout-orange-circle.svg` | Orange-filled circle with icon knocked out. |
+| `icon-knockout-teal-circle.svg` | Teal-filled circle with icon knocked out. |
+
+### Usage by background
+
+| Background | Recommended variants |
+|------------|---------------------|
+| White / off-white | `icon-color`, `icon-black`, `icon-teal`, `icon-knockout-black-circle`, `icon-knockout-orange-circle`, `icon-knockout-teal-circle` |
+| Teal (`#288C9B`) | `icon-black`, `icon-orange`, `icon-knockout-black-circle`, `icon-knockout-orange-circle` |
+| Dark / charcoal | `icon-white-on-black-circle`, `icon-orange`, `icon-knockout-orange-circle`, `icon-knockout-teal-circle` |
+| Any | `icon-white-on-black-circle` |
+
+> Teal column confirmed 2026-04-29. Other columns are best-guess — verify during implementation.
+
+---
+
 ## Color Palette
 
 ### Brand Colors (Source)

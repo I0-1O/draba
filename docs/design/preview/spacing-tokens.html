@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 14px; }
+  .section { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; font-family: var(--font-sans); }
+  /* Spacing bars */
+  .bar-row { display: flex; align-items: center; gap: 8px; }
+  .bar { background: var(--primary); height: 10px; border-radius: 2px; opacity: 0.7; }
+  .bar-label { font-size: 10px; font-family: var(--font-mono); color: var(--muted-foreground); width: 60px; }
+  /* Radius */
+  .rbox { background: var(--muted); border: 1px solid var(--border); width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; }
+  .rbox-label { font-size: 10px; color: var(--muted-foreground); text-align: center; font-family: var(--font-mono); }
+  /* Shadow */
+  .sbox { background: var(--card); width: 56px; height: 36px; border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; }
+  .sbox-label { font-size: 10px; color: var(--muted-foreground); text-align: center; font-family: var(--font-mono); }
+  .col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+</style>
+</head>
+<body>
+  <div>
+    <div class="label">Spacing Scale</div>
+    <div class="section" style="flex-direction:column; gap:4px;">
+      <div class="bar-row"><span class="bar-label">4px / 1</span><div class="bar" style="width:4px"></div></div>
+      <div class="bar-row"><span class="bar-label">8px / 2</span><div class="bar" style="width:8px"></div></div>
+      <div class="bar-row"><span class="bar-label">12px / 3</span><div class="bar" style="width:12px"></div></div>
+      <div class="bar-row"><span class="bar-label">16px / 4</span><div class="bar" style="width:16px"></div></div>
+      <div class="bar-row"><span class="bar-label">24px / 6</span><div class="bar" style="width:24px"></div></div>
+      <div class="bar-row"><span class="bar-label">32px / 8</span><div class="bar" style="width:32px"></div></div>
+    </div>
+  </div>
+  <div>
+    <div class="label">Border Radius</div>
+    <div class="section">
+      <div class="col"><div class="rbox" style="border-radius:4px"></div><div class="rbox-label">4px<br>sm</div></div>
+      <div class="col"><div class="rbox" style="border-radius:6px"></div><div class="rbox-label">6px<br>md</div></div>
+      <div class="col"><div class="rbox" style="border-radius:8px"></div><div class="rbox-label">8px<br>lg</div></div>
+      <div class="col"><div class="rbox" style="border-radius:12px"></div><div class="rbox-label">12px<br>xl</div></div>
+      <div class="col"><div class="rbox" style="border-radius:9999px"></div><div class="rbox-label">full</div></div>
+    </div>
+  </div>
+  <div>
+    <div class="label">Elevation / Shadow</div>
+    <div class="section">
+      <div class="col"><div class="sbox" style="box-shadow:var(--shadow-sm)"></div><div class="rbox-label">sm<br>cards</div></div>
+      <div class="col"><div class="sbox" style="box-shadow:var(--shadow-md)"></div><div class="rbox-label">md<br>popovers</div></div>
+      <div class="col"><div class="sbox" style="box-shadow:var(--shadow-lg)"></div><div class="rbox-label">lg<br>modals</div></div>
+    </div>
+  </div>
+</body>
+</html>

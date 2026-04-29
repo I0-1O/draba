@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); width: 80px; flex-shrink: 0; font-family: var(--font-sans); }
+  button { font-family: var(--font-sans); font-size: 13px; font-weight: 600; padding: 7px 16px; border-radius: var(--radius-md); border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: opacity 0.15s, transform 0.1s; }
+  button:active { transform: scale(0.98); }
+  .btn-primary   { background: var(--primary); color: var(--primary-foreground); }
+  .btn-primary:hover { opacity: 0.9; }
+  .btn-secondary { background: var(--secondary); color: var(--secondary-foreground); }
+  .btn-secondary:hover { opacity: 0.88; }
+  .btn-outline   { background: transparent; color: var(--foreground); border: 1px solid var(--border); }
+  .btn-outline:hover { background: var(--muted); }
+  .btn-ghost     { background: transparent; color: var(--foreground); }
+  .btn-ghost:hover { background: var(--muted); }
+  .btn-destructive { background: var(--destructive); color: var(--destructive-foreground); }
+  .btn-destructive:hover { opacity: 0.88; }
+  .btn-sm { font-size: 12px; padding: 5px 12px; }
+  .btn-lg { font-size: 15px; padding: 10px 22px; }
+  .btn-disabled { opacity: 0.45; cursor: not-allowed; }
+</style>
+</head>
+<body>
+  <div class="row"><div class="label">Primary</div><button class="btn-primary">Add event</button><button class="btn-primary btn-sm">Add event</button><button class="btn-primary btn-lg">Add event</button></div>
+  <div class="row"><div class="label">Secondary</div><button class="btn-secondary">Share timeline</button></div>
+  <div class="row"><div class="label">Outline</div><button class="btn-outline">Export</button><button class="btn-outline btn-sm">Cancel</button></div>
+  <div class="row"><div class="label">Ghost</div><button class="btn-ghost">View all</button></div>
+  <div class="row"><div class="label">Destructive</div><button class="btn-destructive">Delete event</button></div>
+  <div class="row"><div class="label">Disabled</div><button class="btn-primary btn-disabled" disabled>Add event</button><button class="btn-outline btn-disabled" disabled>Export</button></div>
+</body>
+</html>

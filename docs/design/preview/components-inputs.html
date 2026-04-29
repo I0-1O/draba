@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); width: 80px; flex-shrink: 0; font-family: var(--font-sans); }
+  input, select { font-family: var(--font-sans); font-size: 13px; padding: 7px 10px; border-radius: var(--radius-md); border: 1px solid var(--input); background: var(--card); color: var(--foreground); outline: none; width: 200px; }
+  input::placeholder { color: var(--muted-foreground); }
+  input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px hsl(188 59% 38% / 0.2); }
+  input.error { border-color: var(--destructive); }
+  input.disabled { opacity: 0.5; cursor: not-allowed; background: var(--muted); }
+  .helper { font-size: 11px; color: var(--muted-foreground); font-family: var(--font-sans); }
+  .helper.err { color: var(--destructive); }
+</style>
+</head>
+<body>
+  <div class="row"><div class="label">Default</div><input type="text" placeholder="Event title"></div>
+  <div class="row"><div class="label">Filled</div><input type="text" value="Q3 Campaign"></div>
+  <div class="row"><div class="label">Focus</div><input type="text" value="Q3 Campaign" style="border-color:var(--primary);box-shadow:0 0 0 2px hsl(188 59% 38% / 0.2)"></div>
+  <div class="row"><div class="label">Error</div>
+    <div style="display:flex;flex-direction:column;gap:3px">
+      <input type="text" value="" class="error" placeholder="Required">
+      <span class="helper err">Title is required</span>
+    </div>
+  </div>
+  <div class="row"><div class="label">Disabled</div><input type="text" value="Read only" class="disabled" disabled></div>
+  <div class="row"><div class="label">Select</div>
+    <select>
+      <option>Planned</option>
+      <option selected>In progress</option>
+      <option>Done</option>
+    </select>
+  </div>
+</body>
+</html>

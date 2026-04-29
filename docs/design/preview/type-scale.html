@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px 24px; background: var(--background); display: flex; flex-direction: column; gap: 6px; }
+  .row { display: flex; align-items: baseline; gap: 16px; }
+  .meta { width: 140px; flex-shrink: 0; font-size: 10px; color: var(--muted-foreground); font-family: var(--font-mono); }
+  .specimen { color: var(--foreground); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+</style>
+</head>
+<body>
+  <div class="row"><div class="meta">24px · 700</div><div class="specimen" style="font-size:24px;font-weight:700;line-height:1.25">Page heading</div></div>
+  <div class="row"><div class="meta">18px · 600</div><div class="specimen" style="font-size:18px;font-weight:600;line-height:1.25">Section heading</div></div>
+  <div class="row"><div class="meta">16px · 600</div><div class="specimen" style="font-size:16px;font-weight:600">Card / panel title</div></div>
+  <div class="row"><div class="meta">14px · 400</div><div class="specimen" style="font-size:14px;font-weight:400">Body text — readable and calm</div></div>
+  <div class="row"><div class="meta">12px · 400</div><div class="specimen" style="font-size:12px;font-weight:400;color:var(--muted-foreground)">Caption / metadata</div></div>
+  <div class="row"><div class="meta">12px · 600</div><div class="specimen" style="font-size:12px;font-weight:600">Badge · Tag · Timeline block label</div></div>
+</body>
+</html>

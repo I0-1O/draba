@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); font-family: var(--font-sans); }
+  .timeline { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-sm); }
+  .tl-header { display: grid; grid-template-columns: 120px repeat(10, 1fr); border-bottom: 1px solid var(--border); }
+  .tl-header-cell { padding: 6px 8px; font-size: 10px; font-weight: 600; color: var(--muted-foreground); border-right: 1px solid var(--border); text-align: center; }
+  .tl-header-cell:first-child { text-align: left; }
+  .tl-row { display: grid; grid-template-columns: 120px repeat(10, 1fr); border-bottom: 1px solid var(--border); min-height: 44px; position: relative; }
+  .tl-row:last-child { border-bottom: none; }
+  .tl-person { padding: 0 10px; display: flex; align-items: center; gap: 7px; border-right: 1px solid var(--border); }
+  .avatar { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: white; flex-shrink: 0; }
+  .person-name { font-size: 12px; font-weight: 600; color: var(--foreground); }
+  .tl-cell { border-right: 1px solid var(--border); position: relative; }
+  .tl-cell:last-child { border-right: none; }
+  .block { position: absolute; top: 8px; bottom: 8px; border-radius: 4px; display: flex; align-items: center; padding: 0 8px; font-size: 10px; font-weight: 600; color: white; overflow: hidden; white-space: nowrap; box-shadow: var(--shadow-sm); cursor: pointer; transition: opacity 0.15s; }
+  .block:hover { opacity: 0.88; }
+  .today-line { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--secondary); z-index: 5; }
+  .tl-lane { position: relative; grid-column: 2 / -1; display: grid; grid-template-columns: repeat(10, 1fr); }
+</style>
+</head>
+<body>
+  <div class="timeline">
+    <div class="tl-header">
+      <div class="tl-header-cell">Team</div>
+      <div class="tl-header-cell">Apr 28</div>
+      <div class="tl-header-cell">Apr 29</div>
+      <div class="tl-header-cell">Apr 30</div>
+      <div class="tl-header-cell">May 1</div>
+      <div class="tl-header-cell">May 2</div>
+      <div class="tl-header-cell">May 5</div>
+      <div class="tl-header-cell">May 6</div>
+      <div class="tl-header-cell">May 7</div>
+      <div class="tl-header-cell">May 8</div>
+      <div class="tl-header-cell">May 9</div>
+    </div>
+    <!-- Lindsay -->
+    <div class="tl-row">
+      <div class="tl-person"><div class="avatar" style="background:#288C9B">LK</div><span class="person-name">Lindsay</span></div>
+      <div class="tl-lane" style="position:relative">
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell" style="border-right:none"></div>
+        <div class="block" style="background:#288C9B; left: 0%; width: 65%">Campaign launch</div>
+      </div>
+    </div>
+    <!-- Jen -->
+    <div class="tl-row">
+      <div class="tl-person"><div class="avatar" style="background:#F29E4C">JM</div><span class="person-name">Jen</span></div>
+      <div class="tl-lane" style="position:relative">
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell" style="border-right:none"></div>
+        <div class="block" style="background:#F29E4C; color: #333; left: 40%; width: 50%">Project Y</div>
+      </div>
+    </div>
+    <!-- Brian -->
+    <div class="tl-row">
+      <div class="tl-person"><div class="avatar" style="background:#9B59B6">BR</div><span class="person-name">Brian</span></div>
+      <div class="tl-lane" style="position:relative">
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell" style="border-right:none"></div>
+        <div class="block" style="background:#9B59B6; left: 0%; width: 20%">Task A</div>
+        <div class="block" style="background:#9B59B6; left: 55%; width: 40%">Task B</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

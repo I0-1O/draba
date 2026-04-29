@@ -34,11 +34,13 @@ draba is a team coordination and planning tool for small-to-medium teams. It occ
 - Read `docs/REQUIREMENTS.md` before starting new features
 - Read `docs/ARCHITECTURE.md` before making structural changes
 - Check `docs/TASKS.md` for current priorities
+- Check `docs/ROADMAP.md` to understand which phase we're in and what the exit criteria are
 
 ## References
 - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — What the app does
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — How the system is built
 - [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — Code style and patterns
 - [docs/TASKS.md](docs/TASKS.md) — Current backlog and priorities
+- [docs/ROADMAP.md](docs/ROADMAP.md) — Phased development timeline with effort estimates and exit criteria
 - [docs/design/DESIGN_SYSTEM.md](docs/design/DESIGN_SYSTEM.md) — Visual design tokens
 - [docs/design/UX_PATTERNS.md](docs/design/UX_PATTERNS.md) — Interaction patterns

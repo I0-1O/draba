@@ -41,6 +41,16 @@ coverage/
 # TypeScript
 *.tsbuildinfo
 
+# Go
+packages/api/tmp/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Database
+*.db
+
 # Claude Code — personal/local settings only
 # (CLAUDE.md, skills/, and .claude/commands/ are committed — they're shared team context)
 .claude/settings.local.json

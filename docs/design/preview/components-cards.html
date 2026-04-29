@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); padding: 14px 16px; width: 200px; font-family: var(--font-sans); }
+  .card-title { font-size: 13px; font-weight: 600; color: var(--foreground); margin-bottom: 4px; }
+  .card-meta  { font-size: 11px; color: var(--muted-foreground); margin-bottom: 10px; }
+  .card-body  { font-size: 12px; color: var(--foreground); line-height: 1.5; }
+  .kanban-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); padding: 10px 12px; width: 180px; }
+  .kc-title { font-size: 12px; font-weight: 600; color: var(--foreground); margin-bottom: 6px; }
+  .kc-row { display: flex; align-items: center; justify-content: space-between; }
+  .badge { display: inline-flex; padding: 2px 7px; border-radius: 9999px; font-size: 10px; font-weight: 600; background: hsl(188 59% 90%); color: hsl(188 59% 28%); }
+  .avatar { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: white; }
+  .panel { background: var(--card); border-left: 1px solid var(--border); padding: 16px; width: 180px; box-shadow: var(--shadow-md); }
+  .panel-title { font-size: 13px; font-weight: 700; color: var(--foreground); margin-bottom: 12px; }
+  .panel-field { margin-bottom: 10px; }
+  .field-label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 3px; }
+  .field-val { font-size: 12px; color: var(--foreground); }
+</style>
+</head>
+<body>
+  <!-- Standard card -->
+  <div>
+    <div style="font-size:10px;font-weight:600;color:var(--muted-foreground);margin-bottom:6px;font-family:var(--font-sans)">Card</div>
+    <div class="card">
+      <div class="card-title">Q3 Marketing Campaign</div>
+      <div class="card-meta">Lindsay K. · Apr 28 – May 15</div>
+      <div class="card-body">Brand refresh assets and launch plan for summer push.</div>
+    </div>
+  </div>
+  <!-- Kanban card -->
+  <div>
+    <div style="font-size:10px;font-weight:600;color:var(--muted-foreground);margin-bottom:6px;font-family:var(--font-sans)">Kanban card</div>
+    <div class="kanban-card">
+      <div style="width:3px;height:3px;border-radius:50%;background:#288C9B;margin-bottom:6px"></div>
+      <div class="kc-title">Campaign assets</div>
+      <div class="kc-row">
+        <span class="badge">In progress</span>
+        <div class="avatar" style="background:#288C9B">LK</div>
+      </div>
+    </div>
+  </div>
+  <!-- Event detail panel -->
+  <div>
+    <div style="font-size:10px;font-weight:600;color:var(--muted-foreground);margin-bottom:6px;font-family:var(--font-sans)">Event panel</div>
+    <div class="panel">
+      <div class="panel-title">Campaign assets</div>
+      <div class="panel-field"><div class="field-label">Assigned</div><div class="field-val">Lindsay K.</div></div>
+      <div class="panel-field"><div class="field-label">Dates</div><div class="field-val">Apr 28 – May 15</div></div>
+      <div class="panel-field"><div class="field-label">Status</div><div class="field-val">In progress</div></div>
+      <div class="panel-field"><div class="field-label">Notes</div><div class="field-val" style="color:var(--muted-foreground)">No notes yet</div></div>
+    </div>
+  </div>
+</body>
+</html>

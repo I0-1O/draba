@@ -1,0 +1,28 @@
+services:
+  api:
+    build:
+      context: packages/api
+      target: dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./packages/api:/app
+    environment:
+      - DRABA_PORT=8080
+      - DRABA_DB_DRIVER=sqlite
+      - DRABA_DB_DSN=./draba.db
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./packages/web/src:/app/packages/web/src
+      - ./packages/web/public:/app/packages/web/public
+      - ./packages/web/index.html:/app/packages/web/index.html
+    environment:
+      - VITE_API_URL=http://api:8080
+    depends_on:
+      - api

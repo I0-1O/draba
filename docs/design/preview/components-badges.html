@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 14px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); width: 80px; flex-shrink: 0; font-family: var(--font-sans); }
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; font-family: var(--font-sans); }
+  .badge-primary { background: hsl(188 59% 90%); color: hsl(188 59% 28%); }
+  .badge-amber   { background: hsl(30 87% 92%); color: hsl(30 65% 35%); }
+  .badge-success { background: hsl(145 63% 88%); color: hsl(145 63% 25%); }
+  .badge-muted   { background: var(--muted); color: var(--muted-foreground); }
+  .badge-destructive { background: hsl(0 72% 92%); color: hsl(0 72% 38%); }
+  .status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; font-family: var(--font-sans); color: var(--foreground); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .avatar { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: white; font-family: var(--font-sans); }
+  .avatar-group { display: flex; }
+  .avatar-group .avatar { margin-left: -8px; border: 2px solid var(--background); }
+  .avatar-group .avatar:first-child { margin-left: 0; }
+</style>
+</head>
+<body>
+  <div class="row"><div class="label">Badges</div>
+    <span class="badge badge-primary">In progress</span>
+    <span class="badge badge-amber">Planned</span>
+    <span class="badge badge-success">Done</span>
+    <span class="badge badge-muted">Draft</span>
+    <span class="badge badge-destructive">Blocked</span>
+  </div>
+  <div class="row"><div class="label">Status</div>
+    <span class="status"><span class="dot" style="background:#2ECC71"></span>On track</span>
+    <span class="status"><span class="dot" style="background:#F29E4C"></span>At risk</span>
+    <span class="status"><span class="dot" style="background:#E74C3C"></span>Blocked</span>
+    <span class="status"><span class="dot" style="background:var(--muted-foreground)"></span>Not started</span>
+  </div>
+  <div class="row"><div class="label">Avatars</div>
+    <div class="avatar" style="background:#288C9B">LK</div>
+    <div class="avatar" style="background:#F29E4C">JM</div>
+    <div class="avatar" style="background:#9B59B6">BR</div>
+    <div style="width:16px"></div>
+    <div class="avatar-group">
+      <div class="avatar" style="background:#288C9B">LK</div>
+      <div class="avatar" style="background:#F29E4C">JM</div>
+      <div class="avatar" style="background:#9B59B6">BR</div>
+      <div class="avatar" style="background:var(--muted); color:var(--muted-foreground)">+4</div>
+    </div>
+  </div>
+</body>
+</html>

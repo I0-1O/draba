@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; gap: 10px; flex-wrap: wrap; }
+  .chip { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--card); }
+  .dot { width: 28px; height: 28px; border-radius: var(--radius-md); flex-shrink: 0; }
+  .info .name { font-size: 11px; font-weight: 600; color: var(--foreground); }
+  .info .role { font-size: 10px; color: var(--muted-foreground); font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+  <div class="chip"><div class="dot" style="background:var(--primary)"></div><div class="info"><div class="name">primary</div><div class="role">actions · links · focus</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--secondary)"></div><div class="info"><div class="name">secondary</div><div class="role">highlights · badges</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--accent)"></div><div class="info"><div class="name">accent</div><div class="role">CTAs · hover</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--muted)"></div><div class="info"><div class="name">muted</div><div class="role">subtle backgrounds</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--destructive)"></div><div class="info"><div class="name">destructive</div><div class="role">errors · delete</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--success)"></div><div class="info"><div class="name">success</div><div class="role">confirmations</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--warning)"></div><div class="info"><div class="name">warning</div><div class="role">caution states</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--border); border: 1px solid #ccc"></div><div class="info"><div class="name">border</div><div class="role">dividers · outlines</div></div></div>
+</body>
+</html>
