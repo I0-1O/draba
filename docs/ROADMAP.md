@@ -16,7 +16,7 @@ This document organizes development into discrete phases with effort estimates a
 |---|-------|--------|--------|
 | 0 | [Scaffold & Docs](#phase-0-scaffold--docs) | XS | ✅ |
 | 1 | [Project Infrastructure](#phase-1-project-infrastructure) | S — 2–4 hrs | ✅ |
-| 2 | [API Foundation — DB & Auth](#phase-2-api-foundation--db--auth) | L — 3–5 days | ⬜ |
+| 2 | [API Foundation — DB & Auth](#phase-2-api-foundation--db--auth) | L — 3–5 days | ✅ |
 | 3 | [Core API — Events & Teams](#phase-3-core-api--events--teams) | M — 2–3 days | ⬜ |
 | 4 | [OpenAPI Spec & Type Generation](#phase-4-openapi-spec--type-generation) | S — 1 day | ⬜ |
 | 5 | [API — Real-Time (WebSocket)](#phase-5-api--real-time-websocket) | M — 2–3 days | ⬜ |
@@ -62,7 +62,7 @@ Repo created. Requirements, architecture, conventions, and design docs written.
 ---
 
 ### Phase 2 — API Foundation — DB & Auth
-**Status:** ⬜ | **Effort:** L (3–5 days)
+**Status:** ✅ Done — 2026-04-30 | **Effort:** L (3–5 days)
 
 **Scope:**
 - DB abstraction layer with SQLite adapter (sqlc or sqlx)

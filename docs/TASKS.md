@@ -11,13 +11,13 @@
 - [x] Write `docker-compose.yml` for local development — 2026-04-29
 
 ### API — Core
-- [ ] DB abstraction layer with SQLite adapter (sqlc or sqlx)
-- [ ] Migration runner (auto-runs on startup)
-- [ ] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens
-- [ ] Auth: JWT issue/validate, password hash/verify, invite token generate/validate
-- [ ] `POST /auth/register` (invite token required)
-- [ ] `POST /auth/login`
-- [ ] `POST /auth/refresh`
+- [x] DB abstraction layer with SQLite adapter (sqlx + modernc.org/sqlite) — 2026-04-30
+- [x] Migration runner (auto-runs on startup) — 2026-04-30
+- [x] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens — 2026-04-30
+- [x] Auth: JWT issue/validate, password hash/verify, invite token generate/validate — 2026-04-30
+- [x] `POST /auth/register` (invite token required) — 2026-04-30
+- [x] `POST /auth/login` — 2026-04-30
+- [x] `POST /auth/refresh` — 2026-04-30
 - [ ] `POST /teams` — create team
 - [ ] `POST /teams/:id/invites` — send invite
 - [ ] `GET /teams/:id/members`
