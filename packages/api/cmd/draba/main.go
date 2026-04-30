@@ -13,7 +13,10 @@ import (
 func main() {
 	port := getenv("DRABA_PORT", "8080")
 	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := getenv("DRABA_JWT_SECRET", "change-me-in-production")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("DRABA_JWT_SECRET must be set")
+	}
 
 	database, err := db.Open(dsn)
 	if err != nil {

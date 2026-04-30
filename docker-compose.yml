@@ -11,6 +11,7 @@ services:
       - DRABA_PORT=8080
       - DRABA_DB_DRIVER=sqlite
       - DRABA_DB_DSN=./draba.db
+      - DRABA_JWT_SECRET=dev-secret-change-in-prod
 
   web:
     build:

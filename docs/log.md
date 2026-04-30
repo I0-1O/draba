@@ -2,6 +2,36 @@
 
 ---
 
+## 2026-04-30 — /test-phase 2
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review
+- Result: 5 pass (2 environment caveats, 1 advisory)
+- Smoke target: local LAN host (not committed)
+- Caveats: `docker compose config` skipped (docker not in bash PATH); `go test -race` skipped (no GCC/CGO on Windows host — tests pass without `-race`)
+- Advisory: `DRABA_JWT_SECRET` fallback default `"change-me-in-production"` in `cmd/draba/main.go:16` — server should refuse to start if unset or at default in production
+
+---
+
+## 2026-04-30 — Post-Phase 2: CI & deploy fixes
+
+### go.mod version bump (same issue as Phase 1)
+`go get` auto-bumped `go.mod` to `go 1.25.0` (matching the local toolchain). This broke both CI jobs:
+- golangci-lint v1.64.8 (built with Go 1.24) refuses modules targeting Go > 1.24
+- `golang:1.23-alpine` in the Dockerfile can't satisfy `go mod download` for a `go 1.25` module
+
+Fix: `go mod edit -go=1.22.0 && go mod tidy -go=1.22.0`. Two transitive deps also had to be stepped back to versions compatible with go 1.22: `golang.org/x/crypto v0.50.0 → v0.28.0`, `golang.org/x/sys v0.43.0 → v0.26.0` (which also pulled `modernc.org/sqlite v1.50.0 → v1.34.5` and its libc/memory deps). No code changes — purely dependency pinning.
+
+### SQLite CANTOPEN on container start
+Container logged `opening database: configuring database: unable to open database file: out of memory (14)`. SQLite error 14 is `SQLITE_CANTOPEN`; modernc.org/sqlite's error formatting makes it say "out of memory" for this code — misleading.
+
+Two causes fixed:
+1. **Compound PRAGMA**: `db.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")` — `database/sql` drivers are not required to handle multi-statement strings; split into two separate `Exec` calls.
+2. **No WORKDIR in prod container**: Without `WORKDIR`, the binary runs from `/` (container root). Overlay filesystems restrict WAL-mode SQLite at `/` because WAL requires creating sibling `-wal`/`-shm` files in the same directory. Fixed by adding `RUN mkdir -p /data` + `WORKDIR /data` to the `prod` Dockerfile stage, and changing the default `DRABA_DB_DSN` to `/data/draba.db`.
+
+Portainer was also mounting a single file (`/app/draba.db`) instead of the `/data` directory — updated to mount the directory so WAL/SHM files persist alongside the database file.
+
+---
+
 ## 2026-04-30 — Phase 2: API Foundation — DB & Auth
 
 **Completed.** Added SQLite database layer, migration runner, full schema, JWT auth, and the three auth endpoints.

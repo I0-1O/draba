@@ -5,7 +5,7 @@ Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or
 3. Read any referenced docs (ARCHITECTURE.md, CONVENTIONS.md, REQUIREMENTS.md) relevant to this phase before writing any code.
 4. Update the phase status in ROADMAP.md from ⬜ to 🔄 before starting work.
 5. Implement every task in the phase's scope, following CONVENTIONS.md throughout.
-6. After implementation: run `golangci-lint run` (Go) and/or `pnpm --filter web lint` (web), run tests, and verify every exit criterion from ROADMAP.md is met.
+6. After implementation: run `golangci-lint run` (Go) and/or `pnpm --filter web lint` (web), run tests, and verify every exit criterion from ROADMAP.md is met. Suggest running `/test-phase <N>` and `/review-phase <N>` to fan the verification out across subagents in parallel.
 7. Check off completed items in TASKS.md.
 8. Update the phase status in ROADMAP.md:
    - If all exit criteria pass: ✅ Done, add the completion date.
