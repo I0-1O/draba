@@ -12,7 +12,7 @@ import (
 
 func main() {
 	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "./draba.db")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
 	jwtSecret := getenv("DRABA_JWT_SECRET", "change-me-in-production")
 
 	database, err := db.Open(dsn)

@@ -17,8 +17,14 @@ func Open(dsn string) (*sqlx.DB, error) {
 	// SQLite performs better with a single writer connection.
 	database.SetMaxOpenConns(1)
 
-	if _, err = database.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;"); err != nil {
-		return nil, fmt.Errorf("configuring database: %w", err)
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+	}
+	for _, p := range pragmas {
+		if _, err = database.Exec(p); err != nil {
+			return nil, fmt.Errorf("configuring database (%s): %w", p, err)
+		}
 	}
 
 	return database, nil
