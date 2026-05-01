@@ -45,6 +45,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.tier.CheckUserLimit(count); err != nil {
+		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
+		return
+	}
+
 	var invite *models.Invite
 	if count > 0 {
 		if req.InviteToken == "" {
