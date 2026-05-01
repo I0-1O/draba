@@ -44,3 +44,4 @@ DRABA_BASE_URL=                 # public URL of the server (used for OAuth callb
 
 ## Conventions
 See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
+See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.

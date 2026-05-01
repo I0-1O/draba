@@ -2,6 +2,9 @@ import { UserPlus } from 'lucide-react';
 import MemberAvatar from '../MemberAvatar';
 import type { DrabaEvent, Member } from '../../types';
 
+// Layout constants. Event blocks are absolutely positioned inside each
+// member's lane using these — left = startCol * COL_W, width = span * COL_W.
+// Keep these in sync with the DESIGN_SYSTEM doc.
 const COL_W = 80;        // px per day column
 const ROW_H = 52;        // px per member row
 const PERSON_COL_W = 140; // px for the sticky member name column
@@ -17,6 +20,14 @@ interface Props {
   onSelectEvent: (id: string | null) => void;
 }
 
+/**
+ * The core "Person × Time" view. Renders a sticky header row of day labels,
+ * then one row per member. Each row contains a sticky name cell on the left
+ * and a lane on the right with absolutely-positioned event blocks.
+ *
+ * The component is presentational — date arithmetic, event positioning
+ * (`startCol`, `span`), and selection state are all owned by the parent.
+ */
 export default function TimelineGrid({
   members,
   events,

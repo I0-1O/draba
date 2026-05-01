@@ -1,3 +1,6 @@
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
 package main
 
 import (
@@ -12,11 +15,15 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 )
 
-const banner = `
- ⢀⣸ ⡀⣀ ⢀⣀ ⣇⡀ ⢀⣀
- ⠣⠼ ⠏  ⠣⠼ ⠧⠜ ⠣⠼
- team timelines for everyone.
-`
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
 
 func main() {
 	fmt.Print(banner)
@@ -66,6 +73,7 @@ func main() {
 	}
 }
 
+// getenv returns the env var value or fallback when unset/empty.
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

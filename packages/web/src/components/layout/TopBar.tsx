@@ -1,6 +1,9 @@
 import { ChevronLeft, ChevronRight, GanttChart, Columns3, List, Share2, Plus } from 'lucide-react';
 
+/** Which view (Timeline / Kanban / List) is currently displayed. */
 export type ViewMode = 'timeline' | 'kanban' | 'list';
+
+/** Granularity of the date axis on the timeline. */
 export type ZoomLevel = 'day' | 'week' | 'month';
 
 interface Props {
@@ -57,6 +60,11 @@ function IconBtn({ icon, onClick }: { icon: React.ReactNode; onClick?: () => voi
   );
 }
 
+/**
+ * Top toolbar above the active view. Owns no state itself — every action
+ * (paging, view/zoom switching, share, add) is delegated upward, so this
+ * component is reusable across pages with different state owners.
+ */
 export default function TopBar({
   title,
   dateRangeLabel,

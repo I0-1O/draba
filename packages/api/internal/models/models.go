@@ -1,7 +1,13 @@
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
 package models
 
 import "time"
 
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
 type User struct {
 	ID           string    `db:"id"            json:"id"`
 	Email        string    `db:"email"         json:"email"`
@@ -12,6 +18,7 @@ type User struct {
 	UpdatedAt    time.Time `db:"updated_at"    json:"updatedAt"`
 }
 
+// Team is a workspace that groups users and their scheduled work.
 type Team struct {
 	ID        string    `db:"id"         json:"id"`
 	Name      string    `db:"name"       json:"name"`
@@ -20,6 +27,9 @@ type Team struct {
 	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
 }
 
+// TeamMember is the join row that puts a User in a Team with a given
+// Role ("owner", "admin", "member"). Color is the per-team display color
+// used in timeline views.
 type TeamMember struct {
 	TeamID   string    `db:"team_id"  json:"teamId"`
 	UserID   string    `db:"user_id"  json:"userId"`
@@ -28,6 +38,9 @@ type TeamMember struct {
 	JoinedAt time.Time `db:"joined_at" json:"joinedAt"`
 }
 
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
 type Invite struct {
 	ID         string     `db:"id"          json:"id"`
 	TeamID     string     `db:"team_id"     json:"teamId"`

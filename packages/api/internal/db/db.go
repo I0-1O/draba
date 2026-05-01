@@ -1,3 +1,7 @@
+// Package db provides the database connection, schema migrations,
+// and repository types backing the API server. The default driver is
+// SQLite (modernc.org/sqlite, a pure-Go build to avoid cgo); MySQL and
+// Postgres are planned per docs/ARCHITECTURE.md.
 package db
 
 import (

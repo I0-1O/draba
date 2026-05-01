@@ -21,12 +21,24 @@ const FIELD_LABEL: React.CSSProperties = {
   marginBottom: 4,
 };
 
+/**
+ * Right-side detail panel for a selected timeline event.
+ *
+ * Editing model:
+ *  - `title` and `notes` use local state and commit on blur, so we don't
+ *    fire an `onChange` for every keystroke.
+ *  - `status` and `color` commit immediately (single discrete choice).
+ *  - The effect resyncs local state when the selected event changes
+ *    (keyed on `event.id`), otherwise stale text would persist when the
+ *    user clicks a different event.
+ */
 export default function EventPanel({ event, members, onClose, onChange, onDelete }: Props) {
   const member = members.find(m => m.id === event.memberId);
   const [title, setTitle] = useState(event.title);
   const [notes, setNotes] = useState(event.notes ?? '');
   const [status, setStatus] = useState<EventStatus>(event.status);
 
+  // Reset local edits when the panel switches to a different event.
   useEffect(() => {
     setTitle(event.title);
     setNotes(event.notes ?? '');

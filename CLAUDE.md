@@ -44,3 +44,5 @@ draba is a team coordination and planning tool for small-to-medium teams. It occ
 - [docs/ROADMAP.md](docs/ROADMAP.md) — Phased development timeline with effort estimates and exit criteria
 - [docs/design/DESIGN_SYSTEM.md](docs/design/DESIGN_SYSTEM.md) — Visual design tokens
 - [docs/design/UX_PATTERNS.md](docs/design/UX_PATTERNS.md) — Interaction patterns
+- [skills/go-comments.md](skills/go-comments.md) — Go comment conventions (package headers, exported doc comments, inline why-comments)
+- [skills/ts-comments.md](skills/ts-comments.md) — TypeScript/React comment conventions (file headers, TSDoc on exports, inline why-comments)

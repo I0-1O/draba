@@ -1,3 +1,7 @@
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
 package api
 
 import (
@@ -17,6 +21,8 @@ type Server struct {
 	tier    tier.Tier
 }
 
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
 func NewServer(users *db.UserRepo, invites *db.InviteRepo, tokens *auth.TokenService, t tier.Tier) *Server {
 	return &Server{
 		users:   users,
@@ -26,6 +32,8 @@ func NewServer(users *db.UserRepo, invites *db.InviteRepo, tokens *auth.TokenSer
 	}
 }
 
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 

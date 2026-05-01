@@ -22,6 +22,11 @@ interface SidebarItemProps {
   onClick?: () => void;
 }
 
+/**
+ * A single nav row inside the sidebar. Renders the label only when the
+ * sidebar is expanded; otherwise the label is exposed via `title=` for
+ * native tooltip / accessibility.
+ */
 function SidebarItem({ icon, label, active = false, collapsed, onClick }: SidebarItemProps) {
   const [hovered, setHovered] = useState(false);
   return (
@@ -68,6 +73,11 @@ const ICON = { width: 15, height: 15, strokeWidth: 1.8, flexShrink: 0 } as const
 // Placeholder timelines — replaced when API layer is wired
 const DEMO_TIMELINES = ['Engineering Q2', 'Design Sprint', 'Marketing Q3'];
 
+/**
+ * Left navigation rail: brand, team selector, timeline list, and the
+ * current-user footer. The collapsed/expanded state is driven by the
+ * parent so the layout can react (TopBar offset, content width).
+ */
 export default function Sidebar({ collapsed, onToggle }: Props) {
   const [activeTimeline, setActiveTimeline] = useState(DEMO_TIMELINES[0]);
 

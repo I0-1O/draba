@@ -1,3 +1,7 @@
+// Package tier defines the deployment tiers (Unlimited, Team, Business,
+// Enterprise) and the per-tier limits and capability gates the API enforces.
+// Pro modules register through this package so they can read the active Tier
+// at startup. See registry.go for the module registration contract.
 package tier
 
 import (
@@ -5,6 +9,8 @@ import (
 	"os"
 )
 
+// Tier is a deployment tier identifier. The zero value (empty string) is
+// Unlimited, which is what self-hosted/free installs run as.
 type Tier string
 
 const (
@@ -49,6 +55,8 @@ func Load() (Tier, error) {
 	return t, nil
 }
 
+// Limits returns the user/team caps for this tier. Unknown tiers return
+// the zero value, which is interpreted as "unlimited".
 func (t Tier) Limits() Limits {
 	return tierLimits[t]
 }
@@ -59,6 +67,8 @@ func (t Tier) AtLeast(other Tier) bool {
 	return tierOrder[t] >= tierOrder[other]
 }
 
+// String returns the tier name for logs and error messages. Unlimited
+// renders as "unlimited" rather than the empty string.
 func (t Tier) String() string {
 	if t == Unlimited {
 		return "unlimited"

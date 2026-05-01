@@ -44,6 +44,7 @@ pnpm --filter web lint
 
 ## Conventions
 See `docs/CONVENTIONS.md` for React, TypeScript, and component patterns.
+See `skills/ts-comments.md` for comment conventions (file-level headers, TSDoc on exported declarations, when to add inline why-comments, mandatory comments on `any`/`as`/`@ts-expect-error`). Apply these whenever writing or editing TS/TSX.
 
 ## Notes
 - In production, the built static files are embedded in the Go binary — no separate static server
