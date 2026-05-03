@@ -59,13 +59,15 @@ func main() {
 
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	events := db.NewEventRepo(database)
 	tokens := auth.NewTokenService(jwtSecret)
 
 	if mods := tier.Registered(); len(mods) > 0 {
 		log.Printf("modules: %d registered", len(mods))
 	}
 
-	srv := api.NewServer(users, invites, tokens, t)
+	srv := api.NewServer(users, invites, teams, events, tokens, t)
 
 	log.Printf("listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {

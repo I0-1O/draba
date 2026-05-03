@@ -2,6 +2,50 @@
 
 ---
 
+## 2026-05-03 — Phase 3: Core API — Events & Teams
+
+**Completed.** Added team management, invite flow, and event CRUD endpoints.
+
+### What was built
+
+**New models (`internal/models/models.go`)**
+- `Event` — full events table shape; all optional fields as pointers; `ArchivedAt` nullable
+- `TeamMemberWithUser` — embeds `TeamMember` + user display fields for member list responses
+
+**New repositories (`internal/db/`)**
+- `team_repo.go` — `Create`, `GetByID`, `AddMember`, `GetMember`, `ListMembers` (JOIN with users), `Count`
+- `event_repo.go` — `Create`, `GetByID`, `Update`, `Delete`, `ListByTeam` (optional `from`/`to` bounds)
+
+**New handlers (`internal/api/`)**
+- `team_handler.go` — `POST /teams`, `POST /teams/{id}/invites`, `GET /teams/{id}/members`
+- `event_handler.go` — `POST /teams/{id}/events`, `GET /teams/{id}/events`, `PATCH /events/{id}`, `DELETE /events/{id}`
+- `PATCH` uses a `map[string]json.RawMessage` decode so only supplied fields are applied
+
+**Updated wiring**
+- `server.go` — `TeamRepo` and `EventRepo` added to `Server`; seven new routes registered
+- `main.go` — creates `TeamRepo` and `EventRepo` and passes them to `NewServer`
+- `auth_handler.go` — register handler now adds the new user to the team when an invite is accepted
+
+**Authorization model**
+- `POST /teams` — any authenticated user (tier check before insert)
+- `POST /teams/{id}/invites` — authenticated + admin role on that team
+- `GET /teams/{id}/members` — authenticated + any membership
+- All event endpoints — authenticated + any membership on the event's team
+
+### Exit criteria — all verified by automated tests
+
+- Full invite flow (`TestInviteFlow_FullCycle`): create team → send invite → register via token → list members shows both users
+- Events CRUD + date range filter: 12 event tests covering create, list, list-with-filter, update (field-level patch), delete, and 404/403 error paths
+- All responses verified for correct shape and HTTP status codes (29 tests total, all green)
+- `golangci-lint run` passes cleanly
+
+### Decisions & notes
+- `DELETE /events/:id` permanently removes the row; soft-delete archive is a Phase 9 feature
+- Invite tokens are 128-bit hex (crypto/rand), expire in 7 days; no resend mechanism yet
+- Team slug is auto-derived from the name at creation; no uniqueness retry — duplicate slugs will surface as a DB error (acceptable for now, Phase 10 can improve)
+
+---
+
 ## 2026-04-30 — /test-phase 2
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review

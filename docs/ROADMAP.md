@@ -17,7 +17,7 @@ This document organizes development into discrete phases with effort estimates a
 | 0 | [Scaffold & Docs](#phase-0-scaffold--docs) | XS | ✅ |
 | 1 | [Project Infrastructure](#phase-1-project-infrastructure) | S — 2–4 hrs | ✅ |
 | 2 | [API Foundation — DB & Auth](#phase-2-api-foundation--db--auth) | L — 3–5 days | ✅ |
-| 3 | [Core API — Events & Teams](#phase-3-core-api--events--teams) | M — 2–3 days | ⬜ |
+| 3 | [Core API — Events & Teams](#phase-3-core-api--events--teams) | M — 2–3 days | ✅ |
 | 4 | [OpenAPI Spec & Type Generation](#phase-4-openapi-spec--type-generation) | S — 1 day | ⬜ |
 | 5 | [API — Real-Time (WebSocket)](#phase-5-api--real-time-websocket) | M — 2–3 days | ⬜ |
 | 6 | [API — Timelines](#phase-6-api--timelines) | S — ½–1 day | ⬜ |
@@ -80,7 +80,7 @@ Repo created. Requirements, architecture, conventions, and design docs written.
 ---
 
 ### Phase 3 — Core API — Events & Teams
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** ✅ Done — 2026-05-03 | **Effort:** M (2–3 days)
 
 **Scope:**
 - `POST /teams` — create team

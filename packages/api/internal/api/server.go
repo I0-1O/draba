@@ -17,16 +17,20 @@ import (
 type Server struct {
 	users   *db.UserRepo
 	invites *db.InviteRepo
+	teams   *db.TeamRepo
+	events  *db.EventRepo
 	tokens  *auth.TokenService
 	tier    tier.Tier
 }
 
 // NewServer constructs a Server with its required dependencies. It does not
 // touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(users *db.UserRepo, invites *db.InviteRepo, tokens *auth.TokenService, t tier.Tier) *Server {
+func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, events *db.EventRepo, tokens *auth.TokenService, t tier.Tier) *Server {
 	return &Server{
 		users:   users,
 		invites: invites,
+		teams:   teams,
+		events:  events,
 		tokens:  tokens,
 		tier:    t,
 	}
@@ -41,6 +45,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /auth/login", s.handleLogin)
 	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
 	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/events", chain(s.handleCreateEvent, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/events", chain(s.handleListEvents, s.authMiddleware))
+	mux.HandleFunc("PATCH /events/{id}", chain(s.handleUpdateEvent, s.authMiddleware))
+	mux.HandleFunc("DELETE /events/{id}", chain(s.handleDeleteEvent, s.authMiddleware))
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

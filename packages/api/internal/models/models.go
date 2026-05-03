@@ -6,6 +6,42 @@ package models
 
 import "time"
 
+// Event is a scheduled item of work belonging to a Team. ArchivedAt is
+// non-nil when the event is soft-deleted; list endpoints exclude archived
+// events by default.
+type Event struct {
+	ID              string     `db:"id"               json:"id"`
+	TeamID          string     `db:"team_id"          json:"teamId"`
+	Title           string     `db:"title"            json:"title"`
+	Description     *string    `db:"description"      json:"description,omitempty"`
+	Icon            *string    `db:"icon"             json:"icon,omitempty"`
+	Color           *string    `db:"color"            json:"color,omitempty"`
+	StartAt         time.Time  `db:"start_at"         json:"startAt"`
+	EndAt           time.Time  `db:"end_at"           json:"endAt"`
+	AllDay          bool       `db:"all_day"          json:"allDay"`
+	StatusID        *string    `db:"status_id"        json:"statusId,omitempty"`
+	ParentEventID   *string    `db:"parent_event_id"  json:"parentEventId,omitempty"`
+	PercentComplete *int       `db:"percent_complete" json:"percentComplete,omitempty"`
+	Location        *string    `db:"location"         json:"location,omitempty"`
+	URL             *string    `db:"url"              json:"url,omitempty"`
+	Rrule           *string    `db:"rrule"            json:"rrule,omitempty"`
+	CaldavUID       *string    `db:"caldav_uid"       json:"caldavUid,omitempty"`
+	GoogleEventID   *string    `db:"google_event_id"  json:"googleEventId,omitempty"`
+	CreatedBy       string     `db:"created_by"       json:"createdBy"`
+	CreatedAt       time.Time  `db:"created_at"       json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"       json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"      json:"archivedAt,omitempty"`
+}
+
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+}
+
 // User is an authenticated account. PasswordHash is omitted from JSON
 // to avoid leaking it through any handler that returns a User.
 type User struct {

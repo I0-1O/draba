@@ -93,6 +93,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	if invite != nil {
 		_ = s.invites.MarkAccepted(invite.ID)
+		member := &models.TeamMember{
+			TeamID:   invite.TeamID,
+			UserID:   user.ID,
+			Role:     invite.Role,
+			JoinedAt: now,
+		}
+		_ = s.teams.AddMember(member)
 	}
 
 	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)

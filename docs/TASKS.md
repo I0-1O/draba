@@ -18,13 +18,13 @@
 - [x] `POST /auth/register` (invite token required) — 2026-04-30
 - [x] `POST /auth/login` — 2026-04-30
 - [x] `POST /auth/refresh` — 2026-04-30
-- [ ] `POST /teams` — create team
-- [ ] `POST /teams/:id/invites` — send invite
-- [ ] `GET /teams/:id/members`
-- [ ] `POST /teams/:id/events` — create event
-- [ ] `GET /teams/:id/events` — list events (date range filter)
-- [ ] `PATCH /events/:id` — update event
-- [ ] `DELETE /events/:id` — delete event
+- [x] `POST /teams` — create team — 2026-05-03
+- [x] `POST /teams/:id/invites` — send invite — 2026-05-03
+- [x] `GET /teams/:id/members` — 2026-05-03
+- [x] `POST /teams/:id/events` — create event — 2026-05-03
+- [x] `GET /teams/:id/events` — list events (date range filter) — 2026-05-03
+- [x] `PATCH /events/:id` — update event — 2026-05-03
+- [x] `DELETE /events/:id` — delete event — 2026-05-03
 
 ### API — Real-Time
 - [ ] WebSocket hub (`internal/ws/`)
