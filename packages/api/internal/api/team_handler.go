@@ -128,6 +128,33 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, invite)
 }
 
+// handleGetTeam handles GET /teams/{id}. Any team member may fetch the team record.
+func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get team")
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get team")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, team)
+}
+
 // handleListMembers handles GET /teams/{id}/members. Any team member may
 // list the membership roster.
 func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {

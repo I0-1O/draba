@@ -465,6 +465,30 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /teams/{id}:
+    get:
+      operationId: getTeam
+      summary: Get a team by ID
+      description: Any member of the team may fetch the team record.
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Team record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /teams/{id}/invites:
     post:
       operationId: createInvite

@@ -47,6 +47,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
 
 	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
 	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
 	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
 	mux.HandleFunc("POST /teams/{id}/events", chain(s.handleCreateEvent, s.authMiddleware))
