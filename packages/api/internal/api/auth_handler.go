@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -92,14 +93,20 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if invite != nil {
-		_ = s.invites.MarkAccepted(invite.ID)
+		if err := s.invites.MarkAccepted(invite.ID); err != nil {
+			// User and tokens are still returned — email uniqueness prevents a
+			// second registration. Log so the open invite is visible in monitoring.
+			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
+		}
 		member := &models.TeamMember{
 			TeamID:   invite.TeamID,
 			UserID:   user.ID,
 			Role:     invite.Role,
 			JoinedAt: now,
 		}
-		_ = s.teams.AddMember(member)
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
+		}
 	}
 
 	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)

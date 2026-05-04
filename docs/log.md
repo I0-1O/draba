@@ -46,6 +46,15 @@
 
 ---
 
+## 2026-05-03 — /test-phase 3
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review
+- Result: all pass
+- Smoke target: local LAN host (not committed)
+- Notes: `docker compose config` skipped (docker not in bash PATH on dev box); `go test -race` skipped (no GCC/CGO on Windows — runs in CI); `GET /users/me` returns 404 (not a Phase 3 assertion, not counted); low-severity advisory: `auth_handler.go:95` silently discards error from `MarkAccepted` — a DB failure there could leave an invite token reusable until expiry
+
+---
+
 ## 2026-04-30 — /test-phase 2
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review
