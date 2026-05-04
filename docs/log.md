@@ -2,6 +2,45 @@
 
 ---
 
+## 2026-05-04 — Phase 4: OpenAPI Spec & Type Generation
+
+**Completed.** Wrote the OpenAPI 3.1.0 specification for all Phase 2–3 endpoints and wired up `openapi-typescript` codegen so the web package can import generated types.
+
+### What was built
+
+**`packages/shared/openapi.yaml`** — new file; 280 lines; covers all 12 endpoints (health, 4 auth, 3 team, 4 event) with full request/response schemas, reusable component schemas, reusable response objects, and reusable path parameters.
+
+**Schemas defined:**
+- `User`, `Team`, `TeamMember`, `TeamMemberWithUser` (allOf TeamMember + user display fields)
+- `Invite`, `Event`, `AuthResponse`, `RefreshResponse`, `HealthResponse`, `ApiError`
+
+**`packages/shared/package.json`** — added `generate` script (`openapi-typescript ./openapi.yaml -o ./src/index.ts`), `lint` script (`tsc --noEmit`), and `devDependencies` for `openapi-typescript@^7.6.1` and `typescript`.
+
+**`packages/shared/tsconfig.json`** — minimal TypeScript config for linting the generated output.
+
+**`packages/shared/src/index.ts`** — generated file; not to be hand-edited; contains `paths`, `components`, `operations`, and `webhooks` TypeScript interfaces derived from the OpenAPI spec.
+
+**Root `package.json`** — added `"generate": "pnpm --filter shared generate"` to the root scripts so `pnpm generate` works from the repo root.
+
+**`packages/web/package.json`** — added `"@draba/shared": "workspace:*"` to dependencies.
+
+**`packages/web/tsconfig.app.json`** — added `paths` entry mapping `@draba/shared` to `../shared/src/index.ts` for reliable TypeScript module resolution.
+
+**`packages/web/src/types/api.ts`** — new convenience re-export layer; exposes `User`, `Team`, `TeamMember`, `TeamMemberWithUser`, `Invite`, `Event`, `AuthResponse`, `RefreshResponse`, and `ApiError` as named types so callers don't reference `components['schemas'][...]` directly.
+
+### Exit criteria — all verified
+
+- `pnpm generate` completes with no errors (openapi-typescript 7.13.0)
+- All Phase 2–3 endpoints are represented in the spec (12 paths × methods)
+- `import type { Event } from '@draba/shared'` resolves cleanly — `pnpm --filter web lint` (`tsc --noEmit`) passes with zero errors
+
+### Decisions & notes
+- Used OpenAPI 3.1.0 (not 3.0.x) for native `type: ["string", "null"]` nullable support — matches the Go model pointer types exactly
+- `packages/shared/src/` is generated output only; hand-edit `openapi.yaml` then re-run `pnpm generate`
+- `packages/web/src/types/api.ts` is the stable import surface for the web package — it insulates callers from `openapi-typescript`'s internal path syntax
+
+---
+
 ## 2026-05-03 — Phase 3: Core API — Events & Teams
 
 **Completed.** Added team management, invite flow, and event CRUD endpoints.

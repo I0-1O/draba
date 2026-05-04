@@ -1,0 +1,714 @@
+openapi: "3.1.0"
+
+info:
+  title: draba API
+  description: Team coordination API — Phases 2 & 3 (auth, teams, events).
+  version: "1.0.0"
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+# All authenticated endpoints require a Bearer JWT unless overridden with security: [].
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  # ────────────────────────────────────────────────────────────
+  # Schemas
+  # ────────────────────────────────────────────────────────────
+  schemas:
+
+    User:
+      type: object
+      required: [id, email, displayName, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        displayName:
+          type: string
+        avatarUrl:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    Team:
+      type: object
+      required: [id, name, slug, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    TeamMember:
+      type: object
+      required: [teamId, userId, role, joinedAt]
+      properties:
+        teamId:
+          type: string
+        userId:
+          type: string
+        role:
+          type: string
+          enum: [owner, admin, member]
+        color:
+          type: ["string", "null"]
+        joinedAt:
+          type: string
+          format: date-time
+
+    TeamMemberWithUser:
+      allOf:
+        - $ref: "#/components/schemas/TeamMember"
+        - type: object
+          required: [email, displayName]
+          properties:
+            email:
+              type: string
+              format: email
+            displayName:
+              type: string
+            avatarUrl:
+              type: ["string", "null"]
+
+    Invite:
+      type: object
+      required: [id, teamId, email, token, role, invitedBy, expiresAt, createdAt]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        email:
+          type: string
+        token:
+          type: string
+        role:
+          type: string
+          enum: [admin, member]
+        invitedBy:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        acceptedAt:
+          type: ["string", "null"]
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    Event:
+      type: object
+      required: [id, teamId, title, startAt, endAt, allDay, createdBy, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        title:
+          type: string
+        description:
+          type: ["string", "null"]
+        icon:
+          type: ["string", "null"]
+        color:
+          type: ["string", "null"]
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        allDay:
+          type: boolean
+        statusId:
+          type: ["string", "null"]
+        parentEventId:
+          type: ["string", "null"]
+        percentComplete:
+          type: ["integer", "null"]
+          minimum: 0
+          maximum: 100
+        location:
+          type: ["string", "null"]
+        url:
+          type: ["string", "null"]
+        rrule:
+          type: ["string", "null"]
+        caldavUid:
+          type: ["string", "null"]
+        googleEventId:
+          type: ["string", "null"]
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        archivedAt:
+          type: ["string", "null"]
+          format: date-time
+
+    AuthResponse:
+      type: object
+      required: [user, accessToken, refreshToken]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+
+    RefreshResponse:
+      type: object
+      required: [accessToken]
+      properties:
+        accessToken:
+          type: string
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ApiError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+  # ────────────────────────────────────────────────────────────
+  # Reusable responses
+  # ────────────────────────────────────────────────────────────
+  responses:
+    BadRequest:
+      description: Invalid request body or parameters.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    Unauthorized:
+      description: Missing or invalid authentication token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    Forbidden:
+      description: Authenticated but not allowed to perform this action.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    PaymentRequired:
+      description: Tier limit reached.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+  # ────────────────────────────────────────────────────────────
+  # Reusable parameters
+  # ────────────────────────────────────────────────────────────
+  parameters:
+    teamId:
+      name: id
+      in: path
+      required: true
+      description: Team ID.
+      schema:
+        type: string
+
+    eventId:
+      name: id
+      in: path
+      required: true
+      description: Event ID.
+      schema:
+        type: string
+
+# ────────────────────────────────────────────────────────────
+# Paths
+# ────────────────────────────────────────────────────────────
+paths:
+
+  /health:
+    get:
+      operationId: health
+      summary: Health check
+      security: []
+      tags: [system]
+      responses:
+        "200":
+          description: Server is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Auth ────────────────────────────────────────────────────
+
+  /auth/register:
+    post:
+      operationId: register
+      summary: Register a new user
+      description: |
+        The first user on a fresh install may register without an invite token
+        (bootstrap). Every subsequent user must supply a valid invite token.
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, displayName]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                displayName:
+                  type: string
+                  minLength: 1
+                inviteToken:
+                  type: string
+      responses:
+        "201":
+          description: User registered successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Email address is already registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/login:
+    post:
+      operationId: login
+      summary: Authenticate and obtain tokens
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Authenticated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/refresh:
+    post:
+      operationId: refreshToken
+      summary: Exchange a refresh token for a new access token
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        "200":
+          description: New access token issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/me:
+    get:
+      operationId: getMe
+      summary: Get the authenticated user's profile
+      tags: [auth]
+      responses:
+        "200":
+          description: Current user profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Teams ────────────────────────────────────────────────────
+
+  /teams:
+    post:
+      operationId: createTeam
+      summary: Create a new team
+      description: The authenticated user automatically becomes the team's first admin member.
+      tags: [teams]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+      responses:
+        "201":
+          description: Team created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/invites:
+    post:
+      operationId: createInvite
+      summary: Create a team invite
+      description: Only team admins may create invites. The token expires after 7 days.
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: If provided, the invite is scoped to this email address.
+                role:
+                  type: string
+                  enum: [admin, member]
+                  default: member
+      responses:
+        "201":
+          description: Invite created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invite"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/members:
+    get:
+      operationId: listTeamMembers
+      summary: List members of a team
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Array of team members with user display info.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TeamMemberWithUser"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Events ───────────────────────────────────────────────────
+
+  /teams/{id}/events:
+    post:
+      operationId: createEvent
+      summary: Create an event in a team
+      tags: [events]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, startAt, endAt]
+              properties:
+                title:
+                  type: string
+                  minLength: 1
+                description:
+                  type: ["string", "null"]
+                icon:
+                  type: ["string", "null"]
+                color:
+                  type: ["string", "null"]
+                startAt:
+                  type: string
+                  format: date-time
+                endAt:
+                  type: string
+                  format: date-time
+                allDay:
+                  type: boolean
+                  default: false
+                statusId:
+                  type: ["string", "null"]
+                parentEventId:
+                  type: ["string", "null"]
+                percentComplete:
+                  type: ["integer", "null"]
+                  minimum: 0
+                  maximum: 100
+                location:
+                  type: ["string", "null"]
+                url:
+                  type: ["string", "null"]
+                rrule:
+                  type: ["string", "null"]
+      responses:
+        "201":
+          description: Event created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Event"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    get:
+      operationId: listEvents
+      summary: List events for a team
+      description: Archived events are excluded by default. Optional date-range filter on startAt.
+      tags: [events]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: from
+          in: query
+          required: false
+          description: Only return events where startAt >= from (RFC 3339).
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Only return events where startAt <= to (RFC 3339).
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Array of events.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Event"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /events/{id}:
+    patch:
+      operationId: updateEvent
+      summary: Partially update an event
+      description: Only fields present in the request body are modified (true PATCH semantics).
+      tags: [events]
+      parameters:
+        - $ref: "#/components/parameters/eventId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  minLength: 1
+                description:
+                  type: ["string", "null"]
+                icon:
+                  type: ["string", "null"]
+                color:
+                  type: ["string", "null"]
+                startAt:
+                  type: string
+                  format: date-time
+                endAt:
+                  type: string
+                  format: date-time
+                allDay:
+                  type: boolean
+                statusId:
+                  type: ["string", "null"]
+                parentEventId:
+                  type: ["string", "null"]
+                percentComplete:
+                  type: ["integer", "null"]
+                  minimum: 0
+                  maximum: 100
+                location:
+                  type: ["string", "null"]
+                url:
+                  type: ["string", "null"]
+                rrule:
+                  type: ["string", "null"]
+      responses:
+        "200":
+          description: Updated event.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Event"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteEvent
+      summary: Delete an event
+      tags: [events]
+      parameters:
+        - $ref: "#/components/parameters/eventId"
+      responses:
+        "204":
+          description: Event deleted (no body).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"

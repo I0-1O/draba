@@ -2,5 +2,16 @@
   "name": "@draba/shared",
   "private": true,
   "version": "0.0.0",
-  "type": "module"
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "generate": "openapi-typescript ./openapi.yaml -o ./src/index.ts",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.6.1",
+    "typescript": "~5.8.0"
+  }
 }

@@ -54,8 +54,8 @@
 - [ ] Real-time update: apply WebSocket deltas to timeline state
 
 ### OpenAPI
-- [ ] Write initial `openapi.yaml` in `packages/shared/`
-- [ ] Set up TypeScript type generation from spec (openapi-typescript)
+- [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
+- [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
 
 ## Up Next
 
