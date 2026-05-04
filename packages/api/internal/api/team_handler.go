@@ -52,6 +52,10 @@ func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: now,
 	}
 	if err := s.teams.Create(team); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			writeError(w, http.StatusConflict, "TEAM_NAME_TAKEN", "a team with that name already exists")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
 		return
 	}

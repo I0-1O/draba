@@ -105,7 +105,7 @@ func (r *EventRepo) ListByTeam(teamID string, from, to *time.Time) ([]*models.Ev
 	}
 	query += ` ORDER BY start_at ASC`
 
-	var events []*models.Event
+	events := make([]*models.Event, 0)
 	if err := r.db.Select(&events, query, args...); err != nil {
 		return nil, fmt.Errorf("listing events: %w", err)
 	}

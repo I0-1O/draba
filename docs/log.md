@@ -2,6 +2,16 @@
 
 ---
 
+## 2026-05-04 — /test-phase 4
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync
+- Result: all pass
+- Smoke target: local LAN host (not committed)
+- Caveats: `docker compose config` skipped (docker not in bash PATH); `go test -race` skipped (no GCC/CGO on Windows — tests pass without `-race`)
+- Advisories: `GET /teams/:id/events` returns `null` instead of `[]` for empty result sets; `POST /teams` returns 500 on duplicate slug (should be 409)
+
+---
+
 ## 2026-05-04 — Phase 4: OpenAPI Spec & Type Generation
 
 **Completed.** Wrote the OpenAPI 3.1.0 specification for all Phase 2–3 endpoints and wired up `openapi-typescript` codegen so the web package can import generated types.
