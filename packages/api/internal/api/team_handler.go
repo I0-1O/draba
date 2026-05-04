@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
@@ -52,7 +53,7 @@ func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: now,
 	}
 	if err := s.teams.Create(team); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if errors.Is(err, db.ErrDuplicateName) {
 			writeError(w, http.StatusConflict, "TEAM_NAME_TAKEN", "a team with that name already exists")
 			return
 		}

@@ -1,12 +1,18 @@
 package db
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
+
+// ErrDuplicateName is returned by TeamRepo.Create when the generated slug
+// collides with an existing team's slug (UNIQUE constraint on teams.slug).
+var ErrDuplicateName = errors.New("team name already taken")
 
 // TeamRepo is the persistence layer for Team records and their membership
 // join table.
@@ -19,13 +25,17 @@ func NewTeamRepo(db *sqlx.DB) *TeamRepo {
 	return &TeamRepo{db: db}
 }
 
-// Create inserts a new Team row.
+// Create inserts a new Team row. Returns ErrDuplicateName if the slug is
+// already taken.
 func (r *TeamRepo) Create(team *models.Team) error {
 	_, err := r.db.NamedExec(`
 		INSERT INTO teams (id, name, slug, created_at, updated_at)
 		VALUES (:id, :name, :slug, :created_at, :updated_at)
 	`, team)
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateName
+		}
 		return fmt.Errorf("creating team: %w", err)
 	}
 	return nil

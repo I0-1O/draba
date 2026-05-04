@@ -217,6 +217,68 @@ func TestListMembers_NonMemberForbidden(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w2.Code)
 }
 
+func TestCreateTeam_DuplicateSlug(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	// First team succeeds.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Engineering"}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	// Second team with same name produces the same slug — expect 409.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, "/teams", map[string]string{"name": "Engineering"}, token))
+	assert.Equal(t, http.StatusConflict, w2.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "TEAM_NAME_TAKEN", errObj["code"])
+}
+
+func TestGetTeam_Success(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	// Create a team.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Acme"}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+	teamID := created["id"].(string)
+
+	// Fetch the team.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodGet, fmt.Sprintf("/teams/%s", teamID), nil, token))
+	assert.Equal(t, http.StatusOK, w2.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&team))
+	assert.Equal(t, teamID, team["id"])
+	assert.Equal(t, "Acme", team["name"])
+}
+
+func TestGetTeam_NonMember_Forbidden(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	aliceToken, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	// Create a team under Alice.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Acme"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+	teamID := team["id"].(string)
+
+	// Mint a valid JWT for Bob, who is not a member of Alice's team.
+	bobTokens := auth.NewTokenService("team-test-secret")
+	bobToken, _ := bobTokens.IssueAccessToken("bob-id", "bob@example.com")
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodGet, fmt.Sprintf("/teams/%s", teamID), nil, bobToken))
+	assert.Equal(t, http.StatusForbidden, w2.Code)
+}
+
 func TestTierTeamLimit(t *testing.T) {
 	database, err := db.Open(":memory:")
 	require.NoError(t, err)
