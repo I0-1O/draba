@@ -2,6 +2,7 @@ package ws
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,13 +17,24 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/events"
 )
 
+// allowAllMembers is a MemberChecker that grants every user membership in
+// every team — used by tests that are not concerned with authorization.
+var allowAllMembers MemberChecker = func(_, _ string) error { return nil }
+
+// denyAllMembers is a MemberChecker that always rejects membership.
+var denyAllMembers MemberChecker = func(_, _ string) error { return errors.New("not a member") }
+
 // testSetup returns a running hub, its event bus, and a test HTTP server that
 // routes every request to hub.ServeWS (simulating the GET /ws endpoint).
-func testSetup(t *testing.T) (*Hub, *events.Bus, *httptest.Server) {
+// Pass a MemberChecker to control authorization; pass nil to allow everyone.
+func testSetup(t *testing.T, members MemberChecker) (*Hub, *events.Bus, *httptest.Server) {
 	t.Helper()
+	if members == nil {
+		members = allowAllMembers
+	}
 	bus := events.NewBus()
 	tokens := auth.NewTokenService("test-secret")
-	hub := NewHub(bus, tokens)
+	hub := NewHub(bus, tokens, members)
 	go hub.Run()
 	srv := httptest.NewServer(http.HandlerFunc(hub.ServeWS))
 	t.Cleanup(srv.Close)
@@ -48,7 +60,7 @@ func dial(t *testing.T, srv *httptest.Server, token string) *websocket.Conn {
 }
 
 func TestHub_ServeWS_RejectsNoToken(t *testing.T) {
-	_, _, srv := testSetup(t)
+	_, _, srv := testSetup(t, nil)
 	u := "ws" + strings.TrimPrefix(srv.URL, "http")
 	_, resp, err := websocket.DefaultDialer.Dial(u, nil)
 	require.Error(t, err)
@@ -56,7 +68,7 @@ func TestHub_ServeWS_RejectsNoToken(t *testing.T) {
 }
 
 func TestHub_ServeWS_RejectsInvalidToken(t *testing.T) {
-	_, _, srv := testSetup(t)
+	_, _, srv := testSetup(t, nil)
 	u := "ws" + strings.TrimPrefix(srv.URL, "http") + "?token=not.a.valid.token"
 	_, resp, err := websocket.DefaultDialer.Dial(u, nil)
 	require.Error(t, err)
@@ -64,7 +76,7 @@ func TestHub_ServeWS_RejectsInvalidToken(t *testing.T) {
 }
 
 func TestHub_BroadcastToSubscribedTeam(t *testing.T) {
-	_, bus, srv := testSetup(t)
+	_, bus, srv := testSetup(t, nil)
 
 	conn := dial(t, srv, issueToken(t, "u1"))
 
@@ -87,7 +99,7 @@ func TestHub_BroadcastToSubscribedTeam(t *testing.T) {
 }
 
 func TestHub_NoLeakToOtherTeam(t *testing.T) {
-	_, bus, srv := testSetup(t)
+	_, bus, srv := testSetup(t, nil)
 
 	connA := dial(t, srv, issueToken(t, "u1"))
 	connB := dial(t, srv, issueToken(t, "u2"))
@@ -115,7 +127,7 @@ func TestHub_NoLeakToOtherTeam(t *testing.T) {
 }
 
 func TestHub_TwoClientsOnSameTeamBothReceive(t *testing.T) {
-	_, bus, srv := testSetup(t)
+	_, bus, srv := testSetup(t, nil)
 
 	conn1 := dial(t, srv, issueToken(t, "u1"))
 	conn2 := dial(t, srv, issueToken(t, "u2"))
@@ -136,4 +148,33 @@ func TestHub_TwoClientsOnSameTeamBothReceive(t *testing.T) {
 		require.NoError(t, json.Unmarshal(raw, &got))
 		assert.Equal(t, string(events.EventDeleted), got.Type)
 	}
+}
+
+func TestHub_SubscribeRejectsByNonMember(t *testing.T) {
+	_, bus, srv := testSetup(t, denyAllMembers)
+
+	conn := dial(t, srv, issueToken(t, "u1"))
+
+	// Try to subscribe to team1 — the member checker will deny it.
+	sub, _ := json.Marshal(inboundMsg{Type: "subscribe", TeamID: "team1"})
+	require.NoError(t, conn.WriteMessage(websocket.TextMessage, sub))
+
+	// Give the hub time to process the message and (not) register the subscription.
+	time.Sleep(50 * time.Millisecond)
+
+	// Publish an event to team1; the connection should not receive it.
+	bus.Publish(events.Message{Type: events.EventCreated, TeamID: "team1"})
+
+	conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	_, raw, err := conn.ReadMessage()
+	require.NoError(t, err, "expected an error response message, not a timeout")
+
+	var got OutboundMsg
+	require.NoError(t, json.Unmarshal(raw, &got))
+	assert.Equal(t, "error", got.Type, "hub should send an error message when subscribe is denied")
+
+	// Confirm no broadcast arrives after the error.
+	conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	_, _, err = conn.ReadMessage()
+	assert.Error(t, err, "non-member must not receive team1's broadcast")
 }

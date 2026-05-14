@@ -66,7 +66,10 @@ func main() {
 	tokens := auth.NewTokenService(jwtSecret)
 
 	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens)
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
 	go hub.Run()
 	log.Printf("ws: hub running")
 

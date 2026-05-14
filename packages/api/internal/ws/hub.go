@@ -26,6 +26,11 @@ const (
 	maxMessageBytes = 512
 )
 
+// MemberChecker reports whether userID belongs to teamID.
+// A non-nil error (including sql.ErrNoRows) means the user is not a member.
+// It is satisfied in production by wrapping (*db.TeamRepo).GetMember.
+type MemberChecker func(teamID, userID string) error
+
 var upgrader = websocket.Upgrader{
 	// Origin check is intentionally permissive; auth is enforced via JWT.
 	CheckOrigin:     func(_ *http.Request) bool { return true },
@@ -52,24 +57,29 @@ type client struct {
 	send    chan OutboundMsg
 	mu      sync.RWMutex
 	teamIDs map[string]struct{}
+	userID  string
 }
 
 // Hub manages all connected WebSocket clients and routes broadcast messages
 // to team-subscribed clients. Call Run in a goroutine before serving requests.
 type Hub struct {
-	tokens *auth.TokenService
-	bus    *events.Bus
+	tokens  *auth.TokenService
+	members MemberChecker
+	bus     *events.Bus
 
 	mu    sync.RWMutex
 	teams map[string]map[*client]struct{} // teamID → set of clients
 }
 
-// NewHub returns a Hub wired to the given event bus and auth token service.
-func NewHub(bus *events.Bus, tokens *auth.TokenService) *Hub {
+// NewHub returns a Hub wired to the given event bus, auth token service, and
+// member checker. The checker gates subscribe messages: only users who are
+// members of a team may subscribe to its real-time feed.
+func NewHub(bus *events.Bus, tokens *auth.TokenService, members MemberChecker) *Hub {
 	return &Hub{
-		tokens: tokens,
-		bus:    bus,
-		teams:  make(map[string]map[*client]struct{}),
+		tokens:  tokens,
+		members: members,
+		bus:     bus,
+		teams:   make(map[string]map[*client]struct{}),
 	}
 }
 
@@ -92,7 +102,8 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing token", http.StatusUnauthorized)
 		return
 	}
-	if _, err := h.tokens.Validate(tokenStr, "access"); err != nil {
+	claims, err := h.tokens.Validate(tokenStr, "access")
+	if err != nil {
 		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
 		return
 	}
@@ -108,6 +119,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		conn:    conn,
 		send:    make(chan OutboundMsg, 64),
 		teamIDs: make(map[string]struct{}),
+		userID:  claims.UserID,
 	}
 
 	go c.writePump(h)
@@ -185,7 +197,14 @@ func (c *client) readPump(h *Hub) {
 		switch msg.Type {
 		case "subscribe":
 			if msg.TeamID != "" {
-				h.subscribe(c, msg.TeamID)
+				if err := h.members(msg.TeamID, c.userID); err != nil {
+					select {
+					case c.send <- OutboundMsg{Type: "error", Payload: "not a member of team " + msg.TeamID}:
+					default:
+					}
+				} else {
+					h.subscribe(c, msg.TeamID)
+				}
 			}
 		case "pong":
 			// Extend the read deadline when the client acknowledges a ping.

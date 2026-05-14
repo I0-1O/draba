@@ -33,7 +33,7 @@ func eventTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID string) 
 	eventsRepo := db.NewEventRepo(database)
 	tokens := auth.NewTokenService("event-test-secret")
 	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens)
+	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
 	srv = api.NewServer(users, invites, teams, eventsRepo, tokens, tier.Unlimited, bus, hub).Routes()
 

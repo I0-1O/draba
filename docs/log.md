@@ -2,6 +2,16 @@
 
 ---
 
+## 2026-05-14 — /test-phase 5
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, ws-smoke (skipped — stub)
+- Result: 5 pass, 1 skip
+- Smoke target: http://epcot.lan:8081
+- Caveats: `docker compose config` skipped (docker not in bash PATH); `go test -race` skipped (no GCC/CGO on Windows); `ws-smoke` skipped (Phase 5 section is a stub with no runnable assertions)
+- Advisory: WS `subscribe` handler (`internal/ws/hub.go:186-189`) does not verify team membership before adding client to team subscriber set — a valid JWT holder can subscribe to any teamId. Recommend injecting team repo into Hub and checking membership before `h.subscribe`.
+
+---
+
 ## 2026-05-14 — Phase 5: API — Real-Time (WebSocket)
 
 **Completed.** Added the internal event bus and WebSocket hub; event mutations now broadcast deltas to connected clients in real time.

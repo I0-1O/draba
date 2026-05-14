@@ -38,7 +38,7 @@ func newTestServerWithTier(t *testing.T, tr tier.Tier) http.Handler {
 	eventsRepo := db.NewEventRepo(database)
 	tokens := auth.NewTokenService("test-secret")
 	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens)
+	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
 	return api.NewServer(users, invites, teams, eventsRepo, tokens, tr, bus, hub).Routes()
 }
@@ -202,7 +202,7 @@ func TestRegister_TierUserLimitReached(t *testing.T) {
 
 	toks2 := auth.NewTokenService("test-secret")
 	bus2 := events.NewBus()
-	hub2 := ws.NewHub(bus2, toks2)
+	hub2 := ws.NewHub(bus2, toks2, func(_, _ string) error { return nil })
 	srv := api.NewServer(users, db.NewInviteRepo(database), db.NewTeamRepo(database), db.NewEventRepo(database), toks2, tier.Team, bus2, hub2).Routes()
 
 	w := postJSON(t, srv, "/auth/register", map[string]string{
