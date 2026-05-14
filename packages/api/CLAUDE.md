@@ -37,6 +37,7 @@ DRABA_DB_DRIVER=sqlite          # sqlite | mysql | postgres
 DRABA_DB_DSN=./draba.db         # file path for SQLite, connection string for others
 DRABA_JWT_SECRET=               # required — random secret for signing JWTs
 DRABA_PORT=8080                 # default 8080
+DRABA_LOG_LEVEL=info            # debug | info | warn | error (default info; set debug in docker-compose for dev)
 DRABA_GOOGLE_CLIENT_ID=         # required for Google Calendar sync
 DRABA_GOOGLE_CLIENT_SECRET=     # required for Google Calendar sync
 DRABA_BASE_URL=                 # public URL of the server (used for OAuth callbacks, CalDAV URLs)

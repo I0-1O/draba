@@ -31,6 +31,16 @@
 - Integration tests hit a real SQLite database — no mocking the DB layer
 - Naming: `TestCreateEvent_AssignsMultipleUsers`, `TestCalDAVSync_UpdatesExistingEvent`
 
+### Logging
+- Use `log/slog` package-level functions (`slog.Debug`, `slog.Info`, `slog.Warn`, `slog.Error`) — never `fmt.Println` or `log.Printf`
+- Level is controlled by the `DRABA_LOG_LEVEL` env var; default is `info`
+- All output goes to stdout — Docker captures it in `docker logs`
+- **Debug:** HTTP request/response details, WebSocket lifecycle (connect, subscribe, disconnect), internal routing
+- **Info:** startup and shutdown events only
+- **Warn:** unexpected but recoverable conditions (e.g. abnormal WS close)
+- **Error:** failures that impair a request or abort startup; always include `"err", err` as a structured arg
+- Use structured key-value args, not formatted strings: `slog.Info("db: opened", "dsn", dsn)` not `slog.Info(fmt.Sprintf(...))`
+
 ### API Handlers
 - Handlers are thin: validate input, call service, return response
 - No business logic in handlers — all logic lives in `internal/` service packages

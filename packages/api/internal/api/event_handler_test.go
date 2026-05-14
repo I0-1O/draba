@@ -247,6 +247,111 @@ func TestDeleteEvent_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+// eventTestSetupWithBus is like eventTestSetup but also returns the bus so
+// tests can assert that event mutations publish the correct messages.
+func eventTestSetupWithBus(t *testing.T) (srv http.Handler, aliceToken, teamID string, bus *events.Bus) {
+	t.Helper()
+	database, err := db.Open(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Migrate(database))
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	eventsRepo := db.NewEventRepo(database)
+	tokens := auth.NewTokenService("event-test-secret")
+	bus = events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
+
+	srv = api.NewServer(users, invites, teams, eventsRepo, tokens, tier.Unlimited, bus, hub).Routes()
+
+	aliceToken, _ = seedUser(t, srv, "alice@bustest.com", "password1", "Alice")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Bus Team"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+	teamID = team["id"].(string)
+	return srv, aliceToken, teamID, bus
+}
+
+func TestCreateEvent_PublishesBusMessage(t *testing.T) {
+	srv, token, teamID, bus := eventTestSetupWithBus(t)
+	ch := bus.Subscribe()
+	defer bus.Unsubscribe(ch)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/events", teamID), map[string]any{
+		"title": "Bus Test", "startAt": "2026-05-05T09:00:00Z", "endAt": "2026-05-05T10:00:00Z",
+	}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, events.EventCreated, msg.Type)
+		assert.Equal(t, teamID, msg.TeamID)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("bus did not receive EventCreated within timeout")
+	}
+}
+
+func TestUpdateEvent_PublishesBusMessage(t *testing.T) {
+	srv, token, teamID, bus := eventTestSetupWithBus(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/events", teamID), map[string]any{
+		"title": "Original", "startAt": "2026-05-05T09:00:00Z", "endAt": "2026-05-05T10:00:00Z",
+	}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+	eventID := created["id"].(string)
+
+	ch := bus.Subscribe()
+	defer bus.Unsubscribe(ch)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPatch, fmt.Sprintf("/events/%s", eventID), map[string]any{"title": "Updated"}, token))
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, events.EventUpdated, msg.Type)
+		assert.Equal(t, teamID, msg.TeamID)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("bus did not receive EventUpdated within timeout")
+	}
+}
+
+func TestDeleteEvent_PublishesBusMessage(t *testing.T) {
+	srv, token, teamID, bus := eventTestSetupWithBus(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/events", teamID), map[string]any{
+		"title": "To Delete", "startAt": "2026-05-05T09:00:00Z", "endAt": "2026-05-05T10:00:00Z",
+	}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+	eventID := created["id"].(string)
+
+	ch := bus.Subscribe()
+	defer bus.Unsubscribe(ch)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodDelete, fmt.Sprintf("/events/%s", eventID), nil, token))
+	require.Equal(t, http.StatusNoContent, w2.Code)
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, events.EventDeleted, msg.Type)
+		assert.Equal(t, teamID, msg.TeamID)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("bus did not receive EventDeleted within timeout")
+	}
+}
+
 func TestEventCRUD_NonMemberForbidden(t *testing.T) {
 	srv, aliceToken, teamID := eventTestSetup(t)
 

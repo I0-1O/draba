@@ -5,9 +5,10 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/I0-1O/draba/packages/api/internal/api"
 	"github.com/I0-1O/draba/packages/api/internal/auth"
@@ -28,36 +29,41 @@ const banner = "\n" +
 	"  see who's doing what, when.\n\n"
 
 func main() {
+	setupLogger()
 	fmt.Print(banner)
 
 	port := getenv("DRABA_PORT", "8080")
 	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
 	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
 	if jwtSecret == "" {
-		log.Fatal("DRABA_JWT_SECRET must be set")
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
 	}
 
 	t, err := tier.Load()
 	if err != nil {
-		log.Fatalf("tier: %v", err)
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
 	}
 	l := t.Limits()
 	if l.MaxUsers == 0 {
-		log.Printf("tier: %s", t)
+		slog.Info("tier", "tier", t)
 	} else {
-		log.Printf("tier: %s (max users: %d, max teams: %d)", t, l.MaxUsers, l.MaxTeams)
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
 	}
 
 	database, err := db.Open(dsn)
 	if err != nil {
-		log.Fatalf("db: open: %v", err)
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
 	}
-	log.Printf("db: opened %s", dsn)
+	slog.Info("db: opened", "dsn", dsn)
 
 	if err := db.Migrate(database); err != nil {
-		log.Fatalf("db: migrate: %v", err)
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
 	}
-	log.Printf("db: migrations applied")
+	slog.Info("db: migrations applied")
 
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)
@@ -71,18 +77,35 @@ func main() {
 		return err
 	})
 	go hub.Run()
-	log.Printf("ws: hub running")
+	slog.Info("ws: hub running")
 
 	if mods := tier.Registered(); len(mods) > 0 {
-		log.Printf("modules: %d registered", len(mods))
+		slog.Info("modules loaded", "count", len(mods))
 	}
 
 	srv := api.NewServer(users, invites, teams, eventRepo, tokens, t, bus, hub)
 
-	log.Printf("listening on :%s", port)
+	slog.Info("listening", "port", port)
 	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		log.Fatal(err)
+		slog.Error("server error", "err", err)
+		os.Exit(1)
 	}
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 }
 
 // getenv returns the env var value or fallback when unset/empty.

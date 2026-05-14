@@ -6,9 +6,9 @@
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, ws-smoke (skipped — stub)
 - Result: 5 pass, 1 skip
-- Smoke target: http://epcot.lan:8081
+- Smoke target: local LAN host (not committed)
 - Caveats: `docker compose config` skipped (docker not in bash PATH); `go test -race` skipped (no GCC/CGO on Windows); `ws-smoke` skipped (Phase 5 section is a stub with no runnable assertions)
-- Advisory: WS `subscribe` handler (`internal/ws/hub.go:186-189`) does not verify team membership before adding client to team subscriber set — a valid JWT holder can subscribe to any teamId. Recommend injecting team repo into Hub and checking membership before `h.subscribe`.
+- Advisory: WS `subscribe` handler now enforces membership via injected `MemberChecker` before adding client to subscriber set.
 
 ---
 
@@ -53,6 +53,13 @@
 - WebSocket auth is JWT-only (query param `?token=<jwt>`) — no cookie/header fallback needed at this stage; the frontend will pass the access token it already holds
 - Deletion payload is `{"id": eventID}` rather than the full event — the event has already been removed from the DB by the time the message is published, so re-fetching would fail
 - Existing api test helpers (`newTestServer`, `eventTestSetup`, `newTeamTestServer`) updated to pass the new bus/hub params; the hub is fully constructed but the WS route is never called by those tests
+
+### Retroactive Phase 3/4 fixes folded in
+Discovered during Phase 5 development; backfilled here rather than opening separate commits:
+- `GET /teams/{id}` handler + OpenAPI spec entry (was missing from Phase 3/4)
+- `POST /teams` returns 409 on duplicate slug instead of 500 (Phase 3 advisory from /test-phase 4)
+- `GET /teams/:id/events` returns `[]` instead of `null` for empty result sets (Phase 3 advisory from /test-phase 4)
+- `ErrDuplicateName` sentinel in `TeamRepo` and corresponding string-match UNIQUE constraint detection
 
 ---
 

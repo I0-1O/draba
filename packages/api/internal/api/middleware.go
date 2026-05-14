@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 )
@@ -41,4 +43,32 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 func claimsFromContext(ctx context.Context) *auth.Claims {
 	c, _ := ctx.Value(claimsKey).(*auth.Claims)
 	return c
+}
+
+// statusWriter wraps ResponseWriter to capture the status code written by
+// the handler, which is not otherwise readable after the fact.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+// requestLogger wraps next and emits a debug-level log line for every
+// request: method, path, status code, and wall-clock duration in ms.
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		slog.Debug("http",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"ms", time.Since(start).Milliseconds(),
+		)
+	})
 }

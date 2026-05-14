@@ -5,7 +5,7 @@ package ws
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -111,7 +111,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		// Upgrade wrote the HTTP error; log and return.
-		log.Printf("ws: upgrade: %v", err)
+		slog.Error("ws: upgrade failed", "err", err)
 		return
 	}
 
@@ -121,6 +121,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		teamIDs: make(map[string]struct{}),
 		userID:  claims.UserID,
 	}
+	slog.Debug("ws: client connected", "userID", claims.UserID)
 
 	go c.writePump(h)
 	c.readPump(h)
@@ -140,8 +141,10 @@ func (h *Hub) subscribe(c *client, teamID string) {
 	c.mu.Unlock()
 }
 
-// unsubscribeAll removes c from every team subscription set it belongs to.
+// unsubscribeAll removes c from every team subscription set it belongs to
+// and logs the disconnect.
 func (h *Hub) unsubscribeAll(c *client) {
+	slog.Debug("ws: client disconnected", "userID", c.userID)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c.mu.RLock()
@@ -184,7 +187,7 @@ func (c *client) readPump(h *Hub) {
 		_, raw, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("ws: read: %v", err)
+				slog.Warn("ws: unexpected close", "userID", c.userID, "err", err)
 			}
 			return
 		}
@@ -198,11 +201,13 @@ func (c *client) readPump(h *Hub) {
 		case "subscribe":
 			if msg.TeamID != "" {
 				if err := h.members(msg.TeamID, c.userID); err != nil {
+					slog.Debug("ws: subscribe denied", "userID", c.userID, "teamID", msg.TeamID)
 					select {
 					case c.send <- OutboundMsg{Type: "error", Payload: "not a member of team " + msg.TeamID}:
 					default:
 					}
 				} else {
+					slog.Debug("ws: subscribed", "userID", c.userID, "teamID", msg.TeamID)
 					h.subscribe(c, msg.TeamID)
 				}
 			}

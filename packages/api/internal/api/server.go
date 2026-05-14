@@ -61,6 +61,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PATCH /events/{id}", chain(s.handleUpdateEvent, s.authMiddleware))
 	mux.HandleFunc("DELETE /events/{id}", chain(s.handleDeleteEvent, s.authMiddleware))
 
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
 	mux.HandleFunc("GET /ws", s.hub.ServeWS)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -75,7 +77,7 @@ func (s *Server) Routes() http.Handler {
 		}
 	}
 
-	return mux
+	return requestLogger(mux)
 }
 
 // chain applies a single middleware to a handler function.
