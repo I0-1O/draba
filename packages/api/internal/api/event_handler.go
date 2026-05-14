@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/I0-1O/draba/packages/api/internal/events"
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
@@ -84,6 +85,7 @@ func (s *Server) handleCreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.bus.Publish(events.Message{Type: events.EventCreated, TeamID: event.TeamID, Payload: event})
 	writeJSON(w, http.StatusCreated, event)
 }
 
@@ -255,6 +257,7 @@ func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.bus.Publish(events.Message{Type: events.EventUpdated, TeamID: event.TeamID, Payload: event})
 	writeJSON(w, http.StatusOK, event)
 }
 
@@ -288,5 +291,10 @@ func (s *Server) handleDeleteEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.bus.Publish(events.Message{
+		Type:    events.EventDeleted,
+		TeamID:  event.TeamID,
+		Payload: map[string]string{"id": eventID},
+	})
 	w.WriteHeader(http.StatusNoContent)
 }

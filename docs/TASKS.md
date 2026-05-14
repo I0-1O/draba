@@ -27,9 +27,9 @@
 - [x] `DELETE /events/:id` — delete event — 2026-05-03
 
 ### API — Real-Time
-- [ ] WebSocket hub (`internal/ws/`)
-- [ ] Team-scoped subscription model
-- [ ] Broadcast on `events.*` internal bus events
+- [x] WebSocket hub (`internal/ws/`) — 2026-05-14
+- [x] Team-scoped subscription model — 2026-05-14
+- [x] Broadcast on `events.*` internal bus events — 2026-05-14
 
 ### API — Timelines
 - [ ] `POST /teams/:id/timelines` — create timeline

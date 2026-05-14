@@ -12,7 +12,9 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/api"
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
 )
 
 const banner = "\n" +
@@ -60,14 +62,19 @@ func main() {
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
-	events := db.NewEventRepo(database)
+	eventRepo := db.NewEventRepo(database)
 	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens)
+	go hub.Run()
+	log.Printf("ws: hub running")
 
 	if mods := tier.Registered(); len(mods) > 0 {
 		log.Printf("modules: %d registered", len(mods))
 	}
 
-	srv := api.NewServer(users, invites, teams, events, tokens, t)
+	srv := api.NewServer(users, invites, teams, eventRepo, tokens, t, bus, hub)
 
 	log.Printf("listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {

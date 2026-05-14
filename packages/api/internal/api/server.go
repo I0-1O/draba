@@ -10,7 +10,9 @@ import (
 
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
 )
 
 // Server holds shared dependencies for all HTTP handlers.
@@ -21,18 +23,22 @@ type Server struct {
 	events  *db.EventRepo
 	tokens  *auth.TokenService
 	tier    tier.Tier
+	bus     *events.Bus
+	hub     *ws.Hub
 }
 
 // NewServer constructs a Server with its required dependencies. It does not
 // touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, events *db.EventRepo, tokens *auth.TokenService, t tier.Tier) *Server {
+func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, eventsRepo *db.EventRepo, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
 	return &Server{
 		users:   users,
 		invites: invites,
 		teams:   teams,
-		events:  events,
+		events:  eventsRepo,
 		tokens:  tokens,
 		tier:    t,
+		bus:     bus,
+		hub:     hub,
 	}
 }
 
@@ -54,6 +60,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /teams/{id}/events", chain(s.handleListEvents, s.authMiddleware))
 	mux.HandleFunc("PATCH /events/{id}", chain(s.handleUpdateEvent, s.authMiddleware))
 	mux.HandleFunc("DELETE /events/{id}", chain(s.handleDeleteEvent, s.authMiddleware))
+
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

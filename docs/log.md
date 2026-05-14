@@ -2,6 +2,50 @@
 
 ---
 
+## 2026-05-14 — Phase 5: API — Real-Time (WebSocket)
+
+**Completed.** Added the internal event bus and WebSocket hub; event mutations now broadcast deltas to connected clients in real time.
+
+### What was built
+
+**`internal/events/bus.go`** — new package; lightweight in-process pub/sub broker. `Bus.Subscribe()` returns a buffered channel; `Bus.Publish()` fans out non-blocking to all subscribers; `Bus.Unsubscribe()` closes the channel and removes it. Publish never blocks the caller — slow subscribers are skipped.
+
+**`internal/ws/hub.go`** — new package; WebSocket hub and per-client read/write pumps.
+- `Hub.Run()` consumes from the event bus and broadcasts to team-scoped client sets.
+- `Hub.ServeWS()` upgrades HTTP → WebSocket, validates JWT from `?token=`, then drives `readPump` + `writePump` goroutines.
+- `readPump` handles `{"type":"subscribe","teamId":"..."}` to add client to a team's subscriber set; extends read deadline on `{"type":"pong"}`.
+- `writePump` sends outgoing messages and emits `{"type":"ping"}` every 30 seconds to keep idle connections alive; extends write deadline per message.
+- Read deadline 70s, write deadline 10s; max inbound message 512 bytes; slow clients are dropped, not stalled.
+
+**`internal/api/server.go`** — added `bus *events.Bus` and `hub *ws.Hub` fields; updated `NewServer` signature; registered `GET /ws` route → `hub.ServeWS`.
+
+**`internal/api/event_handler.go`** — after each successful DB write, publishes an `events.Message` on the bus:
+- `handleCreateEvent` → `events.EventCreated` with full event payload
+- `handleUpdateEvent` → `events.EventUpdated` with full event payload
+- `handleDeleteEvent` → `events.EventDeleted` with `{"id": eventID}` stub
+
+**`cmd/draba/main.go`** — creates `events.NewBus()` and `ws.NewHub(bus, tokens)`; starts `hub.Run()` in a goroutine before the HTTP server; passes both to `NewServer`.
+
+**New dependency:** `github.com/gorilla/websocket v1.5.3`
+
+### Tests added
+- `internal/events/bus_test.go` — 4 tests: single deliver, multi-subscriber fan-out, unsubscribe stops delivery, publish with no subscribers doesn't panic.
+- `internal/ws/hub_test.go` — 4 tests: rejects missing token (401), rejects invalid token (401), broadcasts to subscribed team, team isolation (teamA broadcast does not reach teamB subscriber).
+
+### Exit criteria — all verified by automated tests
+- `go test ./...` — all packages pass (api, db, events, ws, tier)
+- `golangci-lint run` — clean
+- Team isolation test confirms a teamB subscriber receives no messages from a teamA publish
+- Two-client broadcast test confirms both clients subscribed to the same team receive the event delta
+
+### Decisions & notes
+- heartbeat is JSON `{"type":"ping"}` as specified in CONVENTIONS.md; read deadline (70s) extends on `{"type":"pong"}` from client
+- WebSocket auth is JWT-only (query param `?token=<jwt>`) — no cookie/header fallback needed at this stage; the frontend will pass the access token it already holds
+- Deletion payload is `{"id": eventID}` rather than the full event — the event has already been removed from the DB by the time the message is published, so re-fetching would fail
+- Existing api test helpers (`newTestServer`, `eventTestSetup`, `newTeamTestServer`) updated to pass the new bus/hub params; the hub is fully constructed but the WS route is never called by those tests
+
+---
+
 ## 2026-05-04 — /test-phase 4
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync

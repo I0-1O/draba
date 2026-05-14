@@ -19,7 +19,7 @@ This document organizes development into discrete phases with effort estimates a
 | 2 | [API Foundation — DB & Auth](#phase-2-api-foundation--db--auth) | L — 3–5 days | ✅ |
 | 3 | [Core API — Events & Teams](#phase-3-core-api--events--teams) | M — 2–3 days | ✅ |
 | 4 | [OpenAPI Spec & Type Generation](#phase-4-openapi-spec--type-generation) | S — 1 day | ✅ |
-| 5 | [API — Real-Time (WebSocket)](#phase-5-api--real-time-websocket) | M — 2–3 days | ⬜ |
+| 5 | [API — Real-Time (WebSocket)](#phase-5-api--real-time-websocket) | M — 2–3 days | ✅ |
 | 6 | [API — Timelines](#phase-6-api--timelines) | S — ½–1 day | ⬜ |
 | 7 | [Web — Scaffold](#phase-7-web--scaffold) | M — 2–3 days | ⬜ |
 | 8 | [Web — Timeline View (Core UI)](#phase-8-web--timeline-view-core-ui) | XL — 1–2 wks | ⬜ |
@@ -114,7 +114,7 @@ Repo created. Requirements, architecture, conventions, and design docs written.
 ---
 
 ### Phase 5 — API — Real-Time (WebSocket)
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** ✅ Done — 2026-05-14 | **Effort:** M (2–3 days)
 
 **Scope:**
 - WebSocket hub (`internal/ws/`)

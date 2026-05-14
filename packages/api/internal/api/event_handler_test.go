@@ -14,7 +14,9 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/api"
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
 )
 
 // eventTestSetup creates a server, registers Alice, creates a team, and
@@ -28,10 +30,12 @@ func eventTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID string) 
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
-	events := db.NewEventRepo(database)
+	eventsRepo := db.NewEventRepo(database)
 	tokens := auth.NewTokenService("event-test-secret")
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens)
 
-	srv = api.NewServer(users, invites, teams, events, tokens, tier.Unlimited).Routes()
+	srv = api.NewServer(users, invites, teams, eventsRepo, tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@event.com", "password1", "Alice")
 
