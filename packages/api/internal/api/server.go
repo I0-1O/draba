@@ -17,28 +17,30 @@ import (
 
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
-	users   *db.UserRepo
-	invites *db.InviteRepo
-	teams   *db.TeamRepo
-	events  *db.EventRepo
-	tokens  *auth.TokenService
-	tier    tier.Tier
-	bus     *events.Bus
-	hub     *ws.Hub
+	users     *db.UserRepo
+	invites   *db.InviteRepo
+	teams     *db.TeamRepo
+	events    *db.EventRepo
+	timelines *db.TimelineRepo
+	tokens    *auth.TokenService
+	tier      tier.Tier
+	bus       *events.Bus
+	hub       *ws.Hub
 }
 
 // NewServer constructs a Server with its required dependencies. It does not
 // touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, eventsRepo *db.EventRepo, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
+func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, eventsRepo *db.EventRepo, timelinesRepo *db.TimelineRepo, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
 	return &Server{
-		users:   users,
-		invites: invites,
-		teams:   teams,
-		events:  eventsRepo,
-		tokens:  tokens,
-		tier:    t,
-		bus:     bus,
-		hub:     hub,
+		users:     users,
+		invites:   invites,
+		teams:     teams,
+		events:    eventsRepo,
+		timelines: timelinesRepo,
+		tokens:    tokens,
+		tier:      t,
+		bus:       bus,
+		hub:       hub,
 	}
 }
 
@@ -60,6 +62,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /teams/{id}/events", chain(s.handleListEvents, s.authMiddleware))
 	mux.HandleFunc("PATCH /events/{id}", chain(s.handleUpdateEvent, s.authMiddleware))
 	mux.HandleFunc("DELETE /events/{id}", chain(s.handleDeleteEvent, s.authMiddleware))
+
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
 
 	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
 	// JWT itself before upgrading, because WebSocket clients can't set headers.

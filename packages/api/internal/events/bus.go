@@ -17,6 +17,9 @@ const (
 	EventUpdated Type = "event.updated"
 	// EventDeleted is published after an event is removed.
 	EventDeleted Type = "event.deleted"
+
+	// TimelineCreated is published after a new timeline is persisted.
+	TimelineCreated Type = "timeline.created"
 )
 
 // Message is a single domain event published on the Bus.

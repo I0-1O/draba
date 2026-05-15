@@ -69,6 +69,7 @@ func main() {
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
 	eventRepo := db.NewEventRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
 	tokens := auth.NewTokenService(jwtSecret)
 
 	bus := events.NewBus()
@@ -83,7 +84,7 @@ func main() {
 		slog.Info("modules loaded", "count", len(mods))
 	}
 
-	srv := api.NewServer(users, invites, teams, eventRepo, tokens, t, bus, hub)
+	srv := api.NewServer(users, invites, teams, eventRepo, timelineRepo, tokens, t, bus, hub)
 
 	slog.Info("listening", "port", port)
 	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {

@@ -32,10 +32,10 @@
 - [x] Broadcast on `events.*` internal bus events — 2026-05-14
 
 ### API — Timelines
-- [ ] `POST /teams/:id/timelines` — create timeline
-- [ ] `GET /timelines/:id` — fetch timeline (public or auth-gated)
-- [ ] `GET /timelines/share/:token` — public share link handler
-- [ ] Timeline access list enforcement
+- [x] `POST /teams/:id/timelines` — create timeline — 2026-05-15
+- [x] `GET /timelines/:id` — fetch timeline (public or auth-gated) — 2026-05-15
+- [x] `GET /timelines/share/:token` — public share link handler — 2026-05-15
+- [x] Timeline access list enforcement — 2026-05-15
 
 ### Web — Scaffold
 - [ ] Initialize shadcn/ui: `pnpm dlx shadcn@latest init`

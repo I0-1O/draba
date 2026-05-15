@@ -31,11 +31,12 @@ func eventTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID string) 
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
 	eventsRepo := db.NewEventRepo(database)
+	timelinesRepo := db.NewTimelineRepo(database)
 	tokens := auth.NewTokenService("event-test-secret")
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv = api.NewServer(users, invites, teams, eventsRepo, tokens, tier.Unlimited, bus, hub).Routes()
+	srv = api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@event.com", "password1", "Alice")
 
@@ -259,11 +260,12 @@ func eventTestSetupWithBus(t *testing.T) (srv http.Handler, aliceToken, teamID s
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
 	eventsRepo := db.NewEventRepo(database)
+	timelinesRepo := db.NewTimelineRepo(database)
 	tokens := auth.NewTokenService("event-test-secret")
 	bus = events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv = api.NewServer(users, invites, teams, eventsRepo, tokens, tier.Unlimited, bus, hub).Routes()
+	srv = api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@bustest.com", "password1", "Alice")
 

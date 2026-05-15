@@ -74,6 +74,25 @@ type TeamMember struct {
 	JoinedAt time.Time `db:"joined_at" json:"joinedAt"`
 }
 
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view with optional access control and shareable links.
+// Visibility "public" allows any team member to access; "restricted" limits
+// access to users listed in timeline_access.
+type Timeline struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Name       string     `db:"name"        json:"name"`
+	StartDate  string     `db:"start_date"  json:"startDate"`
+	EndDate    string     `db:"end_date"    json:"endDate"`
+	Visibility string     `db:"visibility"  json:"visibility"`
+	ShareToken string     `db:"share_token" json:"shareToken"`
+	IcalToken  string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy  string     `db:"created_by"  json:"createdBy"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+}
+
 // Invite is a single-use token that grants an email address the right to
 // join a Team. AcceptedAt is non-nil once consumed; expired or accepted
 // invites are rejected by the registration handler.
