@@ -22,7 +22,9 @@ const (
 	writeTimeout = 10 * time.Second
 	// readTimeout is the read deadline reset after every pong. It is long
 	// enough for a client to respond to at least two ping cycles.
-	readTimeout     = 70 * time.Second
+	readTimeout = 70 * time.Second
+	// maxMessageBytes caps inbound frame size; subscribe and pong messages are
+	// tiny JSON blobs so 512 bytes is generous.
 	maxMessageBytes = 512
 )
 
