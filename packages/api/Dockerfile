@@ -17,7 +17,7 @@ RUN go mod download
 CMD ["air", "-c", ".air.toml"]
 
 # ── Production stage ──
-FROM alpine:3.19 AS prod
+FROM alpine:3.21 AS prod
 RUN apk add --no-cache ca-certificates && mkdir -p /data
 COPY --from=builder /draba /usr/local/bin/draba
 WORKDIR /data
