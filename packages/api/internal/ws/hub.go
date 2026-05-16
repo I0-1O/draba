@@ -17,12 +17,13 @@ import (
 )
 
 const (
-	heartbeatInterval = 30 * time.Second
+	// defaultHeartbeatInterval is the ping cadence in production.
+	defaultHeartbeatInterval = 30 * time.Second
 	// writeTimeout is the maximum time allowed to write a single message.
 	writeTimeout = 10 * time.Second
-	// readTimeout is the read deadline reset after every pong. It is long
-	// enough for a client to respond to at least two ping cycles.
-	readTimeout = 70 * time.Second
+	// defaultReadTimeout is the read deadline reset after every pong. It is
+	// long enough for a client to respond to at least two ping cycles.
+	defaultReadTimeout = 70 * time.Second
 	// maxMessageBytes caps inbound frame size; subscribe and pong messages are
 	// tiny JSON blobs so 512 bytes is generous.
 	maxMessageBytes = 512
@@ -69,6 +70,12 @@ type Hub struct {
 	members MemberChecker
 	bus     *events.Bus
 
+	// heartbeatInterval controls how often writePump sends a ping frame.
+	// readTimeout is the read deadline extended after each pong. Both default
+	// to production values and are overridden in tests to keep them fast.
+	heartbeatInterval time.Duration
+	readTimeout       time.Duration
+
 	mu    sync.RWMutex
 	teams map[string]map[*client]struct{} // teamID → set of clients
 }
@@ -78,10 +85,12 @@ type Hub struct {
 // members of a team may subscribe to its real-time feed.
 func NewHub(bus *events.Bus, tokens *auth.TokenService, members MemberChecker) *Hub {
 	return &Hub{
-		tokens:  tokens,
-		members: members,
-		bus:     bus,
-		teams:   make(map[string]map[*client]struct{}),
+		tokens:            tokens,
+		members:           members,
+		bus:               bus,
+		heartbeatInterval: defaultHeartbeatInterval,
+		readTimeout:       defaultReadTimeout,
+		teams:             make(map[string]map[*client]struct{}),
 	}
 }
 
@@ -183,7 +192,7 @@ func (c *client) readPump(h *Hub) {
 	}()
 
 	c.conn.SetReadLimit(maxMessageBytes)
-	_ = c.conn.SetReadDeadline(time.Now().Add(readTimeout))
+	_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
 
 	for {
 		_, raw, err := c.conn.ReadMessage()
@@ -215,7 +224,7 @@ func (c *client) readPump(h *Hub) {
 			}
 		case "pong":
 			// Extend the read deadline when the client acknowledges a ping.
-			_ = c.conn.SetReadDeadline(time.Now().Add(readTimeout))
+			_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
 		}
 	}
 }
@@ -223,8 +232,8 @@ func (c *client) readPump(h *Hub) {
 // writePump sends outgoing messages and heartbeat pings to the WebSocket
 // connection. It returns when the send channel is closed or a write fails,
 // triggering a connection close that causes readPump to return too.
-func (c *client) writePump(_ *Hub) {
-	ticker := time.NewTicker(heartbeatInterval)
+func (c *client) writePump(h *Hub) {
+	ticker := time.NewTicker(h.heartbeatInterval)
 	defer func() {
 		ticker.Stop()
 		c.conn.Close()

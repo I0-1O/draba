@@ -1,6 +1,7 @@
 # Architecture
 
 ## System Overview
+
 draba is an API-first, event-driven team coordination tool. The API server is the single source of truth. All clients (web, CLI, MCP agents) are dumb consumers of the same REST + WebSocket API. Every state change emits an internal event; calendar sync, real-time broadcast, and notifications are event consumers.
 
 ```
@@ -18,6 +19,7 @@ The server also implements a built-in CalDAV endpoint, allowing iOS/macOS Calend
 ## Components
 
 ### API Server (`packages/api/`)
+
 - Language: Go
 - Transport: HTTP/REST + WebSocket
 - Auth: JWT (access token) + short-lived refresh tokens; invite tokens for registration
@@ -28,6 +30,7 @@ The server also implements a built-in CalDAV endpoint, allowing iOS/macOS Calend
 - Entry point: `cmd/draba/main.go`
 
 ### Web Frontend (`packages/web/`)
+
 - Framework: React (TypeScript, strict mode)
 - UI components: shadcn/ui (copy-paste components, owned by the repo — not a runtime dependency)
 - Styling: Tailwind CSS v4; design tokens via CSS custom properties following shadcn convention
@@ -38,6 +41,7 @@ The server also implements a built-in CalDAV endpoint, allowing iOS/macOS Calend
 - Static files served by the Go binary in production (embedded)
 
 ### Shared (`packages/shared/`)
+
 - OpenAPI specification (`openapi.yaml`) — the contract between API and web
 - TypeScript types generated from the OpenAPI spec (used by `packages/web`)
 - This is the source of truth for the API shape; Go structs and TS types both derive from it
@@ -101,6 +105,7 @@ calendar_connections
 ```
 
 ### Key Relationships
+
 - An event belongs to a team and can be assigned to multiple users (`event_assignments`)
 - An event can have a parent event (same team), enabling nesting without a separate Project entity
 - A timeline is a named date range over a team's events — not a data container
@@ -111,6 +116,7 @@ calendar_connections
 ## Data Flow
 
 ### Event Create / Update
+
 1. Client sends REST request → API handler validates and writes to DB
 2. Handler publishes typed event to internal event bus (e.g., `events.updated`)
 3. Event bus fans out to consumers:
@@ -118,17 +124,20 @@ calendar_connections
    - **Calendar sync worker** — pushes change to Google Calendar and/or CalDAV for each assigned user who has a connection
 
 ### Inbound Google Calendar Sync
+
 1. Google pushes a webhook notification to `/webhooks/google`
 2. Handler fetches the changed event from Google Calendar API
 3. Upserts the event in draba DB (matched on `google_event_id`)
 4. Publishes `events.updated` to the event bus → WebSocket broadcast
 
 ### CalDAV (Inbound from iOS/macOS)
+
 1. Client issues a CalDAV REPORT or PUT to draba's built-in CalDAV endpoint
 2. draba handles the CalDAV protocol natively and writes to DB
 3. Publishes to event bus → WebSocket broadcast + outbound Google sync if connected
 
 ### Real-Time
+
 - WebSocket connections are scoped per team
 - On connect, client subscribes to one or more team rooms
 - Server broadcasts JSON delta payloads on `events.*` and `timeline.*` events
@@ -158,6 +167,7 @@ calendar_connections
 ## Infrastructure
 
 ### Self-Hosted (v1)
+
 - Single Docker image: `ghcr.io/draba/draba:latest`
 - Configuration via environment variables (DB path, DB type, SMTP, Google OAuth credentials)
 - SQLite: data stored in a mounted volume
@@ -165,6 +175,7 @@ calendar_connections
 - No external services required in SQLite mode
 
 ### Directory Structure (Go server)
+
 ```
 packages/api/
   cmd/draba/          -- main entry point
@@ -181,4 +192,5 @@ packages/api/
 ```
 
 ### CI/CD
+
 - [TBD — GitHub Actions; build + test on PR; publish Docker image on tag]

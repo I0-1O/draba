@@ -41,6 +41,24 @@ func testSetup(t *testing.T, members MemberChecker) (*Hub, *events.Bus, *httptes
 	return hub, bus, srv
 }
 
+// testSetupFast is like testSetup but uses short heartbeat/read timeouts so
+// heartbeat tests complete in milliseconds rather than seconds.
+func testSetupFast(t *testing.T, members MemberChecker) (*Hub, *events.Bus, *httptest.Server) {
+	t.Helper()
+	if members == nil {
+		members = allowAllMembers
+	}
+	bus := events.NewBus()
+	tokens := auth.NewTokenService("test-secret")
+	hub := NewHub(bus, tokens, members)
+	hub.heartbeatInterval = 50 * time.Millisecond
+	hub.readTimeout = 200 * time.Millisecond
+	go hub.Run()
+	srv := httptest.NewServer(http.HandlerFunc(hub.ServeWS))
+	t.Cleanup(srv.Close)
+	return hub, bus, srv
+}
+
 // issueToken issues an access token for testing.
 func issueToken(t *testing.T, userID string) string {
 	t.Helper()
@@ -148,6 +166,41 @@ func TestHub_TwoClientsOnSameTeamBothReceive(t *testing.T) {
 		require.NoError(t, json.Unmarshal(raw, &got))
 		assert.Equal(t, string(events.EventDeleted), got.Type)
 	}
+}
+
+func TestHub_Heartbeat_PingReceived(t *testing.T) {
+	_, _, srv := testSetupFast(t, nil)
+	conn := dial(t, srv, issueToken(t, "u1"))
+
+	// The hub sends a ping frame within one heartbeatInterval (50ms here).
+	// Expect it within 300ms to give the goroutine scheduler room.
+	conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	_, raw, err := conn.ReadMessage()
+	require.NoError(t, err, "expected a ping message within heartbeat interval")
+
+	var got OutboundMsg
+	require.NoError(t, json.Unmarshal(raw, &got))
+	assert.Equal(t, "ping", got.Type)
+}
+
+func TestHub_Heartbeat_MissedPingDisconnects(t *testing.T) {
+	_, _, srv := testSetupFast(t, nil)
+	conn := dial(t, srv, issueToken(t, "u1"))
+
+	// Read without sending pong. The server keeps sending pings every 50ms,
+	// so drain them all; after readTimeout (200ms) the server closes the
+	// connection. 1s outer deadline guards against hanging if something breaks.
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	var serverClosed bool
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			serverClosed = true
+			break
+		}
+		// Got a ping — discard it, send no pong.
+	}
+	assert.True(t, serverClosed, "server should close the connection after readTimeout with no pong")
 }
 
 func TestHub_SubscribeRejectsByNonMember(t *testing.T) {

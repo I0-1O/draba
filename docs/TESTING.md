@@ -89,11 +89,9 @@ Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. T
 | `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
 | `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
 | `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
-| `type-sync` *(future)* | regen OpenAPI types, assert no diff | Phase 4 |
-| `ws-smoke` *(future)* | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
-| `web-e2e` *(future)* | Chrome MCP — login, render timeline, drag-create | Phase 7 |
-
-`/test-phase N` spawns every subagent whose "active from" phase ≤ N. Each subagent reads its own section below for the exact assertions, so adding tests later is a doc edit, not a command edit.
+| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
+| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
+| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
 
 ---
 
@@ -111,6 +109,16 @@ Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. T
 
 **unit-test**
 - All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
+- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
+  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
+  - `Validate` rejects a token signed with a different secret (tampered signature)
+  - `Validate` rejects an expired token
+  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
+  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
+  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
+- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
+  - `GetValid` returns `sql.ErrNoRows` for an expired invite
+  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
 
 **schema-check**
 - Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
@@ -119,59 +127,89 @@ Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. T
 **api-smoke** (against `$DRABA_TEST_URL`)
 - `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
 - `POST /auth/register` with an invalid/missing invite token → 4xx
+- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
 - `POST /auth/login` with the registered credentials → 200, returns JWT
+- `POST /auth/login` with a non-existent email → 401
 - `POST /auth/login` with bad credentials → 401
 - `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
+- `POST /auth/refresh` with an access token (wrong type) → 401
+- `POST /auth/refresh` with a token signed by a different secret → 401
 - A subsequent authenticated request with the issued JWT → 200 (validates signing)
 
 **security-review**
 - No password fields stored in plaintext (grep migrations + handlers)
 - JWT secret loaded from env/config, not hardcoded
-- Invite tokens single-use (consumed on register)
+- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
 - No SQL string concatenation in queries
 
 ### Phase 3 — Core API (Events & Teams)
 
-*Stub — populate during/after Phase 3 implementation.*
+**api-smoke**
+- `POST /teams` → returns team (201 Created)
+- `GET /teams/:id` with member token → 200 OK, returns team
+- `GET /teams/:id` with non-member token → 403 Forbidden
+- `POST /teams/:id/invites` → returns invite token (201 Created)
+- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
+- `POST /teams/:id/events`, then `GET /teams/:id/events?from=…&to=…` returns it (200 OK)
+- `PATCH /events/:id` updates fields (200 OK); `DELETE /events/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
+- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
+- Authz: a user not on the team cannot read or mutate that team's events (403 Forbidden)
+- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
 
-**api-smoke** (planned)
-- `POST /teams` → returns team
-- `POST /teams/:id/invites` → returns invite token
-- Register via that token → user appears in `GET /teams/:id/members`
-- `POST /teams/:id/events`, then `GET /teams/:id/events?from=…&to=…` returns it
-- `PATCH /events/:id` updates fields; `DELETE /events/:id` removes it (subsequent GET excludes)
-- Auth: every endpoint rejects requests without a valid JWT (401)
-- Authz: a user not on the team cannot read or mutate that team's events (403)
-
-**security-review** (planned)
+**security-review**
 - Every new route requires auth middleware
 - Team membership enforced on every team-scoped endpoint
 
 ### Phase 4 — OpenAPI Spec & Type Generation
 
-*Stub.*
-
-**type-sync** (planned)
+**type-sync**
 - `pnpm generate` succeeds with no errors
 - `git diff` after generate is empty (committed types match spec)
 - All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
 
 ### Phase 5 — Real-Time (WebSocket)
 
-*Stub.*
+**unit-test**
+- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
+- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
+- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
 
-**ws-smoke** (planned)
+**ws-smoke**
 - Two clients on team A both receive a delta within 500ms of an event mutation
 - A client on team B does not receive team A's events
-- 30s heartbeat keeps idle connection alive
+- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
+  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
 
 ### Phase 6 — Timelines
 
-*Stub.* api-smoke: create + fetch with JWT, public share token works, non-access-list user gets 403.
+**unit-test**
+- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
+  - Grant access then revoke; `HasAccess` returns false after revoke
+  - Revoking access that was never granted is a no-op (no error)
+- `timeline_repo.ListByTeam` — unit test needed:
+  - Returns all non-archived timelines for a team in descending creation order
+  - Returns empty slice (not error) when team has no timelines
 
-### Phase 7+ — Web
+**api-smoke**
+- `POST /teams/:id/timelines` with JWT → 201 Created
+- `GET /timelines/:id` with JWT (user on access list) → 200 OK
+- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
+- `GET /timelines/share/:token` → 200 OK without requiring auth
 
-*Stubs.* `web-e2e` via Chrome MCP picks up at Phase 7. Detailed assertions added when each phase begins.
+### Phase 7 — Web — Scaffold
+
+**web-e2e**
+- Navigating to protected routes unauthenticated redirects to `/login`
+- Successful login redirects to the main app view and stores the token
+- TanStack Query successfully fetches team/event data from the API
+- WebSocket client successfully connects and maintains a heartbeat
+
+**Known gap — frontend component unit tests**
+No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
+
+### Phase 8+ — Web
+
+*Stubs.* Detailed assertions added when each phase begins.
 
 ---
 
