@@ -212,6 +212,66 @@ export interface paths {
         patch: operations["updateEvent"];
         trace?: never;
     };
+    "/teams/{id}/timelines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a timeline for a team
+         * @description The authenticated user must be a member of the team. Restricted timelines automatically grant access to the creator.
+         */
+        post: operations["createTimeline"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/timelines/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch a timeline by ID
+         * @description Requires team membership. Restricted timelines additionally require an entry in the access list.
+         */
+        get: operations["getTimeline"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/timelines/share/{token}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch a timeline via its public share token
+         * @description No authentication required. The share token itself is the credential.
+         */
+        get: operations["getTimelineByShareToken"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -286,6 +346,26 @@ export interface components {
             rrule?: string | null;
             caldavUid?: string | null;
             googleEventId?: string | null;
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            /** Format: date-time */
+            archivedAt?: string | null;
+        };
+        Timeline: {
+            id: string;
+            teamId: string;
+            name: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            /** @enum {string} */
+            visibility: "public" | "restricted";
+            shareToken: string;
+            icalToken: string;
             createdBy: string;
             /** Format: date-time */
             createdAt: string;
@@ -374,6 +454,10 @@ export interface components {
         teamId: string;
         /** @description Event ID. */
         eventId: string;
+        /** @description Timeline ID. */
+        timelineId: string;
+        /** @description Public share token for a timeline. */
+        shareToken: string;
     };
     requestBodies: never;
     headers: never;
@@ -800,6 +884,100 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name: string;
+                    /** Format: date */
+                    startDate: string;
+                    /** Format: date */
+                    endDate: string;
+                    /**
+                     * @default public
+                     * @enum {string}
+                     */
+                    visibility?: "public" | "restricted";
+                };
+            };
+        };
+        responses: {
+            /** @description Timeline created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Timeline"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Timeline ID. */
+                id: components["parameters"]["timelineId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Timeline found. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Timeline"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getTimelineByShareToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Public share token for a timeline. */
+                token: components["parameters"]["shareToken"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Timeline found. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Timeline"];
+                };
+            };
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };

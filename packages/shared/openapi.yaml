@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: draba API
-  description: Team coordination API — Phases 2 & 3 (auth, teams, events).
+  description: Team coordination API — Phases 2–6 (auth, teams, events, timelines).
   version: "1.0.0"
 
 servers:
@@ -174,6 +174,41 @@ components:
           type: ["string", "null"]
           format: date-time
 
+    Timeline:
+      type: object
+      required: [id, teamId, name, startDate, endDate, visibility, shareToken, icalToken, createdBy, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        name:
+          type: string
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        visibility:
+          type: string
+          enum: [public, restricted]
+        shareToken:
+          type: string
+        icalToken:
+          type: string
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        archivedAt:
+          type: ["string", "null"]
+          format: date-time
+
     AuthResponse:
       type: object
       required: [user, accessToken, refreshToken]
@@ -276,6 +311,22 @@ components:
       in: path
       required: true
       description: Event ID.
+      schema:
+        type: string
+
+    timelineId:
+      name: id
+      in: path
+      required: true
+      description: Timeline ID.
+      schema:
+        type: string
+
+    shareToken:
+      name: token
+      in: path
+      required: true
+      description: Public share token for a timeline.
       schema:
         type: string
 
@@ -732,6 +783,98 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Timelines ────────────────────────────────────────────────
+
+  /teams/{id}/timelines:
+    post:
+      operationId: createTimeline
+      summary: Create a timeline for a team
+      description: The authenticated user must be a member of the team. Restricted timelines automatically grant access to the creator.
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, startDate, endDate]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                startDate:
+                  type: string
+                  format: date
+                endDate:
+                  type: string
+                  format: date
+                visibility:
+                  type: string
+                  enum: [public, restricted]
+                  default: public
+      responses:
+        "201":
+          description: Timeline created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /timelines/{id}:
+    get:
+      operationId: getTimeline
+      summary: Fetch a timeline by ID
+      description: Requires team membership. Restricted timelines additionally require an entry in the access list.
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      responses:
+        "200":
+          description: Timeline found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /timelines/share/{token}:
+    get:
+      operationId: getTimelineByShareToken
+      summary: Fetch a timeline via its public share token
+      description: No authentication required. The share token itself is the credential.
+      security: []
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/shareToken"
+      responses:
+        "200":
+          description: Timeline found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":

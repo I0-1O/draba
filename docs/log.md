@@ -2,6 +2,15 @@
 
 ---
 
+## 2026-05-15 — /test-phase 6
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review
+- Result: all pass
+- Smoke target: local LAN host (not committed)
+- Caveats: `docker compose config` skipped (Docker not in PATH on dev box); `go test -race` skipped (no GCC/CGO on Windows — runs in CI)
+
+---
+
 ## 2026-05-15 — Phase 6: API — Timelines
 
 **Completed.** Added the timelines API — create, fetch by ID (auth-gated), and public share link.

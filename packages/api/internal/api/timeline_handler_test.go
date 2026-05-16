@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,9 +16,36 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
 )
+
+// fakeTimelineStore wraps a real TimelineRepo and lets tests inject errors for
+// specific methods. Zero value delegates everything to the real repo.
+type fakeTimelineStore struct {
+	real           *db.TimelineRepo
+	grantAccessErr error
+}
+
+func (f *fakeTimelineStore) Create(t *models.Timeline) error {
+	return f.real.Create(t)
+}
+func (f *fakeTimelineStore) GetByID(id string) (*models.Timeline, error) {
+	return f.real.GetByID(id)
+}
+func (f *fakeTimelineStore) GetByShareToken(token string) (*models.Timeline, error) {
+	return f.real.GetByShareToken(token)
+}
+func (f *fakeTimelineStore) HasAccess(timelineID, userID string) (bool, error) {
+	return f.real.HasAccess(timelineID, userID)
+}
+func (f *fakeTimelineStore) GrantAccess(timelineID, userID string) error {
+	if f.grantAccessErr != nil {
+		return f.grantAccessErr
+	}
+	return f.real.GrantAccess(timelineID, userID)
+}
 
 // timelineTestSetup creates an in-memory server, registers Alice, creates a
 // team, and returns the handler, Alice's token, and the team ID.
@@ -262,6 +290,42 @@ func TestGetTimeline_InvalidShareToken(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestCreateTimeline_RestrictedGrantAccessError(t *testing.T) {
+	database, err := db.Open(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Migrate(database))
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	eventsRepo := db.NewEventRepo(database)
+	realTimelines := db.NewTimelineRepo(database)
+	fake := &fakeTimelineStore{real: realTimelines, grantAccessErr: errors.New("injected DB error")}
+	tokens := auth.NewTokenService("timeline-test-secret")
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
+
+	srv := api.NewServer(users, invites, teams, eventsRepo, fake, tokens, tier.Unlimited, bus, hub).Routes()
+
+	aliceToken, _ := seedUser(t, srv, "alice@granterr.com", "password1", "Alice")
+
+	wTeam := httptest.NewRecorder()
+	srv.ServeHTTP(wTeam, authReq(http.MethodPost, "/teams", map[string]string{"name": "Grant Err Team"}, aliceToken))
+	require.Equal(t, http.StatusCreated, wTeam.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(wTeam.Body).Decode(&team))
+	teamID := team["id"].(string)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name":       "Restricted Fail",
+		"startDate":  "2026-01-01",
+		"endDate":    "2026-12-31",
+		"visibility": "restricted",
+	}, aliceToken))
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
 func TestCreateTimeline_PublishesBusMessage(t *testing.T) {

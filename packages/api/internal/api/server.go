@@ -11,9 +11,20 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
 )
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	HasAccess(timelineID, userID string) (bool, error)
+	GrantAccess(timelineID, userID string) error
+}
 
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
@@ -21,7 +32,7 @@ type Server struct {
 	invites   *db.InviteRepo
 	teams     *db.TeamRepo
 	events    *db.EventRepo
-	timelines *db.TimelineRepo
+	timelines TimelineStore
 	tokens    *auth.TokenService
 	tier      tier.Tier
 	bus       *events.Bus
@@ -30,7 +41,7 @@ type Server struct {
 
 // NewServer constructs a Server with its required dependencies. It does not
 // touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, eventsRepo *db.EventRepo, timelinesRepo *db.TimelineRepo, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
+func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, eventsRepo *db.EventRepo, timelinesRepo TimelineStore, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
 	return &Server{
 		users:     users,
 		invites:   invites,
