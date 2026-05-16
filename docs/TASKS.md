@@ -38,13 +38,13 @@
 - [x] Timeline access list enforcement — 2026-05-15
 
 ### Web — Scaffold
-- [ ] Initialize shadcn/ui: `pnpm dlx shadcn@latest init`
-- [ ] Set color tokens in `src/index.css` once palette is decided
-- [ ] Set up dark mode toggle (localStorage + `prefers-color-scheme`)
-- [ ] Routing setup (React Router)
-- [ ] Auth flow: login, register (via invite), token storage
-- [ ] API client (TanStack Query + fetch wrapper using generated types)
-- [ ] WebSocket client hook (`useWebSocket`)
+- [x] Initialize shadcn/ui: `pnpm dlx shadcn@latest init` — 2026-05-16
+- [x] Set color tokens in `src/index.css` once palette is decided — 2026-05-16
+- [x] Set up dark mode toggle (localStorage + `prefers-color-scheme`) — 2026-05-16
+- [x] Routing setup (React Router) — 2026-05-16
+- [x] Auth flow: login, register (via invite), token storage — 2026-05-16
+- [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
+- [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
 
 ### Web — Timeline View
 - [ ] Horizontal timeline component (person lanes, time blocks)

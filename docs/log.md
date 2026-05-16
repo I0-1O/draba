@@ -2,6 +2,74 @@
 
 ---
 
+## 2026-05-16 — Phase 7: Web — Scaffold
+
+**Completed (pending manual browser verification).** Added the full web frontend scaffold: shadcn/ui integration, dark mode toggle, React Router routing, auth flow (login + register pages), TanStack Query API client, and WebSocket hook.
+
+### What was built
+
+**Dependencies added to `packages/web/`**
+- `react-router-dom` ^7 — routing
+- `@tanstack/react-query` ^5 — server state
+- `clsx`, `tailwind-merge`, `class-variance-authority` — shadcn utilities
+- `@radix-ui/react-slot`, `@radix-ui/react-label` — shadcn Radix primitives
+- `@types/node` (dev) — for `path.resolve` in `vite.config.ts`
+
+**Configuration**
+- `components.json` — shadcn config; points to `src/index.css` and `@/` alias
+- `vite.config.ts` — added `resolve.alias` for `@/ → src/`
+- `tsconfig.app.json` — added `"@/*": ["./src/*"]` path mapping alongside existing `@draba/shared`
+
+**`src/lib/utils.ts`** — `cn()` helper (clsx + tailwind-merge)
+
+**`src/lib/api.ts`** — fetch wrapper; reads `VITE_API_URL` (default `http://localhost:8080`); `apiFetch<T>` injects `Authorization: Bearer`; `ApiError` class with `status`/`code`/`message`; `createAuthFetch` factory for hooks; refresh token stored at `draba_refresh_token` in localStorage
+
+**shadcn UI components** (in `src/components/ui/`)
+- `button.tsx` — CVA variants: default, destructive, outline, secondary, ghost, link; sizes: default, sm, lg, icon
+- `input.tsx` — styled text/email/password input
+- `label.tsx` — Radix Label with uppercase tracking style
+- `card.tsx` — Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter
+
+**`src/contexts/AuthContext.tsx`** — `AuthProvider` + `useAuth`; access token in memory; refresh token in localStorage; auto-restores session from stored refresh token on mount; exposes `login`, `register`, `logout`, `getAccessToken` (stable ref, never stale in closures)
+
+**`src/hooks/useDarkMode.ts`** — `useDarkMode()`; reads initial preference from localStorage → `prefers-color-scheme` fallback; sets/removes `.dark` class on `<html>`; persists to `draba_theme`
+
+**`src/components/DarkModeToggle.tsx`** — sun/moon icon button; calls `useDarkMode().toggle()`
+
+**`src/hooks/useWebSocket.ts`** — `useWebSocket({ token, teamIds, onMessage })`; connects to `${WS_BASE}/ws?token=<jwt>`; sends `{ type: "subscribe", teamId }` on open; replies `{ type: "pong" }` to server pings; reconnects with exponential back-off (1 s → 30 s cap) on unexpected close; exposes `{ status, subscribe }`
+
+**`src/hooks/useTeamEvents.ts`** — `useTeamEvents(teamId, from?, to?)` and `useTeamMembers(teamId)` (TanStack Query); `useInvalidateTeamEvents(teamId)` for WebSocket-triggered cache busting; `createAuthFetch(getAccessToken)` used at query-time to avoid stale token closures
+
+**`src/components/ProtectedRoute.tsx`** — React Router `<Outlet>` wrapper; redirects to `/login` with `state.from` when unauthenticated; renders `null` during session restore
+
+**Pages**
+- `src/pages/LoginPage.tsx` — email + password form; calls `useAuth().login`; redirects to `state.from` on success; shows `ApiError.message` inline
+- `src/pages/RegisterPage.tsx` — displayName + email + password + inviteToken fields; pre-fills token from `?token=` query param; calls `useAuth().register`
+- `src/pages/DashboardPage.tsx` — shell with Sidebar + TopBar; `useTeamEvents` + `useTeamMembers` hooks wired; `useWebSocket` subscribed to team; invalidates events cache on any `event.*` delta; sign-out button
+
+**`src/App.tsx`** — `QueryClientProvider` + `BrowserRouter` + `AuthProvider` wrapping three routes: `/login`, `/register`, `/ `(protected via `ProtectedRoute`)
+
+### Exit criteria status
+
+| Criterion | Status |
+|-----------|--------|
+| TypeScript compiles with zero errors (`pnpm --filter web lint`) | ✅ verified |
+| Vite production build succeeds (`pnpm --filter web build`) | ✅ verified |
+| `/login` renders | ⏳ manual browser check needed |
+| `/login` authenticates against live API | ⏳ manual browser check needed |
+| Protected routes redirect unauthenticated users to `/login` | ⏳ manual browser check needed |
+| TanStack Query hook fetches and displays team events | ⏳ manual browser check needed |
+| WebSocket connects and emits events in browser DevTools | ⏳ manual browser check needed |
+
+### Decisions & notes
+- Access token is held in React state (memory); not written to localStorage or sessionStorage — avoids XSS token theft. Refresh token in localStorage (only way to survive page reload).
+- `createAuthFetch` takes a `getAccessToken` getter (not the token value directly) so TanStack Query closures always read the current in-memory token, not a stale captured copy.
+- WebSocket URL derives from `API_BASE` by replacing `http` → `ws` so a single `VITE_API_URL` env var covers both protocols.
+- Reconnect back-off caps at 30 s (half of server's 70 s read deadline) to recover before the server closes idle connections.
+- `DashboardPage` uses a placeholder `PLACEHOLDER_TEAM_ID = ''` — the team-selection UI and timeline canvas are Phase 8 work.
+
+---
+
 ## 2026-05-15 — /test-phase 6
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review

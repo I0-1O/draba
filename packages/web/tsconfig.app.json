@@ -20,7 +20,8 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
     "paths": {
-      "@draba/shared": ["../shared/src/index.ts"]
+      "@draba/shared": ["../shared/src/index.ts"],
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src"]
