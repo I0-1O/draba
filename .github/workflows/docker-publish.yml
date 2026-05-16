@@ -25,7 +25,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: packages/api
+          context: .
           file: packages/api/Dockerfile
           target: prod
           push: true

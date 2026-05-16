@@ -43,6 +43,10 @@ coverage/
 
 # Go
 packages/api/tmp/
+
+# Embedded web build artifacts — populated by Docker; not checked in
+packages/api/ui/static/*
+!packages/api/ui/static/.gitkeep
 *.exe
 *.dll
 *.so

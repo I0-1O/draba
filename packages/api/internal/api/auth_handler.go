@@ -10,6 +10,8 @@ import (
 	"time"
 	"unicode"
 
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
@@ -19,18 +21,13 @@ import (
 // must present a valid invite token. Tier user limits are enforced before
 // hashing the password to avoid wasted bcrypt work.
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email       string `json:"email"`
-		Password    string `json:"password"`
-		DisplayName string `json:"displayName"`
-		InviteToken string `json:"inviteToken"`
-	}
+	var req RegisterJSONRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
 	}
 
-	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
 
 	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
@@ -56,16 +53,16 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	var invite *models.Invite
 	if count > 0 {
-		if req.InviteToken == "" {
+		if req.InviteToken == nil || *req.InviteToken == "" {
 			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
 			return
 		}
-		inv, err := s.invites.GetValid(req.InviteToken)
+		inv, err := s.invites.GetValid(*req.InviteToken)
 		if err != nil {
 			writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
 			return
 		}
-		if inv.Email != "" && !strings.EqualFold(inv.Email, req.Email) {
+		if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
 			writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
 			return
 		}
@@ -81,7 +78,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	user := &models.User{
 		ID:           newID(),
-		Email:        req.Email,
+		Email:        string(req.Email),
 		PasswordHash: hash,
 		DisplayName:  req.DisplayName,
 		CreatedAt:    now,
@@ -131,22 +128,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 // INVALID_CREDENTIALS error for both unknown email and bad password so
 // the endpoint cannot be used as an account-existence oracle.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
+	var req LoginJSONRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
 	}
 
-	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
 	if req.Email == "" || req.Password == "" {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
 		return
 	}
 
-	user, err := s.users.GetByEmail(req.Email)
+	user, err := s.users.GetByEmail(string(req.Email))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
@@ -182,9 +176,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
 // token for a new access token; the refresh token itself is not rotated.
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		RefreshToken string `json:"refreshToken"`
-	}
+	var req RefreshTokenJSONBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return

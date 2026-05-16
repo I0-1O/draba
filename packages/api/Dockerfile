@@ -1,9 +1,25 @@
-# ── Build stage ──
-FROM golang:1.25-alpine AS builder
+# ── Web builder ──
+FROM node:22-alpine AS web-builder
+RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /workspace
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/web/package.json packages/web/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install --frozen-lockfile
+COPY packages/web packages/web
+COPY packages/shared packages/shared
+RUN pnpm --filter @draba/web build
+
+# ── Go dependency cache ──
+FROM golang:1.25-alpine AS go-deps
 WORKDIR /app
-COPY go.mod go.sum ./
+COPY packages/api/go.mod packages/api/go.sum ./
 RUN go mod download
-COPY . .
+
+# ── Production builder — embeds web dist into the Go binary ──
+FROM go-deps AS builder
+COPY packages/api/ .
+COPY --from=web-builder /workspace/packages/web/dist ./ui/static
 RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
 
 # ── Dev stage (used by docker-compose for hot reload) ──
@@ -12,7 +28,7 @@ RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
 FROM golang:1.25-alpine AS dev
 RUN go install github.com/air-verse/air@latest
 WORKDIR /app
-COPY go.mod go.sum ./
+COPY packages/api/go.mod packages/api/go.sum ./
 RUN go mod download
 CMD ["air", "-c", ".air.toml"]
 

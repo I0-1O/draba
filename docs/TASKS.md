@@ -45,6 +45,7 @@
 - [x] Auth flow: login, register (via invite), token storage — 2026-05-16
 - [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
 - [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
+- [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
 
 ### Web — Timeline View
 - [ ] Horizontal timeline component (person lanes, time blocks)
@@ -56,6 +57,8 @@
 ### OpenAPI
 - [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
 - [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
+- [x] Set up Go type generation from spec (`oapi-codegen`) — 2026-05-16
+- [x] Refactor existing Go handlers to use generated OpenAPI models — 2026-05-16
 
 ## Up Next
 
@@ -104,7 +107,6 @@
 - [ ] Password reset flow (email required — pick SMTP or transactional email provider)
 - [ ] Public timeline read-only view (no login)
 - [ ] Timeline restricted-access enforcement
-- [ ] Docker image: embed React build into Go binary, single artifact
 
 ## Done
 - [x] Initialize repo scaffold — 2026-04-27

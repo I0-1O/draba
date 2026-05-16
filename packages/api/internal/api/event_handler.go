@@ -26,21 +26,7 @@ func (s *Server) handleCreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Title           string    `json:"title"`
-		Description     *string   `json:"description"`
-		Icon            *string   `json:"icon"`
-		Color           *string   `json:"color"`
-		StartAt         time.Time `json:"startAt"`
-		EndAt           time.Time `json:"endAt"`
-		AllDay          bool      `json:"allDay"`
-		StatusID        *string   `json:"statusId"`
-		ParentEventID   *string   `json:"parentEventId"`
-		PercentComplete *int      `json:"percentComplete"`
-		Location        *string   `json:"location"`
-		URL             *string   `json:"url"`
-		Rrule           *string   `json:"rrule"`
-	}
+	var req CreateEventJSONBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
@@ -59,6 +45,11 @@ func (s *Server) handleCreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	allDay := false
+	if req.AllDay != nil {
+		allDay = *req.AllDay
+	}
+
 	now := time.Now()
 	event := &models.Event{
 		ID:              newID(),
@@ -69,12 +60,12 @@ func (s *Server) handleCreateEvent(w http.ResponseWriter, r *http.Request) {
 		Color:           req.Color,
 		StartAt:         req.StartAt,
 		EndAt:           req.EndAt,
-		AllDay:          req.AllDay,
-		StatusID:        req.StatusID,
-		ParentEventID:   req.ParentEventID,
+		AllDay:          allDay,
+		StatusID:        req.StatusId,
+		ParentEventID:   req.ParentEventId,
 		PercentComplete: req.PercentComplete,
 		Location:        req.Location,
-		URL:             req.URL,
+		URL:             req.Url,
 		Rrule:           req.Rrule,
 		CreatedBy:       claims.UserID,
 		CreatedAt:       now,

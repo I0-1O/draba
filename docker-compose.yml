@@ -1,7 +1,8 @@
 services:
   api:
     build:
-      context: packages/api
+      context: .
+      dockerfile: packages/api/Dockerfile
       target: dev
     ports:
       - "8080:8080"

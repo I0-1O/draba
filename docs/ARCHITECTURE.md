@@ -44,6 +44,7 @@ The server also implements a built-in CalDAV endpoint, allowing iOS/macOS Calend
 
 - OpenAPI specification (`openapi.yaml`) — the contract between API and web
 - TypeScript types generated from the OpenAPI spec (used by `packages/web`)
+- Go server models generated from the OpenAPI spec (used by `packages/api`) using `oapi-codegen`
 - This is the source of truth for the API shape; Go structs and TS types both derive from it
 
 ---

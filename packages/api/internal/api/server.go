@@ -6,7 +6,9 @@ package api
 
 import (
 	"fmt"
+	"io/fs"
 	"net/http"
+	"strings"
 
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
@@ -37,6 +39,7 @@ type Server struct {
 	tier      tier.Tier
 	bus       *events.Bus
 	hub       *ws.Hub
+	uiFS      fs.FS
 }
 
 // NewServer constructs a Server with its required dependencies. It does not
@@ -53,6 +56,15 @@ func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, e
 		bus:       bus,
 		hub:       hub,
 	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
 }
 
 // Routes returns the fully-wired HTTP handler for the API, including all
@@ -88,6 +100,10 @@ func (s *Server) Routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
 	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
 	for _, m := range tier.Registered() {
 		if err := m.Register(ctx); err != nil {
@@ -102,4 +118,25 @@ func (s *Server) Routes() http.Handler {
 // chain applies a single middleware to a handler function.
 func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
 	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
 }

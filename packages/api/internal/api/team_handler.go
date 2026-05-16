@@ -19,9 +19,7 @@ var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
 // handleCreateTeam handles POST /teams. The authenticated user becomes the
 // team's first admin member.
 func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Name string `json:"name"`
-	}
+	var req CreateTeamJSONBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
@@ -95,19 +93,20 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Email string `json:"email"`
-		Role  string `json:"role"`
-	}
+	var req CreateInviteJSONBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
 	}
-	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 
-	role := req.Role
-	if role == "" {
-		role = "member"
+	var email string
+	if req.Email != nil {
+		email = strings.ToLower(strings.TrimSpace(string(*req.Email)))
+	}
+
+	role := "member"
+	if req.Role != nil {
+		role = string(*req.Role)
 	}
 	if role != "admin" && role != "member" {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
@@ -118,7 +117,7 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	invite := &models.Invite{
 		ID:        newID(),
 		TeamID:    teamID,
-		Email:     req.Email,
+		Email:     email,
 		Token:     newID(),
 		Role:      role,
 		InvitedBy: claims.UserID,

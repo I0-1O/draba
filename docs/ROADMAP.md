@@ -155,12 +155,15 @@ Repo created. Requirements, architecture, conventions, and design docs written.
 - Auth flow: login page, register-via-invite page, token storage
 - API client: TanStack Query + fetch wrapper using generated types
 - WebSocket client hook (`useWebSocket`)
+- oapi-codegen wired for Go handler types (no drift between OpenAPI spec and Go)
+- React build embedded in Go binary via `//go:embed`; single container, single port
 
 **Exit criteria — safe to pause when:**
-- `/login` renders and authenticates against the live API
+- `/login` renders and authenticates against the live API (served from the Go binary)
 - Protected routes redirect unauthenticated users to `/login`
 - A TanStack Query hook successfully fetches and displays team events
 - WebSocket connects and emits events visible in browser DevTools Network tab
+- `docker build --target prod` produces a single image; the login page loads at port 8080 with no second container
 
 ---
 
@@ -269,14 +272,12 @@ The heaviest phase. This is the product's core differentiator.
 - Password reset flow (requires SMTP or transactional email provider)
 - Public read-only timeline view (no login required)
 - Timeline restricted-access enforcement
-- Docker image: embed React build into Go binary, single artifact
 
 **Exit criteria — safe to pause when:**
 - Exporting a timeline produces a valid CSV and Excel file with all events
 - Importing that CSV back in shows a preview, validates rows, and creates events on confirm
 - Password reset sends an email and allows setting a new password
 - A public timeline share link is fully viewable without logging in
-- `docker build` produces a single image; `docker run` serves both the API and the web app with no additional containers
 
 ---
 

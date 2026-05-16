@@ -26,12 +26,7 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Name       string `json:"name"`
-		StartDate  string `json:"startDate"`
-		EndDate    string `json:"endDate"`
-		Visibility string `json:"visibility"`
-	}
+	var req CreateTimelineJSONBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
@@ -41,29 +36,20 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
 		return
 	}
-	if req.StartDate == "" || req.EndDate == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startDate and endDate are required")
-		return
-	}
-	const dateLayout = "2006-01-02"
-	startDate, err := time.Parse(dateLayout, req.StartDate)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startDate must be YYYY-MM-DD")
-		return
-	}
-	endDate, err := time.Parse(dateLayout, req.EndDate)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must be YYYY-MM-DD")
-		return
-	}
+
+	startDate := req.StartDate.Time
+	endDate := req.EndDate.Time
+
 	if endDate.Before(startDate) {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
 		return
 	}
-	if req.Visibility == "" {
-		req.Visibility = "public"
+
+	visibility := "public"
+	if req.Visibility != nil {
+		visibility = string(*req.Visibility)
 	}
-	if req.Visibility != "public" && req.Visibility != "restricted" {
+	if visibility != "public" && visibility != "restricted" {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "visibility must be public or restricted")
 		return
 	}
@@ -73,9 +59,9 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 		ID:         newID(),
 		TeamID:     teamID,
 		Name:       req.Name,
-		StartDate:  req.StartDate,
-		EndDate:    req.EndDate,
-		Visibility: req.Visibility,
+		StartDate:  startDate.Format("2006-01-02"),
+		EndDate:    endDate.Format("2006-01-02"),
+		Visibility: visibility,
 		ShareToken: newID(),
 		IcalToken:  newID(),
 		CreatedBy:  claims.UserID,
