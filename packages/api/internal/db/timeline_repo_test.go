@@ -126,3 +126,66 @@ func TestTimelineRepo_GetByShareToken_NotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, sql.ErrNoRows))
 }
+
+func TestTimelineRepo_RevokeAccess_RemovesAccess(t *testing.T) {
+	database := openTestDB(t)
+	repo := db.NewTimelineRepo(database)
+
+	teamID, userID := seedTeamAndUser(t, database, "rev-a")
+	tl := makeTimeline("tl-rev-a", teamID, userID)
+	require.NoError(t, repo.Create(tl))
+
+	require.NoError(t, repo.GrantAccess(tl.ID, userID))
+	ok, err := repo.HasAccess(tl.ID, userID)
+	require.NoError(t, err)
+	require.True(t, ok, "access should be granted before revoke")
+
+	require.NoError(t, repo.RevokeAccess(tl.ID, userID))
+
+	ok, err = repo.HasAccess(tl.ID, userID)
+	require.NoError(t, err)
+	assert.False(t, ok, "access should be removed after revoke")
+}
+
+func TestTimelineRepo_RevokeAccess_Noop(t *testing.T) {
+	database := openTestDB(t)
+	repo := db.NewTimelineRepo(database)
+
+	// Revoking access that was never granted must not return an error.
+	require.NoError(t, repo.RevokeAccess("nonexistent-timeline", "nonexistent-user"))
+}
+
+func TestTimelineRepo_ListByTeam_Empty(t *testing.T) {
+	database := openTestDB(t)
+	repo := db.NewTimelineRepo(database)
+	teamID, _ := seedTeamAndUser(t, database, "list-empty")
+
+	ts, err := repo.ListByTeam(teamID)
+	require.NoError(t, err)
+	assert.Empty(t, ts, "new team should have no timelines")
+}
+
+func TestTimelineRepo_ListByTeam_ReturnsBothOrderedByCreation(t *testing.T) {
+	database := openTestDB(t)
+	repo := db.NewTimelineRepo(database)
+	teamID, userID := seedTeamAndUser(t, database, "list-two")
+
+	// Insert older timeline first.
+	first := makeTimeline("tl-list-1", teamID, userID)
+	first.CreatedAt = time.Now().Add(-time.Minute)
+	first.UpdatedAt = first.CreatedAt
+	require.NoError(t, repo.Create(first))
+
+	// Insert newer timeline second — unique tokens required by UNIQUE constraint.
+	second := makeTimeline("tl-list-2", teamID, userID)
+	second.ShareToken = "share-tl-list-2"
+	second.IcalToken = "ical-tl-list-2"
+	require.NoError(t, repo.Create(second))
+
+	ts, err := repo.ListByTeam(teamID)
+	require.NoError(t, err)
+	require.Len(t, ts, 2)
+	// ListByTeam orders by created_at DESC — most recent first.
+	assert.Equal(t, second.ID, ts[0].ID)
+	assert.Equal(t, first.ID, ts[1].ID)
+}
