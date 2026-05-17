@@ -59,3 +59,5 @@ packages/api/ui/static/*
 # (CLAUDE.md, skills/, and .claude/commands/ are committed — they're shared team context)
 .claude/settings.local.json
 .claude/todos
+.claude/launch.json
+.claude/mockups/

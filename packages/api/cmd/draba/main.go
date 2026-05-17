@@ -31,6 +31,14 @@ const banner = "\n" +
 	"  see who's doing what, when.\n\n"
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "reset-password":
+			runResetPassword(os.Args[2:])
+			return
+		}
+	}
+
 	setupLogger()
 	fmt.Print(banner)
 

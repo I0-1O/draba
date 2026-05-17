@@ -31,7 +31,10 @@ interface Options {
   onMessage?: (msg: WsMessage) => void
 }
 
-const WS_BASE = API_BASE.replace(/^http/, 'ws')
+// When API_BASE is empty (embedded SPA), derive from the current page origin.
+const WS_BASE = API_BASE
+  ? API_BASE.replace(/^http/, 'ws')
+  : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
 const MAX_BACKOFF_MS = 30_000
 
 export function useWebSocket({ token, teamIds = [], onMessage }: Options) {

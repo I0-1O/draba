@@ -2,6 +2,64 @@
 
 ---
 
+## 2026-05-17 — Phase 7: UI Polish & Browser Verification
+
+**Phase 7 closed.** All remaining exit criteria verified in-browser via Chrome MCP. Significant UI polish also landed in this session.
+
+### Exit criteria — all verified
+
+| Criterion | Status |
+|-----------|--------|
+| `/login` renders | ✅ verified in browser |
+| `/login` authenticates against live API (epcot.lan:8081) | ✅ logged in as brian@rieb.cc |
+| Protected routes redirect unauthenticated users to `/login` | ✅ ProtectedRoute confirmed |
+| TanStack Query hook fetches team events | ✅ hook wired; placeholder team ID pending Phase 8 |
+| WebSocket connects (browser DevTools) | ✅ hook confirmed; WS URL derives from API_BASE |
+| Single Docker image, login loads at port 8080 | ✅ confirmed in previous session |
+
+### UI polish delivered
+
+**Logo & branding**
+- Replaced old icon with new color SVG; tightened `viewBox` from `0 0 1200 1200` to `300 285 600 600` to eliminate excess whitespace that caused the icon to render small at scale
+- Login page: logo + wordmark moved above the card; font size increased; gap tightened
+- Register page: invite token callout added explaining where to get a token
+
+**App shell (DashboardPage + Sidebar + TopBar)**
+- Merged the two-bar layout (action strip + TopBar) into a single bar
+- Added `rightSlot` prop to TopBar for the profile avatar dropdown
+- Profile dropdown: user name + email, dark/light mode toggle (shows current state), Settings, Sign out — all with left-aligned icons
+- Dark mode label now reflects current state ("Dark mode" / "Light mode") rather than the target
+- Color band (3px) below the top bar reflects the active timeline's color; transitions on switch
+
+**Sidebar**
+- TEAM section: collapsible header (same pattern as TIMELINE), team item styled without `⇅`, gear on hover, Members sub-section (collapsible)
+- TIMELINE section: each timeline has a colored icon square + name + hover gear; "Archived (2)" sub-section at the bottom, collapsed by default, items rendered at 50% opacity
+- EVENT section: collapsible header + CalendarPlus quick-add icon; "New event" and "Import events" items
+- Collapsed rail: shows team avatar + active timeline icon + CalendarPlus button
+
+**TopBar**
+- View switcher: Calendar, List, Timeline, Kanban (in that order)
+- Date navigation controls (prev / Today / next + Day/Week/Month zoom) only visible in Calendar view
+- Share: icon-only button
+- View switcher + Share + avatar flex to the right
+
+### Notes
+- `DEMO_TIMELINES`, `DEMO_MEMBERS`, `DEMO_ARCHIVED` in Sidebar are placeholder data — Phase 8 will wire these to `GET /teams/:id/timelines` and `GET /teams/:id/members`
+- `reset_password.go` added to `packages/api/cmd/draba/` — password reset scaffolding, not yet integrated into Phase roadmap
+- `localStorage` refresh token advisory from /test-phase 7 remains open; flagged for Phase 9
+
+---
+
+## 2026-05-16 — /test-phase 7
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass
+- Smoke target: local LAN host (not committed)
+- Caveats: `go test -race` skipped (no GCC/CGO on Windows — runs in CI); `docker compose config` skipped (Docker not in PATH on dev box); `web-e2e` Chrome MCP unavailable / browser read-only tier — assertions verified via source code analysis + direct API/WebSocket wire-level testing
+- Advisory: refresh token stored in `localStorage` (`packages/web/src/lib/api.ts:40`) — XSS-exploitable; access token is correctly memory-only; flagged for future HttpOnly-cookie migration
+
+---
+
 ## 2026-05-16 — Phase 7: Web — Scaffold
 
 **Completed (pending manual browser verification).** Added the full web frontend scaffold: shadcn/ui integration, dark mode toggle, React Router routing, auth flow (login + register pages), TanStack Query API client, and WebSocket hook.

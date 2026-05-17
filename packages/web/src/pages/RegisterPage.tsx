@@ -113,6 +113,18 @@ export default function RegisterPage() {
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <Label htmlFor="inviteToken">Invite token</Label>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: 'var(--muted-foreground)',
+                  background: 'var(--muted)',
+                  borderRadius: 6,
+                  padding: '8px 10px',
+                  lineHeight: 1.5,
+                }}
+              >
+                draba is invite-only. Ask your team admin to send you an invite, or click the link in your invitation email — it will fill this in automatically.
+              </div>
               <Input
                 id="inviteToken"
                 type="text"

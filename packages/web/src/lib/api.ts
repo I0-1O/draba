@@ -13,8 +13,11 @@ import type { components } from '@draba/shared'
 
 export type ApiErrorBody = components['schemas']['ApiError']
 
+// Empty string = same-origin relative URLs, which is correct when the SPA is
+// embedded in the Go binary. Set VITE_API_URL for local dev against a
+// separate API server (e.g. VITE_API_URL=http://localhost:8080).
 export const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:8080'
+  (import.meta.env.VITE_API_URL as string | undefined) ?? ''
 
 export const REFRESH_TOKEN_KEY = 'draba_refresh_token'
 

@@ -10,9 +10,19 @@ This is the draba web frontend. React + TypeScript + Vite.
 - `src/types/` — re-exports from generated types in `packages/shared/`
 
 ## Run
+
+**Against local API (default):**
 ```bash
 pnpm --filter web dev
 ```
+Proxies `/api` and `/ws` to `http://localhost:8080`.
+
+**Against Docker (e.g. epcot.lan):**
+Create `packages/web/.env.local` (gitignored):
+```
+VITE_API_TARGET=http://epcot.lan:8081
+```
+Then run the same command. The dev server at `localhost:5173` transparently forwards all API and WebSocket traffic to the Docker container — no CORS config needed.
 
 ## Build
 ```bash

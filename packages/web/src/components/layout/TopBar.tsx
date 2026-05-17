@@ -1,13 +1,9 @@
-import { ChevronLeft, ChevronRight, GanttChart, Columns3, List, Share2, Plus } from 'lucide-react';
+import { ChevronLeft, ChevronRight, CalendarDays, GanttChart, Columns3, List, Share2 } from 'lucide-react';
 
-/** Which view (Timeline / Kanban / List) is currently displayed. */
-export type ViewMode = 'timeline' | 'kanban' | 'list';
-
-/** Granularity of the date axis on the timeline. */
+export type ViewMode = 'calendar' | 'timeline' | 'kanban' | 'list';
 export type ZoomLevel = 'day' | 'week' | 'month';
 
 interface Props {
-  title: string;
   dateRangeLabel: string;
   view: ViewMode;
   zoom: ZoomLevel;
@@ -17,13 +13,14 @@ interface Props {
   onNext: () => void;
   onToday: () => void;
   onShare?: () => void;
-  onAddEvent?: () => void;
+  rightSlot?: React.ReactNode;
 }
 
 const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
-  { id: 'timeline', icon: <GanttChart size={13} strokeWidth={1.8} />, label: 'Timeline' },
-  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,   label: 'Kanban' },
-  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,       label: 'List' },
+  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
+  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
+  { id: 'timeline', icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Timeline' },
+  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
 ];
 
 const ZOOMS: { id: ZoomLevel; label: string }[] = [
@@ -41,10 +38,11 @@ const BTN_BASE: React.CSSProperties = {
   border: 'none',
 };
 
-function IconBtn({ icon, onClick }: { icon: React.ReactNode; onClick?: () => void }) {
+function IconBtn({ icon, onClick, title }: { icon: React.ReactNode; onClick?: () => void; title?: string }) {
   return (
     <button
       onClick={onClick}
+      title={title}
       style={{
         ...BTN_BASE,
         width: 28,
@@ -61,12 +59,10 @@ function IconBtn({ icon, onClick }: { icon: React.ReactNode; onClick?: () => voi
 }
 
 /**
- * Top toolbar above the active view. Owns no state itself — every action
- * (paging, view/zoom switching, share, add) is delegated upward, so this
- * component is reusable across pages with different state owners.
+ * Top toolbar above the active view. Date navigation controls are only
+ * shown when the Calendar view is active. All actions are delegated upward.
  */
 export default function TopBar({
-  title,
   dateRangeLabel,
   view,
   zoom,
@@ -76,15 +72,17 @@ export default function TopBar({
   onNext,
   onToday,
   onShare,
-  onAddEvent,
+  rightSlot,
 }: Props) {
+  const isCalendar = view === 'calendar';
+
   return (
     <div
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 12,
-        padding: '0 20px',
+        gap: 6,
+        padding: '0 12px',
         height: 'var(--topbar-h)',
         background: 'var(--card)',
         borderBottom: '1px solid var(--border)',
@@ -92,95 +90,75 @@ export default function TopBar({
         zIndex: 10,
       }}
     >
-      {/* Timeline title */}
-      <span
-        style={{
-          fontSize: 14,
-          fontWeight: 700,
-          color: 'var(--foreground)',
-          marginRight: 4,
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {title}
-      </span>
+      {/* Date navigation — calendar view only */}
+      {isCalendar && (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <IconBtn icon={<ChevronLeft size={13} strokeWidth={2} />} onClick={onPrev} />
+            <button
+              onClick={onToday}
+              style={{
+                ...BTN_BASE,
+                fontSize: 12,
+                fontWeight: 600,
+                color: 'var(--primary)',
+                background: 'none',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-md)',
+                padding: '4px 10px',
+              }}
+            >
+              Today
+            </button>
+            <IconBtn icon={<ChevronRight size={13} strokeWidth={2} />} onClick={onNext} />
+          </div>
 
-      {/* Date navigation */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-        <IconBtn icon={<ChevronLeft size={13} strokeWidth={2} />} onClick={onPrev} />
-        <button
-          onClick={onToday}
-          style={{
-            ...BTN_BASE,
-            fontSize: 12,
-            fontWeight: 600,
-            color: 'var(--primary)',
-            background: 'none',
-            border: '1px solid var(--border)',
+          <span style={{ fontSize: 12, color: 'var(--muted-foreground)', fontWeight: 400, whiteSpace: 'nowrap' }}>
+            {dateRangeLabel}
+          </span>
+
+          {/* Zoom picker */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1,
+            background: 'var(--muted)',
             borderRadius: 'var(--radius-md)',
-            padding: '4px 10px',
-          }}
-        >
-          Today
-        </button>
-        <IconBtn icon={<ChevronRight size={13} strokeWidth={2} />} onClick={onNext} />
-      </div>
-
-      <span
-        style={{
-          fontSize: 12,
-          color: 'var(--muted-foreground)',
-          fontWeight: 400,
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {dateRangeLabel}
-      </span>
-
-      {/* Zoom */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 1,
-          background: 'var(--muted)',
-          borderRadius: 'var(--radius-md)',
-          padding: 2,
-        }}
-      >
-        {ZOOMS.map(z => (
-          <button
-            key={z.id}
-            onClick={() => onZoomChange(z.id)}
-            style={{
-              ...BTN_BASE,
-              fontSize: 11,
-              fontWeight: 600,
-              padding: '3px 9px',
-              borderRadius: 5,
-              background: zoom === z.id ? 'var(--card)' : 'transparent',
-              color: zoom === z.id ? 'var(--foreground)' : 'var(--muted-foreground)',
-              boxShadow: zoom === z.id ? 'var(--shadow-sm)' : 'none',
-            }}
-          >
-            {z.label}
-          </button>
-        ))}
-      </div>
+            padding: 2,
+          }}>
+            {ZOOMS.map(z => (
+              <button
+                key={z.id}
+                onClick={() => onZoomChange(z.id)}
+                style={{
+                  ...BTN_BASE,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  padding: '3px 9px',
+                  borderRadius: 5,
+                  background: zoom === z.id ? 'var(--card)' : 'transparent',
+                  color: zoom === z.id ? 'var(--foreground)' : 'var(--muted-foreground)',
+                  boxShadow: zoom === z.id ? 'var(--shadow-sm)' : 'none',
+                }}
+              >
+                {z.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
 
       <div style={{ flex: 1 }} />
 
       {/* View switcher */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 1,
-          background: 'var(--muted)',
-          borderRadius: 'var(--radius-md)',
-          padding: 2,
-        }}
-      >
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 1,
+        background: 'var(--muted)',
+        borderRadius: 'var(--radius-md)',
+        padding: 2,
+      }}>
         {VIEWS.map(v => (
           <button
             key={v.id}
@@ -203,42 +181,11 @@ export default function TopBar({
         ))}
       </div>
 
-      {/* Share */}
-      <button
-        onClick={onShare}
-        style={{
-          ...BTN_BASE,
-          gap: 6,
-          fontSize: 13,
-          fontWeight: 600,
-          padding: '6px 14px',
-          borderRadius: 'var(--radius-md)',
-          background: 'var(--primary)',
-          color: 'var(--primary-foreground)',
-        }}
-      >
-        <Share2 size={13} strokeWidth={2} />
-        Share
-      </button>
+      {/* Share — icon only */}
+      <IconBtn icon={<Share2 size={14} strokeWidth={2} />} onClick={onShare} title="Share" />
 
-      {/* Add event */}
-      <button
-        onClick={onAddEvent}
-        style={{
-          ...BTN_BASE,
-          gap: 5,
-          fontSize: 13,
-          fontWeight: 600,
-          padding: '6px 14px',
-          borderRadius: 'var(--radius-md)',
-          border: '1px solid var(--border)',
-          background: 'var(--card)',
-          color: 'var(--foreground)',
-        }}
-      >
-        <Plus size={14} strokeWidth={2} />
-        Add event
-      </button>
+      {/* Profile avatar — injected by parent */}
+      {rightSlot}
     </div>
   );
 }

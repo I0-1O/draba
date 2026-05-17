@@ -54,16 +54,16 @@ export default function LoginPage() {
         <DarkModeToggle />
       </div>
 
-      {/* Logo + wordmark */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 32 }}>
-        <img src="/logo.svg" alt="draba" style={{ width: 36, height: 36 }} />
-        <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.01em' }}>
+      {/* Logo + wordmark above the card */}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, marginBottom: 24 }}>
+        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
+        <span style={{ fontSize: 36, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.02em' }}>
           draba
         </span>
       </div>
 
       <Card style={{ width: '100%', maxWidth: 380 }}>
-        <CardHeader>
+        <CardHeader style={{ paddingTop: 24 }}>
           <CardTitle>Sign in</CardTitle>
           <CardDescription>Enter your email and password to continue.</CardDescription>
         </CardHeader>
