@@ -281,7 +281,7 @@ function validateStep(step: Step, data: WizardData): string | null {
 // ---------------------------------------------------------------------------
 
 export default function SetupPage() {
-  const { register, getAccessToken } = useAuth()
+  const { register } = useAuth()
   const navigate = useNavigate()
 
   const [step, setStep] = useState<Step>(1)
@@ -328,16 +328,15 @@ export default function SetupPage() {
     setLoading(true)
 
     try {
-      // 1. Create account — sets auth state (token in memory + refresh in localStorage)
-      await register(data.email, data.password, data.displayName)
-
-      const token = getAccessToken()
+      // 1. Create account — returns token directly to avoid racing the async
+      //    setState inside register() before the next render cycle.
+      const token = await register(data.email, data.password, data.displayName)
 
       // 2. Create team
       const team = await apiFetch<{ id: string }>('/teams', {
         method: 'POST',
         body: JSON.stringify({ name: data.teamName }),
-        accessToken: token ?? undefined,
+        accessToken: token,
       })
 
       // 3. Create timeline
@@ -348,7 +347,7 @@ export default function SetupPage() {
           startDate: data.startDate,
           endDate: data.endDate,
         }),
-        accessToken: token ?? undefined,
+        accessToken: token,
       })
 
       navigate('/', { replace: true })

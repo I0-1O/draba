@@ -37,7 +37,9 @@ interface AuthState {
 interface AuthContextValue extends AuthState {
   getAccessToken: () => string | null
   login: (email: string, password: string) => Promise<void>
-  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<void>
+  /** Registers a new account and returns the fresh access token directly,
+   *  avoiding a race against the async setState that follows. */
+  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
   logout: () => void
 }
 
@@ -102,13 +104,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       password: string,
       displayName: string,
       inviteToken?: string,
-    ) => {
+    ): Promise<string> => {
       const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
         '/auth/register',
         { email, password, displayName, inviteToken },
       )
       storeRefreshToken(refreshToken)
       setState({ user, accessToken, initializing: false })
+      // Return the token directly so callers don't race against the async
+      // setState — tokenRef won't update until the next render cycle.
+      return accessToken
     },
     [],
   )
