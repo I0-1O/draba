@@ -4,9 +4,10 @@
  */
 
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@/contexts/AuthContext'
-import { apiFetch, ApiError } from '@/lib/api'
+import { API_BASE, apiFetch, ApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -134,6 +135,16 @@ function Step1({ data, onChange }: StepProps) {
   return (
     <>
       <CardHeader>
+        <p
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: 'var(--primary)',
+            margin: '0 0 4px',
+          }}
+        >
+          Welcome to draba!
+        </p>
         <CardTitle>Create your account</CardTitle>
         <CardDescription>
           You're the first person here, so this account will have full admin
@@ -195,7 +206,7 @@ function Step2({ data, onChange }: StepProps) {
           <Label htmlFor="teamName">Team name</Label>
           <Input
             id="teamName"
-            placeholder="Acme Design"
+            placeholder="Product Marketing"
             autoComplete="off"
             value={data.teamName}
             onChange={e => onChange({ teamName: e.target.value })}
@@ -277,12 +288,41 @@ function validateStep(step: Step, data: WizardData): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Date helpers
+// ---------------------------------------------------------------------------
+
+function toDateString(d: Date): string {
+  return d.toISOString().split('T')[0]
+}
+
+function defaultDates(): { startDate: string; endDate: string } {
+  const start = new Date()
+  const end = new Date()
+  end.setMonth(end.getMonth() + 3)
+  return { startDate: toDateString(start), endDate: toDateString(end) }
+}
+
+// ---------------------------------------------------------------------------
 // Main wizard
 // ---------------------------------------------------------------------------
+
+interface SetupStatus {
+  needsSetup: boolean
+}
 
 export default function SetupPage() {
   const { register } = useAuth()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
+
+  // If setup has already been completed redirect to login rather than showing
+  // a broken wizard (handles back-navigation and direct URL access after setup).
+  const { data: setupStatus, isLoading: statusLoading } = useQuery<SetupStatus>({
+    queryKey: ['setup-status'],
+    queryFn: () =>
+      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
+    staleTime: Infinity,
+  })
 
   const [step, setStep] = useState<Step>(1)
   const [data, setData] = useState<WizardData>({
@@ -291,11 +331,18 @@ export default function SetupPage() {
     password: '',
     teamName: '',
     timelineName: '',
-    startDate: '',
-    endDate: '',
+    ...defaultDates(),
   })
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+
+  // Wait for the status check before rendering anything.
+  if (statusLoading) return null
+
+  // Setup already done — send to login.
+  if (setupStatus && !setupStatus.needsSetup) {
+    return <Navigate to="/login" replace />
+  }
 
   function handleChange(patch: Partial<WizardData>) {
     setData(d => ({ ...d, ...patch }))
@@ -350,6 +397,9 @@ export default function SetupPage() {
         accessToken: token,
       })
 
+      // Mark setup as done in the query cache so ProtectedRoute doesn't
+      // replay the stale needsSetup:true value after the user logs out.
+      queryClient.setQueryData<SetupStatus>(['setup-status'], { needsSetup: false })
       navigate('/', { replace: true })
     } catch (err) {
       if (err instanceof ApiError) {
