@@ -34,8 +34,13 @@ CMD ["air", "-c", ".air.toml"]
 
 # ── Production stage ──
 FROM alpine:3.21 AS prod
-RUN apk add --no-cache ca-certificates && mkdir -p /data
+RUN apk add --no-cache ca-certificates \
+    && addgroup -g 1000 draba \
+    && adduser -u 1000 -G draba -s /bin/sh -D draba \
+    && mkdir -p /data \
+    && chown draba:draba /data
 COPY --from=builder /draba /usr/local/bin/draba
 WORKDIR /data
+USER draba
 EXPOSE 8080
 CMD ["draba"]
