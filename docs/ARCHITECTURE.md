@@ -61,7 +61,9 @@ teams
   id, name, slug, created_at, updated_at
 
 team_members
-  team_id, user_id, role (admin|member), color, joined_at
+  id, team_id, user_id (nullable), display_name (nullable), role (admin|member), color, joined_at
+  -- user_id is null and display_name is populated for login-less "Participants"
+  -- role="admin" represents a Team Admin
 
 team_statuses
   id, team_id, name, color, position, created_at, updated_at
@@ -89,7 +91,10 @@ event_tags
   event_id, tag
 
 event_assignments
-  event_id, user_id
+  event_id, team_member_id (FK → team_members.id)
+
+event_links
+  id, event_id (FK), provider (e.g. asana), external_id, url
 
 timelines
   id, team_id, name, start_date, end_date,
@@ -97,7 +102,11 @@ timelines
   created_by, created_at, updated_at, archived_at (nullable)
 
 timeline_access
-  timeline_id, user_id     -- only used when visibility = restricted
+  timeline_id, team_member_id, role (admin|member)
+  -- role="admin" represents a Timeline Admin
+
+team_inbound_webhooks
+  id, team_id, provider, token, created_by, created_at
 
 calendar_connections
   id, user_id, provider (google|caldav),
@@ -109,6 +118,7 @@ calendar_connections
 
 - An event belongs to a team and can be assigned to multiple users (`event_assignments`)
 - An event can have a parent event (same team), enabling nesting without a separate Project entity
+- An event created via an external integration has `is_external=true` and an associated `event_links` record
 - A timeline is a named date range over a team's events — not a data container
 - Calendar connections are per-user; each user chooses which calendars to sync their events to
 
@@ -123,6 +133,13 @@ calendar_connections
 3. Event bus fans out to consumers:
    - **WebSocket broadcaster** — pushes delta to all connected clients subscribed to that team
    - **Calendar sync worker** — pushes change to Google Calendar and/or CalDAV for each assigned user who has a connection
+
+### External Connectors (Inbound One-Way Sync)
+
+1. External system (e.g. Asana) pushes a payload to `POST /webhooks/:provider/:token`
+2. Handler verifies the token against `team_inbound_webhooks` to identify the team
+3. Handler parses the payload, finds or creates an event (setting `is_external=true`), and updates `event_links`
+4. Publishes `events.updated` to the event bus → WebSocket broadcast (UI renders block as read-only)
 
 ### Inbound Google Calendar Sync
 

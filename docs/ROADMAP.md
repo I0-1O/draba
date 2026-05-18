@@ -22,7 +22,9 @@ This document organizes development into discrete phases with effort estimates a
 | 5 | [API — Real-Time (WebSocket)](#phase-5-api--real-time-websocket) | M — 2–3 days | ✅ |
 | 6 | [API — Timelines](#phase-6-api--timelines) | S — ½–1 day | ✅ |
 | 7 | [Web — Scaffold](#phase-7-web--scaffold) | M — 2–3 days | ✅ |
-| 8 | [Web — Timeline View (Core UI)](#phase-8-web--timeline-view-core-ui) | XL — 1–2 wks | ⬜ |
+| 8.1 | [Web — Timeline Shell & Event Rendering](#phase-81-web--timeline-shell--event-rendering) | L — 3–5 days | ⬜ |
+| 8.2 | [Web — Timeline Interactions](#phase-82-web--timeline-interactions) | L — 3–5 days | ⬜ |
+| 8.3 | [Web — Real-Time WebSocket Sync](#phase-83-web--real-time-websocket-sync) | M — 1–2 days | ⬜ |
 | 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ⬜ |
 | 10 | [Team Configuration](#phase-10-team-configuration) | M — 1–2 days | ⬜ |
 | 11 | [Web — Calendar, List & Kanban Views](#phase-11-web--calendar-list--kanban-views) | L — 1 wk | ⬜ |
@@ -167,24 +169,60 @@ Repo created. Requirements, architecture, conventions, and design docs written.
 
 ---
 
-### Phase 8 — Web — Timeline View (Core UI)
-**Status:** ⬜ | **Effort:** XL (1–2 wks)
+### Phase 8.1 — Web — Timeline Shell & Event Rendering
+**Status:** ⬜ | **Effort:** L (3–5 days)
 
-The heaviest phase. This is the product's core differentiator.
+Static, data-driven timeline. No interactions — just layout and rendering correctness.
 
 **Scope:**
-- Horizontal timeline component: person lanes on the Y-axis, time on the X-axis
-- Event block: renders title, color, icon, and date range within a lane
-- Click a block to open view/edit detail panel
-- Click-and-drag on an empty lane cell to create a new event
-- Real-time: apply incoming WebSocket deltas to timeline state without a full reload
+- `TimelineView` component: person lanes (Y-axis), time grid (X-axis, day granularity), horizontal scroll
+- Pixel ↔ date math (map date range to X offset/width)
+- Event blocks: positioned by date range, colored, labeled (title + status icon)
+- Wire to `GET /teams/:id/events?start=&end=` via TanStack Query
+- Wire to `GET /teams/:id/members` for lane rows
 
 **Exit criteria — safe to pause when:**
 - Team member lanes render with correct names and colors
 - Events appear as blocks spanning the correct date range in the correct lane
-- Dragging on a lane opens a creation form pre-filled with the selected range
-- Clicking an event block opens an edit panel; changes save and reflect immediately
+- Timeline scrolls horizontally across the visible date range
+
+---
+
+### Phase 8.2 — Web — Timeline Interactions
+**Status:** ⬜ | **Effort:** L (3–5 days)
+
+Builds on 8.1. Full CRUD interactions on the timeline.
+
+**Scope:**
+- Click event block → open `EventDetailPanel` (view mode)
+- Edit button → inline editing form (title, description, date range, status, assignees)
+- Save → `PATCH /events/:id`, optimistic update, close panel
+- Delete → `DELETE /events/:id`, confirm dialog, remove from timeline
+- Drag on empty lane cell → capture start/end date range → open `EventCreateForm` pre-filled with lane member + dates
+- Submit form → `POST /teams/:id/events`, add block to timeline
+
+**Exit criteria — safe to pause when:**
+- Clicking an event block opens an edit panel; changes save and reflect immediately in the UI
+- Dragging on an empty lane cell opens a creation form pre-filled with the selected range
+- Created and edited events appear correctly in the timeline without page reload
+
+---
+
+### Phase 8.3 — Web — Real-Time WebSocket Sync
+**Status:** ⬜ | **Effort:** M (1–2 days)
+
+Builds on 8.2. Wire live WebSocket deltas into the timeline's state.
+
+**Scope:**
+- Connect `useWebSocket` hook (Phase 7) to subscribe to `events.*` messages for the active team
+- On `events.created` delta: insert new event block into TanStack Query cache
+- On `events.updated` delta: update existing block in cache (position + content)
+- On `events.deleted` delta: remove block from cache
+- Handle optimistic update conflicts (local edit in-flight when WS delta arrives for same event)
+
+**Exit criteria — safe to pause when:**
 - A second browser tab's timeline updates within 500ms when an event is mutated in the first tab
+- No duplicate or ghost blocks after rapid create/edit/delete sequences
 
 ---
 
@@ -278,6 +316,22 @@ The heaviest phase. This is the product's core differentiator.
 - Importing that CSV back in shows a preview, validates rows, and creates events on confirm
 - Password reset sends an email and allows setting a new password
 - A public timeline share link is fully viewable without logging in
+
+---
+
+### Phase 14 — External Connectors (Webhooks)
+**Status:** ⬜ | **Effort:** M (3–5 days)
+
+**Scope:**
+- Schema changes: `event_links`, `team_inbound_webhooks`, `is_external` flag on `events`
+- `POST /teams/:id/webhooks` to generate inbound webhook URLs
+- Generic JSON parsing for inbound webhook payload mapping (e.g. Asana, Aha)
+- Disabling edit UI for `is_external` blocks in the timeline (read-only)
+
+**Exit criteria — safe to pause when:**
+- Generating a webhook creates a unique URL for the team
+- Sending a dummy JSON payload to that URL creates an `is_external` event block mapped to a user
+- Trying to drag or edit that block in the UI is prevented (read-only mode)
 
 ---
 

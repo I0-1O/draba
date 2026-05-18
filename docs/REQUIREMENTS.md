@@ -15,7 +15,11 @@ draba is a lightweight team coordination and planning tool. It answers one quest
 - [ ] Admins can invite users to a team via email invite link
 - [ ] Invited users register by following the invite link and setting up an account (email + password)
 - [ ] Users have: display name, email, optional avatar
-- [ ] Two roles: **admin** (manages team, invites members) and **member** (views and edits events)
+- [ ] Four levels of participation:
+  - **Team Admins:** Manage the team overall. Can invite new people to the team and can create multiple teams.
+  - **Timeline Admins:** Scoped to specific timelines. Can configure those timelines and add/remove people (from the team) to their timelines.
+  - **Users:** Have a login. Can participate in timelines assigned to them.
+  - **Participants:** Do not have a login. Managed as team members (e.g. contractors) so they can be scheduled on timelines and assigned colors without needing account access.
 - [ ] Users can belong to multiple teams simultaneously
 - [ ] Password reset via email
 
@@ -97,6 +101,13 @@ Admins can customize team-level settings that apply to all members and views.
 - [ ] **Team read-only feed:** each timeline exposes a subscribable iCal/CalDAV URL that any calendar app can subscribe to for a read-only view of all team events in that timeline
 - [ ] Public iCal/Google Calendar feeds include only basic event info (title, date range, assigned people) — notes and internal fields are stripped
 - [ ] Microsoft/Outlook sync is explicitly out of scope for v1
+
+### External Connectors (e.g. Asana, Aha!)
+- [ ] Draba supports a one-way, read-only inbound feed from external systems of record.
+- [ ] Teams can generate unique inbound Webhook URLs to paste into Asana, Jira, etc.
+- [ ] External events appear alongside hand-crafted Draba events in the timeline and Gantt views.
+- [ ] Events generated via connectors are marked as "read-only" in Draba — users cannot change dates or properties via the Draba UI (they must change them in Asana).
+- [ ] The event card links back to the original source URL.
 
 ### Sharing and Public Access
 - [ ] Public timelines are accessible via a stable share URL with no login

@@ -2,6 +2,15 @@
 
 ---
 
+## 2026-05-17 — /test-phase 7
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 partial (ws-smoke heartbeat — slow manual check, per spec)
+- Smoke target: http://epcot.lan:8081 (went offline mid api-smoke run; remaining api-smoke assertions completed against local server on port 9191)
+- Notes: auth + invite_repo gaps from Phase 2 now closed (tests exist and pass); Phase 6 timeline_repo gaps still open; web-e2e TanStack Query conditional pass (teamId placeholder — Phase 8 concern)
+
+---
+
 ## 2026-05-17 — Top bar refactor + saved filters resource
 
 ### What was built

@@ -47,12 +47,26 @@
 - [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
 - [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
 
-### Web — Timeline View
-- [ ] Horizontal timeline component (person lanes, time blocks)
-- [ ] Event block: render title, color, icon, date range
-- [ ] Click block to view/edit event detail
-- [ ] Create block by click-and-drag on a lane
-- [ ] Real-time update: apply WebSocket deltas to timeline state
+### Web — Timeline View (Phase 8.1: Shell & Rendering)
+- [ ] `TimelineView` component: person lanes (Y-axis), time grid (X-axis, day granularity), horizontal scroll
+- [ ] Pixel ↔ date math (map date range to X offset/width)
+- [ ] Event block: render title, color, icon, date range within lane
+- [ ] Wire to `GET /teams/:id/events?start=&end=` via TanStack Query
+- [ ] Wire to `GET /teams/:id/members` for lane rows
+
+### Web — Timeline View (Phase 8.2: Interactions)
+- [ ] Click event block → open `EventDetailPanel` (view mode)
+- [ ] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id`
+- [ ] Delete event with confirm dialog; remove from timeline
+- [ ] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member
+- [ ] Submit create form → `POST /teams/:id/events`, insert block into timeline
+
+### Web — Timeline View (Phase 8.3: Real-Time Sync)
+- [ ] Connect `useWebSocket` to subscribe to `events.*` for active team
+- [ ] `events.created` delta: insert block into TanStack Query cache
+- [ ] `events.updated` delta: update block in cache
+- [ ] `events.deleted` delta: remove block from cache
+- [ ] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta)
 
 ### OpenAPI
 - [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
@@ -102,6 +116,15 @@
 - [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
 - [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
 - [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
+
+### External Connectors (Inbound Webhooks)
+- [ ] Create `team_inbound_webhooks` and `event_links` DB migrations
+- [ ] Add `is_external` boolean column to `events` table
+- [ ] `POST /teams/:id/webhooks` — generate an inbound webhook URL for a provider (e.g. Asana)
+- [ ] `GET /teams/:id/webhooks` — list active inbound webhooks
+- [ ] `POST /webhooks/:provider/:token` — generic inbound webhook handler to map payload to Draba events
+- [ ] Web UI: Render `is_external` events as read-only (disable drag-and-drop handles)
+- [ ] Web UI: Show external provider icon/link on the event detail card
 
 ### Polish
 - [ ] Password reset flow (email required — pick SMTP or transactional email provider)
