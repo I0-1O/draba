@@ -31,12 +31,9 @@ const banner = "\n" +
 	"  see who's doing what, when.\n\n"
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "reset-password":
-			runResetPassword(os.Args[2:])
-			return
-		}
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
 	}
 
 	setupLogger()
@@ -80,6 +77,7 @@ func main() {
 	teams := db.NewTeamRepo(database)
 	eventRepo := db.NewEventRepo(database)
 	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
 	tokens := auth.NewTokenService(jwtSecret)
 
 	bus := events.NewBus()
@@ -94,7 +92,7 @@ func main() {
 		slog.Info("modules loaded", "count", len(mods))
 	}
 
-	srv := api.NewServer(users, invites, teams, eventRepo, timelineRepo, tokens, t, bus, hub)
+	srv := api.NewServer(users, invites, teams, eventRepo, timelineRepo, savedFilterRepo, tokens, t, bus, hub)
 
 	// Wire up the embedded React SPA when a production build is present.
 	// In dev the static/ directory only has .gitkeep so this is a no-op.

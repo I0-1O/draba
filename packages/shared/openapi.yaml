@@ -226,6 +226,28 @@ components:
           nullable: true
           format: date-time
 
+    SavedFilter:
+      type: object
+      required: [id, teamId, userId, name, definition, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        userId:
+          type: string
+        name:
+          type: string
+        definition:
+          type: string
+          description: Opaque JSON filter spec (validated client-side).
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
     AuthResponse:
       type: object
       required: [user, accessToken, refreshToken]
@@ -336,6 +358,14 @@ components:
       in: path
       required: true
       description: Timeline ID.
+      schema:
+        type: string
+
+    savedFilterId:
+      name: id
+      in: path
+      required: true
+      description: Saved filter ID.
       schema:
         type: string
 
@@ -885,6 +915,122 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Timeline"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Saved Filters ────────────────────────────────────────────
+
+  /teams/{id}/saved_filters:
+    get:
+      operationId: listSavedFilters
+      summary: List the authenticated user's saved filters for a team
+      tags: [savedFilters]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Array of saved filters owned by the caller.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SavedFilter"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createSavedFilter
+      summary: Create a saved filter for the authenticated user in a team
+      tags: [savedFilters]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, definition]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                definition:
+                  type: string
+                  description: Opaque JSON filter spec (validated client-side).
+      responses:
+        "201":
+          description: Saved filter created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedFilter"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /saved_filters/{id}:
+    patch:
+      operationId: updateSavedFilter
+      summary: Partially update a saved filter (owner only)
+      tags: [savedFilters]
+      parameters:
+        - $ref: "#/components/parameters/savedFilterId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                definition:
+                  type: string
+      responses:
+        "200":
+          description: Updated saved filter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedFilter"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteSavedFilter
+      summary: Delete a saved filter (owner only)
+      tags: [savedFilters]
+      parameters:
+        - $ref: "#/components/parameters/savedFilterId"
+      responses:
+        "204":
+          description: Saved filter deleted (no body).
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

@@ -211,6 +211,19 @@ type RefreshResponse struct {
 	AccessToken string `json:"accessToken"`
 }
 
+// SavedFilter defines model for SavedFilter.
+type SavedFilter struct {
+	CreatedAt time.Time `json:"createdAt"`
+
+	// Definition Opaque JSON filter spec (validated client-side).
+	Definition string    `json:"definition"`
+	Id         string    `json:"id"`
+	Name       string    `json:"name"`
+	TeamId     string    `json:"teamId"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	UserId     string    `json:"userId"`
+}
+
 // Team defines model for Team.
 type Team struct {
 	CreatedAt time.Time `json:"createdAt"`
@@ -279,6 +292,9 @@ type User struct {
 // EventId defines model for eventId.
 type EventId = string
 
+// SavedFilterId defines model for savedFilterId.
+type SavedFilterId = string
+
 // ShareToken defines model for shareToken.
 type ShareToken = string
 
@@ -345,6 +361,12 @@ type UpdateEventJSONBody struct {
 	Url             *string    `json:"url,omitempty"`
 }
 
+// UpdateSavedFilterJSONBody defines parameters for UpdateSavedFilter.
+type UpdateSavedFilterJSONBody struct {
+	Definition *string `json:"definition,omitempty"`
+	Name       *string `json:"name,omitempty"`
+}
+
 // CreateTeamJSONBody defines parameters for CreateTeam.
 type CreateTeamJSONBody struct {
 	Name string `json:"name"`
@@ -386,6 +408,13 @@ type CreateInviteJSONBody struct {
 // CreateInviteJSONBodyRole defines parameters for CreateInvite.
 type CreateInviteJSONBodyRole string
 
+// CreateSavedFilterJSONBody defines parameters for CreateSavedFilter.
+type CreateSavedFilterJSONBody struct {
+	// Definition Opaque JSON filter spec (validated client-side).
+	Definition string `json:"definition"`
+	Name       string `json:"name"`
+}
+
 // CreateTimelineJSONBody defines parameters for CreateTimeline.
 type CreateTimelineJSONBody struct {
 	EndDate    openapi_types.Date                `json:"endDate"`
@@ -409,6 +438,9 @@ type RegisterJSONRequestBody RegisterJSONBody
 // UpdateEventJSONRequestBody defines body for UpdateEvent for application/json ContentType.
 type UpdateEventJSONRequestBody UpdateEventJSONBody
 
+// UpdateSavedFilterJSONRequestBody defines body for UpdateSavedFilter for application/json ContentType.
+type UpdateSavedFilterJSONRequestBody UpdateSavedFilterJSONBody
+
 // CreateTeamJSONRequestBody defines body for CreateTeam for application/json ContentType.
 type CreateTeamJSONRequestBody CreateTeamJSONBody
 
@@ -417,6 +449,9 @@ type CreateEventJSONRequestBody CreateEventJSONBody
 
 // CreateInviteJSONRequestBody defines body for CreateInvite for application/json ContentType.
 type CreateInviteJSONRequestBody CreateInviteJSONBody
+
+// CreateSavedFilterJSONRequestBody defines body for CreateSavedFilter for application/json ContentType.
+type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 
 // CreateTimelineJSONRequestBody defines body for CreateTimeline for application/json ContentType.
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody

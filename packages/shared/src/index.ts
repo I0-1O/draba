@@ -252,6 +252,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/teams/{id}/saved_filters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the authenticated user's saved filters for a team */
+        get: operations["listSavedFilters"];
+        put?: never;
+        /** Create a saved filter for the authenticated user in a team */
+        post: operations["createSavedFilter"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/saved_filters/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a saved filter (owner only) */
+        delete: operations["deleteSavedFilter"];
+        options?: never;
+        head?: never;
+        /** Partially update a saved filter (owner only) */
+        patch: operations["updateSavedFilter"];
+        trace?: never;
+    };
     "/timelines/share/{token}": {
         parameters: {
             query?: never;
@@ -374,6 +410,18 @@ export interface components {
             /** Format: date-time */
             archivedAt?: string | null;
         };
+        SavedFilter: {
+            id: string;
+            teamId: string;
+            userId: string;
+            name: string;
+            /** @description Opaque JSON filter spec (validated client-side). */
+            definition: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
         AuthResponse: {
             user: components["schemas"]["User"];
             accessToken: string;
@@ -456,6 +504,8 @@ export interface components {
         eventId: string;
         /** @description Timeline ID. */
         timelineId: string;
+        /** @description Saved filter ID. */
+        savedFilterId: string;
         /** @description Public share token for a timeline. */
         shareToken: string;
     };
@@ -951,6 +1001,127 @@ export interface operations {
                     "application/json": components["schemas"]["Timeline"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listSavedFilters: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Array of saved filters owned by the caller. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SavedFilter"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createSavedFilter: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name: string;
+                    /** @description Opaque JSON filter spec (validated client-side). */
+                    definition: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Saved filter created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SavedFilter"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteSavedFilter: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Saved filter ID. */
+                id: components["parameters"]["savedFilterId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Saved filter deleted (no body). */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateSavedFilter: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Saved filter ID. */
+                id: components["parameters"]["savedFilterId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name?: string;
+                    definition?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated saved filter. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SavedFilter"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];

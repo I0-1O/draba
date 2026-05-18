@@ -41,7 +41,8 @@ func newTestServerWithTier(t *testing.T, tr tier.Tier) http.Handler {
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	return api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, tokens, tr, bus, hub).Routes()
+	savedFiltersRepo := db.NewSavedFilterRepo(database)
+	return api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, savedFiltersRepo, tokens, tr, bus, hub).Routes()
 }
 
 func postJSON(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {
@@ -204,7 +205,7 @@ func TestRegister_TierUserLimitReached(t *testing.T) {
 	toks2 := auth.NewTokenService("test-secret")
 	bus2 := events.NewBus()
 	hub2 := ws.NewHub(bus2, toks2, func(_, _ string) error { return nil })
-	srv := api.NewServer(users, db.NewInviteRepo(database), db.NewTeamRepo(database), db.NewEventRepo(database), db.NewTimelineRepo(database), toks2, tier.Team, bus2, hub2).Routes()
+	srv := api.NewServer(users, db.NewInviteRepo(database), db.NewTeamRepo(database), db.NewEventRepo(database), db.NewTimelineRepo(database), db.NewSavedFilterRepo(database), toks2, tier.Team, bus2, hub2).Routes()
 
 	w := postJSON(t, srv, "/auth/register", map[string]string{
 		"email": "newcomer@example.com", "password": "supersecret", "displayName": "Newcomer",

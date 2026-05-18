@@ -93,6 +93,19 @@ type Timeline struct {
 	ArchivedAt *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
 }
 
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID         string    `db:"id"         json:"id"`
+	TeamID     string    `db:"team_id"    json:"teamId"`
+	UserID     string    `db:"user_id"    json:"userId"`
+	Name       string    `db:"name"       json:"name"`
+	Definition string    `db:"definition" json:"definition"`
+	CreatedAt  time.Time `db:"created_at" json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at" json:"updatedAt"`
+}
+
 // Invite is a single-use token that grants an email address the right to
 // join a Team. AcceptedAt is non-nil once consumed; expired or accepted
 // invites are rejected by the registration handler.

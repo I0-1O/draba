@@ -64,7 +64,7 @@ func timelineTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID strin
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv = api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, tokens, tier.Unlimited, bus, hub).Routes()
+	srv = api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, db.NewSavedFilterRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@timeline.com", "password1", "Alice")
 
@@ -307,7 +307,7 @@ func TestCreateTimeline_RestrictedGrantAccessError(t *testing.T) {
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv := api.NewServer(users, invites, teams, eventsRepo, fake, tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, eventsRepo, fake, db.NewSavedFilterRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ := seedUser(t, srv, "alice@granterr.com", "password1", "Alice")
 
@@ -342,7 +342,7 @@ func TestCreateTimeline_PublishesBusMessage(t *testing.T) {
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv := api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, db.NewSavedFilterRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ := seedUser(t, srv, "alice@tlbus.com", "password1", "Alice")
 

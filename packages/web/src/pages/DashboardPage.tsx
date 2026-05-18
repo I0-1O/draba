@@ -8,7 +8,9 @@
 
 import { useState, useRef, useEffect } from 'react'
 import Sidebar from '@/components/layout/Sidebar'
-import TopBar, { type ViewMode, type ZoomLevel } from '@/components/layout/TopBar'
+import TopBar, { type ViewMode } from '@/components/layout/TopBar'
+import RightSidebar from '@/components/layout/RightSidebar'
+import { FilterProvider } from '@/contexts/FilterContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
@@ -33,14 +35,14 @@ const DROPDOWN_BTN: React.CSSProperties = {
   textAlign: 'left',
 }
 
-export default function DashboardPage() {
+function DashboardShell() {
   const { logout, accessToken, user } = useAuth()
   const { isDark, toggle: toggleDark } = useDarkMode()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [view, setView] = useState<ViewMode>('calendar')
-  const [zoom, setZoom] = useState<ZoomLevel>('week')
   const [profileOpen, setProfileOpen] = useState(false)
   const [activeTimelineColor, setActiveTimelineColor] = useState('#1A97A2')
+  const [filterEditorOpen, setFilterEditorOpen] = useState(false)
   const profileRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -88,15 +90,11 @@ export default function DashboardPage() {
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
         <TopBar
-          dateRangeLabel="May 2026"
           view={view}
-          zoom={zoom}
+          teamId={teamId}
           onViewChange={setView}
-          onZoomChange={setZoom}
-          onPrev={() => {}}
-          onNext={() => {}}
-          onToday={() => {}}
           onShare={() => {}}
+          onOpenFilterEditor={() => setFilterEditorOpen(true)}
           rightSlot={
             <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
               <button
@@ -211,6 +209,24 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+
+      <RightSidebar
+        open={filterEditorOpen}
+        title="Filter editor"
+        onClose={() => setFilterEditorOpen(false)}
+      >
+        <p style={{ color: 'var(--muted-foreground)', fontSize: 13, lineHeight: 1.5 }}>
+          Filter editor coming soon.
+        </p>
+      </RightSidebar>
     </div>
+  )
+}
+
+export default function DashboardPage() {
+  return (
+    <FilterProvider>
+      <DashboardShell />
+    </FilterProvider>
   )
 }
