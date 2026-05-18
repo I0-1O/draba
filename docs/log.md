@@ -2,6 +2,40 @@
 
 ---
 
+## 2026-05-18 — Phase 8.0: RBAC Refactor + First-Run Setup Wizard (complete)
+
+### What was built
+
+**RBAC & Participants refactor — API**
+- Migration 003: `is_superadmin` on `users`; `team_members` rebuilt with `id` PK + nullable `user_id` + `display_name`; `event_assignments` and `timeline_access` rebuilt to use `team_member_id`; `visibility` dropped from `timelines`; `timeline_access` gains `role (admin|member)`
+- First registered user is automatically granted `is_superadmin = true`
+- `GET /setup/status` — public endpoint returning `{ needsSetup: bool }` based on user count
+- `timeline_handler`: visibility removed; every timeline creator is auto-granted admin access; team admins bypass access check, members require explicit `timeline_access` entry
+- `team_handler` / `auth_handler`: `TeamMember.ID` generated on create; `UserID` is now a nullable pointer
+
+**Frontend — first-run setup wizard**
+- `SetupPage.tsx`: 3-step wizard (Account → Team → Timeline) with numbered step indicator, back/next navigation, inline validation, and all API calls deferred to Finish
+- `ProtectedRoute`: redirects unauthenticated users to `/setup` (instead of `/login`) when `needsSetup` is true
+- `/setup` self-guards: redirects to `/login` if setup is already complete; TanStack Query cache updated on Finish so subsequent logout goes to login
+- `AuthContext.register()` now returns the access token directly to avoid a React `setState` race condition
+
+**Infrastructure**
+- Production Dockerfile: runs as non-root `draba` user (uid/gid 1000) so DB files on the host volume are not owned by root
+
+**Tests added**
+- `TestRegister_FirstUserIsSuperadmin` — first user gets `is_superadmin: true`
+- `TestRegister_SubsequentUserIsNotSuperadmin` — invited users get `false`
+- `TestGetTimeline_MemberWithoutAccessForbidden` — team member (role=member) blocked without timeline grant
+- `TestGetTimeline_MemberGrantedAccessAllowed` — team member with explicit grant can access
+
+### Result
+- `go test ./...` — all pass
+- `golangci-lint run` — clean
+- `pnpm --filter web lint` — clean
+- Setup wizard verified end-to-end on epcot.lan container
+
+---
+
 ## 2026-05-18 — Phase 8: RBAC & Participants (API only)
 
 ### What was built

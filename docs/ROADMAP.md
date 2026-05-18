@@ -22,6 +22,7 @@ This document organizes development into discrete phases with effort estimates a
 | 5 | [API — Real-Time (WebSocket)](#phase-5-api--real-time-websocket) | M — 2–3 days | ✅ |
 | 6 | [API — Timelines](#phase-6-api--timelines) | S — ½–1 day | ✅ |
 | 7 | [Web — Scaffold](#phase-7-web--scaffold) | M — 2–3 days | ✅ |
+| 8.0 | [RBAC Refactor + First-Run Setup](#phase-80-rbac-refactor--first-run-setup) | M — 1–2 days | ✅ |
 | 8.1 | [Web — Timeline Shell & Event Rendering](#phase-81-web--timeline-shell--event-rendering) | L — 3–5 days | ⬜ |
 | 8.2 | [Web — Timeline Interactions](#phase-82-web--timeline-interactions) | L — 3–5 days | ⬜ |
 | 8.3 | [Web — Real-Time WebSocket Sync](#phase-83-web--real-time-websocket-sync) | M — 1–2 days | ⬜ |
@@ -166,6 +167,25 @@ Repo created. Requirements, architecture, conventions, and design docs written.
 - A TanStack Query hook successfully fetches and displays team events
 - WebSocket connects and emits events visible in browser DevTools Network tab
 - `docker build --target prod` produces a single image; the login page loads at port 8080 with no second container
+
+---
+
+### Phase 8.0 — RBAC Refactor + First-Run Setup
+**Status:** ✅ Done — 2026-05-18 | **Effort:** M (1–2 days)
+
+Prerequisite work before the web timeline phases: tightened the auth model and added a first-run experience.
+
+**Scope:**
+- Migration 003: `team_members` PK, nullable `user_id` (login-less Participants), `team_member_id` FKs on `event_assignments` and `timeline_access`, `role` on `timeline_access`, `visibility` dropped from `timelines`
+- First registered user auto-granted `is_superadmin`; team admins bypass timeline access checks; members require explicit grant
+- `GET /setup/status` public endpoint; 3-step first-run setup wizard (Account → Team → Timeline)
+- Production container runs as non-root user (uid 1000)
+
+**Exit criteria:**
+- Migration runs cleanly on a fresh DB; existing data preserved on upgrade
+- First user through the wizard lands in the app as superadmin with a team and timeline
+- Navigating to `/setup` after setup is complete redirects to `/login`
+- `go test ./...` all pass; `golangci-lint run` clean
 
 ---
 

@@ -47,6 +47,17 @@
 - [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
 - [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
 
+### RBAC Refactor + First-Run Setup (Phase 8.0)
+- [x] Migration 003: `team_members` PK, nullable `user_id`, `display_name` — 2026-05-18
+- [x] Migration 003: `event_assignments` + `timeline_access` swap `user_id` FK for `team_member_id` — 2026-05-18
+- [x] Migration 003: `timeline_access` gains `role (admin|member)`; `visibility` dropped from `timelines` — 2026-05-18
+- [x] `User.IsSuperadmin`: first registered user auto-granted superadmin — 2026-05-18
+- [x] `GET /setup/status` — public endpoint (`{ needsSetup: bool }`) — 2026-05-18
+- [x] Timeline access: team admins bypass check; members require explicit `timeline_access` entry — 2026-05-18
+- [x] `SetupPage`: 3-step first-run wizard (account → team → timeline) — 2026-05-18
+- [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
+- [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
+
 ### Web — Timeline View (Phase 8.1: Shell & Rendering)
 - [ ] `TimelineView` component: person lanes (Y-axis), time grid (X-axis, day granularity), horizontal scroll
 - [ ] Pixel ↔ date math (map date range to X offset/width)
