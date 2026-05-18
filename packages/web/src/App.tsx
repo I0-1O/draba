@@ -5,6 +5,7 @@ import ProtectedRoute from '@/components/ProtectedRoute'
 import LoginPage from '@/pages/LoginPage'
 import RegisterPage from '@/pages/RegisterPage'
 import DashboardPage from '@/pages/DashboardPage'
+import SetupPage from '@/pages/SetupPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -21,6 +22,9 @@ export default function App() {
       <BrowserRouter>
         <AuthProvider>
           <Routes>
+            {/* First-run setup — public, shown before any users exist */}
+            <Route path="/setup" element={<SetupPage />} />
+
             {/* Public routes */}
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />

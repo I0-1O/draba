@@ -12,12 +12,14 @@ import (
 )
 
 // handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
-// user must be a member of the team.
+// user must be a member of the team. The creator is automatically granted
+// timeline-admin access.
 func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
 
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+	member, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
 			return
@@ -45,15 +47,6 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	visibility := "public"
-	if req.Visibility != nil {
-		visibility = string(*req.Visibility)
-	}
-	if visibility != "public" && visibility != "restricted" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "visibility must be public or restricted")
-		return
-	}
-
 	now := time.Now()
 	timeline := &models.Timeline{
 		ID:         newID(),
@@ -61,7 +54,6 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 		Name:       req.Name,
 		StartDate:  startDate.Format("2006-01-02"),
 		EndDate:    endDate.Format("2006-01-02"),
-		Visibility: visibility,
 		ShareToken: newID(),
 		IcalToken:  newID(),
 		CreatedBy:  claims.UserID,
@@ -73,13 +65,10 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Automatically grant the creator access to restricted timelines so they
-	// are not immediately locked out of their own timeline.
-	if timeline.Visibility == "restricted" {
-		if err := s.timelines.GrantAccess(timeline.ID, claims.UserID); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-			return
-		}
+	// Always grant the creator timeline-admin access so they can manage it.
+	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
 	}
 
 	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
@@ -87,8 +76,8 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetTimeline handles GET /timelines/{id}. The authenticated user must
-// be a member of the timeline's team; restricted timelines additionally
-// require an entry in timeline_access.
+// be a member of the timeline's team. Team admins may access any timeline;
+// other members require an entry in timeline_access.
 func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 	timelineID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
@@ -103,8 +92,8 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// All authenticated requests require team membership.
-	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
 			return
@@ -113,9 +102,9 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Restricted timelines require an explicit access entry.
-	if timeline.Visibility == "restricted" {
-		ok, err := s.timelines.HasAccess(timelineID, claims.UserID)
+	// Team admins can access all timelines; members need an explicit grant.
+	if member.Role != "admin" {
+		ok, err := s.timelines.HasAccess(timelineID, member.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
 			return

@@ -51,11 +51,11 @@ func (r *TeamRepo) GetByID(id string) (*models.Team, error) {
 	return &t, nil
 }
 
-// AddMember inserts a team_members row.
+// AddMember inserts a team_members row. m.ID must be pre-populated by the caller.
 func (r *TeamRepo) AddMember(m *models.TeamMember) error {
 	_, err := r.db.NamedExec(`
-		INSERT INTO team_members (team_id, user_id, role, color, joined_at)
-		VALUES (:team_id, :user_id, :role, :color, :joined_at)
+		INSERT INTO team_members (id, team_id, user_id, display_name, role, color, joined_at)
+		VALUES (:id, :team_id, :user_id, :display_name, :role, :color, :joined_at)
 	`, m)
 	if err != nil {
 		return fmt.Errorf("adding team member: %w", err)
@@ -75,16 +75,19 @@ func (r *TeamRepo) GetMember(teamID, userID string) (*models.TeamMember, error) 
 	return &m, nil
 }
 
-// ListMembers returns all members of a team joined with their user details,
-// ordered by the time they joined.
+// ListMembers returns all members of a team, including login-less Participants.
+// A LEFT JOIN handles Participants who have no users row; COALESCE resolves
+// display_name from users first, then team_members.display_name as fallback.
 func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, error) {
 	var members []*models.TeamMemberWithUser
 	err := r.db.Select(&members, `
 		SELECT
-			tm.team_id, tm.user_id, tm.role, tm.color, tm.joined_at,
-			u.email, u.display_name, u.avatar_url
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.joined_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(u.display_name, tm.display_name, '') AS display_name,
+			u.avatar_url
 		FROM team_members tm
-		JOIN users u ON u.id = tm.user_id
+		LEFT JOIN users u ON u.id = tm.user_id
 		WHERE tm.team_id = ?
 		ORDER BY tm.joined_at ASC
 	`, teamID)

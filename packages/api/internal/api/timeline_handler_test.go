@@ -37,14 +37,14 @@ func (f *fakeTimelineStore) GetByID(id string) (*models.Timeline, error) {
 func (f *fakeTimelineStore) GetByShareToken(token string) (*models.Timeline, error) {
 	return f.real.GetByShareToken(token)
 }
-func (f *fakeTimelineStore) HasAccess(timelineID, userID string) (bool, error) {
-	return f.real.HasAccess(timelineID, userID)
+func (f *fakeTimelineStore) HasAccess(timelineID, teamMemberID string) (bool, error) {
+	return f.real.HasAccess(timelineID, teamMemberID)
 }
-func (f *fakeTimelineStore) GrantAccess(timelineID, userID string) error {
+func (f *fakeTimelineStore) GrantAccess(timelineID, teamMemberID, role string) error {
 	if f.grantAccessErr != nil {
 		return f.grantAccessErr
 	}
-	return f.real.GrantAccess(timelineID, userID)
+	return f.real.GrantAccess(timelineID, teamMemberID, role)
 }
 
 // timelineTestSetup creates an in-memory server, registers Alice, creates a
@@ -81,10 +81,9 @@ func TestCreateTimeline_Success(t *testing.T) {
 	srv, token, teamID := timelineTestSetup(t)
 
 	body := map[string]any{
-		"name":       "Q2 Roadmap",
-		"startDate":  "2026-04-01",
-		"endDate":    "2026-06-30",
-		"visibility": "public",
+		"name":      "Q2 Roadmap",
+		"startDate": "2026-04-01",
+		"endDate":   "2026-06-30",
 	}
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), body, token))
@@ -94,27 +93,30 @@ func TestCreateTimeline_Success(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&tl))
 	assert.Equal(t, "Q2 Roadmap", tl["name"])
 	assert.Equal(t, teamID, tl["teamId"])
-	assert.Equal(t, "public", tl["visibility"])
 	assert.NotEmpty(t, tl["id"])
 	assert.NotEmpty(t, tl["shareToken"])
 	assert.NotEmpty(t, tl["icalToken"])
+	assert.Nil(t, tl["visibility"], "visibility was removed in the RBAC refactor")
 }
 
-func TestCreateTimeline_DefaultVisibilityPublic(t *testing.T) {
+func TestCreateTimeline_CreatorCanAccess(t *testing.T) {
 	srv, token, teamID := timelineTestSetup(t)
 
-	body := map[string]any{
-		"name":      "Implicit Public",
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name":      "Creator Access",
 		"startDate": "2026-01-01",
 		"endDate":   "2026-12-31",
-	}
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), body, token))
-
-	assert.Equal(t, http.StatusCreated, w.Code)
+	}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
 	var tl map[string]any
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&tl))
-	assert.Equal(t, "public", tl["visibility"])
+	timelineID := tl["id"].(string)
+
+	// Creator must be able to fetch their own timeline immediately after creation.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodGet, fmt.Sprintf("/timelines/%s", timelineID), nil, token))
+	assert.Equal(t, http.StatusOK, w2.Code)
 }
 
 func TestCreateTimeline_MissingName(t *testing.T) {
@@ -209,23 +211,21 @@ func TestGetTimeline_NonMemberForbidden(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w2.Code)
 }
 
-func TestGetTimeline_RestrictedAccessForbidden(t *testing.T) {
+func TestGetTimeline_NonTeamMemberAccessForbidden(t *testing.T) {
 	srv, aliceToken, teamID := timelineTestSetup(t)
 
-	// Alice creates a restricted timeline.
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
-		"name":       "Secret Plan",
-		"startDate":  "2026-01-01",
-		"endDate":    "2026-12-31",
-		"visibility": "restricted",
+		"name":      "Secret Plan",
+		"startDate": "2026-01-01",
+		"endDate":   "2026-12-31",
 	}, aliceToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 	var created map[string]any
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
 	timelineID := created["id"].(string)
 
-	// A user not on the access list (here: a non-member with a valid JWT) is rejected.
+	// User not in the team at all is rejected regardless of timeline_access.
 	outsiderTokens := auth.NewTokenService("timeline-test-secret")
 	outsiderToken, _ := outsiderTokens.IssueAccessToken("random-user-id", "random@example.com")
 
@@ -234,23 +234,21 @@ func TestGetTimeline_RestrictedAccessForbidden(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w2.Code)
 }
 
-func TestGetTimeline_RestrictedCreatorCanAccess(t *testing.T) {
+func TestGetTimeline_TeamAdminCanAlwaysAccess(t *testing.T) {
 	srv, aliceToken, teamID := timelineTestSetup(t)
 
-	// Alice creates a restricted timeline; she should be auto-granted access.
+	// Alice (team admin) creates a timeline; she should be able to access it.
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
-		"name":       "Restricted But Mine",
-		"startDate":  "2026-01-01",
-		"endDate":    "2026-12-31",
-		"visibility": "restricted",
+		"name":      "Admin Timeline",
+		"startDate": "2026-01-01",
+		"endDate":   "2026-12-31",
 	}, aliceToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 	var created map[string]any
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
 	timelineID := created["id"].(string)
 
-	// Alice can fetch her own restricted timeline.
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, authReq(http.MethodGet, fmt.Sprintf("/timelines/%s", timelineID), nil, aliceToken))
 	assert.Equal(t, http.StatusOK, w2.Code)
@@ -320,10 +318,9 @@ func TestCreateTimeline_RestrictedGrantAccessError(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
-		"name":       "Restricted Fail",
-		"startDate":  "2026-01-01",
-		"endDate":    "2026-12-31",
-		"visibility": "restricted",
+		"name":      "Grant Fail",
+		"startDate": "2026-01-01",
+		"endDate":   "2026-12-31",
 	}, aliceToken))
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }

@@ -24,11 +24,11 @@ func (r *TimelineRepo) Create(t *models.Timeline) error {
 	_, err := r.db.NamedExec(`
 		INSERT INTO timelines (
 			id, team_id, name, start_date, end_date,
-			visibility, share_token, ical_token,
+			share_token, ical_token,
 			created_by, created_at, updated_at
 		) VALUES (
 			:id, :team_id, :name, :start_date, :end_date,
-			:visibility, :share_token, :ical_token,
+			:share_token, :ical_token,
 			:created_by, :created_at, :updated_at
 		)
 	`, t)
@@ -74,13 +74,13 @@ func (r *TimelineRepo) ListByTeam(teamID string) ([]*models.Timeline, error) {
 	return ts, nil
 }
 
-// HasAccess reports whether userID is listed in timeline_access for the given
-// timeline. Returns false (not an error) when the row is absent.
-func (r *TimelineRepo) HasAccess(timelineID, userID string) (bool, error) {
+// HasAccess reports whether teamMemberID has an entry in timeline_access for
+// the given timeline. Returns false (not an error) when the row is absent.
+func (r *TimelineRepo) HasAccess(timelineID, teamMemberID string) (bool, error) {
 	var count int
 	err := r.db.Get(&count,
-		`SELECT COUNT(*) FROM timeline_access WHERE timeline_id = ? AND user_id = ?`,
-		timelineID, userID,
+		`SELECT COUNT(*) FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("checking timeline access: %w", err)
@@ -88,12 +88,14 @@ func (r *TimelineRepo) HasAccess(timelineID, userID string) (bool, error) {
 	return count > 0, nil
 }
 
-// GrantAccess inserts a timeline_access row. It is a no-op if the row
-// already exists.
-func (r *TimelineRepo) GrantAccess(timelineID, userID string) error {
+// GrantAccess inserts a timeline_access row with the given role. On conflict
+// (row already exists) the role is updated to the supplied value.
+func (r *TimelineRepo) GrantAccess(timelineID, teamMemberID, role string) error {
 	_, err := r.db.Exec(
-		`INSERT OR IGNORE INTO timeline_access (timeline_id, user_id) VALUES (?, ?)`,
-		timelineID, userID,
+		`INSERT INTO timeline_access (timeline_id, team_member_id, role)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(timeline_id, team_member_id) DO UPDATE SET role = excluded.role`,
+		timelineID, teamMemberID, role,
 	)
 	if err != nil {
 		return fmt.Errorf("granting timeline access: %w", err)
@@ -103,10 +105,10 @@ func (r *TimelineRepo) GrantAccess(timelineID, userID string) error {
 
 // RevokeAccess removes a timeline_access row. It is a no-op when the row
 // does not exist.
-func (r *TimelineRepo) RevokeAccess(timelineID, userID string) error {
+func (r *TimelineRepo) RevokeAccess(timelineID, teamMemberID string) error {
 	_, err := r.db.Exec(
-		`DELETE FROM timeline_access WHERE timeline_id = ? AND user_id = ?`,
-		timelineID, userID,
+		`DELETE FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
 	)
 	if err != nil {
 		return fmt.Errorf("revoking timeline access: %w", err)

@@ -45,7 +45,6 @@ func makeTimeline(id, teamID, createdBy string) *models.Timeline {
 		Name:       "Test Timeline",
 		StartDate:  "2026-01-01",
 		EndDate:    "2026-12-31",
-		Visibility: "restricted",
 		ShareToken: "share-" + id,
 		IcalToken:  "ical-" + id,
 		CreatedBy:  createdBy,
@@ -54,11 +53,21 @@ func makeTimeline(id, teamID, createdBy string) *models.Timeline {
 	}
 }
 
+// seedTeamMember inserts a team_members row and returns its generated id.
+func seedTeamMember(t *testing.T, database *sqlx.DB, memberID, teamID, userID string) {
+	t.Helper()
+	_, err := database.Exec(
+		`INSERT INTO team_members (id, team_id, user_id, role, joined_at) VALUES (?, ?, ?, 'member', datetime('now'))`,
+		memberID, teamID, userID,
+	)
+	require.NoError(t, err)
+}
+
 func TestTimelineRepo_HasAccess_NotGranted(t *testing.T) {
 	database := openTestDB(t)
 	repo := db.NewTimelineRepo(database)
 
-	ok, err := repo.HasAccess("any-timeline", "any-user")
+	ok, err := repo.HasAccess("any-timeline", "any-member-id")
 	require.NoError(t, err)
 	assert.False(t, ok)
 }
@@ -71,13 +80,16 @@ func TestTimelineRepo_HasAccess_AfterGrant(t *testing.T) {
 	tl := makeTimeline("tl-a", teamID, userID)
 	require.NoError(t, repo.Create(tl))
 
-	ok, err := repo.HasAccess(tl.ID, userID)
+	memberID := "tm-a"
+	seedTeamMember(t, database, memberID, teamID, userID)
+
+	ok, err := repo.HasAccess(tl.ID, memberID)
 	require.NoError(t, err)
 	assert.False(t, ok, "no access before GrantAccess")
 
-	require.NoError(t, repo.GrantAccess(tl.ID, userID))
+	require.NoError(t, repo.GrantAccess(tl.ID, memberID, "member"))
 
-	ok, err = repo.HasAccess(tl.ID, userID)
+	ok, err = repo.HasAccess(tl.ID, memberID)
 	require.NoError(t, err)
 	assert.True(t, ok, "access should be granted after GrantAccess")
 }
@@ -90,8 +102,12 @@ func TestTimelineRepo_GrantAccess_Idempotent(t *testing.T) {
 	tl := makeTimeline("tl-b", teamID, userID)
 	require.NoError(t, repo.Create(tl))
 
-	require.NoError(t, repo.GrantAccess(tl.ID, userID))
-	require.NoError(t, repo.GrantAccess(tl.ID, userID), "second grant must be a no-op")
+	memberID := "tm-b"
+	seedTeamMember(t, database, memberID, teamID, userID)
+
+	require.NoError(t, repo.GrantAccess(tl.ID, memberID, "member"))
+	// Second grant with same role must be a no-op (upsert on conflict).
+	require.NoError(t, repo.GrantAccess(tl.ID, memberID, "member"), "second grant must be a no-op")
 }
 
 func TestTimelineRepo_HasAccess_DifferentUser(t *testing.T) {
@@ -102,11 +118,14 @@ func TestTimelineRepo_HasAccess_DifferentUser(t *testing.T) {
 	tl := makeTimeline("tl-c", teamID, userID)
 	require.NoError(t, repo.Create(tl))
 
-	require.NoError(t, repo.GrantAccess(tl.ID, userID))
+	memberID := "tm-c"
+	seedTeamMember(t, database, memberID, teamID, userID)
 
-	ok, err := repo.HasAccess(tl.ID, "other-user")
+	require.NoError(t, repo.GrantAccess(tl.ID, memberID, "member"))
+
+	ok, err := repo.HasAccess(tl.ID, "other-member-id")
 	require.NoError(t, err)
-	assert.False(t, ok, "a different user should not gain access")
+	assert.False(t, ok, "a different team member should not gain access")
 }
 
 func TestTimelineRepo_GetByID_NotFound(t *testing.T) {
@@ -135,14 +154,17 @@ func TestTimelineRepo_RevokeAccess_RemovesAccess(t *testing.T) {
 	tl := makeTimeline("tl-rev-a", teamID, userID)
 	require.NoError(t, repo.Create(tl))
 
-	require.NoError(t, repo.GrantAccess(tl.ID, userID))
-	ok, err := repo.HasAccess(tl.ID, userID)
+	memberID := "tm-rev-a"
+	seedTeamMember(t, database, memberID, teamID, userID)
+
+	require.NoError(t, repo.GrantAccess(tl.ID, memberID, "member"))
+	ok, err := repo.HasAccess(tl.ID, memberID)
 	require.NoError(t, err)
 	require.True(t, ok, "access should be granted before revoke")
 
-	require.NoError(t, repo.RevokeAccess(tl.ID, userID))
+	require.NoError(t, repo.RevokeAccess(tl.ID, memberID))
 
-	ok, err = repo.HasAccess(tl.ID, userID)
+	ok, err = repo.HasAccess(tl.ID, memberID)
 	require.NoError(t, err)
 	assert.False(t, ok, "access should be removed after revoke")
 }

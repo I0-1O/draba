@@ -59,9 +59,11 @@ func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userID := claims.UserID
 	member := &models.TeamMember{
+		ID:       newID(),
 		TeamID:   team.ID,
-		UserID:   claims.UserID,
+		UserID:   &userID,
 		Role:     "admin",
 		JoinedAt: now,
 	}

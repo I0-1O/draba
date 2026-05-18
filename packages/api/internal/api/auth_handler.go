@@ -81,6 +81,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Email:        string(req.Email),
 		PasswordHash: hash,
 		DisplayName:  req.DisplayName,
+		IsSuperadmin: count == 0,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -95,9 +96,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			// second registration. Log so the open invite is visible in monitoring.
 			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
 		}
+		userID := user.ID
 		member := &models.TeamMember{
+			ID:       newID(),
 			TeamID:   invite.TeamID,
-			UserID:   user.ID,
+			UserID:   &userID,
 			Role:     invite.Role,
 			JoinedAt: now,
 		}

@@ -1,0 +1,83 @@
+package api_test
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+func TestSetupStatus_NeedsSetup(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/setup/status", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]bool
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.True(t, resp["needsSetup"])
+}
+
+func TestSetupStatus_NoSetupNeeded(t *testing.T) {
+	database, err := db.Open(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Migrate(database))
+
+	usersRepo := db.NewUserRepo(database)
+	require.NoError(t, usersRepo.Create(&models.User{
+		ID:           "u1",
+		Email:        "admin@example.com",
+		PasswordHash: "x",
+		DisplayName:  "Admin",
+		IsSuperadmin: true,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+	}))
+
+	toks := auth.NewTokenService("setup-test-secret")
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, toks, func(_, _ string) error { return nil })
+	srv := api.NewServer(
+		usersRepo,
+		db.NewInviteRepo(database),
+		db.NewTeamRepo(database),
+		db.NewEventRepo(database),
+		db.NewTimelineRepo(database),
+		db.NewSavedFilterRepo(database),
+		toks, tier.Unlimited, bus, hub,
+	).Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/setup/status", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]bool
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.False(t, resp["needsSetup"])
+}
+
+func TestSetupStatus_NoAuthRequired(t *testing.T) {
+	srv := newTestServer(t)
+
+	// No Authorization header — must still return 200.
+	req := httptest.NewRequest(http.MethodGet, "/setup/status", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}

@@ -22,8 +22,8 @@ func NewUserRepo(db *sqlx.DB) *UserRepo {
 // (the users.email UNIQUE constraint surfaces as a wrapped driver error).
 func (r *UserRepo) Create(u *models.User) error {
 	_, err := r.db.NamedExec(`
-		INSERT INTO users (id, email, password_hash, display_name, avatar_url, created_at, updated_at)
-		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :created_at, :updated_at)
+		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
+		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
 	`, u)
 	if err != nil {
 		return fmt.Errorf("creating user: %w", err)

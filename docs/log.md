@@ -2,6 +2,38 @@
 
 ---
 
+## 2026-05-18 — Phase 8: RBAC & Participants (API only)
+
+### What was built
+
+**Migration**
+- `internal/db/migrations/003_rbac_participants.sql` — five schema changes: `is_superadmin BOOLEAN` on `users`; `team_members` rebuilt with `id TEXT PRIMARY KEY`, nullable `user_id`, and `display_name`; `event_assignments` and `timeline_access` rebuilt to reference `team_members.id` instead of `users.id`; `visibility` dropped from `timelines`; `timeline_access` gains a `role` column (`admin|member`)
+
+**Models** (`internal/models/models.go`)
+- `User`: +`IsSuperadmin bool`
+- `TeamMember`: +`ID string`, `UserID *string` (nullable — nil for login-less Participants), +`DisplayName *string`
+- `Timeline`: removed `Visibility` field
+
+**Repos**
+- `UserRepo.Create`: includes `is_superadmin` in INSERT
+- `TeamRepo.AddMember`: includes `id` + `display_name`; `ListMembers` uses LEFT JOIN + COALESCE to handle Participants without a users row
+- `TimelineRepo`: all access methods (`HasAccess`, `GrantAccess`, `RevokeAccess`) now accept `teamMemberID` instead of `userID`; `GrantAccess` gains a `role` param and upserts on conflict; `Create` drops the visibility column
+
+**Handlers**
+- `auth_handler`: first registered user auto-gets `IsSuperadmin = true`; invite acceptance now generates `TeamMember.ID` and uses pointer `UserID`
+- `team_handler`: team creator's membership uses `newID()` for `TeamMember.ID` and pointer `UserID`
+- `timeline_handler`: visibility handling removed; every new timeline auto-grants creator role=`admin` in `timeline_access`; `GetTimeline` bypasses access check for team admins, enforces `timeline_access` for members
+
+**Tests**
+- `timeline_handler_test`: `fakeTimelineStore` signatures updated; visibility tests renamed/rewritten for new access model
+- `timeline_repo_test`: `makeTimeline` no longer sets `Visibility`; access tests seed a `team_members` row and use `teamMemberID`
+
+### Result
+- `go test ./...` — all pass
+- `golangci-lint run` — clean
+
+---
+
 ## 2026-05-17 — /test-phase 7
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

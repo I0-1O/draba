@@ -61,3 +61,4 @@ packages/api/ui/static/*
 .claude/todos
 .claude/launch.json
 .claude/mockups/
+GEMINI.md

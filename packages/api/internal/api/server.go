@@ -24,8 +24,8 @@ type TimelineStore interface {
 	Create(t *models.Timeline) error
 	GetByID(id string) (*models.Timeline, error)
 	GetByShareToken(token string) (*models.Timeline, error)
-	HasAccess(timelineID, userID string) (bool, error)
-	GrantAccess(timelineID, userID string) error
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
 }
 
 // Server holds shared dependencies for all HTTP handlers.
@@ -73,6 +73,8 @@ func (s *Server) WithUI(uiFS fs.FS) *Server {
 // core routes plus any routes added by registered tier modules.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
 
 	mux.HandleFunc("POST /auth/register", s.handleRegister)
 	mux.HandleFunc("POST /auth/login", s.handleLogin)

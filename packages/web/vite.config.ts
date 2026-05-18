@@ -19,8 +19,11 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
         '/auth': { target: apiTarget, changeOrigin: true },
         '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
         '/ws': { target: apiTarget, changeOrigin: true, ws: true },
       },
     },

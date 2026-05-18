@@ -34,7 +34,9 @@ type Event struct {
 }
 
 // TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query.
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
 type TeamMemberWithUser struct {
 	TeamMember
 	Email       string  `db:"email"        json:"email"`
@@ -45,13 +47,14 @@ type TeamMemberWithUser struct {
 // User is an authenticated account. PasswordHash is omitted from JSON
 // to avoid leaking it through any handler that returns a User.
 type User struct {
-	ID           string    `db:"id"            json:"id"`
-	Email        string    `db:"email"         json:"email"`
-	PasswordHash string    `db:"password_hash" json:"-"`
-	DisplayName  string    `db:"display_name"  json:"displayName"`
-	AvatarURL    *string   `db:"avatar_url"    json:"avatarUrl,omitempty"`
-	CreatedAt    time.Time `db:"created_at"    json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"    json:"updatedAt"`
+	ID           string    `db:"id"             json:"id"`
+	Email        string    `db:"email"          json:"email"`
+	PasswordHash string    `db:"password_hash"  json:"-"`
+	DisplayName  string    `db:"display_name"   json:"displayName"`
+	AvatarURL    *string   `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	IsSuperadmin bool      `db:"is_superadmin"  json:"isSuperadmin"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
 }
 
 // Team is a workspace that groups users and their scheduled work.
@@ -63,28 +66,29 @@ type Team struct {
 	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
 }
 
-// TeamMember is the join row that puts a User in a Team with a given
-// Role ("owner", "admin", "member"). Color is the per-team display color
-// used in timeline views.
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member".
 type TeamMember struct {
-	TeamID   string    `db:"team_id"  json:"teamId"`
-	UserID   string    `db:"user_id"  json:"userId"`
-	Role     string    `db:"role"     json:"role"`
-	Color    *string   `db:"color"    json:"color,omitempty"`
-	JoinedAt time.Time `db:"joined_at" json:"joinedAt"`
+	ID          string    `db:"id"           json:"id"`
+	TeamID      string    `db:"team_id"      json:"teamId"`
+	UserID      *string   `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string   `db:"display_name" json:"displayName,omitempty"`
+	Role        string    `db:"role"         json:"role"`
+	Color       *string   `db:"color"        json:"color,omitempty"`
+	JoinedAt    time.Time `db:"joined_at"    json:"joinedAt"`
 }
 
 // Timeline is a named date range over a team's events. It is not a data
-// container — it is a view with optional access control and shareable links.
-// Visibility "public" allows any team member to access; "restricted" limits
-// access to users listed in timeline_access.
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL.
 type Timeline struct {
 	ID         string     `db:"id"          json:"id"`
 	TeamID     string     `db:"team_id"     json:"teamId"`
 	Name       string     `db:"name"        json:"name"`
 	StartDate  string     `db:"start_date"  json:"startDate"`
 	EndDate    string     `db:"end_date"    json:"endDate"`
-	Visibility string     `db:"visibility"  json:"visibility"`
 	ShareToken string     `db:"share_token" json:"shareToken"`
 	IcalToken  string     `db:"ical_token"  json:"icalToken"`
 	CreatedBy  string     `db:"created_by"  json:"createdBy"`
