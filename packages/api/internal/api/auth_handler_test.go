@@ -73,6 +73,59 @@ func TestRegister_FirstUserNoInvite(t *testing.T) {
 	assert.NotEmpty(t, resp["refreshToken"])
 }
 
+func TestRegister_FirstUserIsSuperadmin(t *testing.T) {
+	srv := newTestServer(t)
+
+	w := postJSON(t, srv, "/auth/register", map[string]string{
+		"email":       "alice@example.com",
+		"password":    "supersecret",
+		"displayName": "Alice",
+	})
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	user := resp["user"].(map[string]any)
+	assert.True(t, user["isSuperadmin"].(bool), "first registered user must be superadmin")
+}
+
+func TestRegister_SubsequentUserIsNotSuperadmin(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+
+	// Alice registers first.
+	aliceToken, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	// Alice creates a team and invites Bob.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Acme"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", team["id"]),
+		map[string]string{"email": "bob@example.com", "role": "member"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
+
+	// Bob registers via invite.
+	b, _ := json.Marshal(map[string]string{
+		"email": "bob@example.com", "password": "password2",
+		"displayName": "Bob", "inviteToken": inv["token"].(string),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, req)
+	require.Equal(t, http.StatusCreated, w3.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&resp))
+	user := resp["user"].(map[string]any)
+	assert.False(t, user["isSuperadmin"].(bool), "subsequent users must not be superadmin")
+}
+
 func TestRegister_SecondUserRequiresInvite(t *testing.T) {
 	srv := newTestServer(t)
 

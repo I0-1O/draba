@@ -254,6 +254,92 @@ func TestGetTimeline_TeamAdminCanAlwaysAccess(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w2.Code)
 }
 
+func TestGetTimeline_MemberWithoutAccessForbidden(t *testing.T) {
+	srv, aliceToken, teamID := timelineTestSetup(t)
+
+	// Alice (admin) creates a timeline and is auto-granted admin access.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name":      "Admin Only",
+		"startDate": "2026-01-01",
+		"endDate":   "2026-12-31",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+	timelineID := created["id"].(string)
+
+	// Alice invites Bob as a regular member.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob@member.com", "role": "member"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
+	bobToken, _ := seedUserWithInvite(t, srv, "bob@member.com", "password2", "Bob", inv["token"].(string))
+
+	// Bob is a team member but has no timeline_access entry — must be forbidden.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodGet, fmt.Sprintf("/timelines/%s", timelineID), nil, bobToken))
+	assert.Equal(t, http.StatusForbidden, w3.Code)
+}
+
+func TestGetTimeline_MemberGrantedAccessAllowed(t *testing.T) {
+	database, err := db.Open(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Migrate(database))
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	eventsRepo := db.NewEventRepo(database)
+	timelinesRepo := db.NewTimelineRepo(database)
+	tokens := auth.NewTokenService("access-test-secret")
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
+	srv := api.NewServer(users, invites, teams, eventsRepo, timelinesRepo,
+		db.NewSavedFilterRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+
+	aliceToken, _ := seedUser(t, srv, "alice@access.com", "password1", "Alice")
+
+	wTeam := httptest.NewRecorder()
+	srv.ServeHTTP(wTeam, authReq(http.MethodPost, "/teams", map[string]string{"name": "Access Team"}, aliceToken))
+	require.Equal(t, http.StatusCreated, wTeam.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(wTeam.Body).Decode(&team))
+	teamID := team["id"].(string)
+
+	// Alice creates a timeline; she gets auto-granted admin access.
+	wTL := httptest.NewRecorder()
+	srv.ServeHTTP(wTL, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "Shared Plan", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, wTL.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(wTL.Body).Decode(&tl))
+	timelineID := tl["id"].(string)
+
+	// Alice invites Bob as a member.
+	wInv := httptest.NewRecorder()
+	srv.ServeHTTP(wInv, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob@access.com", "role": "member"}, aliceToken))
+	require.Equal(t, http.StatusCreated, wInv.Code)
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(wInv.Body).Decode(&inv))
+	bobToken, bobID := seedUserWithInvite(t, srv, "bob@access.com", "password2", "Bob", inv["token"].(string))
+	_ = bobToken
+
+	// Grant Bob explicit timeline access via the repo (simulating an admin granting it).
+	bobMember, err := teams.GetMember(teamID, bobID)
+	require.NoError(t, err)
+	require.NoError(t, timelinesRepo.GrantAccess(timelineID, bobMember.ID, "member"))
+
+	// Bob can now fetch the timeline.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodGet, fmt.Sprintf("/timelines/%s", timelineID), nil, bobToken))
+	assert.Equal(t, http.StatusOK, w3.Code)
+}
+
 func TestGetTimeline_PublicShareToken(t *testing.T) {
 	srv, token, teamID := timelineTestSetup(t)
 
