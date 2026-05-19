@@ -4,7 +4,7 @@
  * export stub.
  */
 
-import { Download } from 'lucide-react';
+import { Download, Share2 } from 'lucide-react';
 import type { TimeGranularity } from './granularity';
 
 export type { TimeGranularity } from './granularity';
@@ -19,6 +19,7 @@ interface Props {
   granularity: TimeGranularity | 'auto';
   onGranularityChange: (g: TimeGranularity | 'auto') => void;
   onExport: () => void;
+  onShare?: () => void;
 }
 
 const CTRL_BTN: React.CSSProperties = {
@@ -74,6 +75,7 @@ export default function GanttToolbar({
   granularity,
   onGranularityChange,
   onExport,
+  onShare,
 }: Props) {
   return (
     <div
@@ -141,6 +143,16 @@ export default function GanttToolbar({
       >
         <Download size={13} strokeWidth={1.8} />
         Export
+      </button>
+
+      {/* Share */}
+      <button
+        style={CTRL_BTN}
+        onClick={onShare}
+        title="Share"
+      >
+        <Share2 size={13} strokeWidth={1.8} />
+        Share
       </button>
     </div>
   );

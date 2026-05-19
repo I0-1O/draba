@@ -101,7 +101,6 @@ function DashboardShell() {
           view={view}
           teamId={teamId}
           onViewChange={setView}
-          onShare={() => {}}
           onOpenFilterEditor={() => setFilterEditorOpen(true)}
           rightSlot={
             <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
@@ -190,6 +189,7 @@ function DashboardShell() {
             granularity={granularity}
             onGranularityChange={setGranularity}
             onExport={() => {}}
+            onShare={() => {}}
           />
         )}
 

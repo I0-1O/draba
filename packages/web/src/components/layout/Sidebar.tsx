@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   ChevronRight,
   ChevronLeft,
@@ -14,6 +14,9 @@ import {
   Megaphone,
   Plug,
 } from 'lucide-react';
+
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 360;
 
 interface Props {
   collapsed: boolean;
@@ -40,9 +43,10 @@ interface Member {
 }
 
 const DEMO_TIMELINES: Timeline[] = [
-  { id: '1', name: 'Engineering Q2', color: '#1A97A2', icon: <Code2 {...ICON_SM} /> },
-  { id: '2', name: 'Design Sprint',   color: '#6366F1', icon: <Palette {...ICON_SM} /> },
-  { id: '3', name: 'Marketing Q3',   color: '#F17B2B', icon: <BarChart3 {...ICON_SM} /> },
+  { id: '1', name: 'Q1 2027 Roadmap',            color: '#1A97A2', icon: <Code2 {...ICON_SM} /> },
+  { id: '2', name: 'New Logo GTM',                color: '#6366F1', icon: <Palette {...ICON_SM} /> },
+  { id: '3', name: 'Q4 2026 Roadmap',             color: '#F17B2B', icon: <BarChart3 {...ICON_SM} /> },
+  { id: '4', name: 'Project Pinky and the Brain', color: '#E11D48', icon: <Megaphone {...ICON_SM} /> },
 ];
 
 const DEMO_ARCHIVED: Timeline[] = [
@@ -157,6 +161,59 @@ function TimelineItem({ timeline, active, collapsed, onClick, onSettings }: Time
   );
 }
 
+function ConnectorItem({ name, status, color }: { name: string; status: string; color: string }) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 6px 6px 16px',
+        cursor: 'pointer',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        transition: 'background 0.12s',
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div style={{
+        width: 20, height: 20, borderRadius: 4,
+        background: color,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
+          <rect x="1" y="1" width="9" height="18" rx="1.5" />
+          <rect x="14" y="1" width="9" height="12" rx="1.5" />
+        </svg>
+      </div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {name}
+        </div>
+        <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginTop: 1 }}>
+          {status}
+        </div>
+      </div>
+      <button
+        title={`Configure ${name}`}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          width: 26, height: 26, marginRight: 0,
+          background: 'none', border: 'none', borderRadius: 5,
+          color: 'rgba(255,255,255,0.4)', cursor: 'pointer',
+          opacity: hovered ? 1 : 0, transition: 'opacity 0.12s',
+          flexShrink: 0,
+        }}
+        onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+        onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+      >
+        <Settings2 {...ICON_SM} />
+      </button>
+    </div>
+  );
+}
+
 /**
  * Left navigation rail: brand, team selector with members, and timeline list.
  * Collapsed/expanded state is driven by the parent.
@@ -173,16 +230,51 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
 
   const activeTimeline = DEMO_TIMELINES.find(t => t.id === activeId)!;
 
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
+  const dragging = useRef(false);
+  const startX = useRef(0);
+  const startW = useRef(SIDEBAR_MIN);
+
+  useEffect(() => {
+    function onMouseMove(e: MouseEvent) {
+      if (!dragging.current) return;
+      const delta = e.clientX - startX.current;
+      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
+    }
+    function onMouseUp() {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
+
+  function onHandleMouseDown(e: React.MouseEvent) {
+    e.preventDefault();
+    dragging.current = true;
+    startX.current = e.clientX;
+    startW.current = sidebarWidth;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
   return (
     <div
       style={{
-        width: collapsed ? 52 : 'var(--sidebar-w)',
+        position: 'relative',
+        width: collapsed ? 52 : sidebarWidth,
         flexShrink: 0,
         background: 'var(--color-charcoal)',
         color: 'white',
         display: 'flex',
         flexDirection: 'column',
-        transition: 'width 0.2s ease',
+        transition: 'width 0.0s',
         overflow: 'hidden',
         borderRight: '1px solid rgba(255,255,255,0.06)',
       }}
@@ -237,7 +329,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
             {/* Team avatar — click to expand */}
             <div
-              title="Acme Corp"
+              title="Product Marketing"
               onClick={onToggle}
               style={{
                 width: 28,
@@ -253,7 +345,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
                 cursor: 'pointer',
               }}
             >
-              A
+              P
             </div>
             {/* Active timeline — click to expand */}
             <div
@@ -357,10 +449,10 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
                 color: 'white',
                 flexShrink: 0,
               }}>
-                A
+                P
               </div>
               <span style={{ fontSize: 13, fontWeight: 600, color: 'white', flex: 1, marginLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
-                Acme Corp
+                Product Marketing
               </span>
               <button
                 title="Team settings"
@@ -670,6 +762,8 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
                 }}>
                   {activeTimeline.name}
                 </div>
+                {/* Stub: connected Trello board */}
+                <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
                 <button
                   style={{
                     display: 'flex', alignItems: 'center', gap: 8,
@@ -688,6 +782,37 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
           </div>
         )}
       </div>
+
+      {/* Resize handle */}
+      {!collapsed && (
+        <div
+          onMouseDown={onHandleMouseDown}
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            width: 5,
+            height: '100%',
+            cursor: 'col-resize',
+            zIndex: 20,
+          }}
+          onMouseEnter={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'var(--primary)')}
+          onMouseLeave={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'transparent')}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              width: 2,
+              height: '100%',
+              background: 'transparent',
+              transition: 'background 0.15s',
+              pointerEvents: 'none',
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }

@@ -9,7 +9,7 @@
  */
 
 import { useState } from 'react';
-import { CalendarDays, GanttChart, Columns3, List, Share2, Search, X } from 'lucide-react';
+import { CalendarDays, GanttChart, Columns3, List, Search, X } from 'lucide-react';
 import FilterDropdown from '@/components/filters/FilterDropdown';
 
 export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
@@ -18,7 +18,6 @@ interface Props {
   view: ViewMode;
   teamId?: string;
   onViewChange: (view: ViewMode) => void;
-  onShare?: () => void;
   onOpenFilterEditor: () => void;
   rightSlot?: React.ReactNode;
 }
@@ -38,27 +37,6 @@ const BTN_BASE: React.CSSProperties = {
   fontFamily: 'var(--font-sans)',
   border: 'none',
 };
-
-function IconBtn({ icon, onClick, title }: { icon: React.ReactNode; onClick?: () => void; title?: string }) {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      style={{
-        ...BTN_BASE,
-        width: 28,
-        height: 28,
-        flexShrink: 0,
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--radius-md)',
-        background: 'var(--card)',
-        color: 'var(--muted-foreground)',
-      }}
-    >
-      {icon}
-    </button>
-  );
-}
 
 function SearchInput() {
   const [query, setQuery] = useState('');
@@ -125,7 +103,6 @@ export default function TopBar({
   view,
   teamId,
   onViewChange,
-  onShare,
   onOpenFilterEditor,
   rightSlot,
 }: Props) {
@@ -175,16 +152,13 @@ export default function TopBar({
         ))}
       </div>
 
-      {/* Left: share */}
-      <IconBtn icon={<Share2 size={14} strokeWidth={2} />} onClick={onShare} title="Share" />
-
       <div style={{ flex: 1 }} />
-
-      {/* Right: filter dropdown */}
-      <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
 
       {/* Search stub — highlight wiring in Phase 8.5 */}
       <SearchInput />
+
+      {/* Filter dropdown */}
+      <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
 
       {/* Profile avatar — injected by parent */}
       {rightSlot}
