@@ -222,6 +222,48 @@ func TestListMembers_NonMemberForbidden(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w2.Code)
 }
 
+func TestListTeams_Unauthenticated(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/teams", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestListTeams_Empty(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, "/teams", nil, token))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var teams []map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&teams))
+	assert.Len(t, teams, 0)
+}
+
+func TestListTeams_ReturnsOwnTeams(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	wCreate := httptest.NewRecorder()
+	srv.ServeHTTP(wCreate, authReq(http.MethodPost, "/teams", map[string]string{"name": "Engineering"}, token))
+	require.Equal(t, http.StatusCreated, wCreate.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(wCreate.Body).Decode(&created))
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, "/teams", nil, token))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var teams []map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&teams))
+	require.Len(t, teams, 1)
+	assert.Equal(t, created["id"], teams[0]["id"])
+	assert.Equal(t, "Engineering", teams[0]["name"])
+}
+
 func TestCreateTeam_DuplicateSlug(t *testing.T) {
 	srv, _ := newTeamTestServer(t)
 	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")

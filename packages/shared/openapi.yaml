@@ -201,7 +201,7 @@ components:
 
     Timeline:
       type: object
-      required: [id, teamId, name, startDate, endDate, visibility, shareToken, icalToken, createdBy, createdAt, updatedAt]
+      required: [id, teamId, name, startDate, endDate, shareToken, icalToken, createdBy, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -215,9 +215,6 @@ components:
         endDate:
           type: string
           format: date
-        visibility:
-          type: string
-          enum: [public, restricted]
         shareToken:
           type: string
         icalToken:
@@ -929,10 +926,6 @@ paths:
                 endDate:
                   type: string
                   format: date
-                visibility:
-                  type: string
-                  enum: [public, restricted]
-                  default: public
       responses:
         "201":
           description: Timeline created.

@@ -85,8 +85,8 @@ VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', 'x-not-loginable', 'Test Boo
 INSERT INTO teams (id, name, slug)
 VALUES ('${TEAM_ID}', 'Test Team', 'test-team');
 
-INSERT INTO team_members (team_id, user_id, role)
-VALUES ('${TEAM_ID}', '${ADMIN_ID}', 'admin');
+INSERT INTO team_members (id, team_id, user_id, role)
+VALUES ('bootstrap-admin-member', '${TEAM_ID}', '${ADMIN_ID}', 'admin');
 
 INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at)
 VALUES ('${INVITE_ID}', '${TEAM_ID}', '${DRABA_TEST_INVITE_EMAIL}', '${DRABA_TEST_INVITE_TOKEN}', 'member', '${ADMIN_ID}', '${EXPIRES}');

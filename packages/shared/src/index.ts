@@ -404,8 +404,6 @@ export interface components {
             startDate: string;
             /** Format: date */
             endDate: string;
-            /** @enum {string} */
-            visibility: "public" | "restricted";
             shareToken: string;
             icalToken: string;
             createdBy: string;
@@ -1010,11 +1008,6 @@ export interface operations {
                     startDate: string;
                     /** Format: date */
                     endDate: string;
-                    /**
-                     * @default public
-                     * @enum {string}
-                     */
-                    visibility?: "public" | "restricted";
                 };
             };
         };

@@ -2,6 +2,15 @@
 
 ---
 
+## 2026-05-18 — /test-phase 8.1
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (8 pass, 0 fail, 0 skip)
+- Smoke target: http://epcot.lan:8081
+- Notes: `scripts/reset-test-env.sh` seed INSERT fixed — added `id` column to `team_members` row (Migration 003 compat); all previously tracked unit-test gaps (auth, invite_repo, timeline_repo) now closed
+
+---
+
 ## 2026-05-18 — Phase 8.1 Gantt pivot: design revision + full reimplementation (complete)
 
 ### Why

@@ -343,6 +343,52 @@ func TestGetTimeline_MemberGrantedAccessAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w3.Code)
 }
 
+func TestListTimelines_Empty(t *testing.T) {
+	srv, token, teamID := timelineTestSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines", teamID), nil, token))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var timelines []map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&timelines))
+	assert.Len(t, timelines, 0)
+}
+
+func TestListTimelines_ReturnsMembersTimelines(t *testing.T) {
+	srv, token, teamID := timelineTestSetup(t)
+
+	body := map[string]any{"name": "Q2 Plan", "startDate": "2026-04-01", "endDate": "2026-06-30"}
+	wCreate := httptest.NewRecorder()
+	srv.ServeHTTP(wCreate, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), body, token))
+	require.Equal(t, http.StatusCreated, wCreate.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(wCreate.Body).Decode(&created))
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines", teamID), nil, token))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var timelines []map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&timelines))
+	require.Len(t, timelines, 1)
+	assert.Equal(t, created["id"], timelines[0]["id"])
+	assert.Equal(t, "Q2 Plan", timelines[0]["name"])
+}
+
+func TestListTimelines_NonMemberForbidden(t *testing.T) {
+	srv, _, teamID := timelineTestSetup(t)
+
+	// Mint a token for a user who is not a member of this team.
+	tokens := auth.NewTokenService("timeline-test-secret")
+	outsiderToken, _ := tokens.IssueAccessToken("outsider-id", "outsider@example.com")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines", teamID), nil, outsiderToken))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
 func TestGetTimeline_PublicShareToken(t *testing.T) {
 	srv, token, teamID := timelineTestSetup(t)
 
