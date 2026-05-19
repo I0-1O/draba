@@ -1,24 +1,23 @@
 /**
- * TimelineToolbar — the thin sub-toolbar that sits between the top bar and
- * the Gantt grid. Provides zoom, group-by, sort-by, and an export stub.
+ * GanttToolbar — the thin sub-toolbar that sits between the top bar and
+ * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
+ * export stub.
  */
 
-import { Minus, Plus, Download } from 'lucide-react';
+import { Download } from 'lucide-react';
+import type { TimeGranularity } from './granularity';
 
+export type { TimeGranularity } from './granularity';
 export type GroupBy = 'none' | 'member' | 'parent';
 export type SortBy = 'startDate' | 'endDate' | 'title';
-
-/** Ordered zoom steps in px-per-day. */
-export const COL_WIDTHS = [40, 60, 80, 120, 160] as const;
-export type ColWidth = (typeof COL_WIDTHS)[number];
 
 interface Props {
   groupBy: GroupBy;
   onGroupByChange: (g: GroupBy) => void;
   sortBy: SortBy;
   onSortByChange: (s: SortBy) => void;
-  colWidth: ColWidth;
-  onZoomChange: (w: ColWidth) => void;
+  granularity: TimeGranularity | 'auto';
+  onGranularityChange: (g: TimeGranularity | 'auto') => void;
   onExport: () => void;
 }
 
@@ -37,20 +36,6 @@ const CTRL_BTN: React.CSSProperties = {
   fontWeight: 500,
   cursor: 'pointer',
   fontFamily: 'var(--font-sans)',
-  flexShrink: 0,
-};
-
-const ZOOM_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  width: 20,
-  height: 20,
-  border: 'none',
-  background: 'none',
-  color: 'var(--muted-foreground)',
-  cursor: 'pointer',
-  padding: 0,
   flexShrink: 0,
 };
 
@@ -81,17 +66,15 @@ const SELECT: React.CSSProperties = {
   flexShrink: 0,
 };
 
-export default function TimelineToolbar({
+export default function GanttToolbar({
   groupBy,
   onGroupByChange,
   sortBy,
   onSortByChange,
-  colWidth,
-  onZoomChange,
+  granularity,
+  onGranularityChange,
   onExport,
 }: Props) {
-  const zoomIdx = COL_WIDTHS.indexOf(colWidth);
-
   return (
     <div
       style={{
@@ -105,31 +88,20 @@ export default function TimelineToolbar({
         flexShrink: 0,
       }}
     >
-      {/* Zoom slider */}
-      <button
-        style={{ ...ZOOM_BTN, opacity: zoomIdx > 0 ? 1 : 0.3 }}
-        onClick={() => zoomIdx > 0 && onZoomChange(COL_WIDTHS[zoomIdx - 1])}
-        title="Zoom out"
+      {/* Zoom (granularity) */}
+      <span style={LABEL}>Zoom</span>
+      <select
+        style={SELECT}
+        value={granularity}
+        onChange={e => onGranularityChange(e.target.value as TimeGranularity | 'auto')}
       >
-        <Minus size={13} strokeWidth={2.5} />
-      </button>
-      <input
-        type="range"
-        min={0}
-        max={COL_WIDTHS.length - 1}
-        step={1}
-        value={zoomIdx}
-        onChange={e => onZoomChange(COL_WIDTHS[Number(e.target.value)])}
-        title={`Zoom: ${colWidth}px/day`}
-        style={{ width: 80, cursor: 'pointer', accentColor: 'var(--primary)' }}
-      />
-      <button
-        style={{ ...ZOOM_BTN, opacity: zoomIdx < COL_WIDTHS.length - 1 ? 1 : 0.3 }}
-        onClick={() => zoomIdx < COL_WIDTHS.length - 1 && onZoomChange(COL_WIDTHS[zoomIdx + 1])}
-        title="Zoom in"
-      >
-        <Plus size={13} strokeWidth={2.5} />
-      </button>
+        <option value="auto">Auto</option>
+        <option value="day">Day</option>
+        <option value="week">Week</option>
+        <option value="month">Month</option>
+        <option value="quarter">Quarter</option>
+        <option value="year">Year</option>
+      </select>
 
       <div style={DIVIDER} />
 

@@ -1,60 +1,58 @@
 /**
- * TimelineGrid — presentational Gantt chart.
+ * GanttGrid — presentational Gantt chart.
  *
- * Renders a sticky header row of day labels, then one row per GanttRow entry.
- * Rows are either group-header dividers or event bars. All data preparation
- * (grouping, sorting, date math) lives in the parent TimelineView.
+ * Renders a sticky header row of column labels, then one row per GanttRow
+ * entry. Rows are either group-header dividers or event bars. All data
+ * preparation (grouping, sorting, date math) lives in the parent GanttView.
  */
 
 import MemberAvatar from '../MemberAvatar';
+import EmptyState from '../shared/EmptyState';
 import type { Member } from '../../types';
+import type { ColumnDef } from './granularity';
 
-// Left column width — enough for title + avatar cluster.
 const LABEL_COL_W = 240;
-// Heights
 const HEADER_H = 36;
 const ROW_H = 44;
 const GROUP_H = 30;
+const COL_W = 80;
 
 /** A positioned event bar ready for rendering. */
 export interface GanttEvent {
   id: string;
   title: string;
+  /** Fractional column start (0-based). */
   startCol: number;
+  /** Fractional column span. */
   span: number;
   color: string;
-  /** All assigned members — shown as a stacked avatar cluster in the label cell. */
   members: Member[];
-  /** True when this event is a child of another (adds left indent in parent grouping). */
   isChild: boolean;
 }
 
-/** Either a collapsible section header or a single event row. */
 export type GanttRow =
   | { kind: 'group'; id: string; label: string; color: string; count: number }
   | { kind: 'event'; event: GanttEvent };
 
 interface Props {
   rows: GanttRow[];
-  /** Display label for each day column, e.g. ["May 18", "May 19", …] */
-  days: string[];
-  /** Index within `days` that is today — drives the highlight and today line. */
+  columns: ColumnDef[];
+  /** Fractional column index of today (-1 if outside range). */
   todayIndex: number;
-  /** Pixel width of each day column. Driven by the zoom control. */
-  colWidth: number;
   selectedEventId: string | null;
   onSelectEvent: (id: string | null) => void;
 }
 
-export default function TimelineGrid({
+export default function GanttGrid({
   rows,
-  days,
+  columns,
   todayIndex,
-  colWidth,
   selectedEventId,
   onSelectEvent,
 }: Props) {
-  const totalW = LABEL_COL_W + days.length * colWidth;
+  const totalW = LABEL_COL_W + columns.length * COL_W;
+  // Integer column index that contains today (for background highlight)
+  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -73,7 +71,6 @@ export default function TimelineGrid({
             zIndex: 5,
           }}
         >
-          {/* "Event" label over the sticky left column */}
           <div
             style={{
               width: LABEL_COL_W,
@@ -92,66 +89,58 @@ export default function TimelineGrid({
             Event
           </div>
 
-          {/* Day columns */}
-          {days.map((label, i) => (
-            <div
-              key={i}
-              style={{
-                width: colWidth,
-                flexShrink: 0,
-                height: HEADER_H,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 11,
-                fontWeight: i === todayIndex ? 700 : 600,
-                color: i === todayIndex ? 'var(--primary)' : 'var(--muted-foreground)',
-                borderRight: i < days.length - 1 ? '1px solid var(--border)' : 'none',
-                position: 'relative',
-              }}
-            >
-              {label}
-              {i === todayIndex && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    bottom: 0,
-                    left: '50%',
-                    transform: 'translateX(-50%)',
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    background: 'var(--secondary)',
-                  }}
-                />
-              )}
-            </div>
-          ))}
+          {columns.map((col, i) => {
+            const isToday = i === todayCol;
+            return (
+              <div
+                key={i}
+                style={{
+                  width: COL_W,
+                  flexShrink: 0,
+                  height: HEADER_H,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 11,
+                  fontWeight: isToday ? 700 : 600,
+                  color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
+                  borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+                  position: 'relative',
+                }}
+              >
+                {col.label}
+                {isToday && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      bottom: 0,
+                      left: `${((todayIndex - todayCol) * 100)}%`,
+                      transform: 'translateX(-50%)',
+                      width: 6,
+                      height: 6,
+                      borderRadius: '50%',
+                      background: 'var(--secondary)',
+                    }}
+                  />
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 
-      {/* ── Scrollable body ────────────────────────────────────────────── */}
+      {/* ── Empty state (outside scroll container so it stays centered) ── */}
+      {rows.length === 0 ? (
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <EmptyState message="No viewable events" />
+        </div>
+      ) : (
+
+      /* ── Scrollable body ────────────────────────────────────────────── */
       <div style={{ flex: 1, overflowY: 'auto', overflowX: 'auto' }}>
         <div style={{ width: totalW }}>
 
-          {rows.length === 0 && (
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                height: 120,
-                color: 'var(--muted-foreground)',
-                fontSize: 13,
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              No events in this date range.
-            </div>
-          )}
-
           {rows.map((row, rowIdx) => {
-            // ── Group header ──────────────────────────────────────────
             if (row.kind === 'group') {
               return (
                 <div
@@ -214,13 +203,11 @@ export default function TimelineGrid({
                       {row.count}
                     </span>
                   </div>
-                  {/* Extend group header across the grid */}
                   <div style={{ flex: 1 }} />
                 </div>
               );
             }
 
-            // ── Event row ─────────────────────────────────────────────
             const ev = row.event;
             const selected = selectedEventId === ev.id;
             const indent = ev.isChild ? 20 : 0;
@@ -263,7 +250,6 @@ export default function TimelineGrid({
                       : 'var(--card)';
                   }}
                 >
-                  {/* Color dot */}
                   <div
                     style={{
                       width: 8,
@@ -273,7 +259,6 @@ export default function TimelineGrid({
                       flexShrink: 0,
                     }}
                   />
-                  {/* Title */}
                   <span
                     style={{
                       fontSize: 12,
@@ -288,7 +273,6 @@ export default function TimelineGrid({
                   >
                     {ev.title}
                   </span>
-                  {/* Member avatar cluster (max 3) */}
                   {ev.members.length > 0 && (
                     <div style={{ display: 'flex', flexShrink: 0 }}>
                       {ev.members.slice(0, 3).map((m, i) => (
@@ -306,35 +290,36 @@ export default function TimelineGrid({
 
                 {/* Lane — background columns + today line + event bar */}
                 <div style={{ position: 'relative', flex: 1, display: 'flex' }}>
-                  {/* Background day columns */}
-                  {days.map((_, i) => (
+                  {columns.map((_, i) => (
                     <div
                       key={i}
                       style={{
-                        width: colWidth,
+                        width: COL_W,
                         height: '100%',
                         flexShrink: 0,
-                        borderRight: i < days.length - 1 ? '1px solid var(--border)' : 'none',
+                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
                         background:
-                          i === todayIndex ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                          i === todayCol ? 'hsl(188 59% 38% / .04)' : 'transparent',
                       }}
                     />
                   ))}
 
                   {/* Today vertical line */}
-                  <div
-                    style={{
-                      position: 'absolute',
-                      top: 0,
-                      bottom: 0,
-                      left: todayIndex * colWidth + colWidth / 2,
-                      width: 2,
-                      background: 'var(--secondary)',
-                      opacity: 0.5,
-                      zIndex: 2,
-                      pointerEvents: 'none',
-                    }}
-                  />
+                  {todayIndex >= 0 && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        bottom: 0,
+                        left: todayIndex * COL_W,
+                        width: 2,
+                        background: 'var(--secondary)',
+                        opacity: 0.5,
+                        zIndex: 2,
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  )}
 
                   {/* Event bar */}
                   <div
@@ -343,8 +328,8 @@ export default function TimelineGrid({
                       position: 'absolute',
                       top: 9,
                       bottom: 9,
-                      left: ev.startCol * colWidth + 2,
-                      width: Math.max(ev.span * colWidth - 4, colWidth * 0.5),
+                      left: ev.startCol * COL_W + 2,
+                      width: Math.max(ev.span * COL_W - 4, COL_W * 0.3),
                       background: ev.color,
                       borderRadius: 5,
                       display: 'flex',
@@ -376,6 +361,7 @@ export default function TimelineGrid({
 
         </div>
       </div>
+      )}
     </div>
   );
 }

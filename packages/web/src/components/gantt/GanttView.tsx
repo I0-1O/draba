@@ -1,17 +1,24 @@
 /**
- * TimelineView — data container for the Gantt grid.
+ * GanttView — data container for the Gantt grid.
  *
  * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to TimelineGrid. The component owns
- * no layout state — zoom, groupBy, and sortBy come from DashboardPage.
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
  */
 
-import { useMemo } from 'react';
-import TimelineGrid, { type GanttEvent, type GanttRow } from './TimelineGrid';
+import { useMemo, useRef, useState, useLayoutEffect } from 'react';
+import GanttGrid, { type GanttEvent, type GanttRow } from './GanttGrid';
 import { useTeamEvents, useTeamMembers } from '@/hooks/useTeamEvents';
 import type { components } from '@draba/shared';
 import { type Member, EVENT_COLORS, MEMBER_COLORS } from '@/types';
-import type { GroupBy, SortBy } from './TimelineToolbar';
+import type { GroupBy, SortBy, TimeGranularity } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
 
 type ApiEvent = components['schemas']['Event'];
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
@@ -24,8 +31,7 @@ interface Props {
   endDate?: string;
   groupBy: GroupBy;
   sortBy: SortBy;
-  /** Pixel width of each day column (zoom level). */
-  colWidth: number;
+  granularity: TimeGranularity | 'auto';
   selectedEventId?: string | null;
   onSelectEvent?: (id: string | null) => void;
 }
@@ -34,15 +40,6 @@ interface Props {
 
 function toDateOnly(datetime: string): string {
   return datetime.slice(0, 10);
-}
-
-/** Whole-day count from a to b. */
-function daysBetween(a: Date, b: Date): number {
-  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
-}
-
-function formatDayLabel(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 function todayMidnight(): Date {
@@ -87,6 +84,7 @@ function toRichEvent(
   memberById: Record<string, Member>,
   viewStart: Date,
   viewEnd: Date,
+  columns: ColumnDef[],
 ): RichEvent | null {
   const evStart = new Date(toDateOnly(ev.startAt));
   const evEnd = new Date(toDateOnly(ev.endAt));
@@ -96,8 +94,7 @@ function toRichEvent(
   const clampedStart = evStart < viewStart ? viewStart : evStart;
   const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
 
-  const startCol = daysBetween(viewStart, clampedStart);
-  const span = Math.max(1, daysBetween(clampedStart, clampedEnd) + 1);
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
   const color = ev.color ?? EVENT_COLORS[index % EVENT_COLORS.length];
   const assignedIds = ev.assignedMemberIds ?? [];
   const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
@@ -124,7 +121,7 @@ function sortEvents(events: RichEvent[], sortBy: SortBy): RichEvent[] {
   return [...events].sort((a, b) => {
     if (sortBy === 'title') return a.title.localeCompare(b.title);
     if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs; // startDate (default)
+    return a.startAtMs - b.startAtMs;
   });
 }
 
@@ -143,7 +140,6 @@ function buildRows(
   }
 
   if (groupBy === 'member') {
-    // Bucket events by primary member (first assignee); unassigned → '__none__'
     const buckets: Record<string, RichEvent[]> = {};
     for (const ev of sorted) {
       const key = ev.primaryMemberId ?? '__none__';
@@ -151,14 +147,12 @@ function buildRows(
     }
 
     const rows: GanttRow[] = [];
-    // Iterate members in team order so the sections match the sidebar
     for (const m of members) {
       const evs = buckets[m.id];
       if (!evs?.length) continue;
       rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
       for (const ev of evs) rows.push({ kind: 'event', event: { ...ev, isChild: false } });
     }
-    // Unassigned section
     const unassigned = buckets['__none__'];
     if (unassigned?.length) {
       rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
@@ -176,7 +170,6 @@ function buildRows(
       placed.add(ev.id);
       rows.push({ kind: 'event', event: { ...ev, isChild: false } });
 
-      // Inline children directly after their parent
       for (const child of sorted) {
         if (child.parentEventId === ev.id) {
           placed.add(child.id);
@@ -185,7 +178,6 @@ function buildRows(
       }
     }
 
-    // Orphaned children (parent outside visible range or not in results)
     for (const ev of sorted) {
       if (!placed.has(ev.id)) {
         rows.push({ kind: 'event', event: { ...ev, isChild: true } });
@@ -200,17 +192,31 @@ function buildRows(
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function TimelineView({
+export default function GanttView({
   teamId,
   startDate,
   endDate,
   groupBy,
   sortBy,
-  colWidth,
+  granularity,
   selectedEventId = null,
   onSelectEvent = () => {},
 }: Props) {
   const today = todayMidnight();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
 
   const viewStart = useMemo<Date>(() => {
     if (startDate) return new Date(startDate);
@@ -228,20 +234,20 @@ export default function TimelineView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [endDate]);
 
-  // Day labels and today index
-  const { days, todayIndex } = useMemo(() => {
-    const labels: string[] = [];
-    let todayIdx = -1;
-    const todayStr = today.toISOString().slice(0, 10);
-    const cur = new Date(viewStart);
-    while (cur <= viewEnd) {
-      labels.push(formatDayLabel(cur));
-      if (cur.toISOString().slice(0, 10) === todayStr) todayIdx = labels.length - 1;
-      cur.setDate(cur.getDate() + 1);
-    }
-    return { days: labels, todayIndex: todayIdx };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewStart, viewEnd]);
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity),
+    [viewStart, viewEnd, resolvedGranularity],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
 
   const from = viewStart.toISOString();
   const to = viewEnd.toISOString();
@@ -262,15 +268,16 @@ export default function TimelineView({
 
   const rows: GanttRow[] = useMemo(() => {
     const richEvents = apiEvents
-      .map((ev, i) => toRichEvent(ev, i, memberById, viewStart, viewEnd))
+      .map((ev, i) => toRichEvent(ev, i, memberById, viewStart, viewEnd, columns))
       .filter((e): e is RichEvent => e !== null);
     return buildRows(richEvents, members, groupBy, sortBy);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiEvents, members, memberById, groupBy, sortBy, viewStart, viewEnd]);
+  }, [apiEvents, members, memberById, groupBy, sortBy, viewStart, viewEnd, columns]);
 
   if (isLoading) {
     return (
       <div
+        ref={containerRef}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -281,19 +288,20 @@ export default function TimelineView({
           fontFamily: 'var(--font-sans)',
         }}
       >
-        Loading timeline…
+        Loading events…
       </div>
     );
   }
 
   return (
-    <TimelineGrid
-      rows={rows}
-      days={days}
-      todayIndex={todayIndex}
-      colWidth={colWidth}
-      selectedEventId={selectedEventId}
-      onSelectEvent={onSelectEvent}
-    />
+    <div ref={containerRef} style={{ height: '100%' }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedEventId={selectedEventId}
+        onSelectEvent={onSelectEvent}
+      />
+    </div>
   );
 }

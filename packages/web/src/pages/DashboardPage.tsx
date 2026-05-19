@@ -9,8 +9,8 @@ import { useState, useRef, useEffect } from 'react'
 import Sidebar from '@/components/layout/Sidebar'
 import TopBar, { type ViewMode } from '@/components/layout/TopBar'
 import RightSidebar from '@/components/layout/RightSidebar'
-import TimelineView from '@/components/timeline/TimelineView'
-import TimelineToolbar, { type GroupBy, type SortBy, type ColWidth } from '@/components/timeline/TimelineToolbar'
+import GanttView from '@/components/gantt/GanttView'
+import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity } from '@/components/gantt/GanttToolbar'
 import { FilterProvider } from '@/contexts/FilterContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
@@ -37,15 +37,15 @@ function DashboardShell() {
   const { logout, accessToken, user } = useAuth()
   const { isDark, toggle: toggleDark } = useDarkMode()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('timeline')
+  const [view, setView] = useState<ViewMode>('gantt')
   const [profileOpen, setProfileOpen] = useState(false)
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
   const [activeTimelineColor, setActiveTimelineColor] = useState('#1A97A2')
   const [filterEditorOpen, setFilterEditorOpen] = useState(false)
-  // Timeline toolbar state
+  // Gantt toolbar state
   const [groupBy, setGroupBy] = useState<GroupBy>('none')
   const [sortBy, setSortBy] = useState<SortBy>('startDate')
-  const [colWidth, setColWidth] = useState<ColWidth>(80)
+  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
   const profileRef = useRef<HTMLDivElement>(null)
 
 
@@ -180,33 +180,33 @@ function DashboardShell() {
         {/* Active timeline color band */}
         <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
 
-        {/* Timeline sub-toolbar — only shown in timeline view */}
-        {view === 'timeline' && (
-          <TimelineToolbar
+        {/* Gantt sub-toolbar — only shown in Gantt view */}
+        {view === 'gantt' && (
+          <GanttToolbar
             groupBy={groupBy}
             onGroupByChange={setGroupBy}
             sortBy={sortBy}
             onSortByChange={setSortBy}
-            colWidth={colWidth}
-            onZoomChange={setColWidth}
+            granularity={granularity}
+            onGranularityChange={setGranularity}
             onExport={() => {}}
           />
         )}
 
         {/* Content area */}
         <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'timeline' && teamId ? (
-            <TimelineView
+          {view === 'gantt' && teamId ? (
+            <GanttView
               teamId={teamId}
               startDate={activeTimeline?.startDate}
               endDate={activeTimeline?.endDate}
               groupBy={groupBy}
               sortBy={sortBy}
-              colWidth={colWidth}
+              granularity={granularity}
               selectedEventId={selectedEventId}
               onSelectEvent={setSelectedEventId}
             />
-          ) : view === 'timeline' && !teamId ? (
+          ) : view === 'gantt' && !teamId ? (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
               <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
             </div>

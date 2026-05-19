@@ -8,10 +8,11 @@
  * a context-sensitive sub-toolbar will host them in a later phase.
  */
 
-import { CalendarDays, GanttChart, Columns3, List, Share2 } from 'lucide-react';
+import { useState } from 'react';
+import { CalendarDays, GanttChart, Columns3, List, Share2, Search, X } from 'lucide-react';
 import FilterDropdown from '@/components/filters/FilterDropdown';
 
-export type ViewMode = 'calendar' | 'timeline' | 'kanban' | 'list';
+export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
 
 interface Props {
   view: ViewMode;
@@ -25,7 +26,7 @@ interface Props {
 const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
   { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
   { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
-  { id: 'timeline', icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Timeline' },
+  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
   { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
 ];
 
@@ -56,6 +57,67 @@ function IconBtn({ icon, onClick, title }: { icon: React.ReactNode; onClick?: ()
     >
       {icon}
     </button>
+  );
+}
+
+function SearchInput() {
+  const [query, setQuery] = useState('');
+  const [focused, setFocused] = useState(false);
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        height: 28,
+        padding: '0 8px',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-md)',
+        background: 'var(--card)',
+        width: focused ? 200 : 140,
+        transition: 'width 0.15s ease',
+        flexShrink: 0,
+      }}
+    >
+      <Search size={13} strokeWidth={1.8} style={{ color: 'var(--muted-foreground)', flexShrink: 0 }} />
+      <input
+        type="text"
+        placeholder="Search…"
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        style={{
+          flex: 1,
+          border: 'none',
+          outline: 'none',
+          background: 'transparent',
+          color: 'var(--foreground)',
+          fontSize: 12,
+          fontFamily: 'var(--font-sans)',
+          minWidth: 0,
+        }}
+      />
+      {query && (
+        <button
+          onClick={() => setQuery('')}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            border: 'none',
+            background: 'none',
+            padding: 0,
+            cursor: 'pointer',
+            color: 'var(--muted-foreground)',
+            flexShrink: 0,
+          }}
+        >
+          <X size={12} strokeWidth={2} />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -120,6 +182,9 @@ export default function TopBar({
 
       {/* Right: filter dropdown */}
       <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
+
+      {/* Search stub — highlight wiring in Phase 8.5 */}
+      <SearchInput />
 
       {/* Profile avatar — injected by parent */}
       {rightSlot}

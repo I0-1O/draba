@@ -23,9 +23,13 @@ This document organizes development into discrete phases with effort estimates a
 | 6 | [API — Timelines](#phase-6-api--timelines) | S — ½–1 day | ✅ |
 | 7 | [Web — Scaffold](#phase-7-web--scaffold) | M — 2–3 days | ✅ |
 | 8.0 | [RBAC Refactor + First-Run Setup](#phase-80-rbac-refactor--first-run-setup) | M — 1–2 days | ✅ |
-| 8.1 | [Web — Timeline Shell & Event Rendering](#phase-81-web--timeline-shell--event-rendering) | L — 3–5 days | ✅ |
-| 8.2 | [Web — Timeline Interactions](#phase-82-web--timeline-interactions) | L — 3–5 days | ⬜ |
+| 8.1 | [Web — Gantt Shell & Event Rendering](#phase-81-web--gantt-shell--event-rendering) | L — 3–5 days | ✅ |
+| 8.1.1 | [Rename Timeline View → Gantt](#phase-811-rename-timeline-view--gantt) | XS — 1 hr | ✅ |
+| 8.1.2 | [Gantt View Polish](#phase-812-gantt-view-polish) | M — 1–2 days | ✅ |
+| 8.2 | [Web — Gantt Interactions](#phase-82-web--gantt-interactions) | L — 3–5 days | ⬜ |
 | 8.3 | [Web — Real-Time WebSocket Sync](#phase-83-web--real-time-websocket-sync) | M — 1–2 days | ⬜ |
+| 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ⬜ |
+| 8.5 | [Search with Highlight](#phase-85-search-with-highlight) | S — 1 day | ⬜ |
 | 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ⬜ |
 | 10 | [Team Configuration](#phase-10-team-configuration) | M — 1–2 days | ⬜ |
 | 11 | [Web — Calendar, List & Kanban Views](#phase-11-web--calendar-list--kanban-views) | L — 1 wk | ⬜ |
@@ -189,7 +193,7 @@ Prerequisite work before the web timeline phases: tightened the auth model and a
 
 ---
 
-### Phase 8.1 — Web — Timeline Shell & Event Rendering
+### Phase 8.1 — Web — Gantt Shell & Event Rendering
 **Status:** ✅ Done — 2026-05-18 | **Effort:** L (3–5 days)
 
 Static, data-driven Gantt chart. No drag interactions — layout, rendering, grouping, sorting, and zoom only.
@@ -197,9 +201,9 @@ Static, data-driven Gantt chart. No drag interactions — layout, rendering, gro
 **Design pivot (2026-05-18):** Switched from person-lane resource view to event-row Gantt layout based on first live preview. Person grouping is now one of several "Group by" options rather than the fixed row axis.
 
 **Scope:**
-- `TimelineGrid` component: Gantt layout — one row per event, sticky label column (title + member avatars), horizontal time grid, horizontal scroll
-- `TimelineToolbar` component: zoom in/out, group-by selector (None / Member / Parent event), sort-by selector (Start date / End date / Title), Export stub
-- `TimelineView` component: data container — fetches events + members, applies grouping + sorting, builds `GanttRow[]`, passes to `TimelineGrid`
+- `GanttGrid` component: Gantt layout — one row per event, sticky label column (title + member avatars), horizontal time grid, horizontal scroll
+- `GanttToolbar` component: zoom (granularity), group-by selector (None / Member / Parent event), sort-by selector (Start date / End date / Title), Export stub
+- `GanttView` component: data container — fetches events + members, applies grouping + sorting, builds `GanttRow[]`, passes to `GanttGrid`
 - Pixel ↔ date math (map date range to X offset/width); variable column width for zoom
 - Wire to `GET /teams/:id/events?start=&end=` via TanStack Query
 - Wire to `GET /teams/:id/members` for group labels and member avatars
@@ -211,11 +215,41 @@ Static, data-driven Gantt chart. No drag interactions — layout, rendering, gro
 - Group by Parent shows children indented under their parent event
 - Sort by Start date / End date / Title reorders rows within groups
 - Zoom steps change column width and the grid scrolls correctly
-- Timeline toolbar renders and all controls are functional
+- Gantt toolbar renders and all controls are functional
 
 ---
 
-### Phase 8.2 — Web — Timeline Interactions
+### Phase 8.1.1 — Rename Timeline View → Gantt
+**Status:** ✅ Done — 2026-05-19 | **Effort:** XS (1 hr)
+
+Renamed the Gantt view components to eliminate confusion between the "Timeline" data entity (date-bounded event container) and the view layer.
+
+**Scope:**
+- Renamed directory `components/timeline/` → `components/gantt/`
+- Renamed `TimelineView` → `GanttView`, `TimelineGrid` → `GanttGrid`, `TimelineToolbar` → `GanttToolbar`
+- Updated `ViewMode` type: `'timeline'` → `'gantt'`
+- All data entity code (Sidebar, API, hooks) untouched
+
+---
+
+### Phase 8.1.2 — Gantt View Polish
+**Status:** ✅ Done — 2026-05-19 | **Effort:** M (1–2 days)
+
+Three polish items bundled together.
+
+**Scope:**
+- Reusable `EmptyState` component (`components/shared/EmptyState.tsx`) — draba icon, message, optional description; dark-mode aware via `currentColor`
+- Fixed empty state centering — renders outside the scroll container so it stays centered on screen
+- Zoom rethink — replaced pixel-width slider with time granularity dropdown (Auto / Day / Week / Month / Quarter / Year). Auto-fit picks the finest granularity that fills the viewport. New `granularity.ts` utility for column generation and fractional event positioning.
+
+**Exit criteria — safe to pause when:**
+- Empty state shows centered draba icon + "No viewable events" when no events exist
+- Zoom dropdown changes time granularity; Auto picks an appropriate level based on timeline duration
+- Event bars position correctly with fractional column math at all granularity levels
+
+---
+
+### Phase 8.2 — Web — Gantt Interactions
 **Status:** ⬜ | **Effort:** L (3–5 days)
 
 Builds on 8.1. Full CRUD interactions on the timeline.
@@ -248,8 +282,49 @@ Builds on 8.2. Wire live WebSocket deltas into the timeline's state.
 - Handle optimistic update conflicts (local edit in-flight when WS delta arrives for same event)
 
 **Exit criteria — safe to pause when:**
-- A second browser tab's timeline updates within 500ms when an event is mutated in the first tab
+- A second browser tab's Gantt view updates within 500ms when an event is mutated in the first tab
 - No duplicate or ghost blocks after rapid create/edit/delete sequences
+
+---
+
+### Phase 8.4 — Persistent View Settings
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Server-side user preferences so view settings survive login/logout and sync across devices.
+
+**Scope:**
+- New `user_preferences` table: `id`, `user_id`, `timeline_id` (nullable), `key`, `value` (JSON), `updated_at`; unique on `(user_id, timeline_id, key)`
+- Global preferences (timeline_id NULL): theme, selected_team, selected_timeline
+- Per-timeline preferences: filter preset, group_by, sort_by, zoom_granularity
+- API: `GET /users/me/preferences?timeline_id=`, `PUT /users/me/preferences`
+- Frontend: `usePreferences(timelineId?)` hook — reads/writes, caches via TanStack Query
+- On timeline switch: fetch per-timeline prefs, apply to toolbar state
+- On login: fetch global prefs, restore theme/team/timeline selection
+
+**Exit criteria — safe to pause when:**
+- Changing zoom/group/sort on a timeline, switching to another timeline, and switching back restores the original settings
+- Dark mode and selected team persist across logout/login
+- Settings sync between two browser tabs via API (not just localStorage)
+
+---
+
+### Phase 8.5 — Search with Highlight
+**Status:** ⬜ | **Effort:** S (1 day)
+
+Client-side search that highlights matching events in the active view.
+
+**Scope:**
+- Search input in TopBar between FilterDropdown and ProfileMenu (~200px, expands on focus)
+- Debounced client-side search against already-fetched event titles
+- Matching events: highlighted (amber outline or background glow)
+- Non-matching events: dimmed (opacity ~0.3)
+- Empty search field: all events render normally
+- Clear button (X) resets
+
+**Exit criteria — safe to pause when:**
+- Typing in the search bar dims non-matching events and highlights matches in the Gantt view
+- Clearing the search restores all events to normal appearance
+- Search works across all granularity levels
 
 ---
 
@@ -298,10 +373,10 @@ Builds on 8.2. Wire live WebSocket deltas into the timeline's state.
 - Calendar view: weekly, daily, and monthly grid layouts
 - List view: chronological event list
 - Kanban view: columns = statuses (in order), cards = events, card color = member color
-- View switcher in the timeline header
+- View switcher in the top bar
 
 **Exit criteria — safe to pause when:**
-- View switcher cycles between Timeline, Calendar (3 sub-layouts), List, and Kanban without error
+- View switcher cycles between Gantt, Calendar (3 sub-layouts), List, and Kanban without error
 - All views show the same set of events (no data discrepancy)
 - Kanban columns appear in the same order as team statuses; cards show the correct member color
 

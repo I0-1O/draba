@@ -2,6 +2,29 @@
 
 ---
 
+## 2026-05-19 — Phase 8.1.1 + 8.1.2: Rename, polish, zoom rethink (complete)
+
+### Phase 8.1.1 — Rename Timeline View → Gantt
+- Renamed `components/timeline/` → `components/gantt/` (3 files: GanttView, GanttGrid, GanttToolbar)
+- Updated ViewMode type `'timeline'` → `'gantt'` in TopBar
+- Updated all imports in DashboardPage
+- Data entity "Timeline" (sidebar, API, hooks) untouched
+
+### Phase 8.1.2 — Gantt View Polish
+- New `EmptyState` component (`components/shared/EmptyState.tsx`) — draba icon (inline SVG, currentColor), message, optional description
+- Fixed empty state centering — renders outside scroll container via conditional rendering
+- **Zoom rethink**: replaced pixel-width slider with time granularity dropdown (Auto / Day / Week / Month / Quarter / Year)
+  - New `granularity.ts` utility: column generation, fractional event positioning, auto-fit algorithm, today position
+  - Auto-fit picks finest granularity that fills 50–100% of viewport
+  - Event bars use fractional startCol/span for sub-column positioning
+  - Fixed 80px column width for all granularities
+
+### Roadmap + search stub
+- Added Phase 8.4 (Persistent View Settings) and Phase 8.5 (Search with Highlight) specs to ROADMAP.md
+- Stubbed search input in TopBar (between filter and profile menu) — expands on focus, clear button, no highlight wiring yet
+
+---
+
 ## 2026-05-18 — /test-phase 8.1
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
