@@ -40,6 +40,9 @@ func (f *fakeTimelineStore) GetByShareToken(token string) (*models.Timeline, err
 func (f *fakeTimelineStore) HasAccess(timelineID, teamMemberID string) (bool, error) {
 	return f.real.HasAccess(timelineID, teamMemberID)
 }
+func (f *fakeTimelineStore) ListByTeam(teamID string) ([]*models.Timeline, error) {
+	return f.real.ListByTeam(teamID)
+}
 func (f *fakeTimelineStore) GrantAccess(timelineID, teamMemberID, role string) error {
 	if f.grantAccessErr != nil {
 		return f.grantAccessErr

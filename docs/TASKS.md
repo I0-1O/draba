@@ -59,11 +59,11 @@
 - [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
 
 ### Web — Timeline View (Phase 8.1: Shell & Rendering)
-- [ ] `TimelineView` component: person lanes (Y-axis), time grid (X-axis, day granularity), horizontal scroll
-- [ ] Pixel ↔ date math (map date range to X offset/width)
-- [ ] Event block: render title, color, icon, date range within lane
-- [ ] Wire to `GET /teams/:id/events?start=&end=` via TanStack Query
-- [ ] Wire to `GET /teams/:id/members` for lane rows
+- [x] `TimelineView` component: person lanes (Y-axis), time grid (X-axis, day granularity), horizontal scroll — 2026-05-18
+- [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
+- [x] Event block: render title, color, icon, date range within lane — 2026-05-18
+- [x] Wire to `GET /teams/:id/events?start=&end=` via TanStack Query — 2026-05-18
+- [x] Wire to `GET /teams/:id/members` for lane rows — 2026-05-18
 
 ### Web — Timeline View (Phase 8.2: Interactions)
 - [ ] Click event block → open `EventDetailPanel` (view mode)

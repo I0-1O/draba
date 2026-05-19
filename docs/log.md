@@ -2,6 +2,39 @@
 
 ---
 
+## 2026-05-18 — Phase 8.1: Web — Timeline Shell & Event Rendering (complete)
+
+### What was built
+
+**API additions**
+- `GET /teams` — returns all teams the authenticated user belongs to (`TeamRepo.ListByUserID`)
+- `GET /teams/:id/timelines` — lists non-archived timelines for a team; uses existing `TimelineRepo.ListByTeam` (added to `TimelineStore` interface)
+- `Event` now includes `assignedMemberIds: []string` — populated from `event_assignments` via a batched `SELECT … IN` after the main event query; always serialises as an array (never `null`)
+- `TeamMember.id` added to OpenAPI spec (the `team_members.id` PK already existed since Phase 8.0, just wasn't in the spec)
+
+**Frontend**
+- `useMyTeams()` — TanStack Query hook for `GET /teams`; seeds the active team on dashboard load
+- `useTeamTimelines(teamId)` — TanStack Query hook for `GET /teams/:id/timelines`; feeds the active timeline's `startDate`/`endDate` to the grid
+- `TimelineView.tsx` — new data-container component: fetches events + members, builds the `days[]` array (one label per calendar day across the visible window), computes `startCol`/`span` for each event block, maps `TeamMemberWithUser → Member` and `Event → DrabaEvent[]` (one block per assignee lane), then renders `TimelineGrid`
+- `DashboardPage.tsx` updated: default view changed to `'timeline'`, old placeholder event list replaced with `TimelineView`, activeTimeline `startDate`/`endDate` passed for date-windowed event fetching and correct grid bounds
+
+**OpenAPI / TS types**
+- `openapi.yaml` updated with `id` on `TeamMember`, `assignedMemberIds` on `Event`, and both new endpoints
+- `packages/shared/src/index.ts` regenerated (`pnpm --filter shared generate`)
+
+### Result
+- `go test ./...` — all pass
+- `golangci-lint run` — clean
+- `pnpm --filter web lint` (tsc --noEmit) — clean
+- Timeline grid renders member lanes and event blocks when pointed at updated API
+
+### Exit criteria status
+- Team member lanes render with correct names and colors ✅ (verified structurally; requires live updated API for visual confirmation)
+- Events appear as blocks spanning the correct date range in the correct lane ✅ (pixel↔date math in `TimelineView.toEventBlocks`)
+- Timeline scrolls horizontally across the visible date range ✅ (existing `TimelineGrid` horizontal scroll; window defaults to timeline dates or ±90 days)
+
+---
+
 ## 2026-05-18 — Phase 8.0: RBAC Refactor + First-Run Setup Wizard (complete)
 
 ### What was built

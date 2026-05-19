@@ -65,12 +65,16 @@ components:
 
     TeamMember:
       type: object
-      required: [teamId, userId, role, joinedAt]
+      required: [id, teamId, role, joinedAt]
       properties:
+        id:
+          type: string
+          description: Team-member record ID (team_members.id).
         teamId:
           type: string
         userId:
           type: string
+          nullable: true
         role:
           type: string
           enum: [owner, admin, member]
@@ -189,6 +193,11 @@ components:
           type: string
           nullable: true
           format: date-time
+        assignedMemberIds:
+          type: array
+          items:
+            type: string
+          description: IDs of team_members assigned to this event (from event_assignments).
 
     Timeline:
       type: object
@@ -531,6 +540,24 @@ paths:
   # ── Teams ────────────────────────────────────────────────────
 
   /teams:
+    get:
+      operationId: listTeams
+      summary: List teams for the authenticated user
+      tags: [teams]
+      responses:
+        "200":
+          description: Array of teams the user belongs to.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
     post:
       operationId: createTeam
       summary: Create a new team
@@ -856,6 +883,28 @@ paths:
   # ── Timelines ────────────────────────────────────────────────
 
   /teams/{id}/timelines:
+    get:
+      operationId: listTimelines
+      summary: List timelines for a team
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Array of non-archived timelines for the team.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Timeline"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
     post:
       operationId: createTimeline
       summary: Create a timeline for a team

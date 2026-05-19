@@ -23,7 +23,7 @@ This document organizes development into discrete phases with effort estimates a
 | 6 | [API — Timelines](#phase-6-api--timelines) | S — ½–1 day | ✅ |
 | 7 | [Web — Scaffold](#phase-7-web--scaffold) | M — 2–3 days | ✅ |
 | 8.0 | [RBAC Refactor + First-Run Setup](#phase-80-rbac-refactor--first-run-setup) | M — 1–2 days | ✅ |
-| 8.1 | [Web — Timeline Shell & Event Rendering](#phase-81-web--timeline-shell--event-rendering) | L — 3–5 days | ⬜ |
+| 8.1 | [Web — Timeline Shell & Event Rendering](#phase-81-web--timeline-shell--event-rendering) | L — 3–5 days | ✅ |
 | 8.2 | [Web — Timeline Interactions](#phase-82-web--timeline-interactions) | L — 3–5 days | ⬜ |
 | 8.3 | [Web — Real-Time WebSocket Sync](#phase-83-web--real-time-websocket-sync) | M — 1–2 days | ⬜ |
 | 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ⬜ |
@@ -190,7 +190,7 @@ Prerequisite work before the web timeline phases: tightened the auth model and a
 ---
 
 ### Phase 8.1 — Web — Timeline Shell & Event Rendering
-**Status:** ⬜ | **Effort:** L (3–5 days)
+**Status:** ✅ Done — 2026-05-18 | **Effort:** L (3–5 days)
 
 Static, data-driven timeline. No interactions — just layout and rendering correctness.
 

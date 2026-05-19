@@ -11,6 +11,30 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
+// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
+// list the non-archived timelines for a team.
+func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	timelines, err := s.timelines.ListByTeam(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timelines)
+}
+
 // handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
 // user must be a member of the team. The creator is automatically granted
 // timeline-admin access.

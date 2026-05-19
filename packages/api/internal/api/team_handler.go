@@ -16,6 +16,18 @@ import (
 // slugRe matches any run of characters that are not lowercase ASCII alphanumeric.
 var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
 
+// handleListTeams handles GET /teams. Returns all teams the authenticated
+// user belongs to.
+func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	teams, err := s.teams.ListByUserID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list teams")
+		return
+	}
+	writeJSON(w, http.StatusOK, teams)
+}
+
 // handleCreateTeam handles POST /teams. The authenticated user becomes the
 // team's first admin member.
 func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {

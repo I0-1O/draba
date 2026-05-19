@@ -100,7 +100,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** List teams for the authenticated user */
+        get: operations["listTeams"];
         put?: never;
         /**
          * Create a new team
@@ -219,7 +220,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** List timelines for a team */
+        get: operations["listTimelines"];
         put?: never;
         /**
          * Create a timeline for a team
@@ -333,8 +335,10 @@ export interface components {
             updatedAt: string;
         };
         TeamMember: {
+            /** @description Team-member record ID (team_members.id). */
+            id: string;
             teamId: string;
-            userId: string;
+            userId?: string | null;
             /** @enum {string} */
             role: "owner" | "admin" | "member";
             color?: string | null;
@@ -389,6 +393,8 @@ export interface components {
             updatedAt: string;
             /** Format: date-time */
             archivedAt?: string | null;
+            /** @description IDs of team_members assigned to this event (from event_assignments). */
+            assignedMemberIds?: string[];
         };
         Timeline: {
             id: string;
@@ -654,6 +660,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["User"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listTeams: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Array of teams the user belongs to. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Team"][];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -935,6 +963,32 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listTimelines: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Array of non-archived timelines for the team. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Timeline"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
         };
     };

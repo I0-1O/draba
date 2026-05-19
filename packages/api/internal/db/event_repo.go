@@ -90,7 +90,7 @@ func (r *EventRepo) Delete(id string) error {
 
 // ListByTeam returns non-archived events for a team. When from or to are
 // non-nil they bound the query: events whose start_at falls within [from, to]
-// inclusive are returned.
+// inclusive are returned. AssignedMemberIDs is populated via a second query.
 func (r *EventRepo) ListByTeam(teamID string, from, to *time.Time) ([]*models.Event, error) {
 	query := `SELECT * FROM events WHERE team_id = ? AND archived_at IS NULL`
 	args := []any{teamID}
@@ -105,9 +105,46 @@ func (r *EventRepo) ListByTeam(teamID string, from, to *time.Time) ([]*models.Ev
 	}
 	query += ` ORDER BY start_at ASC`
 
-	events := make([]*models.Event, 0)
-	if err := r.db.Select(&events, query, args...); err != nil {
+	evts := make([]*models.Event, 0)
+	if err := r.db.Select(&evts, query, args...); err != nil {
 		return nil, fmt.Errorf("listing events: %w", err)
 	}
-	return events, nil
+	if len(evts) == 0 {
+		return evts, nil
+	}
+
+	// Initialise AssignedMemberIDs to an empty slice so the JSON field is
+	// always an array (never null) even when an event has no assignments.
+	ids := make([]string, len(evts))
+	byID := make(map[string]*models.Event, len(evts))
+	for i, e := range evts {
+		e.AssignedMemberIDs = []string{}
+		ids[i] = e.ID
+		byID[e.ID] = e
+	}
+
+	asnQuery, asnArgs, err := sqlx.In(
+		`SELECT event_id, team_member_id FROM event_assignments WHERE event_id IN (?)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building assignments query: %w", err)
+	}
+	asnQuery = r.db.Rebind(asnQuery)
+
+	type assignment struct {
+		EventID      string `db:"event_id"`
+		TeamMemberID string `db:"team_member_id"`
+	}
+	var assignments []assignment
+	if err := r.db.Select(&assignments, asnQuery, asnArgs...); err != nil {
+		return nil, fmt.Errorf("listing event assignments: %w", err)
+	}
+	for _, a := range assignments {
+		if e, ok := byID[a.EventID]; ok {
+			e.AssignedMemberIDs = append(e.AssignedMemberIDs, a.TeamMemberID)
+		}
+	}
+
+	return evts, nil
 }

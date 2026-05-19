@@ -24,6 +24,7 @@ type TimelineStore interface {
 	Create(t *models.Timeline) error
 	GetByID(id string) (*models.Timeline, error)
 	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string) ([]*models.Timeline, error)
 	HasAccess(timelineID, teamMemberID string) (bool, error)
 	GrantAccess(timelineID, teamMemberID, role string) error
 }
@@ -81,6 +82,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
 	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
 
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
 	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
 	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
 	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
@@ -95,6 +97,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
 	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
 
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
 	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
 	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
 	// the more-specific literal "share" segment takes precedence.

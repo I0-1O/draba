@@ -97,6 +97,22 @@ func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, err
 	return members, nil
 }
 
+// ListByUserID returns all teams the given user belongs to, ordered by
+// creation date ascending.
+func (r *TeamRepo) ListByUserID(userID string) ([]*models.Team, error) {
+	teams := make([]*models.Team, 0)
+	err := r.db.Select(&teams, `
+		SELECT t.* FROM teams t
+		JOIN team_members tm ON tm.team_id = t.id
+		WHERE tm.user_id = ?
+		ORDER BY t.created_at ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("listing teams for user: %w", err)
+	}
+	return teams, nil
+}
+
 // Count returns the total number of teams.
 func (r *TeamRepo) Count() (int, error) {
 	var count int

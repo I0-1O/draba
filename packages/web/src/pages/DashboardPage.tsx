@@ -1,24 +1,21 @@
 /**
  * Main application shell: sidebar + top bar + content area.
  *
- * The team ID is hard-coded to a placeholder until team-selection UI is
- * implemented in a later phase. WebSocket subscribes to that team and
- * invalidates the events query on any event delta.
+ * Fetches the authenticated user's first team and first timeline to seed the
+ * initial view. Team-selection UI and full sidebar wiring come in a later phase.
  */
 
 import { useState, useRef, useEffect } from 'react'
 import Sidebar from '@/components/layout/Sidebar'
 import TopBar, { type ViewMode } from '@/components/layout/TopBar'
 import RightSidebar from '@/components/layout/RightSidebar'
+import TimelineView from '@/components/timeline/TimelineView'
 import { FilterProvider } from '@/contexts/FilterContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { useTeamEvents, useTeamMembers, useInvalidateTeamEvents } from '@/hooks/useTeamEvents'
+import { useMyTeams, useTeamTimelines, useInvalidateTeamEvents } from '@/hooks/useTeamEvents'
 import { useWebSocket } from '@/hooks/useWebSocket'
-
-// Placeholder — replaced when team-selection is wired in a future phase.
-const PLACEHOLDER_TEAM_ID = ''
 
 const DROPDOWN_BTN: React.CSSProperties = {
   display: 'flex',
@@ -39,8 +36,9 @@ function DashboardShell() {
   const { logout, accessToken, user } = useAuth()
   const { isDark, toggle: toggleDark } = useDarkMode()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('list')
+  const [view, setView] = useState<ViewMode>('timeline')
   const [profileOpen, setProfileOpen] = useState(false)
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
   const [activeTimelineColor, setActiveTimelineColor] = useState('#1A97A2')
   const [filterEditorOpen, setFilterEditorOpen] = useState(false)
   const profileRef = useRef<HTMLDivElement>(null)
@@ -55,8 +53,8 @@ function DashboardShell() {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
-  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'Lindsay K.'
-  const email = (user as { email?: string } | null)?.email ?? 'lk@acme.com'
+  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
+  const email = (user as { email?: string } | null)?.email ?? ''
   const initials = displayName
     .split(' ')
     .map((n: string) => n[0])
@@ -64,10 +62,14 @@ function DashboardShell() {
     .join('')
     .toUpperCase()
 
-  const teamId = PLACEHOLDER_TEAM_ID
+  // Use the first team and timeline the user belongs to.
+  // Full team-selection UI comes in a later phase.
+  const { data: teams = [] } = useMyTeams()
+  const teamId = teams[0]?.id ?? ''
 
-  const { data: events = [], isLoading: eventsLoading } = useTeamEvents(teamId)
-  const { data: members = [] } = useTeamMembers(teamId)
+  const { data: timelines = [] } = useTeamTimelines(teamId)
+  const activeTimeline = timelines[0]
+
   const invalidateEvents = useInvalidateTeamEvents(teamId)
 
   useWebSocket({
@@ -173,39 +175,25 @@ function DashboardShell() {
         <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
 
         {/* Content area */}
-        <div style={{ flex: 1, overflow: 'auto', padding: 24 }}>
-          {eventsLoading ? (
-            <p style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading events…</p>
-          ) : events.length === 0 && teamId === '' ? (
-            <div style={{ textAlign: 'center', paddingTop: 80 }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
-                No team selected. The timeline view will be wired up in Phase 8.
-              </p>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 13, marginTop: 8 }}>
-                {members.length > 0 ? `${members.length} member(s) loaded.` : ''}
-              </p>
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {view === 'timeline' && teamId ? (
+            <TimelineView
+              teamId={teamId}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              selectedEventId={selectedEventId}
+              onSelectEvent={setSelectedEventId}
+            />
+          ) : view === 'timeline' && !teamId ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
             </div>
           ) : (
-            <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {events.map(ev => (
-                <li
-                  key={ev.id}
-                  style={{
-                    padding: '10px 14px',
-                    background: 'var(--card)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-md)',
-                    fontSize: 13,
-                    color: 'var(--foreground)',
-                  }}
-                >
-                  <strong>{ev.title}</strong>{' '}
-                  <span style={{ color: 'var(--muted-foreground)' }}>
-                    {ev.startAt.slice(0, 10)} → {ev.endAt.slice(0, 10)}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
+                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
+              </p>
+            </div>
           )}
         </div>
       </div>
