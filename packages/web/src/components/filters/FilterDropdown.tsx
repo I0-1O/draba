@@ -55,6 +55,11 @@ function activeLabel(active: ActiveFilter, members: { userId: string; displayNam
   return saved.find(s => s.id === active.id)?.name ?? 'Saved'
 }
 
+/** Narrow TeamMemberWithUser to only those with a real user account (not Participants). */
+function hasUserId<T extends { userId?: string | null }>(m: T): m is T & { userId: string } {
+  return typeof m.userId === 'string' && m.userId.length > 0
+}
+
 export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
   const { activeFilter, setActiveFilter } = useFilter()
   const { user } = useAuth()
@@ -72,7 +77,9 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
     return () => document.removeEventListener('mousedown', onDown)
   }, [])
 
-  const label = activeLabel(activeFilter, members, saved)
+  // Participants have no userId; omit them from the per-member filter list.
+  const membersWithUser = members.filter(hasUserId)
+  const label = activeLabel(activeFilter, membersWithUser, saved)
   const currentUserId = (user as { id?: string } | null)?.id ?? ''
 
   function select(f: ActiveFilter) {
@@ -151,11 +158,11 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
             )
           })}
 
-          {members.length > 0 && (
+          {membersWithUser.length > 0 && (
             <>
               <div style={{ borderTop: '1px solid var(--border)', marginTop: 4 }} />
               <div style={SECTION_HEADER}>Members</div>
-              {members.map(m => {
+              {membersWithUser.map(m => {
                 const f: ActiveFilter = { kind: 'member', userId: m.userId }
                 const label = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName
                 return (
