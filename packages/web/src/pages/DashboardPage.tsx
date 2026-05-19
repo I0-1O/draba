@@ -10,7 +10,7 @@ import Sidebar from '@/components/layout/Sidebar'
 import TopBar, { type ViewMode } from '@/components/layout/TopBar'
 import RightSidebar from '@/components/layout/RightSidebar'
 import GanttView from '@/components/gantt/GanttView'
-import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity } from '@/components/gantt/GanttToolbar'
+import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
 import { FilterProvider } from '@/contexts/FilterContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
@@ -47,6 +47,7 @@ function DashboardShell() {
   const [groupBy, setGroupBy] = useState<GroupBy>('none')
   const [sortBy, setSortBy] = useState<SortBy>('startDate')
   const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
+  const [colorBy, setColorBy] = useState<ColorBy>('event')
   const profileRef = useRef<HTMLDivElement>(null)
 
 
@@ -71,14 +72,11 @@ function DashboardShell() {
 
   // Use the first team and timeline the user belongs to.
   // Full team-selection UI comes in a later phase.
-  const { data: teams = [], isLoading: loadingTeams } = useMyTeams()
+  const { data: teams = [] } = useMyTeams()
   const teamId = teams[0]?.id ?? ''
 
-  const { data: timelines = [], isLoading: loadingTimelines } = useTeamTimelines(teamId)
+  const { data: timelines = [] } = useTeamTimelines(teamId)
   const activeTimeline = timelines[0]
-
-  const isLoading = loadingTeams || loadingTimelines
-  const displayNameToUse = activeTimelineName
 
   const invalidateEvents = useInvalidateTeamEvents(teamId)
 
@@ -105,7 +103,7 @@ function DashboardShell() {
         <TopBar
           view={view}
           teamId={teamId}
-          timelineName={displayNameToUse}
+          timelineName={activeTimelineName}
           onViewChange={setView}
           onOpenFilterEditor={() => setFilterEditorOpen(true)}
           rightSlot={
@@ -194,6 +192,8 @@ function DashboardShell() {
             onSortByChange={setSortBy}
             granularity={granularity}
             onGranularityChange={setGranularity}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
             onExport={() => {}}
             onShare={() => {}}
           />
@@ -209,6 +209,7 @@ function DashboardShell() {
               groupBy={groupBy}
               sortBy={sortBy}
               granularity={granularity}
+              colorBy={colorBy}
               selectedEventId={selectedEventId}
               onSelectEvent={setSelectedEventId}
             />

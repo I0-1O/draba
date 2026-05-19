@@ -11,7 +11,7 @@ import GanttGrid, { type GanttEvent, type GanttRow } from './GanttGrid';
 import { useTeamEvents, useTeamMembers } from '@/hooks/useTeamEvents';
 import type { components } from '@draba/shared';
 import { type Member, EVENT_COLORS, MEMBER_COLORS } from '@/types';
-import type { GroupBy, SortBy, TimeGranularity } from './GanttToolbar';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
 import {
   generateColumns,
   positionInColumns,
@@ -32,8 +32,21 @@ interface Props {
   groupBy: GroupBy;
   sortBy: SortBy;
   granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
   selectedEventId?: string | null;
   onSelectEvent?: (id: string | null) => void;
+}
+
+/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
+function statusColorFromId(statusId: string | null | undefined): string {
+  if (!statusId) return '#6b7280';
+  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
+  let h = 0;
+  for (let i = 0; i < statusId.length; i++) {
+    h = statusId.charCodeAt(i) + ((h << 5) - h);
+    h |= 0;
+  }
+  return palette[Math.abs(h) % palette.length];
 }
 
 // ── Date helpers ────────────────────────────────────────────────────────────
@@ -85,6 +98,7 @@ function toRichEvent(
   viewStart: Date,
   viewEnd: Date,
   columns: ColumnDef[],
+  colorBy: ColorBy,
 ): RichEvent | null {
   const evStart = new Date(toDateOnly(ev.startAt));
   const evEnd = new Date(toDateOnly(ev.endAt));
@@ -95,9 +109,13 @@ function toRichEvent(
   const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
 
   const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const color = ev.color ?? EVENT_COLORS[index % EVENT_COLORS.length];
   const assignedIds = ev.assignedMemberIds ?? [];
   const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? EVENT_COLORS[index % EVENT_COLORS.length]) :
+    colorBy === 'status' ? statusColorFromId((ev as ApiEvent & { statusId?: string | null }).statusId) :
+    /* event */ (ev.color ?? EVENT_COLORS[index % EVENT_COLORS.length]);
 
   return {
     id: ev.id,
@@ -199,6 +217,7 @@ export default function GanttView({
   groupBy,
   sortBy,
   granularity,
+  colorBy,
   selectedEventId = null,
   onSelectEvent = () => {},
 }: Props) {
@@ -268,11 +287,11 @@ export default function GanttView({
 
   const rows: GanttRow[] = useMemo(() => {
     const richEvents = apiEvents
-      .map((ev, i) => toRichEvent(ev, i, memberById, viewStart, viewEnd, columns))
+      .map((ev, i) => toRichEvent(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
       .filter((e): e is RichEvent => e !== null);
     return buildRows(richEvents, members, groupBy, sortBy);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiEvents, members, memberById, groupBy, sortBy, viewStart, viewEnd, columns]);
+  }, [apiEvents, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
 
   if (isLoading) {
     return (
@@ -283,7 +302,7 @@ export default function GanttView({
   }
 
   return (
-    <div ref={containerRef} className="h-full">
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
       <GanttGrid
         rows={rows}
         columns={columns}

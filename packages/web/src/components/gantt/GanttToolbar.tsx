@@ -11,6 +11,7 @@ import { cn } from '@/lib/utils';
 export type { TimeGranularity } from './granularity';
 export type GroupBy = 'none' | 'member' | 'parent';
 export type SortBy = 'startDate' | 'endDate' | 'title';
+export type ColorBy = 'event' | 'member' | 'status';
 
 interface Props {
   groupBy: GroupBy;
@@ -19,6 +20,8 @@ interface Props {
   onSortByChange: (s: SortBy) => void;
   granularity: TimeGranularity | 'auto';
   onGranularityChange: (g: TimeGranularity | 'auto') => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
   onExport: () => void;
   onShare?: () => void;
 }
@@ -35,6 +38,8 @@ export default function GanttToolbar({
   onSortByChange,
   granularity,
   onGranularityChange,
+  colorBy,
+  onColorByChange,
   onExport,
   onShare,
 }: Props) {
@@ -175,6 +180,20 @@ export default function GanttToolbar({
         <option value="startDate">Start date</option>
         <option value="endDate">End date</option>
         <option value="title">Title A–Z</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="event">Event</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
       </select>
 
       <div className="flex-1" />

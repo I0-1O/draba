@@ -54,91 +54,117 @@ export default function GanttGrid({
   // Integer column index that contains today (for background highlight)
   const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
 
-  return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-      {/* ── Sticky header ─────────────────────────────────────────────── */}
-      <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
-        <div
-          style={{
-            width: totalW,
-            display: 'flex',
-            height: HEADER_H,
-            borderBottom: '1px solid var(--border)',
-            background: 'var(--card)',
-            position: 'sticky',
-            top: 0,
-            zIndex: 5,
-          }}
-        >
-          <div
-            style={{
-              width: LABEL_COL_W,
-              flexShrink: 0,
-              padding: '0 16px',
-              display: 'flex',
-              alignItems: 'center',
-              borderRight: '1px solid var(--border)',
-              fontSize: 11,
-              fontWeight: 600,
-              color: 'var(--muted-foreground)',
-              textTransform: 'uppercase',
-              letterSpacing: '0.06em',
-            }}
-          >
-            Event
-          </div>
-
-          {columns.map((col, i) => {
-            const isToday = i === todayCol;
-            return (
-              <div
-                key={i}
-                style={{
-                  width: COL_W,
-                  flexShrink: 0,
-                  height: HEADER_H,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: 11,
-                  fontWeight: isToday ? 700 : 600,
-                  color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
-                  borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-                  position: 'relative',
-                }}
-              >
-                {col.label}
-                {isToday && (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      bottom: 0,
-                      left: `${((todayIndex - todayCol) * 100)}%`,
-                      transform: 'translateX(-50%)',
-                      width: 6,
-                      height: 6,
-                      borderRadius: '50%',
-                      background: 'var(--secondary)',
-                    }}
-                  />
-                )}
-              </div>
-            );
-          })}
-        </div>
+  // Header cells are shared between the empty-state path and the unified scroll path.
+  const headerContent = (
+    <>
+      <div
+        style={{
+          width: LABEL_COL_W,
+          flexShrink: 0,
+          padding: '0 16px',
+          display: 'flex',
+          alignItems: 'center',
+          borderRight: '1px solid var(--border)',
+          fontSize: 11,
+          fontWeight: 600,
+          color: 'var(--muted-foreground)',
+          textTransform: 'uppercase' as const,
+          letterSpacing: '0.06em',
+          position: 'sticky' as const,
+          left: 0,
+          zIndex: 6,
+          background: 'var(--card)',
+        }}
+      >
+        Event
       </div>
 
-      {/* ── Empty state (outside scroll container so it stays centered) ── */}
-      {rows.length === 0 ? (
+      {columns.map((col, i) => {
+        const isToday = i === todayCol;
+        return (
+          <div
+            key={i}
+            style={{
+              width: COL_W,
+              flexShrink: 0,
+              height: HEADER_H,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '0 4px 8px',
+              gap: 2,
+              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+              position: 'relative',
+              overflow: 'hidden',
+            }}
+          >
+            <span style={{
+              fontSize: col.sublabel ? 10 : 11,
+              fontWeight: isToday ? 700 : 600,
+              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
+              lineHeight: 1.2,
+              textAlign: 'center',
+            }}>
+              {col.label}
+            </span>
+            {col.sublabel && (
+              <span style={{
+                fontSize: 9,
+                fontWeight: 500,
+                color: 'var(--muted-foreground)',
+                lineHeight: 1,
+                opacity: isToday ? 1 : 0.75,
+              }}>
+                {col.sublabel}
+              </span>
+            )}
+            {isToday && (
+              <div
+                style={{
+                  position: 'absolute',
+                  bottom: 2,
+                  left: `${((todayIndex - todayCol) * 100)}%`,
+                  transform: 'translateX(-50%)',
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: 'var(--secondary)',
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+
+  // ── Empty state: header + centered placeholder ──────────────────────────────
+  if (rows.length === 0) {
+    return (
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
+          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+        </div>
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <EmptyState message="No viewable events" />
         </div>
-      ) : (
+      </div>
+    );
+  }
 
-      /* ── Scrollable body ────────────────────────────────────────────── */
-      <div style={{ flex: 1, overflowY: 'auto', overflowX: 'auto' }}>
+  // ── Unified scroll: header sticky inside the single container ──────────────
+  return (
+    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flex: 1, overflow: 'auto' }}>
         <div style={{ width: totalW }}>
+
+          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
+          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
 
           {rows.map((row, rowIdx) => {
             if (row.kind === 'group') {
@@ -361,7 +387,6 @@ export default function GanttGrid({
 
         </div>
       </div>
-      )}
     </div>
   );
 }

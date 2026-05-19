@@ -9,6 +9,8 @@ export type TimeGranularity = 'day' | 'week' | 'month' | 'quarter' | 'year';
 
 export interface ColumnDef {
   label: string;
+  /** Secondary label rendered on a second line (used for week numbers). */
+  sublabel?: string;
   start: Date;
   end: Date;
   /** Calendar days this column spans (varies for months, quarters, years). */
@@ -82,6 +84,17 @@ function periodStart(d: Date, gran: TimeGranularity): Date {
 
 // ── Label formatting ────────────────────────────────────────────────────────
 
+/** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
+function isoWeekNumber(d: Date): number {
+  const date = new Date(d);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
+  const week1 = new Date(date.getFullYear(), 0, 4);
+  return 1 + Math.round(
+    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getDay() + 6) % 7)) / 7,
+  );
+}
+
 function formatLabel(start: Date, gran: TimeGranularity): string {
   switch (gran) {
     case 'day':
@@ -123,6 +136,7 @@ export function generateColumns(
     const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
     columns.push({
       label: formatLabel(cur, granularity),
+      sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
       start: cur,
       end: next,
       days: daysBetween(colStart, colEnd),
