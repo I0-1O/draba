@@ -22,6 +22,7 @@ interface Props {
   collapsed: boolean;
   onToggle: () => void;
   onActiveColorChange?: (color: string) => void;
+  onActiveNameChange?: (name: string) => void;
 }
 
 const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
@@ -218,7 +219,7 @@ function ConnectorItem({ name, status, color }: { name: string; status: string; 
  * Left navigation rail: brand, team selector with members, and timeline list.
  * Collapsed/expanded state is driven by the parent.
  */
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Props) {
+export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange }: Props) {
   const [activeId, setActiveId] = useState(DEMO_TIMELINES[0].id);
   const [teamOpen, setTeamOpen] = useState(true);
   const [eventOpen, setEventOpen] = useState(true);
@@ -585,7 +586,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
                   timeline={tl}
                   active={activeId === tl.id}
                   collapsed={false}
-                  onClick={() => { setActiveId(tl.id); onActiveColorChange?.(tl.color); }}
+                  onClick={() => { setActiveId(tl.id); onActiveColorChange?.(tl.color); onActiveNameChange?.(tl.name); }}
                   onSettings={() => {}}
                 />
               ))}

@@ -4,7 +4,7 @@
  * export stub.
  */
 
-import { Download, Share2 } from 'lucide-react';
+import { Download, Share2, Plus, Minus } from 'lucide-react';
 import type { TimeGranularity } from './granularity';
 
 export type { TimeGranularity } from './granularity';
@@ -77,6 +77,16 @@ export default function GanttToolbar({
   onExport,
   onShare,
 }: Props) {
+  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
+  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
+  const currentIndex = granularityMap.indexOf(granularity as any) !== -1 ? granularityMap.indexOf(granularity as any) : 0;
+  const currentLabel = granularityLabels[currentIndex];
+
+  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseInt(e.target.value, 10);
+    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
+  };
+
   return (
     <div
       style={{
@@ -91,19 +101,104 @@ export default function GanttToolbar({
       }}
     >
       {/* Zoom (granularity) */}
-      <span style={LABEL}>Zoom</span>
-      <select
-        style={SELECT}
-        value={granularity}
-        onChange={e => onGranularityChange(e.target.value as TimeGranularity | 'auto')}
-      >
-        <option value="auto">Auto</option>
-        <option value="day">Day</option>
-        <option value="week">Week</option>
-        <option value="month">Month</option>
-        <option value="quarter">Quarter</option>
-        <option value="year">Year</option>
-      </select>
+      <style>{`
+        .gantt-zoom-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          background: transparent;
+        }
+        .gantt-zoom-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          margin-top: -4px;
+        }
+        .gantt-zoom-slider::-moz-range-thumb {
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          border: none;
+        }
+        .gantt-zoom-slider::-webkit-slider-runnable-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+        .gantt-zoom-slider::-moz-range-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+      `}</style>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, height: 26 }}>
+        <button
+          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto') }}
+          style={{ ...CTRL_BTN, padding: '0 2px', height: 22, border: 'none', background: 'transparent', color: currentIndex > 0 ? 'var(--foreground)' : 'var(--muted-foreground)', cursor: currentIndex > 0 ? 'pointer' : 'default' }}
+          disabled={currentIndex === 0}
+          title="Zoom out"
+        >
+          <Minus size={14} />
+        </button>
+
+        <div style={{ position: 'relative', width: 80, height: 26, display: 'flex', alignItems: 'center' }}>
+          <div style={{ position: 'absolute', left: 5, right: 5, top: 0, bottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center', pointerEvents: 'none' }}>
+            {[0,1,2,3,4,5].map(i => (
+              <div key={i} style={{ width: 2, height: 6, background: 'var(--border)', borderRadius: 1 }} />
+            ))}
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="5"
+            step="1"
+            value={currentIndex}
+            onChange={handleSliderChange}
+            className="gantt-zoom-slider"
+            style={{ width: '100%', cursor: 'pointer', margin: 0, position: 'relative', zIndex: 1 }}
+            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          />
+        </div>
+
+        <button
+          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto') }}
+          style={{ ...CTRL_BTN, padding: '0 2px', height: 22, border: 'none', background: 'transparent', color: currentIndex < 5 ? 'var(--foreground)' : 'var(--muted-foreground)', cursor: currentIndex < 5 ? 'pointer' : 'default' }}
+          disabled={currentIndex === 5}
+          title="Zoom in"
+        >
+          <Plus size={14} />
+        </button>
+
+        <div
+          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 22,
+            height: 22,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)',
+            fontSize: 12,
+            fontWeight: currentLabel === 'A' ? 700 : 500,
+            color: currentLabel === 'A' ? 'var(--primary)' : 'var(--muted-foreground)',
+            fontFamily: 'var(--font-mono)',
+            userSelect: 'none'
+          }}
+        >
+          {currentLabel}
+        </div>
+      </div>
 
       <div style={DIVIDER} />
 

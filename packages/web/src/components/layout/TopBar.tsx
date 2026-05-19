@@ -17,6 +17,7 @@ export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
 interface Props {
   view: ViewMode;
   teamId?: string;
+  timelineName?: string;
   onViewChange: (view: ViewMode) => void;
   onOpenFilterEditor: () => void;
   rightSlot?: React.ReactNode;
@@ -102,6 +103,7 @@ function SearchInput() {
 export default function TopBar({
   view,
   teamId,
+  timelineName,
   onViewChange,
   onOpenFilterEditor,
   rightSlot,
@@ -111,7 +113,7 @@ export default function TopBar({
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 6,
+        justifyContent: 'space-between',
         padding: '0 12px',
         height: 'var(--topbar-h)',
         background: 'var(--card)',
@@ -120,48 +122,71 @@ export default function TopBar({
         zIndex: 10,
       }}
     >
-      {/* Left: view switcher */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 1,
-        background: 'var(--muted)',
-        borderRadius: 'var(--radius-md)',
-        padding: 2,
-        flexShrink: 0,
-      }}>
-        {VIEWS.map(v => (
-          <button
-            key={v.id}
-            onClick={() => onViewChange(v.id)}
-            style={{
-              ...BTN_BASE,
-              gap: 5,
-              fontSize: 12,
-              fontWeight: 600,
-              padding: '4px 10px',
-              borderRadius: 5,
-              background: view === v.id ? 'var(--card)' : 'transparent',
-              color: view === v.id ? 'var(--foreground)' : 'var(--muted-foreground)',
-              boxShadow: view === v.id ? 'var(--shadow-sm)' : 'none',
-            }}
-          >
-            {v.icon}
-            {v.label}
-          </button>
-        ))}
+      {/* Left zone: view switcher */}
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'flex-start', minWidth: 0 }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1,
+          background: 'var(--muted)',
+          borderRadius: 'var(--radius-md)',
+          padding: 2,
+          flexShrink: 0,
+        }}>
+          {VIEWS.map(v => (
+            <button
+              key={v.id}
+              onClick={() => onViewChange(v.id)}
+              style={{
+                ...BTN_BASE,
+                gap: 5,
+                fontSize: 12,
+                fontWeight: 600,
+                padding: '4px 10px',
+                borderRadius: 5,
+                background: view === v.id ? 'var(--card)' : 'transparent',
+                color: view === v.id ? 'var(--foreground)' : 'var(--muted-foreground)',
+                boxShadow: view === v.id ? 'var(--shadow-sm)' : 'none',
+              }}
+            >
+              {v.icon}
+              {v.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      <div style={{ flex: 1 }} />
+      {/* Center zone: Timeline Name */}
+      <div
+        title={timelineName}
+        style={{
+          flexShrink: 1,
+          fontSize: 12,
+          fontWeight: 500,
+          color: 'var(--muted-foreground)',
+          fontFamily: 'var(--font-sans)',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          padding: '0 12px',
+          textAlign: 'center',
+          userSelect: 'none',
+        }}
+      >
+        {timelineName}
+      </div>
 
-      {/* Search stub — highlight wiring in Phase 8.5 */}
-      <SearchInput />
+      {/* Right zone: Global actions */}
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6, minWidth: 0 }}>
+        {/* Search stub — highlight wiring in Phase 8.5 */}
+        <SearchInput />
 
-      {/* Filter dropdown */}
-      <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
+        {/* Filter dropdown */}
+        <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
 
-      {/* Profile avatar — injected by parent */}
-      {rightSlot}
+        {/* Profile avatar — injected by parent */}
+        {rightSlot}
+      </div>
     </div>
   );
 }

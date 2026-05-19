@@ -41,6 +41,7 @@ function DashboardShell() {
   const [profileOpen, setProfileOpen] = useState(false)
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
   const [activeTimelineColor, setActiveTimelineColor] = useState('#1A97A2')
+  const [activeTimelineName, setActiveTimelineName] = useState('Q1 2027 Roadmap')
   const [filterEditorOpen, setFilterEditorOpen] = useState(false)
   // Gantt toolbar state
   const [groupBy, setGroupBy] = useState<GroupBy>('none')
@@ -70,11 +71,14 @@ function DashboardShell() {
 
   // Use the first team and timeline the user belongs to.
   // Full team-selection UI comes in a later phase.
-  const { data: teams = [] } = useMyTeams()
+  const { data: teams = [], isLoading: loadingTeams } = useMyTeams()
   const teamId = teams[0]?.id ?? ''
 
-  const { data: timelines = [] } = useTeamTimelines(teamId)
+  const { data: timelines = [], isLoading: loadingTimelines } = useTeamTimelines(teamId)
   const activeTimeline = timelines[0]
+
+  const isLoading = loadingTeams || loadingTimelines
+  const displayNameToUse = activeTimelineName
 
   const invalidateEvents = useInvalidateTeamEvents(teamId)
 
@@ -94,12 +98,14 @@ function DashboardShell() {
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(c => !c)}
         onActiveColorChange={setActiveTimelineColor}
+        onActiveNameChange={setActiveTimelineName}
       />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
         <TopBar
           view={view}
           teamId={teamId}
+          timelineName={displayNameToUse}
           onViewChange={setView}
           onOpenFilterEditor={() => setFilterEditorOpen(true)}
           rightSlot={
