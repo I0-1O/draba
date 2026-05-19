@@ -60,15 +60,23 @@ Timelines are named viewing windows — a name and a date range — scoped to a 
 - [ ] Timelines can be archived (removed from active list but preserved; recoverable)
 
 ### Timeline Views
-The primary view is the horizontal timeline. Additional views display the same underlying events in different formats.
+The primary view is a Gantt chart. Additional views display the same underlying events in different formats.
 
-- [ ] **Timeline view** (primary) — horizontal, grouped by person; see `docs/design/UX_PATTERNS.md`
+- [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per event, bars span their date range; see `docs/design/UX_PATTERNS.md`
+  - A **timeline sub-toolbar** sits between the top bar and the grid. It provides:
+    - **Zoom** — variable column width (day granularity, zoom in/out)
+    - **Group by** — controls how event rows are organized:
+      - _None_ — flat list, sorted by the active sort key
+      - _Member_ — one labeled section per assigned team member; events with multiple assignees appear under their primary assignee
+      - _Parent event_ — root events shown first; child events (those with `parentEventId` set) indented beneath their parent
+    - **Sort by** — Start date (default), End date, Title A–Z
+    - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
 - [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
 - [ ] **List view** — simple chronological or grouped list of events
 - [ ] **Kanban view** — read-only; columns = statuses (in the team's configured status order); cards = events, color-coded by assigned person(s); multiple assignees shown as stacked color indicators. This is a viewing mode only — dragging cards to change status is out of scope for v1.
 - [ ] View switcher in the timeline header to toggle between available views
 
-> **Scope note:** Gantt view overlaps significantly with the timeline view and adds dependency complexity — parking lot. Kanban is intentionally read-only in v1; drag-to-change-status is a later addition once the status model is proven.
+> **Note:** Kanban is intentionally read-only in v1; drag-to-change-status is a later addition once the status model is proven.
 
 ### Team Configuration
 Admins can customize team-level settings that apply to all members and views.
@@ -146,7 +154,7 @@ Admins can customize team-level settings that apply to all members and views.
 ## Out of Scope (v1)
 - Microsoft / Outlook / Exchange calendar sync
 - Kanban drag-to-change-status (Kanban is in v1 as a read-only view; interactive status changes via drag are v2)
-- Gantt view with dependencies (overlaps with timeline view; adds dependency complexity)
+- Gantt dependency arrows / critical-path visualization (parent–child grouping is in scope; visual dependency arrows are not)
 - Time tracking or billable hours
 - Task dependencies or critical path
 - Workload balancing or capacity planning

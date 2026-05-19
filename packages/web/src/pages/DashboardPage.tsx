@@ -10,6 +10,7 @@ import Sidebar from '@/components/layout/Sidebar'
 import TopBar, { type ViewMode } from '@/components/layout/TopBar'
 import RightSidebar from '@/components/layout/RightSidebar'
 import TimelineView from '@/components/timeline/TimelineView'
+import TimelineToolbar, { type GroupBy, type SortBy, COL_WIDTHS, type ColWidth } from '@/components/timeline/TimelineToolbar'
 import { FilterProvider } from '@/contexts/FilterContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
@@ -41,7 +42,12 @@ function DashboardShell() {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
   const [activeTimelineColor, setActiveTimelineColor] = useState('#1A97A2')
   const [filterEditorOpen, setFilterEditorOpen] = useState(false)
+  // Timeline toolbar state
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
+  const [sortBy, setSortBy] = useState<SortBy>('startDate')
+  const [colWidth, setColWidth] = useState<ColWidth>(80)
   const profileRef = useRef<HTMLDivElement>(null)
+
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -174,6 +180,19 @@ function DashboardShell() {
         {/* Active timeline color band */}
         <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
 
+        {/* Timeline sub-toolbar — only shown in timeline view */}
+        {view === 'timeline' && (
+          <TimelineToolbar
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            colWidth={colWidth}
+            onZoomChange={setColWidth}
+            onExport={() => {}}
+          />
+        )}
+
         {/* Content area */}
         <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           {view === 'timeline' && teamId ? (
@@ -181,6 +200,9 @@ function DashboardShell() {
               teamId={teamId}
               startDate={activeTimeline?.startDate}
               endDate={activeTimeline?.endDate}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              colWidth={colWidth}
               selectedEventId={selectedEventId}
               onSelectEvent={setSelectedEventId}
             />

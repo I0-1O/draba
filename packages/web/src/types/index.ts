@@ -1,14 +1,9 @@
 /**
  * Local UI types and design-token palettes.
  *
- * These are placeholders used while the frontend is built against mocks.
- * Once the API client is wired up, the wire-format types will come from
- * the generated definitions in `packages/shared/` (see web/CLAUDE.md);
- * the view-only fields (e.g. `startCol`, `span`) will stay here.
+ * Wire-format API types come from generated definitions in `packages/shared/`.
+ * Only view-state types (computed from API data) live here.
  */
-
-/** Lifecycle of a single event on the timeline. */
-export type EventStatus = 'planned' | 'in-progress' | 'done';
 
 /** A person who can be assigned to events on a timeline. */
 export interface Member {
@@ -16,29 +11,6 @@ export interface Member {
   name: string;
   initials: string;
   color: string;
-}
-
-/**
- * A scheduled chunk of work shown as a block on the timeline.
- *
- * `startCol` and `span` are derived view-state, not stored on the server —
- * they're recomputed by the parent whenever the visible date range changes.
- */
-export interface DrabaEvent {
-  id: string;
-  title: string;
-  memberId: string;
-  /** ISO date string, e.g. "2026-04-28" */
-  startDate: string;
-  /** ISO date string, e.g. "2026-05-05" */
-  endDate: string;
-  /** Column index within the visible date range — computed by the parent */
-  startCol: number;
-  /** Number of columns this event spans — computed by the parent */
-  span: number;
-  color: string;
-  status: EventStatus;
-  notes?: string;
 }
 
 /** Member-avatar palette — references CSS custom properties from index.css. */
@@ -69,7 +41,26 @@ export const EVENT_COLORS: string[] = [
   '#8BC34A',
 ];
 
-/** Human-readable label for each EventStatus. */
+// ── Legacy types — kept for EventPanel until Phase 8.2 rewrites it ──────────
+
+/** @deprecated Phase 8.2 will replace this with the API Event type. */
+export type EventStatus = 'planned' | 'in-progress' | 'done';
+
+/** @deprecated Phase 8.2 will replace this with the API Event type. */
+export interface DrabaEvent {
+  id: string;
+  title: string;
+  memberId: string;
+  startDate: string;
+  endDate: string;
+  startCol: number;
+  span: number;
+  color: string;
+  status: EventStatus;
+  notes?: string;
+}
+
+/** @deprecated Phase 8.2 will replace this with resolved team_statuses labels. */
 export const STATUS_LABELS: Record<EventStatus, string> = {
   'planned':     'Planned',
   'in-progress': 'In progress',

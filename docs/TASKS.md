@@ -58,12 +58,19 @@
 - [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
 - [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
 
-### Web — Timeline View (Phase 8.1: Shell & Rendering)
-- [x] `TimelineView` component: person lanes (Y-axis), time grid (X-axis, day granularity), horizontal scroll — 2026-05-18
+### Web — Timeline View (Phase 8.1: Shell & Rendering — Gantt pivot)
+- [x] API: `GET /teams`, `GET /teams/:id/timelines`, `assignedMemberIds[]` on Event — 2026-05-18
+- [x] `TimelineView` + `TimelineGrid` (person-lane prototype, later pivoted) — 2026-05-18
 - [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
-- [x] Event block: render title, color, icon, date range within lane — 2026-05-18
-- [x] Wire to `GET /teams/:id/events?start=&end=` via TanStack Query — 2026-05-18
-- [x] Wire to `GET /teams/:id/members` for lane rows — 2026-05-18
+- [x] Wire to `GET /teams/:id/events?start=&end=` and `GET /teams/:id/members` — 2026-05-18
+- [x] `TimelineGrid` rewrite: Gantt layout — one row per event, sticky label col, member avatars — 2026-05-18
+- [x] `TimelineToolbar` component: zoom in/out, group-by, sort-by, export stub — 2026-05-18
+- [x] `TimelineView` update: build `GanttRow[]` with grouping + sorting logic — 2026-05-18
+- [x] Group by Member: section headers per assignee, events under primary assignee — 2026-05-18
+- [x] Group by Parent: root events first, children indented below their parent — 2026-05-18
+- [x] Sort by: start date, end date, title A–Z — 2026-05-18
+- [x] Zoom: variable `colWidth` stepped through [40, 60, 80, 120, 160] px/day — 2026-05-18
+- [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
 
 ### Web — Timeline View (Phase 8.2: Interactions)
 - [ ] Click event block → open `EventDetailPanel` (view mode)

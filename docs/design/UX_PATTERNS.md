@@ -7,36 +7,58 @@ Everything in the UI should reinforce the **Person + Time Range + Work** model. 
 
 ---
 
-## Primary View: Horizontal Timeline
+## Primary View: Gantt Chart
 
-The timeline is the heart of the product. Layout:
+The Gantt chart is the heart of the product. Layout:
 
 ```
           Apr 28   May 1    May 5    May 10   May 15
 ──────────────────────────────────────────────────────
-Lindsay   [Campaign X ════════════]
-    Jen                   [Project Y ══════]
-   Brian  [Task A ══]            [Task B ════════]
+● Campaign X              [════════════] [LK]
+● Project Y                       [══════] [JD]
+● Task A      [══]                         [BR]
+● Task B                        [════════] [BR]
 ──────────────────────────────────────────────────────
 ```
 
-- **Rows** = people assigned to the team
-- **Blocks** = events, spanning their start/end dates
-- **Color** is tied to the event (user-set), not the person — allows a person to have visually distinct work items
-- **Icon** optionally appears inside the block for quick visual scanning
-- Clicking a block opens the event detail panel (not a modal — slide-in or side panel)
-- Clicking an empty area of a person's lane starts block creation
+- **Rows** = events, one bar per event
+- **Left column** — event color dot, title, member avatar(s) (all assignees, stacked)
+- **Bar** — spans the event's start/end dates
+- **Color** is tied to the event (user-set)
+- Clicking a bar or the row label opens the event detail panel (slide-in right panel)
+- Clicking an empty area of the time grid starts block creation
+
+### Timeline Sub-Toolbar
+A thin toolbar between the top bar and the grid provides:
+
+| Control | Options | Notes |
+|---------|---------|-------|
+| **Zoom** | ± buttons | Steps through column widths: 40 → 60 → 80 → 120 → 160 px/day |
+| **Group by** | None, Member, Parent event | See grouping rules below |
+| **Sort by** | Start date, End date, Title A–Z | Applied within each group |
+| **Export** | CSV / Excel | Exports the visible date range (Phase 13) |
+
+### Grouping Rules
+
+**Group by None (default)**
+Flat list of all events, sorted by the active sort key.
+
+**Group by Member**
+One section header per assigned member, in team-member order. Events appear under their primary assignee (first in `assignedMemberIds`). Unassigned events appear in an "Unassigned" section at the bottom.
+
+**Group by Parent Event**
+Root events (no `parentEventId`) appear as top-level rows. Child events are indented beneath their parent. Children whose parent falls outside the current date range appear at the bottom with extra indentation as orphans.
 
 ### Timeline Navigation
 - Scroll horizontally to move through time
-- Zoom controls: Day / Week / Month granularity
-- "Today" button recenters the view
-- Date range picker to jump to a specific period
+- Zoom in/out via sub-toolbar buttons (day column width)
+- "Today" marker — vertical line + highlighted column
 
 ### Block Interactions
-- **Click-and-drag** on empty lane space to create a new block (sets person + date range)
-- **Drag** an existing block left/right to shift dates
-- **Drag edges** of a block to resize (change start or end date)
+- **Click** a bar or row label — opens event detail panel
+- **Drag** a bar left/right — shifts start and end dates
+- **Drag bar edges** — resize (change start or end date independently)
+- **Drag on empty grid area** — opens "new event" form pre-filled with the clicked date
 - All drag interactions optimistically update the UI and sync in real-time to other viewers
 
 ---

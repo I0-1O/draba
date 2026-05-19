@@ -2,6 +2,50 @@
 
 ---
 
+## 2026-05-18 — Phase 8.1 Gantt pivot: design revision + full reimplementation (complete)
+
+### Why
+First live preview revealed the person-lane resource view didn't match the intended mental model. Switched to a standard Gantt chart (one row per event) with configurable group-by and sort-by. Decision captured in REQUIREMENTS.md and UX_PATTERNS.md.
+
+### What was built
+
+**Design docs updated**
+- `REQUIREMENTS.md`: timeline view section rewritten as Gantt; sub-toolbar documented; "Gantt view — parking lot" note removed
+- `UX_PATTERNS.md`: primary view section rewritten with Gantt ASCII diagram, sub-toolbar table, grouping rules
+
+**`TimelineGrid.tsx`** — complete rewrite
+- One row per event (was: one row per team member)
+- Sticky label column (240 px): color dot, event title, member avatar cluster (max 3, stacked)
+- Group-header rows: colored section divider with label + count badge
+- Child-event rows (group-by parent): 20 px extra left indent
+- `colWidth` is now a prop (drives zoom)
+
+**`TimelineToolbar.tsx`** — new component
+- Zoom in/out: steps through `COL_WIDTHS = [40, 60, 80, 120, 160]` px/day
+- Group by select: None / Member / Parent event
+- Sort by select: Start date / End date / Title A–Z
+- Export stub (fires no-op; Phase 13 will wire it)
+
+**`TimelineView.tsx`** — rewritten
+- Builds `GanttRow[]` from API events + members
+- Group by Member: bucket events by first assignee; sections in team-member order; unassigned section at bottom
+- Group by Parent: root events first, children inlined beneath parent; orphaned children at bottom
+- Sort by: start date, end date, or title — applied within each group
+- Passes `colWidth` prop through to `TimelineGrid`
+
+**`DashboardPage.tsx`** — updated
+- Renders `TimelineToolbar` between the color band and content area (timeline view only)
+- State: `groupBy`, `sortBy`, `colWidth`; zoom handlers step the `COL_WIDTHS` array
+
+**`types/index.ts`** — cleaned up
+- Removed standalone `DrabaEvent` (was view-only type, replaced by `GanttEvent` in TimelineGrid)
+- Retained `EventStatus`, `DrabaEvent`, `STATUS_LABELS` as `@deprecated` stubs so `EventPanel.tsx` compiles until Phase 8.2 rewrites it
+
+### Result
+- `pnpm --filter web lint` (tsc --noEmit) — clean
+
+---
+
 ## 2026-05-18 — Phase 8.1: Web — Timeline Shell & Event Rendering (complete)
 
 ### What was built

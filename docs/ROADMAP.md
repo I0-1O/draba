@@ -192,19 +192,26 @@ Prerequisite work before the web timeline phases: tightened the auth model and a
 ### Phase 8.1 — Web — Timeline Shell & Event Rendering
 **Status:** ✅ Done — 2026-05-18 | **Effort:** L (3–5 days)
 
-Static, data-driven timeline. No interactions — just layout and rendering correctness.
+Static, data-driven Gantt chart. No drag interactions — layout, rendering, grouping, sorting, and zoom only.
+
+**Design pivot (2026-05-18):** Switched from person-lane resource view to event-row Gantt layout based on first live preview. Person grouping is now one of several "Group by" options rather than the fixed row axis.
 
 **Scope:**
-- `TimelineView` component: person lanes (Y-axis), time grid (X-axis, day granularity), horizontal scroll
-- Pixel ↔ date math (map date range to X offset/width)
-- Event blocks: positioned by date range, colored, labeled (title + status icon)
+- `TimelineGrid` component: Gantt layout — one row per event, sticky label column (title + member avatars), horizontal time grid, horizontal scroll
+- `TimelineToolbar` component: zoom in/out, group-by selector (None / Member / Parent event), sort-by selector (Start date / End date / Title), Export stub
+- `TimelineView` component: data container — fetches events + members, applies grouping + sorting, builds `GanttRow[]`, passes to `TimelineGrid`
+- Pixel ↔ date math (map date range to X offset/width); variable column width for zoom
 - Wire to `GET /teams/:id/events?start=&end=` via TanStack Query
-- Wire to `GET /teams/:id/members` for lane rows
+- Wire to `GET /teams/:id/members` for group labels and member avatars
+- API additions: `GET /teams` (list user's teams), `GET /teams/:id/timelines` (list timelines for date bounds), `assignedMemberIds[]` on Event responses
 
 **Exit criteria — safe to pause when:**
-- Team member lanes render with correct names and colors
-- Events appear as blocks spanning the correct date range in the correct lane
-- Timeline scrolls horizontally across the visible date range
+- Events render as bars in the correct date columns, with correct width
+- Group by Member shows one section per assignee with correct events beneath
+- Group by Parent shows children indented under their parent event
+- Sort by Start date / End date / Title reorders rows within groups
+- Zoom steps change column width and the grid scrolls correctly
+- Timeline toolbar renders and all controls are functional
 
 ---
 
