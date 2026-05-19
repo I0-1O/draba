@@ -276,25 +276,14 @@ export default function GanttView({
 
   if (isLoading) {
     return (
-      <div
-        ref={containerRef}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          height: '100%',
-          color: 'var(--muted-foreground)',
-          fontSize: 13,
-          fontFamily: 'var(--font-sans)',
-        }}
-      >
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
         Loading events…
       </div>
     );
   }
 
   return (
-    <div ref={containerRef} style={{ height: '100%' }}>
+    <div ref={containerRef} className="h-full">
       <GanttGrid
         rows={rows}
         columns={columns}

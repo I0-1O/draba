@@ -11,6 +11,7 @@
 import { useState } from 'react';
 import { CalendarDays, GanttChart, Columns3, List, Search, X } from 'lucide-react';
 import FilterDropdown from '@/components/filters/FilterDropdown';
+import { cn } from '@/lib/utils';
 
 export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
 
@@ -30,36 +31,18 @@ const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
   { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
 ];
 
-const BTN_BASE: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  border: 'none',
-};
-
 function SearchInput() {
   const [query, setQuery] = useState('');
   const [focused, setFocused] = useState(false);
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 4,
-        height: 28,
-        padding: '0 8px',
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--radius-md)',
-        background: 'var(--card)',
-        width: focused ? 200 : 140,
-        transition: 'width 0.15s ease',
-        flexShrink: 0,
-      }}
-    >
-      <Search size={13} strokeWidth={1.8} style={{ color: 'var(--muted-foreground)', flexShrink: 0 }} />
+    <div className={cn(
+      'flex items-center gap-1 h-7 px-2',
+      'border border-border rounded-md bg-card',
+      'shrink-0 transition-[width] duration-150',
+      focused ? 'w-[200px]' : 'w-[140px]',
+    )}>
+      <Search size={13} strokeWidth={1.8} className="text-muted-foreground shrink-0" />
       <input
         type="text"
         placeholder="Search…"
@@ -67,31 +50,12 @@ function SearchInput() {
         onChange={e => setQuery(e.target.value)}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
-        style={{
-          flex: 1,
-          border: 'none',
-          outline: 'none',
-          background: 'transparent',
-          color: 'var(--foreground)',
-          fontSize: 12,
-          fontFamily: 'var(--font-sans)',
-          minWidth: 0,
-        }}
+        className="flex-1 min-w-0 border-none outline-none bg-transparent text-foreground text-xs"
       />
       {query && (
         <button
           onClick={() => setQuery('')}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            border: 'none',
-            background: 'none',
-            padding: 0,
-            cursor: 'pointer',
-            color: 'var(--muted-foreground)',
-            flexShrink: 0,
-          }}
+          className="flex items-center justify-center border-none bg-transparent p-0 cursor-pointer text-muted-foreground shrink-0"
         >
           <X size={12} strokeWidth={2} />
         </button>
@@ -109,45 +73,22 @@ export default function TopBar({
   rightSlot,
 }: Props) {
   return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '0 12px',
-        height: 'var(--topbar-h)',
-        background: 'var(--card)',
-        borderBottom: '1px solid var(--border)',
-        flexShrink: 0,
-        zIndex: 10,
-      }}
-    >
+    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
       {/* Left zone: view switcher */}
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'flex-start', minWidth: 0 }}>
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 1,
-          background: 'var(--muted)',
-          borderRadius: 'var(--radius-md)',
-          padding: 2,
-          flexShrink: 0,
-        }}>
+      <div className="flex-1 flex items-center justify-start">
+        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
           {VIEWS.map(v => (
             <button
               key={v.id}
               onClick={() => onViewChange(v.id)}
-              style={{
-                ...BTN_BASE,
-                gap: 5,
-                fontSize: 12,
-                fontWeight: 600,
-                padding: '4px 10px',
-                borderRadius: 5,
-                background: view === v.id ? 'var(--card)' : 'transparent',
-                color: view === v.id ? 'var(--foreground)' : 'var(--muted-foreground)',
-                boxShadow: view === v.id ? 'var(--shadow-sm)' : 'none',
-              }}
+              className={cn(
+                'flex items-center justify-center gap-[5px]',
+                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
+                'border-none cursor-pointer',
+                view === v.id
+                  ? 'bg-card text-foreground shadow-sm'
+                  : 'bg-transparent text-muted-foreground',
+              )}
             >
               {v.icon}
               {v.label}
@@ -156,35 +97,20 @@ export default function TopBar({
         </div>
       </div>
 
-      {/* Center zone: Timeline Name */}
-      <div
-        title={timelineName}
-        style={{
-          flexShrink: 1,
-          fontSize: 12,
-          fontWeight: 500,
-          color: 'var(--muted-foreground)',
-          fontFamily: 'var(--font-sans)',
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          padding: '0 12px',
-          textAlign: 'center',
-          userSelect: 'none',
-        }}
-      >
-        {timelineName}
+      {/* Center zone: timeline name — truncates with ellipsis when narrow */}
+      <div className="flex-1 min-w-0 flex items-center justify-center px-3">
+        <span
+          title={timelineName}
+          className="text-xs font-medium text-muted-foreground truncate select-none"
+        >
+          {timelineName}
+        </span>
       </div>
 
       {/* Right zone: Global actions */}
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6, minWidth: 0 }}>
-        {/* Search stub — highlight wiring in Phase 8.5 */}
+      <div className="flex-1 flex items-center justify-end gap-1.5 min-w-0">
         <SearchInput />
-
-        {/* Filter dropdown */}
         <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
-
-        {/* Profile avatar — injected by parent */}
         {rightSlot}
       </div>
     </div>

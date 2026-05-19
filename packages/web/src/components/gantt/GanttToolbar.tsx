@@ -6,6 +6,7 @@
 
 import { Download, Share2, Plus, Minus } from 'lucide-react';
 import type { TimeGranularity } from './granularity';
+import { cn } from '@/lib/utils';
 
 export type { TimeGranularity } from './granularity';
 export type GroupBy = 'none' | 'member' | 'parent';
@@ -22,50 +23,10 @@ interface Props {
   onShare?: () => void;
 }
 
-const CTRL_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  gap: 5,
-  height: 26,
-  padding: '0 8px',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-  background: 'var(--card)',
-  color: 'var(--foreground)',
-  fontSize: 12,
-  fontWeight: 500,
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  flexShrink: 0,
-};
-
-const DIVIDER: React.CSSProperties = {
-  width: 1,
-  height: 16,
-  background: 'var(--border)',
-  flexShrink: 0,
-};
-
-const LABEL: React.CSSProperties = {
-  fontSize: 11,
-  color: 'var(--muted-foreground)',
-  fontFamily: 'var(--font-sans)',
-  flexShrink: 0,
-};
-
-const SELECT: React.CSSProperties = {
-  height: 26,
-  padding: '0 6px',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-  background: 'var(--card)',
-  color: 'var(--foreground)',
-  fontSize: 12,
-  fontFamily: 'var(--font-sans)',
-  cursor: 'pointer',
-  flexShrink: 0,
-};
+const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label   = 'text-[11px] text-muted-foreground shrink-0';
+const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
 
 export default function GanttToolbar({
   groupBy,
@@ -79,7 +40,9 @@ export default function GanttToolbar({
 }: Props) {
   const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
   const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
-  const currentIndex = granularityMap.indexOf(granularity as any) !== -1 ? granularityMap.indexOf(granularity as any) : 0;
+  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
+    ? granularityMap.indexOf(granularity as never)
+    : 0;
   const currentLabel = granularityLabels[currentIndex];
 
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -88,19 +51,8 @@ export default function GanttToolbar({
   };
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '0 14px',
-        height: 36,
-        background: 'var(--card)',
-        borderBottom: '1px solid var(--border)',
-        flexShrink: 0,
-      }}
-    >
-      {/* Zoom (granularity) */}
+    <div className="flex items-center gap-2 px-3.5 h-9 bg-card border-b border-border shrink-0">
+      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
       <style>{`
         .gantt-zoom-slider {
           -webkit-appearance: none;
@@ -140,20 +92,25 @@ export default function GanttToolbar({
           border-radius: 2px;
         }
       `}</style>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, height: 26 }}>
+
+      {/* Zoom (granularity) */}
+      <div className="flex items-center gap-1.5 h-[26px]">
         <button
-          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto') }}
-          style={{ ...CTRL_BTN, padding: '0 2px', height: 22, border: 'none', background: 'transparent', color: currentIndex > 0 ? 'var(--foreground)' : 'var(--muted-foreground)', cursor: currentIndex > 0 ? 'pointer' : 'default' }}
+          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
           disabled={currentIndex === 0}
           title="Zoom out"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
         >
           <Minus size={14} />
         </button>
 
-        <div style={{ position: 'relative', width: 80, height: 26, display: 'flex', alignItems: 'center' }}>
-          <div style={{ position: 'absolute', left: 5, right: 5, top: 0, bottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center', pointerEvents: 'none' }}>
-            {[0,1,2,3,4,5].map(i => (
-              <div key={i} style={{ width: 2, height: 6, background: 'var(--border)', borderRadius: 1 }} />
+        <div className="relative w-20 h-[26px] flex items-center">
+          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
+            {[0, 1, 2, 3, 4, 5].map(i => (
+              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
             ))}
           </div>
           <input
@@ -163,49 +120,41 @@ export default function GanttToolbar({
             step="1"
             value={currentIndex}
             onChange={handleSliderChange}
-            className="gantt-zoom-slider"
-            style={{ width: '100%', cursor: 'pointer', margin: 0, position: 'relative', zIndex: 1 }}
+            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
             title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
           />
         </div>
 
         <button
-          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto') }}
-          style={{ ...CTRL_BTN, padding: '0 2px', height: 22, border: 'none', background: 'transparent', color: currentIndex < 5 ? 'var(--foreground)' : 'var(--muted-foreground)', cursor: currentIndex < 5 ? 'pointer' : 'default' }}
+          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
           disabled={currentIndex === 5}
           title="Zoom in"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
         >
           <Plus size={14} />
         </button>
 
         <div
           title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 22,
-            height: 22,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-sm)',
-            fontSize: 12,
-            fontWeight: currentLabel === 'A' ? 700 : 500,
-            color: currentLabel === 'A' ? 'var(--primary)' : 'var(--muted-foreground)',
-            fontFamily: 'var(--font-mono)',
-            userSelect: 'none'
-          }}
+          className={cn(
+            'flex items-center justify-center w-[22px] h-[22px]',
+            'bg-card border border-border rounded-sm text-xs font-mono select-none',
+            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
+          )}
         >
           {currentLabel}
         </div>
       </div>
 
-      <div style={DIVIDER} />
+      <div className={divider} />
 
       {/* Group by */}
-      <span style={LABEL}>Group by</span>
+      <span className={label}>Group by</span>
       <select
-        style={SELECT}
+        className={select}
         value={groupBy}
         onChange={e => onGroupByChange(e.target.value as GroupBy)}
       >
@@ -214,12 +163,12 @@ export default function GanttToolbar({
         <option value="parent">Parent event</option>
       </select>
 
-      <div style={DIVIDER} />
+      <div className={divider} />
 
       {/* Sort by */}
-      <span style={LABEL}>Sort by</span>
+      <span className={label}>Sort by</span>
       <select
-        style={SELECT}
+        className={select}
         value={sortBy}
         onChange={e => onSortByChange(e.target.value as SortBy)}
       >
@@ -228,24 +177,14 @@ export default function GanttToolbar({
         <option value="title">Title A–Z</option>
       </select>
 
-      <div style={{ flex: 1 }} />
+      <div className="flex-1" />
 
-      {/* Export */}
-      <button
-        style={CTRL_BTN}
-        onClick={onExport}
-        title="Export events (coming soon)"
-      >
+      <button className={ctrlBtn} onClick={onExport} title="Export events (coming soon)">
         <Download size={13} strokeWidth={1.8} />
         Export
       </button>
 
-      {/* Share */}
-      <button
-        style={CTRL_BTN}
-        onClick={onShare}
-        title="Share"
-      >
+      <button className={ctrlBtn} onClick={onShare} title="Share">
         <Share2 size={13} strokeWidth={1.8} />
         Share
       </button>
