@@ -133,7 +133,6 @@ function sortEvents(events: RichEvent[], sortBy: SortBy): RichEvent[] {
 function buildRows(
   events: RichEvent[],
   members: Member[],
-  memberById: Record<string, Member>,
   groupBy: GroupBy,
   sortBy: SortBy,
 ): GanttRow[] {
@@ -265,7 +264,7 @@ export default function TimelineView({
     const richEvents = apiEvents
       .map((ev, i) => toRichEvent(ev, i, memberById, viewStart, viewEnd))
       .filter((e): e is RichEvent => e !== null);
-    return buildRows(richEvents, members, memberById, groupBy, sortBy);
+    return buildRows(richEvents, members, groupBy, sortBy);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiEvents, members, memberById, groupBy, sortBy, viewStart, viewEnd]);
 
