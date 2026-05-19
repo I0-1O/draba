@@ -23,8 +23,8 @@ interface Props {
 }
 
 const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
-  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
   { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
+  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
   { id: 'timeline', icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Timeline' },
   { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
 ];
@@ -47,6 +47,7 @@ function IconBtn({ icon, onClick, title }: { icon: React.ReactNode; onClick?: ()
         ...BTN_BASE,
         width: 28,
         height: 28,
+        flexShrink: 0,
         border: '1px solid var(--border)',
         borderRadius: 'var(--radius-md)',
         background: 'var(--card)',
@@ -88,6 +89,7 @@ export default function TopBar({
         background: 'var(--muted)',
         borderRadius: 'var(--radius-md)',
         padding: 2,
+        flexShrink: 0,
       }}>
         {VIEWS.map(v => (
           <button

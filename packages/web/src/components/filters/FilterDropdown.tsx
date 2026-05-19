@@ -109,9 +109,9 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
           fontWeight: 600,
         }}
       >
-        <Filter size={13} strokeWidth={1.8} />
-        <span>{label}</span>
-        <ChevronDown size={12} strokeWidth={2} />
+        <Filter size={13} strokeWidth={1.8} style={{ flexShrink: 0 }} />
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 140 }}>{label}</span>
+        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0 }} />
       </button>
 
       {open && (
@@ -154,7 +154,7 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
           {members.length > 0 && (
             <>
               <div style={{ borderTop: '1px solid var(--border)', marginTop: 4 }} />
-              <div style={SECTION_HEADER}>Team members</div>
+              <div style={SECTION_HEADER}>Members</div>
               {members.map(m => {
                 const f: ActiveFilter = { kind: 'member', userId: m.userId }
                 const label = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName

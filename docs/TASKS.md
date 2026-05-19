@@ -87,6 +87,80 @@
 
 ## Up Next
 
+### Web — Member Management (Sidebar)
+Adds inline member config, a two-path add-member flow with pending invite list, and a manage-members entry to the sidebar Members list.
+
+**API:**
+- [ ] `PATCH /teams/:id/members/:memberId` — update display name, color, role (admin only)
+- [ ] `DELETE /teams/:id/members/:memberId` — remove member; team admin only; reject if last admin
+- [ ] `POST /teams/:id/members` — add an existing registered user to the team by `userId`; admin only
+- [ ] `GET /teams/:id/invites` — list pending (unaccepted) invites for the team
+- [ ] `DELETE /teams/:id/invites/:inviteId` — cancel a pending invite; admin only
+
+**Web — member row:**
+- [ ] On hover, show gear icon on each member row; click opens member config drawer
+- [ ] Member config drawer: editable display name, color swatch picker, role selector (admin/member); save → `PATCH /teams/:id/members/:memberId`
+
+**Web — members list footer (below last member, above section border):**
+- [ ] "Add member" button opens add-member sheet with two tabs/modes:
+  - _Add existing user_ — search registered users not yet on this team → `POST /teams/:id/members` with `userId`
+  - _Send invite_ — email input → `POST /teams/:id/invites`; on success, invite appears immediately in the pending list below
+- [ ] Pending invites list in the sheet: shows email + "Pending" badge + cancel (×) button → `DELETE /teams/:id/invites/:id`; fetched from `GET /teams/:id/invites`
+- [ ] "Manage members" row with a Users icon → navigates to `/settings/members` (stub page for now)
+
+---
+
+### Web — Filter Scoping (FilterDropdown + API)
+Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
+
+**Data model:**
+- Single `saved_filters` table: `(id, team_id, timeline_id nullable, created_by, name, definition JSON, scope ENUM(personal|nominated|team|timeline), status ENUM(active|pending_review))`
+- `scope=personal` — visible only to creator; `scope=team` — visible to all team members; `scope=timeline` — visible to all members of that timeline; `scope=nominated` — personal filter flagged by member for admin review (visible to admins)
+
+**API:**
+- [ ] Migration: replace current `saved_filters` shape with the unified schema above
+- [ ] `GET /teams/:id/filters` — returns filters scoped `team` or `timeline` (for the active timeline), plus the calling user's `personal` and `nominated` filters
+- [ ] `POST /teams/:id/filters` — create a new personal filter; `definition` is the filter JSON
+- [ ] `PATCH /filters/:id` — update name or definition (creator or admin)
+- [ ] `PATCH /filters/:id/scope` — promote/demote scope; admin-only for `team`/`timeline`; any member can set `nominated`
+- [ ] `DELETE /filters/:id` — creator or admin
+
+**Web — FilterDropdown layout:**
+- [ ] Reorganize dropdown into four labeled sections, each hidden when empty:
+  1. **Default** — All events / Upcoming / My events (hardcoded presets, always present)
+  2. **Team** — filters with `scope=team` from API
+  3. **Timeline** — filters with `scope=timeline` for the active timeline
+  4. **Mine** — caller's `personal` filters; nominated filters shown with a "Pending" badge
+- [ ] Filter names truncate with ellipsis at a max width; full name in tooltip on hover
+- [ ] "New filter…" opens filter editor (personal scope by default); "Share…" action on existing personal filters lets the member nominate it or (if admin) promote directly to team/timeline
+- [ ] Pass active timeline ID through context so the dropdown can fetch timeline-scoped filters
+- [ ] Admin-visible section at bottom of "Mine": nominated filters awaiting review, with Approve / Reject actions
+
+---
+
+### Web — Connectors (Sidebar + API)
+Inbound-only data connectors that push external events (Asana, Aha, Google Sheets, live Excel, etc.) into a specific draba timeline. Contextual to the active timeline.
+
+**Data model:**
+- `team_connectors (id, team_id, timeline_id, provider ENUM, display_name, config JSON, created_by, created_at)` — one row per connector instance
+- `provider` values initially: `asana | aha | google_sheets | excel_online | webhook` (generic fallback)
+
+**API:**
+- [ ] Migration: `team_connectors` table
+- [ ] `GET /timelines/:id/connectors` — list connectors for a timeline (team members)
+- [ ] `POST /timelines/:id/connectors` — create connector; admin only; returns connector with generated inbound token
+- [ ] `PATCH /connectors/:id` — update display name or config; admin only
+- [ ] `DELETE /connectors/:id` — remove connector; admin only
+- [ ] `POST /connectors/:token/ingest` — public inbound webhook endpoint; validates token; maps payload to events via provider-specific adapter
+
+**Web — sidebar CONNECTORS section (already stubbed):**
+- [ ] Wire `GET /timelines/:id/connectors` — list active connectors beneath the active timeline label; each row shows provider icon + display name
+- [ ] "Add connector" → opens connector setup sheet: provider picker → config fields (varies by provider) → save → `POST /timelines/:id/connectors`
+- [ ] Connector row: on hover show gear icon → opens config drawer; delete option with confirm
+- [ ] Provider icon set: one small icon per supported provider (Asana, Aha, Sheets, Excel, generic Plug)
+
+---
+
 ### API — Token Auth
 - [ ] `POST /tokens` — create API token (returns value once)
 - [ ] `GET /tokens` — list tokens for current user

@@ -39,7 +39,7 @@ function DashboardShell() {
   const { logout, accessToken, user } = useAuth()
   const { isDark, toggle: toggleDark } = useDarkMode()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('calendar')
+  const [view, setView] = useState<ViewMode>('list')
   const [profileOpen, setProfileOpen] = useState(false)
   const [activeTimelineColor, setActiveTimelineColor] = useState('#1A97A2')
   const [filterEditorOpen, setFilterEditorOpen] = useState(false)

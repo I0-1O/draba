@@ -19,14 +19,14 @@ export default function RightSidebar({ open, title, onClose, children }: Props) 
   return (
     <div
       style={{
-        width: WIDTH,
-        minWidth: WIDTH,
+        width: open ? WIDTH : 0,
         flexShrink: 0,
         background: 'var(--card)',
-        display: open ? 'flex' : 'none',
+        display: 'flex',
         flexDirection: 'column',
-        borderLeft: '1px solid var(--border)',
+        borderLeft: open ? '1px solid var(--border)' : 'none',
         overflow: 'hidden',
+        transition: 'width 0.2s ease',
       }}
     >
       <div style={{ width: WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>

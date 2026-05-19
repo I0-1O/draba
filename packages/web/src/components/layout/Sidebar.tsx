@@ -12,6 +12,7 @@ import {
   CalendarPlus,
   LineChart,
   Megaphone,
+  Plug,
 } from 'lucide-react';
 
 interface Props {
@@ -20,9 +21,9 @@ interface Props {
   onActiveColorChange?: (color: string) => void;
 }
 
-const ICON = { width: 15, height: 15, strokeWidth: 1.8, flexShrink: 0 } as const;
-const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8, flexShrink: 0 } as const;
-const ICON_XS = { width: 11, height: 11, strokeWidth: 2, flexShrink: 0 } as const;
+const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
+const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8 } as const;
+const ICON_XS = { width: 11, height: 11, strokeWidth: 2 } as const;
 
 interface Timeline {
   id: string;
@@ -164,6 +165,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
   const [activeId, setActiveId] = useState(DEMO_TIMELINES[0].id);
   const [teamOpen, setTeamOpen] = useState(true);
   const [eventOpen, setEventOpen] = useState(true);
+  const [connectorsOpen, setConnectorsOpen] = useState(true);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [timelinesOpen, setTimelinesOpen] = useState(true);
   const [membersOpen, setMembersOpen] = useState(true);
@@ -191,15 +193,19 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
           display: 'flex',
           alignItems: 'center',
           justifyContent: collapsed ? 'center' : 'space-between',
-          padding: collapsed ? '16px 13px' : '16px 14px 16px 16px',
+          padding: collapsed ? '0 13px' : '0 8px 0 16px',
           borderBottom: '1px solid rgba(255,255,255,0.08)',
-          minHeight: 56,
+          height: 'var(--topbar-h)',
+          flexShrink: 0,
         }}
       >
         {!collapsed && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+          <div
+            onClick={onToggle}
+            style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
+          >
             <img src="/logo.svg" alt="Draba" style={{ width: 28, height: 28 }} />
-            <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.01em', color: 'white' }}>
+            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
               draba
             </span>
           </div>
@@ -229,9 +235,10 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
         {/* Collapsed: team + timeline icons only */}
         {collapsed && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
-            {/* Team avatar */}
+            {/* Team avatar — click to expand */}
             <div
               title="Acme Corp"
+              onClick={onToggle}
               style={{
                 width: 28,
                 height: 28,
@@ -248,9 +255,10 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
             >
               A
             </div>
-            {/* Active timeline */}
+            {/* Active timeline — click to expand */}
             <div
               title={activeTimeline.name}
+              onClick={onToggle}
               style={{
                 width: 28,
                 height: 28,
@@ -351,7 +359,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
               }}>
                 A
               </div>
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'white', flex: 1, marginLeft: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'white', flex: 1, marginLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
                 Acme Corp
               </span>
               <button
@@ -626,6 +634,56 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange }: Pr
                 <Upload width={13} height={13} strokeWidth={1.8} />
                 Import events
               </button>
+            )}
+          </div>
+        )}
+
+        {/* Connectors section — contextual to active timeline */}
+        {!collapsed && (
+          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
+              <button
+                onClick={() => setConnectorsOpen(o => !o)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
+                  padding: 0,
+                }}
+              >
+                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  Connectors
+                </span>
+                {connectorsOpen
+                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
+              </button>
+            </div>
+
+            {connectorsOpen && (
+              <>
+                <div style={{
+                  padding: '0 16px 4px',
+                  fontSize: 10,
+                  color: 'rgba(255,255,255,0.22)',
+                  letterSpacing: '0.02em',
+                }}>
+                  {activeTimeline.name}
+                </div>
+                <button
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '6px 16px', background: 'none', border: 'none',
+                    color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                    cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+                >
+                  <Plug width={13} height={13} strokeWidth={1.8} />
+                  Add connector
+                </button>
+              </>
             )}
           </div>
         )}
