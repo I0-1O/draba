@@ -77,10 +77,15 @@ TEAM_ID="bootstrap-team"
 INVITE_ID="bootstrap-invite"
 EXPIRES=$(date -u -d '+7 days' '+%Y-%m-%d %H:%M:%S')
 
+# DRABA_TEST_ADMIN_PASSWORD_HASH — bcrypt hash of the admin's login password.
+# If not set in ~/.draba-test.env, the admin row is seeded as non-loginable
+# (suitable for CI-only runs where only the invite flow is tested).
+DRABA_TEST_ADMIN_PASSWORD_HASH="${DRABA_TEST_ADMIN_PASSWORD_HASH:-x-not-loginable}"
+
 docker run --rm -i --user 0:0 -v "$DRABA_DB_DIR:/data" "$SQLITE_IMG" \
     sqlite3 "/data/${DRABA_DB_FILENAME}" <<SQL
-INSERT INTO users (id, email, password_hash, display_name)
-VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', 'x-not-loginable', 'Test Bootstrap');
+INSERT INTO users (id, email, password_hash, display_name, is_superadmin)
+VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', '${DRABA_TEST_ADMIN_PASSWORD_HASH}', 'Test Bootstrap', 1);
 
 INSERT INTO teams (id, name, slug)
 VALUES ('${TEAM_ID}', 'Test Team', 'test-team');

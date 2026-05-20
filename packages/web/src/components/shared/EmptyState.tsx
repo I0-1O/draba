@@ -11,8 +11,8 @@ interface EmptyStateProps {
 function DrabaIcon() {
   return (
     <svg
-      width="48"
-      height="48"
+      width="120"
+      height="120"
       viewBox="0 0 536 536"
       fill="currentColor"
       style={{ fillRule: 'evenodd', clipRule: 'evenodd' }}
@@ -35,7 +35,7 @@ export default function EmptyState({ icon, message, description }: EmptyStatePro
         color: 'var(--muted-foreground)',
       }}
     >
-      <div style={{ opacity: 0.25 }}>
+      <div>
         {icon ?? <DrabaIcon />}
       </div>
       <span

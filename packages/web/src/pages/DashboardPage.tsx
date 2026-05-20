@@ -16,7 +16,7 @@ import EventCreatePanel from '@/components/gantt/EventCreatePanel'
 import { FilterProvider } from '@/contexts/FilterContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
 import { useMyTeams, useTeamTimelines, useTeamEventSync } from '@/hooks/useTeamEvents'
 import type { components } from '@draba/shared'
@@ -90,16 +90,26 @@ function DashboardShell() {
   const teamId = teams[0]?.id ?? ''
 
   const { data: timelines = [] } = useTeamTimelines(teamId)
-  const activeTimeline = timelines[0]
-  const activeTimelineId = activeTimeline?.id
+  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
+  // Initialize from first timeline once the list loads.
+  useEffect(() => {
+    if (timelines.length > 0 && !activeTimelineId) setActiveTimelineId(timelines[0].id)
+  }, [timelines, activeTimelineId])
+  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
+
+  const handleTimelineChange = useCallback((id: string) => {
+    prefsAppliedForTimeline.current = null
+    setActiveTimelineId(id)
+  }, [])
 
   useTeamEventSync(teamId, accessToken)
 
   // Per-timeline preferences: restore toolbar state when the active timeline changes.
+  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
+  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
   const timelinePrefs = usePreferenceMap(activeTimelineId)
   useEffect(() => {
-    if (!activeTimelineId) return
-    // Skip if we already applied prefs for this timeline (avoid overwriting user changes).
+    if (!activeTimelineId || !prefsSettled) return
     if (prefsAppliedForTimeline.current === activeTimelineId) return
     prefsAppliedForTimeline.current = activeTimelineId
 
@@ -107,34 +117,33 @@ function DashboardShell() {
     if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
     if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
     if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
-  }, [activeTimelineId, timelinePrefs])
+  }, [activeTimelineId, prefsSettled, timelinePrefs])
 
   // Save toolbar state changes to per-timeline prefs.
   const saveTimelinePref = useCallback((key: string, value: string) => {
     if (!activeTimelineId) return
     upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
-  }, [activeTimelineId, upsert])
+  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    // Only save after we've applied server prefs (prefsAppliedForTimeline is set).
     if (prefsAppliedForTimeline.current !== activeTimelineId) return
     saveTimelinePref('group_by', groupBy)
-  }, [groupBy]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [groupBy, saveTimelinePref])
 
   useEffect(() => {
     if (prefsAppliedForTimeline.current !== activeTimelineId) return
     saveTimelinePref('sort_by', sortBy)
-  }, [sortBy]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sortBy, saveTimelinePref])
 
   useEffect(() => {
     if (prefsAppliedForTimeline.current !== activeTimelineId) return
     saveTimelinePref('zoom_granularity', granularity)
-  }, [granularity]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [granularity, saveTimelinePref])
 
   useEffect(() => {
     if (prefsAppliedForTimeline.current !== activeTimelineId) return
     saveTimelinePref('color_by', colorBy)
-  }, [colorBy]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [colorBy, saveTimelinePref])
 
   // Global preferences: persist dark mode setting.
   useEffect(() => {
@@ -148,6 +157,9 @@ function DashboardShell() {
         onToggle={() => setSidebarCollapsed(c => !c)}
         onActiveColorChange={setActiveTimelineColor}
         onActiveNameChange={setActiveTimelineName}
+        apiTimelines={timelines}
+        activeTimelineId={activeTimelineId}
+        onActiveTimelineChange={handleTimelineChange}
         onNewEvent={() => {
           const today = new Date().toISOString().slice(0, 10)
           setSelectedEventId(null)

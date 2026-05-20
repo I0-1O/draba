@@ -2,6 +2,14 @@
 
 ---
 
+## 2026-05-20 — /test-phase 8.4
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 partial (web-e2e — stale JWT for DB-wiped user caused spurious 500 on PUT prefs; api-smoke confirmed endpoint works with a valid user)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-05-20 — Phase 8.4: Persistent View Settings
 
 ### What was built

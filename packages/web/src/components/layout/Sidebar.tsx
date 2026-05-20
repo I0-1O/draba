@@ -24,6 +24,9 @@ interface Props {
   onActiveColorChange?: (color: string) => void;
   onActiveNameChange?: (name: string) => void;
   onNewEvent?: () => void;
+  apiTimelines?: Array<{ id: string; name: string }>;
+  activeTimelineId?: string;
+  onActiveTimelineChange?: (id: string) => void;
 }
 
 const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
@@ -220,8 +223,10 @@ function ConnectorItem({ name, status, color }: { name: string; status: string; 
  * Left navigation rail: brand, team selector with members, and timeline list.
  * Collapsed/expanded state is driven by the parent.
  */
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewEvent }: Props) {
-  const [activeId, setActiveId] = useState(DEMO_TIMELINES[0].id);
+const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
+
+export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewEvent, apiTimelines, activeTimelineId, onActiveTimelineChange }: Props) {
+  const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
   const [teamOpen, setTeamOpen] = useState(true);
   const [eventOpen, setEventOpen] = useState(true);
   const [connectorsOpen, setConnectorsOpen] = useState(true);
@@ -230,7 +235,16 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
   const [membersOpen, setMembersOpen] = useState(true);
   const [teamHovered, setTeamHovered] = useState(false);
 
-  const activeTimeline = DEMO_TIMELINES.find(t => t.id === activeId)!;
+  const timelines: Timeline[] = apiTimelines?.length
+    ? apiTimelines.map((t, i) => ({
+        id: t.id,
+        name: t.name,
+        color: TIMELINE_COLORS[i % TIMELINE_COLORS.length],
+        icon: <LineChart {...ICON_SM} />,
+      }))
+    : DEMO_TIMELINES
+  const activeId = activeTimelineId ?? internalActiveId
+  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0];
 
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
   const dragging = useRef(false);
@@ -582,13 +596,13 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
 
           {!collapsed && (timelinesOpen ? (
             <>
-              {DEMO_TIMELINES.map(tl => (
+              {timelines.map(tl => (
                 <TimelineItem
                   key={tl.id}
                   timeline={tl}
                   active={activeId === tl.id}
                   collapsed={false}
-                  onClick={() => { setActiveId(tl.id); onActiveColorChange?.(tl.color); onActiveNameChange?.(tl.name); }}
+                  onClick={() => { setInternalActiveId(tl.id); onActiveColorChange?.(tl.color); onActiveNameChange?.(tl.name); onActiveTimelineChange?.(tl.id); }}
                   onSettings={() => {}}
                 />
               ))}
