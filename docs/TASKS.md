@@ -79,6 +79,14 @@
 - [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
 - [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
 
+### Web — Gantt Bar Drag (Phase 8.2.1: Resize & Move)
+- [x] Detect mousedown on left/right edge (8px zone) vs. bar body — 2026-05-19
+- [x] Edge drag: update start or end date live as user drags; snap to active granularity column — 2026-05-19
+- [x] Body drag: shift both start and end dates by the same column delta — 2026-05-19
+- [x] Show date tooltip during drag (start date for left edge, end date for right edge, both for body) — 2026-05-19
+- [x] PATCH `/events/:id` with new startAt/endAt on mouseup; optimistic update in cache — 2026-05-19
+- [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
+
 ### Web — Timeline View (Phase 8.3: Real-Time Sync)
 - [ ] Connect `useWebSocket` to subscribe to `events.*` for active team
 - [ ] `events.created` delta: insert block into TanStack Query cache

@@ -6,9 +6,9 @@
  * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
  */
 
-import { useMemo, useRef, useState, useLayoutEffect, useEffect } from 'react';
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
 import GanttGrid, { type GanttEvent, type GanttRow } from './GanttGrid';
-import { useTeamEvents, useTeamMembers } from '@/hooks/useTeamEvents';
+import { useTeamEvents, useTeamMembers, useUpdateEvent } from '@/hooks/useTeamEvents';
 import type { components } from '@draba/shared';
 import { type Member, EVENT_COLORS, MEMBER_COLORS } from '@/types';
 import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
@@ -230,6 +230,7 @@ export default function GanttView({
   onMembersLoaded,
   onSelectApiEvent,
 }: Props) {
+  const updateEvent = useUpdateEvent(teamId);
   const today = todayMidnight();
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(800);
@@ -310,6 +311,16 @@ export default function GanttView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiEvents, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
 
+  const handleBarDrag = useCallback((eventId: string, newStartDate: Date, newEndDate: Date) => {
+    updateEvent.mutate({
+      eventId,
+      patch: {
+        startAt: newStartDate.toISOString(),
+        endAt: newEndDate.toISOString(),
+      },
+    });
+  }, [updateEvent]);
+
   if (isLoading) {
     return (
       <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
@@ -333,6 +344,7 @@ export default function GanttView({
           }
         }}
         onLaneDrag={onLaneDrag}
+        onBarDrag={handleBarDrag}
       />
     </div>
   );

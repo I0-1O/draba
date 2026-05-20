@@ -27,6 +27,7 @@ This document organizes development into discrete phases with effort estimates a
 | 8.1.1 | [Rename Timeline View → Gantt](#phase-811-rename-timeline-view--gantt) | XS — 1 hr | ✅ |
 | 8.1.2 | [Gantt View Polish](#phase-812-gantt-view-polish) | M — 1–2 days | ✅ |
 | 8.2 | [Web — Gantt Interactions](#phase-82-web--gantt-interactions) | L — 3–5 days | ✅ |
+| 8.2.1 | [Gantt Bar Drag — Resize & Move](#phase-821-gantt-bar-drag--resize--move) | M — 1–2 days | ✅ |
 | 8.3 | [Web — Real-Time WebSocket Sync](#phase-83-web--real-time-websocket-sync) | M — 1–2 days | ⬜ |
 | 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ⬜ |
 | 8.5 | [Search with Highlight](#phase-85-search-with-highlight) | S — 1 day | ⬜ |
@@ -266,6 +267,26 @@ Builds on 8.1. Full CRUD interactions on the timeline.
 - Clicking an event block opens an edit panel; changes save and reflect immediately in the UI
 - Dragging on an empty lane cell opens a creation form pre-filled with the selected range
 - Created and edited events appear correctly in the timeline without page reload
+
+---
+
+### Phase 8.2.1 — Gantt Bar Drag — Resize & Move
+**Status:** ✅ Done — 2026-05-19 | **Effort:** M (1–2 days)
+
+Builds on 8.2. Direct manipulation of event bars on the Gantt chart.
+
+**Scope:**
+- **Edge drag (resize):** mousedown on the left or right 8px edge of an event bar → drag to change start or end date; show date tooltip during drag; PATCH on mouseup
+- **Body drag (move):** mousedown on the bar body → drag horizontally to shift both start and end dates by the same delta; show date tooltip during drag; PATCH on mouseup
+- Visual feedback: bar moves/resizes live during drag (optimistic); ghost/overlay at original position optional
+- Snap to column boundaries (e.g. day, week) matching the active granularity
+- `is_external` events (Phase 14) are non-draggable (read-only)
+
+**Exit criteria — safe to pause when:**
+- Dragging a bar edge changes the event's start or end date and saves on mouseup without a page reload
+- Dragging a bar body shifts both dates by the same amount and saves on mouseup
+- A date tooltip shows the new date(s) during drag
+- Snap-to-column works at all granularity levels
 
 ---
 

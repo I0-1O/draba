@@ -7,6 +7,9 @@
  *
  * Drag on an empty lane cell to select a date range; onLaneDrag fires on
  * mouseup with the resolved start/end dates and the lane's memberId.
+ *
+ * Drag on an event bar's left/right 8px edge to resize it, or on its body to
+ * move it. onBarDrag fires on mouseup with the resolved new dates.
  */
 
 import { useRef, useState, useCallback } from 'react';
@@ -14,12 +17,14 @@ import MemberAvatar from '../MemberAvatar';
 import EmptyState from '../shared/EmptyState';
 import type { Member } from '../../types';
 import type { ColumnDef } from './granularity';
+import { addDays } from './granularity';
 
 const LABEL_COL_W = 240;
 const HEADER_H = 36;
 const ROW_H = 44;
 const GROUP_H = 30;
 const COL_W = 80;
+const EDGE_W = 8; // px hit zone for resize handles
 
 /** A positioned event bar ready for rendering. */
 export interface GanttEvent {
@@ -45,6 +50,33 @@ interface DragState {
   currentCol: number;
 }
 
+type BarDragZone = 'left' | 'right' | 'body';
+
+interface BarDragState {
+  eventId: string;
+  zone: BarDragZone;
+  /** Fractional column of the event's visual start when drag began. */
+  initStartCol: number;
+  /** Fractional column of the event's visual end (startCol + span) when drag began. */
+  initEndCol: number;
+  /** Lane-relative x of the mouse when drag began. */
+  initMouseX: number;
+  /** Page-relative left edge of the lane div. */
+  laneLeft: number;
+  /** Current snapped start column (integer). */
+  snapStartCol: number;
+  /** Current snapped end column (integer, exclusive — col after last occupied). */
+  snapEndCol: number;
+}
+
+interface TooltipState {
+  text: string;
+  /** Viewport-relative x for tooltip positioning. */
+  x: number;
+  /** Viewport-relative y for tooltip positioning. */
+  y: number;
+}
+
 interface Props {
   rows: GanttRow[];
   columns: ColumnDef[];
@@ -54,6 +86,33 @@ interface Props {
   onSelectEvent: (id: string | null) => void;
   /** Called when the user drags on an empty lane cell to create an event. */
   onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called when the user drags a bar edge or body to resize/move it. */
+  onBarDrag?: (eventId: string, newStartDate: Date, newEndDate: Date) => void;
+}
+
+// ── Bar drag helpers ─────────────────────────────────────────────────────────
+
+function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
+  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
+  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
+  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
+}
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function colToStartDate(colIdx: number, columns: ColumnDef[]): Date {
+  const i = Math.max(0, Math.min(columns.length - 1, colIdx));
+  return columns[i].start;
+}
+
+// endColIdx is exclusive (the column *after* the last occupied one).
+function colToEndDate(endColIdx: number, columns: ColumnDef[]): Date {
+  const i = Math.max(1, Math.min(columns.length, endColIdx));
+  return addDays(columns[i - 1].end, -1);
+}
+
+function formatDragDate(d: Date): string {
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 export default function GanttGrid({
@@ -63,6 +122,7 @@ export default function GanttGrid({
   selectedEventId,
   onSelectEvent,
   onLaneDrag,
+  onBarDrag,
 }: Props) {
   const totalW = LABEL_COL_W + columns.length * COL_W;
   // Integer column index that contains today (for background highlight)
@@ -71,6 +131,11 @@ export default function GanttGrid({
   // ── Drag-to-create state ──────────────────────────────────────────────────
   const [drag, setDrag] = useState<DragState | null>(null);
   const dragRef = useRef<DragState | null>(null);
+
+  // ── Bar drag state ────────────────────────────────────────────────────────
+  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
+  const barDragRef = useRef<BarDragState | null>(null);
+  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
 
   const colFromX = useCallback((laneX: number) => {
     return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
@@ -115,6 +180,100 @@ export default function GanttGrid({
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
   }, [colFromX, columns, onLaneDrag]);
+
+  // ── Bar drag handler ──────────────────────────────────────────────────────
+
+  const handleBarMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    ev: GanttEvent,
+    zone: BarDragZone,
+  ) => {
+    if (!onBarDrag) return;
+    e.preventDefault();
+    e.stopPropagation(); // prevent lane-drag from firing
+
+    // The bar's parent is the lane div (position: relative, flex: 1).
+    const laneEl = e.currentTarget.parentElement;
+    if (!laneEl) return;
+    const laneRect = laneEl.getBoundingClientRect();
+
+    const initStartCol = ev.startCol;
+    const initEndCol = ev.startCol + ev.span;
+    const initMouseX = e.clientX - laneRect.left;
+    // Snap initial positions to integer columns for anchor math.
+    const initSnapStart = Math.round(initStartCol);
+    const initSnapEnd = Math.round(initEndCol);
+
+    const state: BarDragState = {
+      eventId: ev.id,
+      zone,
+      initStartCol,
+      initEndCol,
+      initMouseX,
+      laneLeft: laneRect.left,
+      snapStartCol: initSnapStart,
+      snapEndCol: Math.max(initSnapEnd, initSnapStart + 1),
+    };
+    barDragRef.current = state;
+    setBarDrag(state);
+
+    // Initial tooltip
+    const startDate = colToStartDate(state.snapStartCol, columns);
+    const endDate = colToEndDate(state.snapEndCol, columns);
+    setDragTooltip({
+      text: tooltipText(zone, startDate, endDate),
+      x: e.clientX,
+      y: e.clientY,
+    });
+
+    function onMouseMove(mv: MouseEvent) {
+      const s = barDragRef.current;
+      if (!s) return;
+
+      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
+      const n = columns.length;
+
+      let nextStart = s.snapStartCol;
+      let nextEnd = s.snapEndCol;
+
+      if (s.zone === 'left') {
+        nextStart = Math.max(0, Math.min(Math.round(s.initStartCol + deltaCol), s.snapEndCol - 1));
+      } else if (s.zone === 'right') {
+        nextEnd = Math.max(s.snapStartCol + 1, Math.min(Math.round(s.initEndCol + deltaCol), n));
+      } else {
+        // body: preserve span, shift both
+        const span = Math.max(1, Math.round(s.initEndCol - s.initStartCol));
+        const shift = Math.round(deltaCol);
+        nextStart = Math.max(0, Math.min(Math.round(s.initStartCol) + shift, n - span));
+        nextEnd = nextStart + span;
+      }
+
+      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
+      barDragRef.current = next;
+      setBarDrag(next);
+
+      const sd = colToStartDate(nextStart, columns);
+      const ed = colToEndDate(nextEnd, columns);
+      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
+    }
+
+    function onMouseUp() {
+      const s = barDragRef.current;
+      if (s && onBarDrag) {
+        const sd = colToStartDate(s.snapStartCol, columns);
+        const ed = colToEndDate(s.snapEndCol, columns);
+        onBarDrag(s.eventId, sd, ed);
+      }
+      barDragRef.current = null;
+      setBarDrag(null);
+      setDragTooltip(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [columns, onBarDrag]);
 
   // Header cells are shared between the empty-state path and the unified scroll path.
   const headerContent = (
@@ -433,40 +592,94 @@ export default function GanttGrid({
                     />
                   )}
 
-                  {/* Event bar */}
-                  <div
-                    onClick={() => onSelectEvent(ev.id === selectedEventId ? null : ev.id)}
-                    onMouseDown={e => e.stopPropagation()}
-                    style={{
-                      position: 'absolute',
-                      top: 9,
-                      bottom: 9,
-                      left: ev.startCol * COL_W + 2,
-                      width: Math.max(ev.span * COL_W - 4, COL_W * 0.3),
-                      background: ev.color,
-                      borderRadius: 5,
-                      display: 'flex',
-                      alignItems: 'center',
-                      padding: '0 8px',
-                      fontSize: 11,
-                      fontWeight: 600,
-                      color: 'white',
-                      overflow: 'hidden',
-                      whiteSpace: 'nowrap',
-                      textOverflow: 'ellipsis',
-                      cursor: 'pointer',
-                      zIndex: 4,
-                      boxShadow: selected
-                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
-                        : 'var(--shadow-sm)',
-                      transition: 'box-shadow 0.12s',
-                      fontFamily: 'var(--font-sans)',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-                    onMouseLeave={e => (e.currentTarget.style.filter = '')}
-                  >
-                    {ev.title}
-                  </div>
+                  {/* Event bar — live position overridden while dragging */}
+                  {(() => {
+                    const isDragging = barDrag?.eventId === ev.id;
+                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
+                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
+                    const left = startCol * COL_W + 2;
+                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
+                    const grabCursor = isDragging
+                      ? 'grabbing'
+                      : onBarDrag ? 'grab' : 'pointer';
+                    return (
+                      <div
+                        onClick={() => {
+                          // Bar click always selects — use the label cell to deselect.
+                          if (!isDragging) onSelectEvent(ev.id);
+                        }}
+                        onMouseDown={e => {
+                          if (!onBarDrag) { e.stopPropagation(); return; }
+                          const barRect = e.currentTarget.getBoundingClientRect();
+                          const xInBar = e.clientX - barRect.left;
+                          let zone: BarDragZone;
+                          if (xInBar <= EDGE_W) zone = 'left';
+                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
+                          else zone = 'body';
+                          handleBarMouseDown(e, ev, zone);
+                        }}
+                        style={{
+                          position: 'absolute',
+                          top: 9,
+                          bottom: 9,
+                          left,
+                          width,
+                          background: ev.color,
+                          borderRadius: 5,
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: `0 ${EDGE_W + 2}px`,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          color: 'white',
+                          overflow: 'hidden',
+                          whiteSpace: 'nowrap',
+                          textOverflow: 'ellipsis',
+                          cursor: grabCursor,
+                          zIndex: 4,
+                          boxShadow: selected
+                            ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
+                            : 'var(--shadow-sm)',
+                          opacity: isDragging ? 0.85 : 1,
+                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
+                          fontFamily: 'var(--font-sans)',
+                          userSelect: 'none',
+                        }}
+                        onMouseEnter={e => { if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)'; }}
+                        onMouseLeave={e => { e.currentTarget.style.filter = ''; }}
+                      >
+                        {/* Left resize handle */}
+                        {onBarDrag && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '5px 0 0 5px',
+                            }}
+                          />
+                        )}
+                        {ev.title}
+                        {/* Right resize handle */}
+                        {onBarDrag && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              right: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '0 5px 5px 0',
+                            }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             );
@@ -474,6 +687,31 @@ export default function GanttGrid({
 
         </div>
       </div>
+
+      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
+      {dragTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: dragTooltip.x + 14,
+            top: dragTooltip.y - 28,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontWeight: 600,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {dragTooltip.text}
+        </div>
+      )}
     </div>
   );
 }
