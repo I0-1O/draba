@@ -32,12 +32,18 @@ This document organizes development into discrete phases with effort estimates a
 | 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ✅ |
 | 8.5 | [Find (In-View)](#phase-85-find-in-view) | M — 1–2 days | ✅ |
 | 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ⬜ |
-| 10 | [Team Configuration](#phase-10-team-configuration) | M — 1–2 days | ⬜ |
-| 11 | [Web — Calendar, List & Kanban Views](#phase-11-web--calendar-list--kanban-views) | L — 1 wk | ⬜ |
+| 10.1 | [Teams — Full CRUD (API + UI)](#phase-101--teams--full-crud-api--ui) | M — 2 days | ⬜ |
+| 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
+| 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
+| 10.4 | [Profile, Tokens & Admin Settings (Web)](#phase-104--profile-tokens--admin-settings-web) | S — 1 day | ⬜ |
+| 11.1 | [Web — List / Spreadsheet View](#phase-111--web--list--spreadsheet-view) | M — 2–3 days | ⬜ |
+| 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
+| 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Calendar Sync — Google & CalDAV](#phase-12-calendar-sync--google--caldav) | XL — 1–2 wks | ⬜ |
-| 13 | [Data Portability & Polish](#phase-13-data-portability--polish) | M — 3–5 days | ⬜ |
-| 14 | [External Connectors (Webhooks)](#phase-14-external-connectors-webhooks) | M — 3–5 days | ⬜ |
-| 15 | [Global Search](#phase-15-global-search) | M — 2–3 days | ⬜ |
+| 13 | [Shares — Multi-Share Views with Passwords](#phase-13-shares--multi-share-views-with-passwords) | M — 3–5 days | ⬜ |
+| 14 | [Data Portability & Exports](#phase-14-data-portability--exports) | L — 1 wk | ⬜ |
+| 15 | [External Connectors (Webhooks)](#phase-15-external-connectors-webhooks) | M — 3–5 days | ⬜ |
+| 16 | [Global Search](#phase-16-global-search) | M — 2–3 days | ⬜ |
 
 **Parking Lot (v2):** MySQL/Postgres adapters, CLI, MCP server, mobile apps, Microsoft/Outlook sync, multi-tenant hosting, SSO, notifications.
 
@@ -399,6 +405,8 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 - `POST /timelines/:id/archive`, `POST /timelines/:id/unarchive`
 - List endpoints exclude archived records by default; `?archived=true` to include
 
+> **Note:** Phase 9 ships the API surface only. The token management **UI** (create / list / revoke from a settings page) lands in [Phase 10.4 — Profile, Tokens & Admin Settings](#phase-104--profile-tokens--admin-settings-web). Until 10.4 ships, tokens are created via direct API calls or a temporary admin script.
+
 **Exit criteria — safe to pause when:**
 - Can create an API token and use its value as a Bearer token on a GET request
 - A read-only token is rejected (403) on a POST/PATCH/DELETE request
@@ -406,39 +414,258 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 
 ---
 
-### Phase 10 — Team Configuration
-**Status:** ⬜ | **Effort:** M (1–2 days)
+### Phase 10 — Entity Management (data-cornerstone CRUD)
+
+**Framing:** Phase 10 closes the gaps in CRUD for the three core data entities — Teams, Timelines, Events — plus the cross-cutting settings shell. Today the first-run wizard creates one of each and there is no path to manage them afterward. We tackle them entity-by-entity, top-down, so that by the time Phase 11 (views) ships, the data layer underneath is fully manageable. Events are already CRUD-complete from Phases 3 / 8.2 / 8.2.1 (archive lands in Phase 9), so Phase 10 only needs to address Teams and Timelines.
+
+Sub-phase dependency: 10.1 (Teams) → 10.2 (Statuses) → 10.3 (Timelines) → 10.4 (Profile/Tokens/Admin). 10.2 depends on 10.1 because the statuses tab lives inside `/settings/team/:id`. 10.3 doesn't strictly depend on 10.2 but is sequenced after for clean delivery.
+
+---
+
+### Phase 10.1 — Teams — Full CRUD (API + UI)
+**Status:** ⬜ | **Effort:** M (2 days)
+
+Closes the Teams cornerstone. Today a user can create one team via the first-run wizard and never manage it again. After this phase, teams are a fully manageable entity from both API and UI.
+
+**Design rationale:**
+Teams are the outermost data scope — everything else (timelines, events, members, statuses, tokens, shares) hangs off a team. Without a way to rename, reconfigure, manage members, or add additional teams, the rest of the app is essentially read-only at the structural level. This is also where the existing Up-Next "Member Management (Sidebar)" task block lands — those tasks are absorbed here rather than shipped separately.
 
 **Scope:**
+
+*API — team-level:*
+- `GET /teams/:id` — full team detail (name, timezone, week start, member count, timeline count)
+- `PATCH /teams/:id` — rename, change timezone, change week start day (admin only)
+- `POST /teams/:id/archive` and `POST /teams/:id/unarchive` (depends on Phase 9 archive)
+- `POST /teams` already exists (Phase 3) — exposed via a new "Create team" UI path
+
+*API — member-level:*
+- `POST /teams/:id/members` — add existing registered user by `userId` (admin only)
+- `PATCH /teams/:id/members/:memberId` — update display name, color, role (admin for role; member can set own color/display name)
+- `DELETE /teams/:id/members/:memberId` — remove member; reject if last admin
+- `POST /teams/:id/participants` — create login-less participant (admin only; from Phase 8.0 schema)
+
+*API — invite-level:*
+- `GET /teams/:id/invites` — list pending invites
+- `DELETE /teams/:id/invites/:inviteId` — cancel pending invite
+- (`POST /teams/:id/invites` already exists — Phase 3)
+
+*Web:*
+- "New team" affordance in the team picker → create-team modal (name, timezone, week start)
+- `/settings/team/:id` — General tab: name, timezone, week start, archive button
+- `/settings/team/:id` — Members tab: list with role / color / last seen; promote / demote / remove; pending invites with resend / cancel; "Invite new" + "Add existing user" entry points
+- `/settings/team/:id` — Participants tab: create / rename / archive login-less members
+- Team archive flow: confirmation dialog, removes team from active picker, surfaces in an "Archived teams" section
+- Inline member quick-edit in the sidebar (gear icon on hover) opens a lightweight drawer that reuses Members-tab components
+
+**Exit criteria — safe to pause when:**
+- A user can create a second team from the team picker without going through the first-run wizard
+- A team admin can rename their team, change timezone, and change week start from `/settings/team/:id`
+- A team admin can add a registered user, invite a new email, cancel a pending invite, promote a member to admin, change a member's color, and remove a member — all from the Members tab
+- A non-admin member visiting `/settings/team/:id` sees the page in read-only form
+- Archiving a team removes it from the active picker; unarchive restores it
+- Removing the last admin from a team returns a validation error
+- The sidebar gear-icon member quick-edit drawer saves changes that immediately reflect in the Members tab
+
+---
+
+### Phase 10.2 — Team Statuses & Member Colors (API + UI)
+**Status:** ⬜ | **Effort:** M (1–2 days)
+
+Statuses are team-scoped configuration; pairing them with the Statuses tab UI in one phase keeps the API and the only consumer of that API shipping together. Required before Phase 11.3 (Kanban) so admins can configure columns.
+
+**Scope:**
+
+*API:*
 - `team_statuses` migration and repository
 - Seed default statuses (Planned / In Progress / Done) on team creation
 - `GET /teams/:id/statuses`, `POST /teams/:id/statuses`
 - `PATCH /statuses/:id` — rename, recolor, reorder
 - `DELETE /statuses/:id` — requires `replacementStatusId`; migrates events
-- `color` field on `team_members` (settable by admin or member)
+- Self-protect: cannot delete the last remaining status on a team
+- `color` field on `team_members` (already established in 10.1 via member PATCH; reaffirmed here)
+
+*Web:*
+- `/settings/team/:id` — Statuses tab: drag-to-reorder list, inline rename, color picker
+- Delete-with-replacement dialog: lists affected event count, requires picking a replacement status before confirming
+- Member color picker in Members tab (already shipped in 10.1) — confirmed wired to the same color field
 
 **Exit criteria — safe to pause when:**
 - A newly created team has exactly 3 seeded statuses
-- Statuses can be renamed, recolored, and reordered via API
-- Deleting a status without a replacement ID returns a validation error
-- Deleting a status with a replacement migrates all associated events to the replacement
-- A team member's color can be set and is returned in member list responses
+- Statuses can be renamed, recolored, and reordered from the UI; changes persist
+- Deleting a status without a replacement is blocked at both API and UI levels
+- Deleting a status with a replacement migrates all associated events
+- Deleting the last remaining status is blocked
+- Member color changes from the Members tab reflect immediately wherever members are shown
 
 ---
 
-### Phase 11 — Web — Calendar, List & Kanban Views
-**Status:** ⬜ | **Effort:** L (1 wk)
+### Phase 10.3 — Timelines — Full CRUD (API + UI)
+**Status:** ⬜ | **Effort:** M (2 days)
+
+Closes the Timelines cornerstone. Same problem space as 10.1: today timelines can be created in the wizard and never managed afterward, and access lists exist in the schema (Phase 8.0) with no CRUD endpoints.
 
 **Scope:**
-- Calendar view: weekly, daily, and monthly grid layouts
-- List view: chronological event list
-- Kanban view: columns = statuses (in order), cards = events, card color = member color
-- View switcher in the top bar
+
+*API — timeline-level:*
+- `PATCH /timelines/:id` — rename, change start/end date, change description (admin only)
+- `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (depends on Phase 9)
+- `DELETE /timelines/:id` — hard delete; admin only; confirms via second action
+
+*API — access-list:*
+- `GET /timelines/:id/access` — list current grants (team member + role)
+- `PUT /timelines/:id/access/:memberId` — grant or update role (admin / member)
+- `DELETE /timelines/:id/access/:memberId` — revoke grant
+
+*Web:*
+- "New timeline" affordance in the sidebar timelines list → create-timeline modal (name, date range)
+- Edit-timeline modal reachable from each timeline in the sidebar (or a `/settings/team/:id/timelines` sub-route): rename, change date range, archive, delete
+- Access-list management UI: search-pick team members, role toggle, remove
+- Sidebar shows archived timelines under a collapsed "Archived" group; unarchive from there
 
 **Exit criteria — safe to pause when:**
-- View switcher cycles between Gantt, Calendar (3 sub-layouts), List, and Kanban without error
-- All views show the same set of events (no data discrepancy)
-- Kanban columns appear in the same order as team statuses; cards show the correct member color
+- A user can create a second timeline without going through the first-run wizard
+- A timeline admin can rename a timeline and change its date range; events outside the new range are not deleted, just hidden from default views
+- Archiving a timeline removes it from the active sidebar; unarchive restores it
+- The access-list UI lets an admin grant / revoke access for any team member; a non-admin attempting these actions is rejected
+- A team member without an access grant cannot open the timeline (existing 8.0 enforcement) — verified end-to-end through the new UI
+
+---
+
+### Phase 10.4 — Profile, Tokens & Admin Settings (Web)
+**Status:** ⬜ | **Effort:** S (1 day)
+
+Cross-cutting settings — everything that isn't team- or timeline-scoped. Smaller than the original 10.2 because team/timeline management now lives in 10.1 / 10.2 / 10.3.
+
+**Scope:**
+
+*Routing & shell:*
+- `/settings` route with left-nav layout; sections gated by role
+- Nav items: Profile · API Tokens · Team (× N) · Admin (superadmin only) — the Team entries link to the surfaces shipped in 10.1–10.3
+
+*Profile (`/settings/profile`):*
+- Display name edit (PATCH against user record), change password form
+- Email shown read-only for v1
+- Avatar upload — stretch
+
+*API Tokens (`/settings/tokens`):*
+- List existing tokens (name, scope, last used, created) with revoke button
+- Create token dialog: name + scope picker (read-only / add / edit-own / edit-all)
+- One-time secret reveal on creation with copy-to-clipboard; never shown again
+
+*Admin (`/settings/admin`, superadmin only):*
+- Instance name + branding (logo, accent color override)
+- Registration policy toggle (invite-only vs open)
+- Backup status read-only surface (DB path, last-modified)
+- *Deferred to Phase 14:* SMTP config (lands with password-reset flow)
+
+**Exit criteria — safe to pause when:**
+- A user can change display name and password from `/settings/profile`; both persist across logout
+- A user can create, see the secret once for, and revoke an API token from the UI; the token successfully authenticates an API call
+- A superadmin sees the Admin nav item and can change instance name, branding, and registration policy
+- A non-superadmin does not see the Admin nav item
+- All four `/settings` sections coexist with the team and timeline surfaces from 10.1–10.3 without route collision
+
+---
+
+### Phase 11.1 — Web — List / Spreadsheet View
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+The "spreadsheet" surface — a dense, sortable, inline-editable table view of the same events shown in Gantt. Cheapest of the three new views to build and the highest-utility for power users who want to bulk-scan or bulk-edit. Shipped first so the view-switcher infrastructure lands here and the later views slot in.
+
+**Design rationale:**
+Gantt answers "when," List answers "what" — a flat, scannable inventory with column-level sorting, density that fits 50+ events on screen, and inline edits without opening a side panel. This is the view most users will reach for once Find (8.5) gets them close to a row.
+
+**Scope:**
+
+*View-switcher infrastructure (lands here, reused by 11.2 / 11.3):*
+- `ViewMode` extended to `'gantt' | 'list' | 'calendar' | 'kanban'`
+- View switcher control in the timeline sub-toolbar; per-timeline persisted via existing preferences (8.4)
+- View-specific toolbar slots so each view can contribute its own controls without crowding the shared bar
+
+*List view itself:*
+- Virtualized table (react-virtual or TanStack Virtual) — must scroll 1000+ rows smoothly
+- Default columns: Title, Start, End, Duration, Status, Assignees, Tags, Parent
+- Column show/hide menu; column order via drag; column widths resizable — persisted via preferences
+- Sort by clicking a column header (single-column sort for v1)
+- Density toggle (Comfortable / Compact)
+- Inline edit on click for title, dates, status — Tab/Shift+Tab/Enter navigation between cells
+- Row click (off-editable-cell) opens the existing `EventDetailPanel`
+- Bulk selection via checkbox column; bulk archive / delete / status-change actions in a contextual toolbar
+- Respects active filter, Find highlight (8.5), and granularity-independent — granularity does not apply to List
+
+**Exit criteria — safe to pause when:**
+- View switcher toggles between Gantt and List, persisting the choice per timeline
+- List shows all visible events with correct columns and respects the active filter
+- Sorting by any column reorders rows without losing scroll position
+- Inline editing title / dates / status saves via PATCH and reflects in Gantt when switched back
+- Bulk selecting 3+ events and applying "Archive" archives all selected events
+- 1000-row test fixture scrolls without jank
+- Find bar highlights matching rows in List view the same way it highlights bars in Gantt
+
+---
+
+### Phase 11.2 — Web — Calendar View
+**Status:** ⬜ | **Effort:** L (3–5 days)
+
+Three calendar sub-layouts (Month / Week / Day) sharing one component skeleton. Week / Day need an overlapping-event lane algorithm; Month is the cheaper grid.
+
+**Design rationale:**
+A familiar surface for users coming from Google Calendar / Outlook. Not a Gantt replacement — it answers "what's happening this week?" rather than "how does this project unfold?". Multi-day events render as continuous bars across cells (Month) or pinned to an all-day strip above the time grid (Week / Day).
+
+**Scope:**
+
+*Shared:*
+- Sub-layout switcher (Month / Week / Day) inside the view's toolbar slot
+- Today / prev / next navigation; "jump to date" picker
+- Click empty cell → open Event create form, prefilled with that date
+- Click event → open `EventDetailPanel`
+- Drag event between cells → PATCH new start/end (preserving duration); only valid on Week / Day for v1
+
+*Month layout:*
+- 6-week grid; multi-day events render as continuous bars spanning cells; overflow handled with a "+N more" affordance per cell
+
+*Week layout:*
+- 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
+- All-day strip at the top for events without time components
+- Overlapping-event lane algorithm: side-by-side columns within a day
+
+*Day layout:*
+- Single-day variant of Week; same time grid and lane algorithm
+
+**Open question (resolve early in phase):**
+- Events without time components (date-only) — do they all live in the all-day strip, or do they get a default block at e.g. 9am? Affects sync compatibility with Phase 12.
+
+**Exit criteria — safe to pause when:**
+- Switching to Calendar from List/Gantt renders the current month with all events in correct cells
+- Month / Week / Day sub-toggles each render correctly with no data discrepancy
+- A multi-day event renders as a continuous bar in Month and pinned to the all-day strip in Week / Day
+- Two overlapping events in Week view render side-by-side without occlusion
+- Dragging an event to a different day in Week view updates start/end via PATCH
+- Find highlights matching events in all three sub-layouts
+
+---
+
+### Phase 11.3 — Web — Kanban View (Read-Only)
+**Status:** ⬜ | **Effort:** S–M (1–2 days)
+
+Read-only Kanban per [REQUIREMENTS.md](REQUIREMENTS.md). Columns are team statuses in their configured order; cards are events colored by primary assignee. Drag-to-change-status is explicitly v2.
+
+**Depends on:** Phase 10.2 (statuses API + UI), so admins can actually configure columns.
+
+**Scope:**
+- Columns from `team_statuses` in display order; column header colored from status color
+- Cards: title, date range, assignee avatars (stacked color indicators for multi-assignee), parent badge if nested
+- Empty column shows muted "No events" placeholder
+- Column scroll independently when card count exceeds viewport height
+- Card click → `EventDetailPanel`
+- Respects active filter, Find highlight, archived hiding
+
+**Exit criteria — safe to pause when:**
+- Kanban columns appear in the same order as the team's configured statuses
+- Cards show the correct member color (or stacked indicators for multi-assignee)
+- A status renamed / recolored in Settings updates the Kanban column header without refresh
+- Find highlights matching cards across columns
+- Attempting to drag a card produces no errors and no state change (read-only enforcement)
 
 ---
 
@@ -462,26 +689,103 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 
 ---
 
-### Phase 13 — Data Portability & Polish
+### Phase 13 — Shares — Multi-Share Views with Passwords
 **Status:** ⬜ | **Effort:** M (3–5 days)
 
+A first-class **Share** entity. One timeline can have many shares; each share is a frozen pairing of `{ view type + view config + optional password + optional expiry }`. This is the feature that lets a team publish, e.g., a public Gantt sorted by start date with the "Marketing" filter applied, alongside a password-protected List view of the same data for an external stakeholder.
+
+**Design rationale:**
+The existing single share token on `timelines` is too coarse — it shares "the timeline" with no opinion about which view, filter, sort, or grouping the viewer should land in. With four view types live (Gantt + 11.1 + 11.2 + 11.3), the surface a sharer wants to publish is the *configured view*, not the raw timeline. Multiple shares per timeline also enable stakeholder-specific snapshots (different filters, different views, different passwords) without forcing the team into a one-link compromise.
+
 **Scope:**
-- `GET /timelines/:id/export.csv` and `.xlsx`
-- `POST /teams/:id/events/import` — CSV/Excel import with preview + validation step
-- `GET /import-template.csv` and `.xlsx`
-- Password reset flow (requires SMTP or transactional email provider)
-- Public read-only timeline view (no login required)
-- Timeline restricted-access enforcement
+
+*Schema:*
+- New `shares` table: `id`, `timeline_id`, `view_type` (gantt/list/calendar/kanban), `view_config` JSON (filter preset, group_by, sort_by, granularity, visible-columns, etc.), `password_hash` (nullable, bcrypt), `expires_at` (nullable), `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`
+- Public-token column on `shares` (unguessable, URL-safe) — the existing single token on `timelines` is migrated to the first share row
+- `timelines.share_token` deprecated and removed in a follow-up migration once UI references are migrated
+
+*API:*
+- `POST /timelines/:id/shares` — create share; body carries `view_type`, `view_config`, optional `password`, optional `expires_at`
+- `GET /timelines/:id/shares` — list shares for a timeline (creator + admins only)
+- `PATCH /shares/:id` — rename / change password / extend expiry / revoke
+- `DELETE /shares/:id` — hard delete
+- `GET /shares/:token` — public lookup; if password-protected returns 401 with a `passwordRequired: true` marker (no data leakage)
+- `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
+
+*Web — creating shares:*
+- "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
+- Click → modal that snapshots the current toolbar state (filter, sort, group, zoom, etc.) into `view_config`, offers password + expiry toggles, then returns the URL with copy button
+- View-config snapshot is **frozen** at creation time — later changes to the live view do not mutate existing shares
+
+*Web — viewing shares:*
+- Public viewer route `/s/:token` — no auth required; if password-protected, gates behind a password prompt; on success, mounts the corresponding view component in read-only mode with `view_config` applied
+- Read-only enforcement: no drag, no inline edit, no create — the same lockdown used for `is_external` events (Phase 15) applied to the whole surface
+- Branding strip at the top: team name, "Shared view," last-updated timestamp
+
+*Web — managing shares:*
+- "Manage shares" section on each timeline (also reachable from `/settings/team/:id` via a Timelines tab if scope allows): list, view counts, revoke, edit
+- Indicator chip on a timeline tile showing active share count
+
+**Open questions (resolve before starting):**
+- Do password-protected shares get a rate limit on unlock attempts? (Probably yes — N attempts per IP per hour.)
+- Should the unlock JWT be tied to the share's `view_config` snapshot, or refetch live? (Snapshot — that's the whole point.)
+- Do we expose share view counts to non-creators with admin access, or keep them creator-private?
 
 **Exit criteria — safe to pause when:**
-- Exporting a timeline produces a valid CSV and Excel file with all events
-- Importing that CSV back in shows a preview, validates rows, and creates events on confirm
-- Password reset sends an email and allows setting a new password
-- A public timeline share link is fully viewable without logging in
+- A user can create a share from any of the four views, with the current toolbar state captured in `view_config`
+- Visiting the share URL renders the saved view exactly as it was configured at creation time
+- A password-protected share prompts for the password; wrong password is rejected; correct password renders the view
+- Setting an expiry causes the share to return 410 Gone after that date
+- A revoked share returns 410 Gone immediately and the URL is no longer usable
+- One timeline can host at least three independent shares with different view types and configurations
+- Public viewers cannot mutate any data through the share URL (no edits, no drags, no creates)
 
 ---
 
-### Phase 14 — External Connectors (Webhooks)
+### Phase 14 — Data Portability & Exports
+**Status:** ⬜ | **Effort:** L (1 wk)
+
+Tabular import / export plus view-aware exports (Gantt → PDF, Kanban → PDF, List → Markdown, etc.). Each visual export respects the active filter / sort / group at time of export — the deliverable is "what's on the screen right now," not the raw event list.
+
+**Implementation note (PDF engine):**
+PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency in the Docker image). This keeps the binary lean at the cost of reimplementing Gantt / Kanban / Calendar layouts in PDF primitives — accepted tradeoff because the alternative (chromedp) significantly inflates the image size and breaks the "single binary" promise. Visual fidelity for the Gantt PDF will not match the live view pixel-for-pixel; the target is "readable and recognizable," not "screenshot quality."
+
+**Scope:**
+
+*Tabular import / export (was the old Phase 13):*
+- `GET /timelines/:id/export.csv` and `.xlsx`
+- `POST /teams/:id/events/import` — CSV/Excel import with preview + validation step
+- `GET /import-template.csv` and `.xlsx` downloadable template
+- Password reset flow (requires SMTP or transactional email provider) — kept here because import errors / reset emails are the first time we need SMTP
+
+*Visual / textual exports (per view):*
+- **Gantt → PDF:** landscape, paginated by date range; columns scale to fit a printable width per page; legend strip with member colors; export current filter/sort/group state. Gantt → PNG as a single-page variant.
+- **Kanban → PDF:** columns laid out side-by-side; if more columns than fit a printable width, paginate across pages with a column-overflow indicator. Kanban → PNG single-page.
+- **List → CSV, xlsx, Markdown, PDF.** Markdown export uses a GitHub-flavored table; PDF is a styled table with the same columns shown in the UI.
+- **Calendar → PDF:** Month layout → one page per month in range; Week layout → one page per week; Day layout → one page per day.
+- All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description.
+
+*Wiring:*
+- The Gantt toolbar's existing "Export" stub (Phase 8.1) becomes a real menu: CSV / xlsx / PDF / PNG
+- Same menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to each view's relevant formats
+
+**Open questions (resolve before starting):**
+- Are exports synchronous (block and return the file) or async (job queue with a download link)? Probably sync for v1; revisit if multi-hundred-page PDFs become slow.
+- Do exports respect Find highlights or just the filter? (Filter only — Find is ephemeral.)
+
+**Exit criteria — safe to pause when:**
+- Exporting a timeline to CSV and xlsx produces files containing all visible events with the active filter applied
+- Importing the exported CSV back in shows a preview, validates rows, and creates events on confirm
+- Gantt → PDF renders a recognizable Gantt chart with bars in the correct positions and a member-color legend
+- Kanban → PDF renders the visible columns and cards in the same order shown on screen
+- List → Markdown produces a clean GitHub-flavored table that renders correctly in a Markdown previewer
+- Calendar → PDF in Month layout produces one page per month with events in correct cells
+- Password reset flow sends an email and allows setting a new password
+- All export menus are reachable from their respective view toolbars; format options match the view type
+
+---
+
+### Phase 15 — External Connectors (Webhooks)
 **Status:** ⬜ | **Effort:** M (3–5 days)
 
 **Scope:**
@@ -497,13 +801,13 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 
 ---
 
-### Phase 15 — Global Search
+### Phase 16 — Global Search
 **Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
 
 Cross-team, cross-timeline event search via a command palette. Complements (does **not** replace) the in-view Find from [Phase 8.5](#phase-85-find-in-view).
 
 **Why a separate phase:**
-By the time we reach Phase 15 we'll have: Find (8.5), List view (11), real-time sync (8.3), and likely more events per team than fit in one fetch. Global Search needs server-side full-text and a different UX surface (a palette, not an inline bar), so it earns its own phase. With Find + List already shipped, this should feel like the natural "I genuinely don't know where this event is" escape hatch — used rarely but valued when needed.
+By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), and likely more events per team than fit in one fetch. Global Search needs server-side full-text and a different UX surface (a palette, not an inline bar), so it earns its own phase. With Find + List already shipped, this should feel like the natural "I genuinely don't know where this event is" escape hatch — used rarely but valued when needed.
 
 **Directional scope (to be firmed up before the phase):**
 - Command palette opened via `Ctrl/Cmd+K` (separate keybinding from Find's `Ctrl/Cmd+F`)

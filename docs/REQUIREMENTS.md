@@ -53,11 +53,10 @@ Events are the core data object — a block of time assigned to one or more peop
 Timelines are named viewing windows — a name and a date range — scoped to a team. They are not data containers; they are views over the team's events.
 
 - [ ] Teams can create multiple timelines, including overlapping ones
-- [ ] Each timeline has: name, start date, end date, visibility setting
-- [ ] Visibility options: **public** (default — anyone with the link can view, no login required) or **restricted** (specific authenticated users)
-- [ ] Share links can be generated for any timeline
-- [ ] Public timeline viewers see the timeline read-only without an account
+- [ ] Each timeline has: name, start date, end date
+- [ ] Team membership controls who can view a timeline by default; team admins implicitly access all timelines, members require an explicit access grant (see RBAC in Phase 8.0)
 - [ ] Timelines can be archived (removed from active list but preserved; recoverable)
+- [ ] External / public visibility is handled via the **Shares** model (below) — a timeline is not inherently "public" or "restricted"; it becomes externally visible only via a share link the team explicitly creates
 
 ### Timeline Views
 The primary view is a Gantt chart. Additional views display the same underlying events in different formats.
@@ -72,9 +71,10 @@ The primary view is a Gantt chart. Additional views display the same underlying 
     - **Sort by** — Start date (default), End date, Title A–Z
     - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
 - [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
-- [ ] **List view** — simple chronological or grouped list of events
+- [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of events; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many events at once.
 - [ ] **Kanban view** — read-only; columns = statuses (in the team's configured status order); cards = events, color-coded by assigned person(s); multiple assignees shown as stacked color indicators. This is a viewing mode only — dragging cards to change status is out of scope for v1.
 - [ ] View switcher in the timeline header to toggle between available views
+- [ ] Each view persists its own toolbar state per timeline (group / sort / zoom / column visibility / filter preset) via user preferences
 
 > **Note:** Kanban is intentionally read-only in v1; drag-to-change-status is a later addition once the status model is proven.
 
@@ -118,16 +118,35 @@ Admins can customize team-level settings that apply to all members and views.
 - [ ] The event card links back to the original source URL.
 
 ### Sharing and Public Access
-- [ ] Public timelines are accessible via a stable share URL with no login
-- [ ] Public viewers see all events on the timeline read-only
-- [ ] Restricted timelines require the viewer to be an authenticated member listed in the timeline's access list
-- [ ] Each timeline exposes a public iCal feed URL (usable in Google Calendar, Apple Calendar, Outlook, etc.) containing sanitized event data
+Sharing in draba is a first-class entity, not a property of a timeline. A **Share** is a frozen pairing of `{ timeline + view type + view configuration + optional password + optional expiry }`. One timeline can have many shares, each tuned for a different audience.
+
+- [ ] A Share captures: the source timeline, the view type (Gantt / List / Calendar / Kanban), and a snapshot of the view's configuration at creation time (filter, sort, group, zoom, column visibility, etc.)
+- [ ] The view-config snapshot is **frozen** at creation — later edits to the live view do not retroactively change existing shares
+- [ ] A Share can optionally require a password to view (stored hashed; not retrievable)
+- [ ] A Share can optionally expire on a given date; expired shares return a clear "this link has expired" page
+- [ ] A Share can be revoked at any time by the creator or a team admin; revoked links are immediately unusable
+- [ ] A single timeline can host many independent shares simultaneously (e.g., a public Gantt for stakeholders + a password-protected List for contractors)
+- [ ] Share viewers see the chosen view in read-only mode — no drag, no inline edit, no create
+- [ ] Share URLs are unguessable (URL-safe random tokens); password-protected shares additionally rate-limit unlock attempts
+- [ ] Team admins can list, edit, and revoke any share for their team; members can only manage shares they created
+- [ ] Each timeline also exposes a public iCal feed URL (separate from the Share model) containing sanitized event data for calendar app subscription — see Calendar Sync
 
 ### Data Portability
+Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visual** (one-way view exports for sharing offline — PDF / PNG / Markdown).
+
+**Tabular (round-trip):**
 - [ ] Events can be exported to CSV and Excel (.xlsx) from any timeline view
 - [ ] Events can be imported from a CSV or Excel file
 - [ ] A downloadable template file is provided showing the expected import format
 - [ ] Import shows a preview and validation errors before committing
+
+**Visual (view-shaped, one-way out):**
+- [ ] Gantt → PDF (landscape, paginated by date range) and PNG (single page)
+- [ ] Kanban → PDF (columns side-by-side, paginated when too wide for one page) and PNG
+- [ ] List → CSV, xlsx, Markdown table, and PDF
+- [ ] Calendar → PDF, one page per month / week / day depending on active sub-layout
+- [ ] All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description
+- [ ] All visual exports respect the active filter / sort / group at time of export — the deliverable is "what's on the screen right now"
 
 ---
 
