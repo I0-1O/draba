@@ -5,7 +5,7 @@
  * query-time so stale closures never send an expired token.
  */
 
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type { components } from '@draba/shared'
 import { createAuthFetch } from '@/lib/api'
 import { useAuth } from '@/contexts/AuthContext'
@@ -86,4 +86,86 @@ export function useTeamMembers(teamId: string) {
 export function useInvalidateTeamEvents(teamId: string) {
   const client = useQueryClient()
   return () => client.invalidateQueries({ queryKey: ['teams', teamId, 'events'] })
+}
+
+interface CreateEventInput {
+  title: string
+  startAt: string
+  endAt: string
+  description?: string | null
+  color?: string | null
+  assignedMemberIds?: string[]
+}
+
+interface UpdateEventInput {
+  eventId: string
+  patch: {
+    title?: string
+    description?: string | null
+    startAt?: string
+    endAt?: string
+    allDay?: boolean
+    color?: string | null
+    location?: string | null
+    url?: string | null
+    assignedMemberIds?: string[]
+  }
+}
+
+/** Creates an event and invalidates the team events cache. */
+export function useCreateEvent(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateEventInput) =>
+      authFetch<Event>(`/teams/${teamId}/events`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['teams', teamId, 'events'] })
+    },
+  })
+}
+
+/** PATCHes an event and optimistically updates the cache. */
+export function useUpdateEvent(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ eventId, patch }: UpdateEventInput) =>
+      authFetch<Event>(`/events/${eventId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: (updated) => {
+      // Update the event in all matching cache entries for the team.
+      client.setQueriesData<Event[]>(
+        { queryKey: ['teams', teamId, 'events'] },
+        (old) => old?.map((e) => (e.id === updated.id ? updated : e)),
+      )
+    },
+  })
+}
+
+/** Deletes an event and removes it from the cache. */
+export function useDeleteEvent(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (eventId: string) =>
+      authFetch<void>(`/events/${eventId}`, { method: 'DELETE' }),
+    onSuccess: (_data, eventId) => {
+      client.setQueriesData<Event[]>(
+        { queryKey: ['teams', teamId, 'events'] },
+        (old) => old?.filter((e) => e.id !== eventId),
+      )
+    },
+  })
 }

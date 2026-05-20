@@ -88,6 +88,53 @@ func (r *EventRepo) Delete(id string) error {
 	return nil
 }
 
+// SetAssignments replaces all event_assignments for an event with the
+// provided member IDs. An empty slice removes all assignments.
+func (r *EventRepo) SetAssignments(eventID string, memberIDs []string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning assignment transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`DELETE FROM event_assignments WHERE event_id = ?`, eventID); err != nil {
+		return fmt.Errorf("clearing event assignments: %w", err)
+	}
+
+	for _, memberID := range memberIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO event_assignments (event_id, team_member_id) VALUES (?, ?)`,
+			eventID, memberID,
+		); err != nil {
+			return fmt.Errorf("inserting event assignment: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing event assignments: %w", err)
+	}
+	return nil
+}
+
+// GetAssignments returns the team_member_ids assigned to an event.
+func (r *EventRepo) GetAssignments(eventID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT team_member_id FROM event_assignments WHERE event_id = ?`, eventID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting event assignments: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
 // ListByTeam returns non-archived events for a team. When from or to are
 // non-nil they bound the query: events whose start_at falls within [from, to]
 // inclusive are returned. AssignedMemberIDs is populated via a second query.

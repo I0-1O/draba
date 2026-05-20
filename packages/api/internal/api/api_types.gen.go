@@ -383,19 +383,20 @@ type ListEventsParams struct {
 
 // CreateEventJSONBody defines parameters for CreateEvent.
 type CreateEventJSONBody struct {
-	AllDay          *bool     `json:"allDay,omitempty"`
-	Color           *string   `json:"color,omitempty"`
-	Description     *string   `json:"description,omitempty"`
-	EndAt           time.Time `json:"endAt"`
-	Icon            *string   `json:"icon,omitempty"`
-	Location        *string   `json:"location,omitempty"`
-	ParentEventId   *string   `json:"parentEventId,omitempty"`
-	PercentComplete *int      `json:"percentComplete,omitempty"`
-	Rrule           *string   `json:"rrule,omitempty"`
-	StartAt         time.Time `json:"startAt"`
-	StatusId        *string   `json:"statusId,omitempty"`
-	Title           string    `json:"title"`
-	Url             *string   `json:"url,omitempty"`
+	AllDay             *bool     `json:"allDay,omitempty"`
+	AssignedMemberIds  *[]string `json:"assignedMemberIds,omitempty"`
+	Color              *string   `json:"color,omitempty"`
+	Description        *string   `json:"description,omitempty"`
+	EndAt              time.Time `json:"endAt"`
+	Icon               *string   `json:"icon,omitempty"`
+	Location           *string   `json:"location,omitempty"`
+	ParentEventId      *string   `json:"parentEventId,omitempty"`
+	PercentComplete    *int      `json:"percentComplete,omitempty"`
+	Rrule              *string   `json:"rrule,omitempty"`
+	StartAt            time.Time `json:"startAt"`
+	StatusId           *string   `json:"statusId,omitempty"`
+	Title              string    `json:"title"`
+	Url                *string   `json:"url,omitempty"`
 }
 
 // CreateInviteJSONBody defines parameters for CreateInvite.

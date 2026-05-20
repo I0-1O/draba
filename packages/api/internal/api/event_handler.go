@@ -76,6 +76,16 @@ func (s *Server) handleCreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.AssignedMemberIds != nil {
+		if err := s.events.SetAssignments(event.ID, *req.AssignedMemberIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set event assignments")
+			return
+		}
+		event.AssignedMemberIDs = *req.AssignedMemberIds
+	} else {
+		event.AssignedMemberIDs = []string{}
+	}
+
 	s.bus.Publish(events.Message{Type: events.EventCreated, TeamID: event.TeamID, Payload: event})
 	writeJSON(w, http.StatusCreated, event)
 }
@@ -233,6 +243,16 @@ func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var newAssignees *[]string
+	if v, ok := patch["assignedMemberIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
+			return
+		}
+		newAssignees = &ids
+	}
+
 	if event.Title == "" {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
 		return
@@ -246,6 +266,22 @@ func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
 	if err := s.events.Update(event); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update event")
 		return
+	}
+
+	if newAssignees != nil {
+		if err := s.events.SetAssignments(event.ID, *newAssignees); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set event assignments")
+			return
+		}
+		event.AssignedMemberIDs = *newAssignees
+	} else {
+		// Populate current assignments so the response always includes them.
+		existing, err := s.events.GetAssignments(event.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get event assignments")
+			return
+		}
+		event.AssignedMemberIDs = existing
 	}
 
 	s.bus.Publish(events.Message{Type: events.EventUpdated, TeamID: event.TeamID, Payload: event})

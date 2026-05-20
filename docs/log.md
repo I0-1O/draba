@@ -2,6 +2,55 @@
 
 ---
 
+## 2026-05-19 — Phase 8.2 Polish: panel UX, sidebar fixes
+
+### EventDetailPanel redesign
+- Sections: icon stub + title → WHEN (dates + allDay toggle) → ASSIGNED TO (member row style, opacity-dimmed when unassigned) → CLASSIFY (status stub "Phase 10", tags stub "coming soon", color swatches) → DETAILS (parent stub, progress bar stub, location + url functional inputs) → NOTES (description textarea)
+- Added `allDay`, `location`, `url` to `UpdateEventInput` patch type and wired to PATCH
+- Inline title editing (transparent border on blur, visible on focus)
+
+### Sidebar + animation fixes
+- Fixed left sidebar collapse animation: `transition: 'width 0.0s'` → `'width 0.2s ease'`
+- EventDetailPanel and EventCreatePanel now always-rendered with `width: open ? 300 : 0` slide transition
+- Filter sidebar closes when event detail or create panel opens
+
+### New Event button wiring
+- `onNewEvent` prop added to Sidebar; wired to all three "New event" touch targets
+- Opens EventCreatePanel with today as default start/end; clears selected event and filter panel
+- Removed `onLaneDrag` from GanttView wiring (replaced by explicit New Event button)
+
+### Full-row highlight
+- Selected event row now applies `background: hsl(188 59% 38% / .04)` to the entire row container, not just the label cell
+
+---
+
+## 2026-05-19 — Phase 8.2: Gantt Interactions (complete)
+
+### API additions
+- `assignedMemberIds` added to `POST /teams/:id/events` and `PATCH /events/:id` request bodies (OpenAPI spec + Go handler)
+- `EventRepo.SetAssignments(eventID, memberIDs)` — replaces all event_assignments in a transaction
+- `EventRepo.GetAssignments(eventID)` — used to populate `assignedMemberIds` in PATCH response when field not provided
+- Go and TypeScript types regenerated
+
+### New frontend components
+- `EventDetailPanel` (`components/gantt/EventDetailPanel.tsx`) — right-side panel for a selected Gantt event; editable title (blur), description (blur), date range (date inputs), color picker, assignee toggle list; delete with inline confirm; uses `useUpdateEvent` + `useDeleteEvent` mutations
+- `EventCreatePanel` (`components/gantt/EventCreatePanel.tsx`) — create form pre-filled from drag selection; title, description, dates, color, assignees; submit via `useCreateEvent` mutation; panel auto-closes on success
+- `useCreateEvent`, `useUpdateEvent`, `useDeleteEvent` — TanStack Query mutations with optimistic cache updates in `useTeamEvents.ts`
+
+### Drag-to-create in GanttGrid
+- Mousedown on empty lane → crosshair cursor, drag state tracked via ref + window listeners
+- Dashed selection highlight rendered during drag
+- Mousedown on event bar stops propagation (no accidental drag trigger)
+- On mouseup: resolves column indices → dates from `ColumnDef.start`, calls `onLaneDrag` callback
+
+### DashboardPage wiring
+- `onSelectApiEvent` callback on GanttView passes full API event object to parent
+- `onLaneDrag` callback captures drag start/end dates + memberId, opens EventCreatePanel
+- `onMembersLoaded` callback caches member list for panel use
+- EventDetailPanel and EventCreatePanel rendered conditionally in the layout (right edge, no RightSidebar wrapper needed)
+
+---
+
 ## 2026-05-19 — Phase 8.1.1 + 8.1.2: Rename, polish, zoom rethink (complete)
 
 ### Phase 8.1.1 — Rename Timeline View → Gantt

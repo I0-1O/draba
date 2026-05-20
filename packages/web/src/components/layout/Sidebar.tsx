@@ -23,6 +23,7 @@ interface Props {
   onToggle: () => void;
   onActiveColorChange?: (color: string) => void;
   onActiveNameChange?: (name: string) => void;
+  onNewEvent?: () => void;
 }
 
 const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
@@ -219,7 +220,7 @@ function ConnectorItem({ name, status, color }: { name: string; status: string; 
  * Left navigation rail: brand, team selector with members, and timeline list.
  * Collapsed/expanded state is driven by the parent.
  */
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange }: Props) {
+export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewEvent }: Props) {
   const [activeId, setActiveId] = useState(DEMO_TIMELINES[0].id);
   const [teamOpen, setTeamOpen] = useState(true);
   const [eventOpen, setEventOpen] = useState(true);
@@ -275,7 +276,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
         color: 'white',
         display: 'flex',
         flexDirection: 'column',
-        transition: 'width 0.0s',
+        transition: 'width 0.2s ease',
         overflow: 'hidden',
         borderRight: '1px solid rgba(255,255,255,0.06)',
       }}
@@ -370,6 +371,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
             {/* New event */}
             <button
               title="New event"
+              onClick={onNewEvent}
               style={{
                 width: 28,
                 height: 28,
@@ -683,6 +685,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
               </button>
               <button
                 title="New event"
+                onClick={onNewEvent}
                 style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   width: 24, height: 24, borderRadius: 5,
@@ -699,6 +702,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
             {/* New event + Import events — only when section is expanded */}
             {eventOpen && (
               <button
+                onClick={onNewEvent}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
                   padding: '6px 16px', background: 'none', border: 'none',

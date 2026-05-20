@@ -872,6 +872,8 @@ export interface operations {
                     location?: string | null;
                     url?: string | null;
                     rrule?: string | null;
+                    /** @description IDs of team_members to assign. Replaces all existing assignments. */
+                    assignedMemberIds?: string[];
                 };
             };
         };
@@ -944,6 +946,8 @@ export interface operations {
                     location?: string | null;
                     url?: string | null;
                     rrule?: string | null;
+                    /** @description IDs of team_members to assign. Replaces all existing assignments. */
+                    assignedMemberIds?: string[];
                 };
             };
         };

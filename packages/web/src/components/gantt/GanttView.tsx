@@ -6,7 +6,7 @@
  * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
  */
 
-import { useMemo, useRef, useState, useLayoutEffect } from 'react';
+import { useMemo, useRef, useState, useLayoutEffect, useEffect } from 'react';
 import GanttGrid, { type GanttEvent, type GanttRow } from './GanttGrid';
 import { useTeamEvents, useTeamMembers } from '@/hooks/useTeamEvents';
 import type { components } from '@draba/shared';
@@ -35,6 +35,12 @@ interface Props {
   colorBy: ColorBy;
   selectedEventId?: string | null;
   onSelectEvent?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an event. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an event is selected — passes the full API event object. */
+  onSelectApiEvent?: (event: ApiEvent | null) => void;
 }
 
 /** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
@@ -220,6 +226,9 @@ export default function GanttView({
   colorBy,
   selectedEventId = null,
   onSelectEvent = () => {},
+  onLaneDrag,
+  onMembersLoaded,
+  onSelectApiEvent,
 }: Props) {
   const today = todayMidnight();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -285,6 +294,14 @@ export default function GanttView({
     return map;
   }, [members]);
 
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
   const rows: GanttRow[] = useMemo(() => {
     const richEvents = apiEvents
       .map((ev, i) => toRichEvent(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
@@ -308,7 +325,14 @@ export default function GanttView({
         columns={columns}
         todayIndex={todayIdx}
         selectedEventId={selectedEventId}
-        onSelectEvent={onSelectEvent}
+        onSelectEvent={(id) => {
+          onSelectEvent(id);
+          if (onSelectApiEvent) {
+            const found = id ? (apiEvents.find(e => e.id === id) ?? null) : null;
+            onSelectApiEvent(found);
+          }
+        }}
+        onLaneDrag={onLaneDrag}
       />
     </div>
   );

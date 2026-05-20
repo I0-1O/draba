@@ -73,11 +73,11 @@
 - [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
 
 ### Web — Timeline View (Phase 8.2: Interactions)
-- [ ] Click event block → open `EventDetailPanel` (view mode)
-- [ ] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id`
-- [ ] Delete event with confirm dialog; remove from timeline
-- [ ] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member
-- [ ] Submit create form → `POST /teams/:id/events`, insert block into timeline
+- [x] Click event block → open `EventDetailPanel` (view mode) — 2026-05-19
+- [x] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id` — 2026-05-19
+- [x] Delete event with confirm dialog; remove from timeline — 2026-05-19
+- [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
+- [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
 
 ### Web — Timeline View (Phase 8.3: Real-Time Sync)
 - [ ] Connect `useWebSocket` to subscribe to `events.*` for active team

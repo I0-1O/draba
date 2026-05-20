@@ -26,7 +26,7 @@ This document organizes development into discrete phases with effort estimates a
 | 8.1 | [Web — Gantt Shell & Event Rendering](#phase-81-web--gantt-shell--event-rendering) | L — 3–5 days | ✅ |
 | 8.1.1 | [Rename Timeline View → Gantt](#phase-811-rename-timeline-view--gantt) | XS — 1 hr | ✅ |
 | 8.1.2 | [Gantt View Polish](#phase-812-gantt-view-polish) | M — 1–2 days | ✅ |
-| 8.2 | [Web — Gantt Interactions](#phase-82-web--gantt-interactions) | L — 3–5 days | ⬜ |
+| 8.2 | [Web — Gantt Interactions](#phase-82-web--gantt-interactions) | L — 3–5 days | ✅ |
 | 8.3 | [Web — Real-Time WebSocket Sync](#phase-83-web--real-time-websocket-sync) | M — 1–2 days | ⬜ |
 | 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ⬜ |
 | 8.5 | [Search with Highlight](#phase-85-search-with-highlight) | S — 1 day | ⬜ |
@@ -250,7 +250,7 @@ Three polish items bundled together.
 ---
 
 ### Phase 8.2 — Web — Gantt Interactions
-**Status:** ⬜ | **Effort:** L (3–5 days)
+**Status:** ✅ Done — 2026-05-19 | **Effort:** L (3–5 days)
 
 Builds on 8.1. Full CRUD interactions on the timeline.
 

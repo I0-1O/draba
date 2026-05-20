@@ -731,6 +731,11 @@ paths:
                 rrule:
                   type: string
                   nullable: true
+                assignedMemberIds:
+                  type: array
+                  items:
+                    type: string
+                  description: IDs of team_members to assign. Replaces all existing assignments.
       responses:
         "201":
           description: Event created.
@@ -841,6 +846,11 @@ paths:
                 rrule:
                   type: string
                   nullable: true
+                assignedMemberIds:
+                  type: array
+                  items:
+                    type: string
+                  description: IDs of team_members to assign. Replaces all existing assignments.
       responses:
         "200":
           description: Updated event.

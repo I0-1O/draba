@@ -11,12 +11,18 @@ import TopBar, { type ViewMode } from '@/components/layout/TopBar'
 import RightSidebar from '@/components/layout/RightSidebar'
 import GanttView from '@/components/gantt/GanttView'
 import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
+import EventDetailPanel from '@/components/gantt/EventDetailPanel'
+import EventCreatePanel from '@/components/gantt/EventCreatePanel'
 import { FilterProvider } from '@/contexts/FilterContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
 import { useMyTeams, useTeamTimelines, useInvalidateTeamEvents } from '@/hooks/useTeamEvents'
 import { useWebSocket } from '@/hooks/useWebSocket'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiEvent = components['schemas']['Event']
 
 const DROPDOWN_BTN: React.CSSProperties = {
   display: 'flex',
@@ -40,6 +46,9 @@ function DashboardShell() {
   const [view, setView] = useState<ViewMode>('gantt')
   const [profileOpen, setProfileOpen] = useState(false)
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
+  const [selectedApiEvent, setSelectedApiEvent] = useState<ApiEvent | null>(null)
+  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
   const [activeTimelineColor, setActiveTimelineColor] = useState('#1A97A2')
   const [activeTimelineName, setActiveTimelineName] = useState('Q1 2027 Roadmap')
   const [filterEditorOpen, setFilterEditorOpen] = useState(false)
@@ -97,6 +106,13 @@ function DashboardShell() {
         onToggle={() => setSidebarCollapsed(c => !c)}
         onActiveColorChange={setActiveTimelineColor}
         onActiveNameChange={setActiveTimelineName}
+        onNewEvent={() => {
+          const today = new Date().toISOString().slice(0, 10)
+          setSelectedEventId(null)
+          setSelectedApiEvent(null)
+          setFilterEditorOpen(false)
+          setCreateDefaults({ start: today, end: today, memberId: null })
+        }}
       />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
@@ -211,7 +227,16 @@ function DashboardShell() {
               granularity={granularity}
               colorBy={colorBy}
               selectedEventId={selectedEventId}
-              onSelectEvent={setSelectedEventId}
+              onSelectEvent={(id) => {
+                setSelectedEventId(id)
+                if (!id) { setSelectedApiEvent(null); setCreateDefaults(null) }
+              }}
+              onSelectApiEvent={(ev) => {
+                setSelectedApiEvent(ev)
+                setCreateDefaults(null)
+                if (ev) setFilterEditorOpen(false)
+              }}
+              onMembersLoaded={setGanttMembers}
             />
           ) : view === 'gantt' && !teamId ? (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -226,6 +251,26 @@ function DashboardShell() {
           )}
         </div>
       </div>
+
+      {/* Event detail panel — slides in from right when an event is selected */}
+      <EventDetailPanel
+        open={Boolean(selectedApiEvent)}
+        event={selectedApiEvent}
+        members={ganttMembers}
+        teamId={teamId}
+        onClose={() => { setSelectedEventId(null); setSelectedApiEvent(null) }}
+      />
+
+      {/* Event create panel — slides in from New Event button or future drag */}
+      <EventCreatePanel
+        open={Boolean(createDefaults) && !selectedApiEvent}
+        teamId={teamId}
+        members={ganttMembers}
+        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
+        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
+        defaultMemberId={createDefaults?.memberId}
+        onClose={() => setCreateDefaults(null)}
+      />
 
       <RightSidebar
         open={filterEditorOpen}
