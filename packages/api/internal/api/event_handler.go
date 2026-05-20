@@ -123,7 +123,8 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		to = &t
 	}
 
-	events, err := s.events.ListByTeam(teamID, from, to)
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	events, err := s.events.ListByTeam(teamID, from, to, includeArchived)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list events")
 		return
@@ -282,6 +283,66 @@ func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		event.AssignedMemberIDs = existing
+	}
+
+	s.bus.Publish(events.Message{Type: events.EventUpdated, TeamID: event.TeamID, Payload: event})
+	writeJSON(w, http.StatusOK, event)
+}
+
+// handleArchiveEvent handles POST /events/{id}/archive. Any team member may
+// archive an event; the row is soft-deleted (archived_at set) so it is hidden
+// from list responses by default but can be restored.
+func (s *Server) handleArchiveEvent(w http.ResponseWriter, r *http.Request) {
+	s.setEventArchive(w, r, true)
+}
+
+// handleUnarchiveEvent handles POST /events/{id}/unarchive.
+func (s *Server) handleUnarchiveEvent(w http.ResponseWriter, r *http.Request) {
+	s.setEventArchive(w, r, false)
+}
+
+// setEventArchive is the shared implementation for the archive/unarchive
+// endpoints. When archive is true, archived_at is set to now; otherwise it
+// is cleared.
+func (s *Server) setEventArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	eventID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	event, err := s.events.GetByID(eventID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "event not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive event")
+		return
+	}
+	if _, err := s.teams.GetMember(event.TeamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive event")
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+	}
+	if err := s.events.SetArchived(eventID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive event")
+		return
+	}
+	event.ArchivedAt = at
+	event.UpdatedAt = time.Now().UTC()
+
+	// Re-populate assignments for a stable response shape.
+	if ids, err := s.events.GetAssignments(event.ID); err == nil {
+		event.AssignedMemberIDs = ids
+	} else {
+		event.AssignedMemberIDs = []string{}
 	}
 
 	s.bus.Publish(events.Message{Type: events.EventUpdated, TeamID: event.TeamID, Payload: event})

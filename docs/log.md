@@ -2,6 +2,48 @@
 
 ---
 
+## 2026-05-20 — Phase 9: API Token Auth & Archive
+
+### What was built
+
+**API tokens (programmatic auth):**
+- `auth.GenerateAPIToken` / `HashAPIToken` / `LooksLikeAPIToken` — raw token prefix `draba_pat_` + 32 random bytes; SHA-256 hash stored in `api_tokens.token_hash` (the schema column already existed from migration 001).
+- `db.APITokenRepo` — Create / ListByUser / GetByID / GetByHash / Revoke / TouchLastUsed. Revoked rows are preserved so the listing UI shows "Revoked on …".
+- `POST /tokens`, `GET /tokens`, `DELETE /tokens/{id}` — JWT-only (API tokens cannot mint other API tokens). Raw token value returned exactly once on create; listing never includes it.
+
+**Bearer middleware:**
+- `authMiddleware` now accepts either a JWT or an API token. Token type is selected by the `draba_pat_` prefix.
+- Read-only API tokens (`scope=read`) are rejected with 403 on any non-GET request; other scopes pass through.
+- `last_used_at` updated best-effort on each authenticated request.
+
+**Archive (events + timelines):**
+- `events.SetArchived` + `POST /events/{id}/archive` / `/unarchive`. Any team member may archive.
+- `timelines.SetArchived` + `POST /timelines/{id}/archive` / `/unarchive`. Team admins only (per-timeline admin grants deferred to Phase 10.3).
+- `ListByTeam(includeArchived)` on both repos. List endpoints exclude archived rows unless `?archived=true` is passed.
+- `GetByID` on timelines now returns archived rows (so archive endpoints can operate on them); the read handler 404s archived timelines unless `?archived=true`.
+- New `events.TimelineUpdated` bus message for archive/unarchive transitions.
+
+**OpenAPI:**
+- New `APIToken` and `APITokenCreated` schemas.
+- New paths: `/tokens`, `/tokens/{id}`, `/events/{id}/archive`, `/events/{id}/unarchive`, `/timelines/{id}/archive`, `/timelines/{id}/unarchive`.
+- `archived` query param added to `listEvents` and `listTimelines`.
+- TypeScript types regenerated via `pnpm --filter shared generate`.
+
+### Tests
+- `api_token_handler_test.go` — create / list / revoke; raw value returned once; revoked token rejected on subsequent use; invalid scope rejected; read-only scope blocks writes; API token cannot mint API token.
+- `archive_test.go` — event archive hides from default list, restorable via `?archived=true` and via /unarchive; same for timelines.
+- `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` (tsc) clean.
+
+### Exit criteria
+- ✅ Create API token + use raw value as Bearer on GET (verified via test)
+- ✅ Read-only token rejected (403) on POST/PATCH/DELETE
+- ✅ Archiving an event removes it from default list; `?archived=true` restores it
+- ✅ Archive / unarchive endpoints exist for both events and timelines
+
+The token management **UI** is intentionally deferred to Phase 10.4 per ROADMAP.
+
+---
+
 ## 2026-05-20 — /test-phase 8.5
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

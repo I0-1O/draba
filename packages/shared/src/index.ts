@@ -115,6 +115,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List API tokens owned by the caller */
+        get: operations["listAPITokens"];
+        put?: never;
+        /**
+         * Create a new API token
+         * @description Mints a long-lived Bearer token scoped to the caller's account. The raw token
+         *     value is returned exactly once in the response and never re-fetchable. API
+         *     tokens cannot be used to mint other API tokens — this endpoint requires a JWT.
+         */
+        post: operations["createAPIToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tokens/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke an API token
+         * @description Marks the token as revoked. The row is preserved so the listing UI can show "Revoked on …".
+         */
+        delete: operations["revokeAPIToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/teams": {
         parameters: {
             query?: never;
@@ -235,6 +278,43 @@ export interface paths {
         patch: operations["updateEvent"];
         trace?: never;
     };
+    "/events/{id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive an event (soft delete)
+         * @description Sets archivedAt on the event so it is hidden from default list responses but can be restored via /events/{id}/unarchive.
+         */
+        post: operations["archiveEvent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/events/{id}/unarchive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore a previously archived event */
+        post: operations["unarchiveEvent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/teams/{id}/timelines": {
         parameters: {
             query?: never;
@@ -250,6 +330,43 @@ export interface paths {
          * @description The authenticated user must be a member of the team. Restricted timelines automatically grant access to the creator.
          */
         post: operations["createTimeline"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/timelines/{id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive a timeline (admin only)
+         * @description Team admins only. Sets archivedAt on the timeline so it is hidden from default list responses but can be restored via /timelines/{id}/unarchive.
+         */
+        post: operations["archiveTimeline"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/timelines/{id}/unarchive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore a previously archived timeline */
+        post: operations["unarchiveTimeline"];
         delete?: never;
         options?: never;
         head?: never;
@@ -459,6 +576,24 @@ export interface components {
             value: string;
             /** Format: date-time */
             updatedAt: string;
+        };
+        APIToken: {
+            id: string;
+            userId: string;
+            /** @description Human-readable label (e.g. "ci-readonly"). */
+            name: string;
+            /** @enum {string} */
+            scope: "read" | "add" | "edit_own" | "edit_all";
+            /** Format: date-time */
+            lastUsedAt?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            revokedAt?: string | null;
+        };
+        APITokenCreated: components["schemas"]["APIToken"] & {
+            /** @description The raw token value. Returned exactly once at creation; never re-fetchable. */
+            token: string;
         };
         AuthResponse: {
             user: components["schemas"]["User"];
@@ -757,6 +892,83 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    listAPITokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Array of tokens (active and revoked). Raw token value is never included. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIToken"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createAPIToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name: string;
+                    /** @enum {string} */
+                    scope: "read" | "add" | "edit_own" | "edit_all";
+                };
+            };
+        };
+        responses: {
+            /** @description Token created. The raw value is included in this response only. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APITokenCreated"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    revokeAPIToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Token revoked (or already revoked). */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     listTeams: {
         parameters: {
             query?: never;
@@ -911,6 +1123,8 @@ export interface operations {
                 from?: string;
                 /** @description Only return events where startAt <= to (RFC 3339). */
                 to?: string;
+                /** @description When `true`, include archived events. Default excludes them. */
+                archived?: "true" | "false";
             };
             header?: never;
             path: {
@@ -1061,9 +1275,66 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    listTimelines: {
+    archiveEvent: {
         parameters: {
             query?: never;
+            header?: never;
+            path: {
+                /** @description Event ID. */
+                id: components["parameters"]["eventId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The archived event. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Event"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    unarchiveEvent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Event ID. */
+                id: components["parameters"]["eventId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The restored event. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Event"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listTimelines: {
+        parameters: {
+            query?: {
+                /** @description When `true`, include archived timelines. Default excludes them. */
+                archived?: "true" | "false";
+            };
             header?: never;
             path: {
                 /** @description Team ID. */
@@ -1121,6 +1392,60 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    archiveTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Timeline ID. */
+                id: components["parameters"]["timelineId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The archived timeline. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Timeline"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    unarchiveTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Timeline ID. */
+                id: components["parameters"]["timelineId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The restored timeline. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Timeline"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };

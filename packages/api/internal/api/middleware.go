@@ -3,6 +3,8 @@ package api
 import (
 	"bufio"
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -17,11 +19,29 @@ import (
 // using context.WithValue on the same request context.
 type contextKey string
 
-const claimsKey contextKey = "claims"
+const (
+	claimsKey     contextKey = "claims"
+	tokenScopeKey contextKey = "tokenScope"
+)
 
-// authMiddleware enforces a Bearer access token on the request, attaches
-// the validated Claims to the request context, and rejects any request
-// that fails the check with 401.
+// Scope sentinels. tokenScopeFull is used for JWT-authenticated requests
+// where no scope restriction applies; the other values mirror the api_tokens
+// schema check constraint.
+const (
+	tokenScopeFull    = "full"
+	tokenScopeRead    = "read"
+	tokenScopeAdd     = "add"
+	tokenScopeEditOwn = "edit_own"
+	tokenScopeEditAll = "edit_all"
+)
+
+// authMiddleware enforces a Bearer credential on the request, attaches the
+// resolved Claims (and any API-token scope) to the request context, and
+// rejects unauthenticated or scope-violating requests.
+//
+// The Bearer value is either a JWT access token or an API token (prefix
+// auth.APITokenPrefix). Read-only API tokens are rejected on any non-GET
+// request — write scopes are accepted on all methods.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := r.Header.Get("Authorization")
@@ -29,13 +49,49 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or invalid authorization header")
 			return
 		}
-		tokenStr := strings.TrimPrefix(header, "Bearer ")
-		claims, err := s.tokens.Validate(tokenStr, "access")
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
-			return
+		raw := strings.TrimPrefix(header, "Bearer ")
+
+		var (
+			claims *auth.Claims
+			scope  = tokenScopeFull
+		)
+
+		if auth.LooksLikeAPIToken(raw) {
+			tok, err := s.apiTokens.GetByHash(auth.HashAPIToken(raw))
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or revoked api token")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
+				return
+			}
+			if tok.Scope == tokenScopeRead && r.Method != http.MethodGet {
+				writeError(w, http.StatusForbidden, "FORBIDDEN", "read-only token cannot perform writes")
+				return
+			}
+			user, err := s.users.GetByID(tok.UserID)
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "token owner not found")
+				return
+			}
+			claims = &auth.Claims{UserID: user.ID, Email: user.Email, Type: "access"}
+			scope = tok.Scope
+			// Best-effort last-used touch; never block the request on a write failure.
+			if err := s.apiTokens.TouchLastUsed(tok.ID); err != nil {
+				slog.Debug("api token touch failed", "id", tok.ID, "err", err)
+			}
+		} else {
+			c, err := s.tokens.Validate(raw, "access")
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
+				return
+			}
+			claims = c
 		}
+
 		ctx := context.WithValue(r.Context(), claimsKey, claims)
+		ctx = context.WithValue(ctx, tokenScopeKey, scope)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

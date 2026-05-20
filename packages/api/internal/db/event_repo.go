@@ -88,6 +88,19 @@ func (r *EventRepo) Delete(id string) error {
 	return nil
 }
 
+// SetArchived sets or clears archived_at on an event. Pass a non-nil time
+// to archive; pass nil to unarchive.
+func (r *EventRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE events SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting event archived_at: %w", err)
+	}
+	return nil
+}
+
 // SetAssignments replaces all event_assignments for an event with the
 // provided member IDs. An empty slice removes all assignments.
 func (r *EventRepo) SetAssignments(eventID string, memberIDs []string) error {
@@ -135,12 +148,16 @@ func (r *EventRepo) GetAssignments(eventID string) ([]string, error) {
 	return ids, nil
 }
 
-// ListByTeam returns non-archived events for a team. When from or to are
+// ListByTeam returns events for a team. When includeArchived is false the
+// query excludes rows with a non-null archived_at. When from or to are
 // non-nil they bound the query: events whose start_at falls within [from, to]
 // inclusive are returned. AssignedMemberIDs is populated via a second query.
-func (r *EventRepo) ListByTeam(teamID string, from, to *time.Time) ([]*models.Event, error) {
-	query := `SELECT * FROM events WHERE team_id = ? AND archived_at IS NULL`
+func (r *EventRepo) ListByTeam(teamID string, from, to *time.Time, includeArchived bool) ([]*models.Event, error) {
+	query := `SELECT * FROM events WHERE team_id = ?`
 	args := []any{teamID}
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
 
 	if from != nil {
 		query += ` AND start_at >= ?`

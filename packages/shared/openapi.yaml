@@ -276,6 +276,42 @@ components:
           type: string
           format: date-time
 
+    APIToken:
+      type: object
+      required: [id, userId, name, scope, createdAt]
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        name:
+          type: string
+          description: Human-readable label (e.g. "ci-readonly").
+        scope:
+          type: string
+          enum: [read, add, edit_own, edit_all]
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        revokedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    APITokenCreated:
+      allOf:
+        - $ref: "#/components/schemas/APIToken"
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              description: The raw token value. Returned exactly once at creation; never re-fetchable.
+
     AuthResponse:
       type: object
       required: [user, accessToken, refreshToken]
@@ -622,6 +658,86 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # ── API Tokens ───────────────────────────────────────────────
+
+  /tokens:
+    get:
+      operationId: listAPITokens
+      summary: List API tokens owned by the caller
+      tags: [tokens]
+      responses:
+        "200":
+          description: Array of tokens (active and revoked). Raw token value is never included.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/APIToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: createAPIToken
+      summary: Create a new API token
+      description: |
+        Mints a long-lived Bearer token scoped to the caller's account. The raw token
+        value is returned exactly once in the response and never re-fetchable. API
+        tokens cannot be used to mint other API tokens — this endpoint requires a JWT.
+      tags: [tokens]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scope]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                scope:
+                  type: string
+                  enum: [read, add, edit_own, edit_all]
+      responses:
+        "201":
+          description: Token created. The raw value is included in this response only.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITokenCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /tokens/{id}:
+    delete:
+      operationId: revokeAPIToken
+      summary: Revoke an API token
+      description: Marks the token as revoked. The row is preserved so the listing UI can show "Revoked on …".
+      tags: [tokens]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Token revoked (or already revoked).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # ── Teams ────────────────────────────────────────────────────
 
   /teams:
@@ -861,6 +977,13 @@ paths:
           schema:
             type: string
             format: date-time
+        - name: archived
+          in: query
+          required: false
+          description: When `true`, include archived events. Default excludes them.
+          schema:
+            type: string
+            enum: [ "true", "false" ]
       responses:
         "200":
           description: Array of events.
@@ -975,6 +1098,53 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /events/{id}/archive:
+    post:
+      operationId: archiveEvent
+      summary: Archive an event (soft delete)
+      description: Sets archivedAt on the event so it is hidden from default list responses but can be restored via /events/{id}/unarchive.
+      tags: [events]
+      parameters:
+        - $ref: "#/components/parameters/eventId"
+      responses:
+        "200":
+          description: The archived event.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Event"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /events/{id}/unarchive:
+    post:
+      operationId: unarchiveEvent
+      summary: Restore a previously archived event
+      tags: [events]
+      parameters:
+        - $ref: "#/components/parameters/eventId"
+      responses:
+        "200":
+          description: The restored event.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Event"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # ── Timelines ────────────────────────────────────────────────
 
   /teams/{id}/timelines:
@@ -984,6 +1154,13 @@ paths:
       tags: [timelines]
       parameters:
         - $ref: "#/components/parameters/teamId"
+        - name: archived
+          in: query
+          required: false
+          description: When `true`, include archived timelines. Default excludes them.
+          schema:
+            type: string
+            enum: [ "true", "false" ]
       responses:
         "200":
           description: Array of non-archived timelines for the team.
@@ -1037,6 +1214,53 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /timelines/{id}/archive:
+    post:
+      operationId: archiveTimeline
+      summary: Archive a timeline (admin only)
+      description: Team admins only. Sets archivedAt on the timeline so it is hidden from default list responses but can be restored via /timelines/{id}/unarchive.
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      responses:
+        "200":
+          description: The archived timeline.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /timelines/{id}/unarchive:
+    post:
+      operationId: unarchiveTimeline
+      summary: Restore a previously archived timeline
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      responses:
+        "200":
+          description: The restored timeline.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
 

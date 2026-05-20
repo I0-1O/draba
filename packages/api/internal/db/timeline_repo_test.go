@@ -182,7 +182,7 @@ func TestTimelineRepo_ListByTeam_Empty(t *testing.T) {
 	repo := db.NewTimelineRepo(database)
 	teamID, _ := seedTeamAndUser(t, database, "list-empty")
 
-	ts, err := repo.ListByTeam(teamID)
+	ts, err := repo.ListByTeam(teamID, false)
 	require.NoError(t, err)
 	assert.Empty(t, ts, "new team should have no timelines")
 }
@@ -204,7 +204,7 @@ func TestTimelineRepo_ListByTeam_ReturnsBothOrderedByCreation(t *testing.T) {
 	second.IcalToken = "ical-tl-list-2"
 	require.NoError(t, repo.Create(second))
 
-	ts, err := repo.ListByTeam(teamID)
+	ts, err := repo.ListByTeam(teamID, false)
 	require.NoError(t, err)
 	require.Len(t, ts, 2)
 	// ListByTeam orders by created_at DESC — most recent first.

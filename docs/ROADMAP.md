@@ -31,7 +31,7 @@ This document organizes development into discrete phases with effort estimates a
 | 8.3 | [Web — Real-Time WebSocket Sync](#phase-83-web--real-time-websocket-sync) | M — 1–2 days | ✅ |
 | 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ✅ |
 | 8.5 | [Find (In-View)](#phase-85-find-in-view) | M — 1–2 days | ✅ |
-| 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ⬜ |
+| 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ✅ |
 | 10.1 | [Teams — Full CRUD (API + UI)](#phase-101--teams--full-crud-api--ui) | M — 2 days | ⬜ |
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
@@ -395,7 +395,7 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 ---
 
 ### Phase 9 — API Token Auth & Archive
-**Status:** ⬜ | **Effort:** M (1–2 days)
+**Status:** ✅ Done — 2026-05-20 | **Effort:** M (1–2 days)
 
 **Scope:**
 - `POST /tokens`, `GET /tokens`, `DELETE /tokens/:id`

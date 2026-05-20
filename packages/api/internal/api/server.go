@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
@@ -24,9 +25,10 @@ type TimelineStore interface {
 	Create(t *models.Timeline) error
 	GetByID(id string) (*models.Timeline, error)
 	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string) ([]*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
 	HasAccess(timelineID, teamMemberID string) (bool, error)
 	GrantAccess(timelineID, teamMemberID, role string) error
+	SetArchived(id string, at *time.Time) error
 }
 
 // Server holds shared dependencies for all HTTP handlers.
@@ -38,6 +40,7 @@ type Server struct {
 	timelines    TimelineStore
 	savedFilters *db.SavedFilterRepo
 	preferences  *db.UserPreferenceRepo
+	apiTokens    *db.APITokenRepo
 	tokens       *auth.TokenService
 	tier         tier.Tier
 	bus          *events.Bus
@@ -47,7 +50,7 @@ type Server struct {
 
 // NewServer constructs a Server with its required dependencies. It does not
 // touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, eventsRepo *db.EventRepo, timelinesRepo TimelineStore, savedFiltersRepo *db.SavedFilterRepo, preferencesRepo *db.UserPreferenceRepo, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
+func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, eventsRepo *db.EventRepo, timelinesRepo TimelineStore, savedFiltersRepo *db.SavedFilterRepo, preferencesRepo *db.UserPreferenceRepo, apiTokensRepo *db.APITokenRepo, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
 	return &Server{
 		users:        users,
 		invites:      invites,
@@ -56,6 +59,7 @@ func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, e
 		timelines:    timelinesRepo,
 		savedFilters: savedFiltersRepo,
 		preferences:  preferencesRepo,
+		apiTokens:    apiTokensRepo,
 		tokens:       tokens,
 		tier:         t,
 		bus:          bus,
@@ -87,6 +91,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
 	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
 
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
 	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
 	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
 	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
@@ -96,6 +104,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /teams/{id}/events", chain(s.handleListEvents, s.authMiddleware))
 	mux.HandleFunc("PATCH /events/{id}", chain(s.handleUpdateEvent, s.authMiddleware))
 	mux.HandleFunc("DELETE /events/{id}", chain(s.handleDeleteEvent, s.authMiddleware))
+	mux.HandleFunc("POST /events/{id}/archive", chain(s.handleArchiveEvent, s.authMiddleware))
+	mux.HandleFunc("POST /events/{id}/unarchive", chain(s.handleUnarchiveEvent, s.authMiddleware))
 
 	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
 	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
@@ -108,6 +118,8 @@ func (s *Server) Routes() http.Handler {
 	// the more-specific literal "share" segment takes precedence.
 	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
 	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
 
 	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
 	// JWT itself before upgrading, because WebSocket clients can't set headers.

@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -38,18 +39,34 @@ func (r *TimelineRepo) Create(t *models.Timeline) error {
 	return nil
 }
 
-// GetByID fetches a non-archived Timeline by primary key. Returns
-// sql.ErrNoRows (wrapped) when no row matches or the row is archived.
+// GetByID fetches a Timeline by primary key, including archived rows so the
+// archive/unarchive handlers can operate on them. Callers that should reject
+// archived timelines must check ArchivedAt explicitly.
 func (r *TimelineRepo) GetByID(id string) (*models.Timeline, error) {
 	var t models.Timeline
-	err := r.db.Get(&t, `SELECT * FROM timelines WHERE id = ? AND archived_at IS NULL`, id)
+	err := r.db.Get(&t, `SELECT * FROM timelines WHERE id = ?`, id)
 	if err != nil {
 		return nil, fmt.Errorf("getting timeline: %w", err)
 	}
 	return &t, nil
 }
 
+// SetArchived sets or clears archived_at on a timeline. Pass a non-nil time
+// to archive; pass nil to unarchive.
+func (r *TimelineRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE timelines SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting timeline archived_at: %w", err)
+	}
+	return nil
+}
+
 // GetByShareToken fetches a non-archived Timeline by its public share token.
+// Archived timelines are intentionally excluded — public share URLs should
+// 404 once a timeline is archived.
 // Returns sql.ErrNoRows (wrapped) when no row matches.
 func (r *TimelineRepo) GetByShareToken(token string) (*models.Timeline, error) {
 	var t models.Timeline
@@ -60,14 +77,16 @@ func (r *TimelineRepo) GetByShareToken(token string) (*models.Timeline, error) {
 	return &t, nil
 }
 
-// ListByTeam returns all non-archived timelines for a team ordered by
-// creation date descending.
-func (r *TimelineRepo) ListByTeam(teamID string) ([]*models.Timeline, error) {
+// ListByTeam returns timelines for a team ordered by creation date
+// descending. When includeArchived is false, archived rows are excluded.
+func (r *TimelineRepo) ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error) {
 	ts := make([]*models.Timeline, 0)
-	err := r.db.Select(&ts,
-		`SELECT * FROM timelines WHERE team_id = ? AND archived_at IS NULL ORDER BY created_at DESC`,
-		teamID,
-	)
+	query := `SELECT * FROM timelines WHERE team_id = ?`
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
+	query += ` ORDER BY created_at DESC`
+	err := r.db.Select(&ts, query, teamID)
 	if err != nil {
 		return nil, fmt.Errorf("listing timelines: %w", err)
 	}

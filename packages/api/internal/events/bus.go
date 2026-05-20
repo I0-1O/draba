@@ -20,6 +20,9 @@ const (
 
 	// TimelineCreated is published after a new timeline is persisted.
 	TimelineCreated Type = "timeline.created"
+	// TimelineUpdated is published after an existing timeline is modified
+	// (including archive / unarchive transitions).
+	TimelineUpdated Type = "timeline.updated"
 )
 
 // Message is a single domain event published on the Bus.

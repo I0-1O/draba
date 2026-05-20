@@ -179,17 +179,17 @@ Reorganizes the filter dropdown into four explicit sections. Filters are stored 
 
 > **Connectors sidebar + per-timeline connector model is absorbed into the External Connectors (Inbound Webhooks) task block further down** — that section now carries both the webhook backend and the sidebar UI work.
 
-### API — Token Auth
-- [ ] `POST /tokens` — create API token (returns value once)
-- [ ] `GET /tokens` — list tokens for current user
-- [ ] `DELETE /tokens/:id` — revoke token
-- [ ] Middleware: accept Bearer token (JWT or API token) on all authenticated routes
-- [ ] Enforce token scope on writes (read-only tokens blocked from mutations)
+### API — Token Auth (Phase 9)
+- [x] `POST /tokens` — create API token (returns value once) — 2026-05-20
+- [x] `GET /tokens` — list tokens for current user — 2026-05-20
+- [x] `DELETE /tokens/:id` — revoke token (preserved row, sets revoked_at) — 2026-05-20
+- [x] Middleware: accept Bearer token (JWT or API token) on all authenticated routes — 2026-05-20
+- [x] Enforce token scope on writes (read-only tokens blocked from mutations) — 2026-05-20
 
-### API — Archive
-- [ ] `POST /events/:id/archive` and `POST /events/:id/unarchive`
-- [ ] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive`
-- [ ] All list endpoints exclude archived records by default; `?archived=true` to include
+### API — Archive (Phase 9)
+- [x] `POST /events/:id/archive` and `POST /events/:id/unarchive` — 2026-05-20
+- [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
+- [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
 
 ### Phase 10 — Entity Management (data-cornerstone CRUD)
 
