@@ -44,6 +44,15 @@ The token management **UI** is intentionally deferred to Phase 10.4 per ROADMAP.
 
 ---
 
+## 2026-05-20 — /test-phase 9
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 8 pass (web-e2e ran manually after extension connectivity confirmed)
+- Smoke target: http://epcot.lan:8081
+- Bug found: auth middleware accepts JWTs for deleted/non-existent users — PUT preferences returns 500 (FK violation) instead of 401; filed as side task
+
+---
+
 ## 2026-05-20 — /test-phase 8.5
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

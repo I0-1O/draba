@@ -87,6 +87,17 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
 				return
 			}
+			// Verify the user still exists. A valid JWT for a deleted user (e.g.
+			// after a DB wipe) would otherwise pass signature validation but fail
+			// later at the FK layer, producing a confusing 500 instead of a 401.
+			if _, err := s.users.GetByID(c.UserID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
+				return
+			}
 			claims = c
 		}
 

@@ -147,10 +147,8 @@ func TestCreateTimeline_EndBeforeStart(t *testing.T) {
 }
 
 func TestCreateTimeline_NonMemberForbidden(t *testing.T) {
-	srv, _, teamID := timelineTestSetup(t)
-
-	outsiderTokens := auth.NewTokenService("timeline-test-secret")
-	outsiderToken, _ := outsiderTokens.IssueAccessToken("outsider-id", "outsider@example.com")
+	srv, aliceToken, teamID := timelineTestSetup(t)
+	outsiderToken := seedNonMember(t, srv, aliceToken, "outsider@timeline.com", "Outsider")
 
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
@@ -209,8 +207,7 @@ func TestGetTimeline_NonMemberForbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
 	timelineID := created["id"].(string)
 
-	outsiderTokens := auth.NewTokenService("timeline-test-secret")
-	outsiderToken, _ := outsiderTokens.IssueAccessToken("outsider-id", "outsider@example.com")
+	outsiderToken := seedNonMember(t, srv, aliceToken, "outsider@timeline.com", "Outsider")
 
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, authReq(http.MethodGet, fmt.Sprintf("/timelines/%s", timelineID), nil, outsiderToken))
@@ -231,9 +228,9 @@ func TestGetTimeline_NonTeamMemberAccessForbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
 	timelineID := created["id"].(string)
 
-	// User not in the team at all is rejected regardless of timeline_access.
-	outsiderTokens := auth.NewTokenService("timeline-test-secret")
-	outsiderToken, _ := outsiderTokens.IssueAccessToken("random-user-id", "random@example.com")
+	// User exists in this DB (registered via a scratch team) but is not on Alice's
+	// team, so they are rejected regardless of timeline_access list entries.
+	outsiderToken := seedNonMember(t, srv, aliceToken, "random@timeline.com", "Random")
 
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, authReq(http.MethodGet, fmt.Sprintf("/timelines/%s", timelineID), nil, outsiderToken))
@@ -380,11 +377,8 @@ func TestListTimelines_ReturnsMembersTimelines(t *testing.T) {
 }
 
 func TestListTimelines_NonMemberForbidden(t *testing.T) {
-	srv, _, teamID := timelineTestSetup(t)
-
-	// Mint a token for a user who is not a member of this team.
-	tokens := auth.NewTokenService("timeline-test-secret")
-	outsiderToken, _ := tokens.IssueAccessToken("outsider-id", "outsider@example.com")
+	srv, aliceToken, teamID := timelineTestSetup(t)
+	outsiderToken := seedNonMember(t, srv, aliceToken, "outsider@timeline.com", "Outsider")
 
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines", teamID), nil, outsiderToken))

@@ -192,31 +192,19 @@ func TestCreateInvite_NonAdminForbidden(t *testing.T) {
 
 func TestListMembers_NonMemberForbidden(t *testing.T) {
 	srv, _ := newTeamTestServer(t)
-
 	aliceToken, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
 
-	// Register a second server user (Bob) who is NOT on Alice's team.
-	// We need a separate server instance to avoid the invite requirement,
-	// so we bypass by seeding directly via the DB.
-	database, err := db.Open(":memory:")
-	require.NoError(t, err)
-	require.NoError(t, db.Migrate(database))
-	users2 := db.NewUserRepo(database)
-	require.NoError(t, users2.Create(&models.User{
-		ID: "bob-id", Email: "bob@example.com", PasswordHash: "x",
-		DisplayName: "Bob", CreatedAt: time.Now(), UpdatedAt: time.Now(),
-	}))
-	bobTokens := auth.NewTokenService("team-test-secret")
-	bobToken, _ := bobTokens.IssueAccessToken("bob-id", "bob@example.com")
-
-	// Create team under Alice.
+	// Create Alice's team.
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Acme"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
 	var team map[string]any
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
 	teamID := team["id"].(string)
 
-	// Bob's token is valid JWT but Bob is not a team member — expect 403.
+	// Bob exists in this DB (registered via a scratch team) but is not on Acme.
+	bobToken := seedNonMember(t, srv, aliceToken, "bob@example.com", "Bob")
+
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, bobToken))
 	assert.Equal(t, http.StatusForbidden, w2.Code)
@@ -317,9 +305,8 @@ func TestGetTeam_NonMember_Forbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
 	teamID := team["id"].(string)
 
-	// Mint a valid JWT for Bob, who is not a member of Alice's team.
-	bobTokens := auth.NewTokenService("team-test-secret")
-	bobToken, _ := bobTokens.IssueAccessToken("bob-id", "bob@example.com")
+	// Bob exists in this DB (registered via a scratch team) but is not on Acme.
+	bobToken := seedNonMember(t, srv, aliceToken, "bob@example.com", "Bob")
 
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, authReq(http.MethodGet, fmt.Sprintf("/teams/%s", teamID), nil, bobToken))

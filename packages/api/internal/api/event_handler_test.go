@@ -370,9 +370,9 @@ func TestEventCRUD_NonMemberForbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
 	eventID := created["id"].(string)
 
-	// Mint a token for an unknown user (not a team member).
-	outsiderTokens := auth.NewTokenService("event-test-secret")
-	outsiderToken, _ := outsiderTokens.IssueAccessToken("outsider-id", "outsider@example.com")
+	// Register an outsider in this DB (via a scratch team) so they have a valid
+	// JWT, but are not a member of the events team — all ops should return 403.
+	outsiderToken := seedNonMember(t, srv, aliceToken, "outsider@event.com", "Outsider")
 
 	// All event operations should return 403 for the outsider.
 	for _, tc := range []struct {

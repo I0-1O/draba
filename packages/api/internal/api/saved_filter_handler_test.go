@@ -62,6 +62,20 @@ func addTeamMember(t *testing.T, srv http.Handler, adminToken, teamID, email, di
 	return token
 }
 
+// seedNonMember registers a user in the server's DB (via a throwaway scratch
+// team) so the user exists and has a valid JWT, but is not a member of the
+// team under test. Use this instead of minting a ghost token whenever a test
+// needs to assert that a real-but-unrelated user gets 403.
+func seedNonMember(t *testing.T, srv http.Handler, aliceToken, email, displayName string) string {
+	t.Helper()
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "_scratch"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code, "create scratch team: %s", w.Body)
+	var scratch map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&scratch))
+	return addTeamMember(t, srv, aliceToken, scratch["id"].(string), email, displayName)
+}
+
 func TestCreateSavedFilter_Success(t *testing.T) {
 	srv, token, teamID := savedFilterTestSetup(t)
 
@@ -100,10 +114,8 @@ func TestCreateSavedFilter_MissingName(t *testing.T) {
 }
 
 func TestCreateSavedFilter_NonMemberForbidden(t *testing.T) {
-	srv, _, teamID := savedFilterTestSetup(t)
-
-	outsiderTokens := auth.NewTokenService("saved-filter-test-secret")
-	outsiderToken, _ := outsiderTokens.IssueAccessToken("outsider-id", "outsider@example.com")
+	srv, aliceToken, teamID := savedFilterTestSetup(t)
+	outsiderToken := seedNonMember(t, srv, aliceToken, "outsider@savedfilter.com", "Outsider")
 
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/saved_filters", teamID),
