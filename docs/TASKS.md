@@ -88,11 +88,11 @@
 - [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
 
 ### Web — Timeline View (Phase 8.3: Real-Time Sync)
-- [ ] Connect `useWebSocket` to subscribe to `events.*` for active team
-- [ ] `events.created` delta: insert block into TanStack Query cache
-- [ ] `events.updated` delta: update block in cache
-- [ ] `events.deleted` delta: remove block from cache
-- [ ] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta)
+- [x] Connect `useWebSocket` to subscribe to `events.*` for active team — 2026-05-19
+- [x] `events.created` delta: insert block into TanStack Query cache — 2026-05-19
+- [x] `events.updated` delta: update block in cache — 2026-05-19
+- [x] `events.deleted` delta: remove block from cache — 2026-05-19
+- [x] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta) — 2026-05-19
 
 ### OpenAPI
 - [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04

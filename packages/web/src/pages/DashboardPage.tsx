@@ -17,8 +17,7 @@ import { FilterProvider } from '@/contexts/FilterContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { useMyTeams, useTeamTimelines, useInvalidateTeamEvents } from '@/hooks/useTeamEvents'
-import { useWebSocket } from '@/hooks/useWebSocket'
+import { useMyTeams, useTeamTimelines, useTeamEventSync } from '@/hooks/useTeamEvents'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
 
@@ -87,17 +86,7 @@ function DashboardShell() {
   const { data: timelines = [] } = useTeamTimelines(teamId)
   const activeTimeline = timelines[0]
 
-  const invalidateEvents = useInvalidateTeamEvents(teamId)
-
-  useWebSocket({
-    token: accessToken,
-    teamIds: teamId ? [teamId] : [],
-    onMessage: msg => {
-      if (msg.type.startsWith('event.')) {
-        invalidateEvents()
-      }
-    },
-  })
+  useTeamEventSync(teamId, accessToken)
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>

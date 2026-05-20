@@ -2,6 +2,29 @@
 
 ---
 
+## 2026-05-19 — Phase 8.3: Web — Real-Time WebSocket Sync
+
+### What was built
+- **`useTeamEventSync` hook** (`hooks/useTeamEvents.ts`): subscribes to the team's WebSocket feed and applies surgical TanStack Query cache updates for `event.created`, `event.updated`, and `event.deleted` deltas — no full refetch, no flicker.
+- **`event.created`**: appends the incoming event to all matching cache entries; duplicate-delivery guard prevents double-insert when self-echo and the `onSuccess` insert race.
+- **`event.updated`**: replaces the cached event only when the incoming `updatedAt` is strictly newer — prevents self-echo from overwriting a more-recent local state, and handles last-writer-wins correctly for concurrent edits from other tabs.
+- **`event.deleted`**: filters the event out of all matching cache entries immediately.
+- **`useCreateEvent` upgraded**: now inserts the new event surgically on `onSuccess` (was `invalidateQueries`), consistent with the WS-first caching model.
+- **`DashboardPage` simplified**: replaced the `useInvalidateTeamEvents` + `useWebSocket` invalidate-on-any-message block with a single `useTeamEventSync(teamId, accessToken)` call.
+
+### Conflict strategy
+`event.updated` compares `updatedAt` timestamps. If the cache holds the same or a newer version, the WS delta is skipped. This covers:
+- Self-echo: our own PATCH broadcast arrives back; cache was already updated by `onSuccess` with the same server timestamp → skipped.
+- In-flight conflict: concurrent remote edit arrives while our mutation is in-flight; if our PATCH lands last, `onSuccess` sets the final state with the highest `updatedAt`.
+
+### Files changed
+- `packages/web/src/hooks/useTeamEvents.ts` — added `useTeamEventSync`, upgraded `useCreateEvent` to surgical insert, removed `useInvalidateTeamEvents`
+- `packages/web/src/pages/DashboardPage.tsx` — replaced WS invalidate block with `useTeamEventSync`
+- `docs/ROADMAP.md` — Phase 8.3 ✅ Done
+- `docs/TASKS.md` — all Phase 8.3 tasks checked off
+
+---
+
 ## 2026-05-19 — Phase 8.2.1: Gantt Bar Drag — Resize & Move
 
 ### What was built

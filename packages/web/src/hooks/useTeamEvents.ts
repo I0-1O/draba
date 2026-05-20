@@ -5,10 +5,12 @@
  * query-time so stale closures never send an expired token.
  */
 
+import { useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type { components } from '@draba/shared'
 import { createAuthFetch } from '@/lib/api'
 import { useAuth } from '@/contexts/AuthContext'
+import { useWebSocket } from '@/hooks/useWebSocket'
 
 type Event = components['schemas']['Event']
 type Team = components['schemas']['Team']
@@ -80,12 +82,68 @@ export function useTeamMembers(teamId: string) {
 }
 
 /**
- * Returns a function that invalidates the events cache for a team.
- * Used by the WebSocket handler to trigger a refetch after a delta arrives.
+ * Subscribes to the team's WebSocket feed and applies surgical cache updates
+ * for event.created / event.updated / event.deleted deltas.
+ *
+ * Conflict strategy: for event.updated, incoming deltas are only applied when
+ * their updatedAt timestamp is strictly newer than the cached version. This
+ * prevents self-echo (our own PATCH broadcast arriving back) and handles the
+ * last-writer-wins case where a concurrent remote edit arrives while our
+ * mutation is in-flight — the server-returned updatedAt on our onSuccess
+ * will always win if our PATCH was truly last.
  */
-export function useInvalidateTeamEvents(teamId: string) {
+export function useTeamEventSync(
+  teamId: string,
+  accessToken: string | null | undefined,
+) {
   const client = useQueryClient()
-  return () => client.invalidateQueries({ queryKey: ['teams', teamId, 'events'] })
+
+  const handleMessage = useCallback(
+    (msg: { type: string; payload?: unknown }) => {
+      if (!teamId || !msg.payload) return
+
+      if (msg.type === 'event.created') {
+        const incoming = msg.payload as Event
+        client.setQueriesData<Event[]>(
+          { queryKey: ['teams', teamId, 'events'] },
+          (old) => {
+            if (!old) return old
+            // Guard against duplicate delivery.
+            if (old.some((e) => e.id === incoming.id)) return old
+            return [...old, incoming]
+          },
+        )
+      } else if (msg.type === 'event.updated') {
+        const incoming = msg.payload as Event
+        client.setQueriesData<Event[]>(
+          { queryKey: ['teams', teamId, 'events'] },
+          (old) => {
+            if (!old) return old
+            return old.map((e) => {
+              if (e.id !== incoming.id) return e
+              // Skip if the cache already holds the same or a newer version.
+              const cachedMs = new Date(e.updatedAt).getTime()
+              const incomingMs = new Date(incoming.updatedAt).getTime()
+              return incomingMs > cachedMs ? incoming : e
+            })
+          },
+        )
+      } else if (msg.type === 'event.deleted') {
+        const { id } = msg.payload as { id: string }
+        client.setQueriesData<Event[]>(
+          { queryKey: ['teams', teamId, 'events'] },
+          (old) => old?.filter((e) => e.id !== id),
+        )
+      }
+    },
+    [client, teamId],
+  )
+
+  useWebSocket({
+    token: accessToken,
+    teamIds: teamId ? [teamId] : [],
+    onMessage: handleMessage,
+  })
 }
 
 interface CreateEventInput {
@@ -112,7 +170,7 @@ interface UpdateEventInput {
   }
 }
 
-/** Creates an event and invalidates the team events cache. */
+/** Creates an event and inserts it directly into the cache. */
 export function useCreateEvent(teamId: string) {
   const { getAccessToken } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
@@ -124,8 +182,16 @@ export function useCreateEvent(teamId: string) {
         method: 'POST',
         body: JSON.stringify(input),
       }),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ['teams', teamId, 'events'] })
+    onSuccess: (created) => {
+      client.setQueriesData<Event[]>(
+        { queryKey: ['teams', teamId, 'events'] },
+        (old) => {
+          if (!old) return old
+          // WS self-echo may also insert this event; deduplicate by id.
+          if (old.some((e) => e.id === created.id)) return old
+          return [...old, created]
+        },
+      )
     },
   })
 }
