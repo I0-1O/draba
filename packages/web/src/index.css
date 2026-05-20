@@ -243,3 +243,20 @@ code, pre {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
+
+/* ─── Find (in-view) ─────────────────────────────────────────────────────── */
+
+@keyframes find-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px #F29E4C, 0 0 0 5px rgba(242, 158, 76, 0.4); }
+  50%       { box-shadow: 0 0 0 2px #F29E4C, 0 0 0 10px rgba(242, 158, 76, 0.65); }
+}
+
+/* Applied to the active (parked) Gantt event bar during a find session. */
+.find-active-bar {
+  animation: find-pulse 1.2s ease-in-out infinite;
+}
+
+/* Applied to a matching (non-active) Gantt event bar during a find session. */
+.find-match-bar {
+  box-shadow: 0 0 0 2px #F29E4C !important;
+}

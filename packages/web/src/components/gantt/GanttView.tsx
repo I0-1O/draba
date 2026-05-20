@@ -4,10 +4,15 @@
  * Fetches events and members, applies grouping and sorting, builds the
  * GanttRow list, and passes everything to GanttGrid. The component owns
  * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
  */
 
 import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import GanttGrid, { type GanttEvent, type GanttRow } from './GanttGrid';
+import GanttGrid, { type GanttEvent, type GanttRow, type FindState } from './GanttGrid';
 import { useTeamEvents, useTeamMembers, useUpdateEvent } from '@/hooks/useTeamEvents';
 import type { components } from '@draba/shared';
 import { type Member, EVENT_COLORS, MEMBER_COLORS } from '@/types';
@@ -19,6 +24,9 @@ import {
   autoFitGranularity,
   type ColumnDef,
 } from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
 
 type ApiEvent = components['schemas']['Event'];
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
@@ -235,6 +243,9 @@ export default function GanttView({
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(800);
 
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -311,6 +322,54 @@ export default function GanttView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiEvents, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
 
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, apiEvents, members, apiEvents),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, apiEvents, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.eventId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.eventId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'event' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'event'; event: GanttEvent }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderedMatchIds, computedMatchReasons]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
   const handleBarDrag = useCallback((eventId: string, newStartDate: Date, newEndDate: Date) => {
     updateEvent.mutate({
       eventId,
@@ -336,6 +395,7 @@ export default function GanttView({
         columns={columns}
         todayIndex={todayIdx}
         selectedEventId={selectedEventId}
+        findState={findState}
         onSelectEvent={(id) => {
           onSelectEvent(id);
           if (onSelectApiEvent) {
@@ -345,6 +405,7 @@ export default function GanttView({
         }}
         onLaneDrag={onLaneDrag}
         onBarDrag={handleBarDrag}
+        onClearFilters={filtersActive ? () => {} : undefined}
       />
     </div>
   );

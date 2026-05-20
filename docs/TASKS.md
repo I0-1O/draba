@@ -113,6 +113,38 @@
 - [x] `DashboardPage`: save toolbar state (group_by, sort_by, zoom_granularity, color_by) on change — 2026-05-20
 - [x] `DashboardPage`: persist dark mode preference globally — 2026-05-20
 
+### Web — Find (Phase 8.5)
+In-view "find in page" with highlight + match navigation. Scoped to already-loaded events; respects active filters. Global cross-team search is deferred to Phase 15.
+
+**Find bar:**
+- [x] `FindBar` component in the TopBar (between FilterDropdown and ProfileMenu) — query input, match counter (`N / M`), prev/next chevrons, close (×) — 2026-05-20
+- [x] Open via `Ctrl/Cmd+F` global keybinding and via a search icon in the TopBar; close via `Esc` or × — 2026-05-20
+- [x] Debounced (~150ms) client-side matcher over already-fetched events — 2026-05-20
+
+**Match scope:**
+- [x] Case-insensitive match against: event title, description, assignee display names, parent event title — 2026-05-20
+- [x] Respect active filters — only events already visible in the current view are candidates — 2026-05-20
+
+**Visual treatment:**
+- [x] Matching events: amber outline / glow using existing design tokens — 2026-05-20
+- [x] Non-matching events: dimmed to ~0.3 opacity — 2026-05-20
+- [x] Active match (prev/next cursor position): stronger outline + subtle pulse to distinguish from other matches — 2026-05-20
+- [x] On hover, non-title matches show a "why matched" hint (e.g. `matched assignee Jane`) — 2026-05-20
+
+**Navigation:**
+- [x] `Enter` / `Shift+Enter` and ◀ ▶ chevrons walk forward/backward through matches — 2026-05-20
+- [x] Auto-scroll the Gantt on each step — horizontal pan to event's date range, vertical scroll to its row, centered in viewport — 2026-05-20
+
+**Empty / edge cases:**
+- [x] Zero matches, no filters active → bar shows `No matches` — 2026-05-20
+- [x] Zero matches in view, filters active → soft callout: *"No matches in current view. [Clear filters]"* — 2026-05-20
+- [x] Find query is ephemeral (not persisted across navigation/reload); bar open-state also ephemeral — 2026-05-20
+
+**Testing:**
+- [x] Unit: matcher returns correct hits across all match fields, case-insensitive — 2026-05-20
+- [ ] Integration: Find works at every granularity level and every group-by mode (requires live data — manual)
+- [ ] Keyboard: full prev/next cycle reachable with keyboard only (manual verification with live events)
+
 ## Up Next
 
 ### Web — Member Management (Sidebar)

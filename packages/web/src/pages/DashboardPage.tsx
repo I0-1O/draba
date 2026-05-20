@@ -14,6 +14,7 @@ import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type Col
 import EventDetailPanel from '@/components/gantt/EventDetailPanel'
 import EventCreatePanel from '@/components/gantt/EventCreatePanel'
 import { FilterProvider } from '@/contexts/FilterContext'
+import { FindProvider, useFind } from '@/contexts/FindContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
@@ -42,6 +43,7 @@ const DROPDOWN_BTN: React.CSSProperties = {
 function DashboardShell() {
   const { logout, accessToken, user } = useAuth()
   const { isDark, toggle: toggleDark, theme } = useDarkMode()
+  const { setFindBarOpen } = useFind()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [view, setView] = useState<ViewMode>('gantt')
   const [profileOpen, setProfileOpen] = useState(false)
@@ -76,6 +78,18 @@ function DashboardShell() {
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
+
+  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setFindBarOpen(true)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [setFindBarOpen])
 
   const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
   const email = (user as { email?: string } | null)?.email ?? ''
@@ -365,8 +379,10 @@ function DashboardShell() {
 
 export default function DashboardPage() {
   return (
-    <FilterProvider>
-      <DashboardShell />
-    </FilterProvider>
+    <FindProvider>
+      <FilterProvider>
+        <DashboardShell />
+      </FilterProvider>
+    </FindProvider>
   )
 }

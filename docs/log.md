@@ -2,6 +2,14 @@
 
 ---
 
+## 2026-05-20 — /test-phase 8.5
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 8 pass, 1 clean skip (ws-smoke team-isolation — only one team on test instance)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-05-20 — Phase 8.4 post-test fixes
 
 Three bugs found during live testing against localhost:5173 → epcot.lan:8081:

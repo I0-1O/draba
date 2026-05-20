@@ -10,9 +10,15 @@
  *
  * Drag on an event bar's left/right 8px edge to resize it, or on its body to
  * move it. onBarDrag fires on mouseup with the resolved new dates.
+ *
+ * When findState is provided with a non-empty query, non-matching event rows
+ * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
+ * the active (parked) match gets a stronger amber outline with a pulse
+ * animation. Stepping to a new active match auto-scrolls both axes to center
+ * the bar in the viewport.
  */
 
-import { useRef, useState, useCallback } from 'react';
+import { useRef, useState, useCallback, useEffect } from 'react';
 import MemberAvatar from '../MemberAvatar';
 import EmptyState from '../shared/EmptyState';
 import type { Member } from '../../types';
@@ -42,6 +48,17 @@ export interface GanttEvent {
 export type GanttRow =
   | { kind: 'group'; id: string; label: string; color: string; count: number }
   | { kind: 'event'; event: GanttEvent };
+
+/** Visual state for the in-view Find feature. Passed from GanttView. */
+export interface FindState {
+  hasQuery: boolean;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
+  matchReasons: Map<string, string[]>;
+  filtersActive: boolean;
+  matchCount: number;
+}
 
 interface DragState {
   rowIdx: number;
@@ -77,6 +94,13 @@ interface TooltipState {
   y: number;
 }
 
+/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
+interface MatchTooltipState {
+  reasons: string[];
+  x: number;
+  y: number;
+}
+
 interface Props {
   rows: GanttRow[];
   columns: ColumnDef[];
@@ -88,6 +112,10 @@ interface Props {
   onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
   /** Called when the user drags a bar edge or body to resize/move it. */
   onBarDrag?: (eventId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Find state from GanttView; absent when the find bar is closed/idle. */
+  findState?: FindState;
+  /** Called when the user clicks "Clear filters" in the no-matches callout. */
+  onClearFilters?: () => void;
 }
 
 // ── Bar drag helpers ─────────────────────────────────────────────────────────
@@ -123,10 +151,19 @@ export default function GanttGrid({
   onSelectEvent,
   onLaneDrag,
   onBarDrag,
+  findState,
+  onClearFilters,
 }: Props) {
   const totalW = LABEL_COL_W + columns.length * COL_W;
   // Integer column index that contains today (for background highlight)
   const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
+
+  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Always-current rows ref so the active-match scroll effect doesn't go stale
+  const rowsRef = useRef(rows);
+  useEffect(() => { rowsRef.current = rows; });
 
   // ── Drag-to-create state ──────────────────────────────────────────────────
   const [drag, setDrag] = useState<DragState | null>(null);
@@ -137,9 +174,41 @@ export default function GanttGrid({
   const barDragRef = useRef<BarDragState | null>(null);
   const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
 
+  // ── "Why matched" hover tooltip ───────────────────────────────────────────
+  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
+
   const colFromX = useCallback((laneX: number) => {
     return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
   }, [columns.length]);
+
+  // ── Auto-scroll to active find match ─────────────────────────────────────
+  useEffect(() => {
+    const activeId = findState?.activeMatchId;
+    if (!activeId || !scrollContainerRef.current) return;
+    const container = scrollContainerRef.current;
+    const currentRows = rowsRef.current;
+
+    let y = HEADER_H;
+    let matchedEvent: GanttEvent | null = null;
+    for (const row of currentRows) {
+      if (row.kind === 'event' && row.event.id === activeId) {
+        matchedEvent = row.event;
+        break;
+      }
+      y += row.kind === 'group' ? GROUP_H : ROW_H;
+    }
+    if (!matchedEvent) return;
+
+    const viewH = container.clientHeight;
+    const viewW = container.clientWidth;
+    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
+    const eventCenterX = LABEL_COL_W + (matchedEvent.startCol + matchedEvent.span / 2) * COL_W;
+    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
+
+    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
+  // Only re-run when the active match changes, not when rows or columns change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findState?.activeMatchId]);
 
   const handleLaneMouseDown = useCallback((
     e: React.MouseEvent<HTMLDivElement>,
@@ -360,8 +429,21 @@ export default function GanttGrid({
     </>
   );
 
+  // ── Find helpers ──────────────────────────────────────────────────────────
+
+  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
+
+  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
+  function isActive(id: string) { return activeMatchId === id; }
+
+  // Non-title reasons to surface in the "why matched" tooltip
+  function nonTitleReasons(id: string): string[] {
+    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
+  }
+
   // ── Empty state: header + centered placeholder ──────────────────────────────
   if (rows.length === 0) {
+    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
     return (
       <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
@@ -369,8 +451,21 @@ export default function GanttGrid({
             {headerContent}
           </div>
         </div>
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
           <EmptyState message="No viewable events" />
+          {showNoMatchCallout && findState.filtersActive && (
+            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </p>
+          )}
         </div>
       </div>
     );
@@ -379,7 +474,7 @@ export default function GanttGrid({
   // ── Unified scroll: header sticky inside the single container ──────────────
   return (
     <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ flex: 1, overflow: 'auto' }}>
+      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
         <div style={{ width: totalW }}>
 
           {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
@@ -458,6 +553,10 @@ export default function GanttGrid({
             const ev = row.event;
             const selected = selectedEventId === ev.id;
             const indent = ev.isChild ? 20 : 0;
+            const evIsMatch = isMatch(ev.id);
+            const evIsActive = isActive(ev.id);
+            const dimmed = hasQuery && !evIsMatch;
+            const extraReasons = nonTitleReasons(ev.id);
 
             return (
               <div
@@ -468,6 +567,8 @@ export default function GanttGrid({
                   borderBottom: '1px solid var(--border)',
                   position: 'relative',
                   background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                  opacity: dimmed ? 0.3 : 1,
+                  transition: 'opacity 0.15s',
                 }}
               >
                 {/* Sticky label cell */}
@@ -602,6 +703,16 @@ export default function GanttGrid({
                     const grabCursor = isDragging
                       ? 'grabbing'
                       : onBarDrag ? 'grab' : 'pointer';
+
+                    // Box shadow: find states take precedence over selection ring.
+                    // CSS classes (.find-active-bar, .find-match-bar) provide the
+                    // amber outline; we only set inline boxShadow for the selected ring.
+                    const boxShadow = (evIsActive || evIsMatch)
+                      ? undefined
+                      : selected
+                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
+                        : 'var(--shadow-sm)';
+
                     return (
                       <div
                         onClick={() => {
@@ -618,6 +729,23 @@ export default function GanttGrid({
                           else zone = 'body';
                           handleBarMouseDown(e, ev, zone);
                         }}
+                        onMouseEnter={e => {
+                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
+                          // Show "why matched" tooltip for non-title matches
+                          if (extraReasons.length > 0) {
+                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
+                          }
+                        }}
+                        onMouseMove={e => {
+                          if (matchTooltip) {
+                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
+                          }
+                        }}
+                        onMouseLeave={e => {
+                          e.currentTarget.style.filter = '';
+                          setMatchTooltip(null);
+                        }}
+                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
                         style={{
                           position: 'absolute',
                           top: 9,
@@ -637,16 +765,12 @@ export default function GanttGrid({
                           textOverflow: 'ellipsis',
                           cursor: grabCursor,
                           zIndex: 4,
-                          boxShadow: selected
-                            ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
-                            : 'var(--shadow-sm)',
+                          boxShadow,
                           opacity: isDragging ? 0.85 : 1,
                           transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
                           fontFamily: 'var(--font-sans)',
                           userSelect: 'none',
                         }}
-                        onMouseEnter={e => { if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)'; }}
-                        onMouseLeave={e => { e.currentTarget.style.filter = ''; }}
                       >
                         {/* Left resize handle */}
                         {onBarDrag && (
@@ -685,6 +809,26 @@ export default function GanttGrid({
             );
           })}
 
+          {/* No-matches-in-view callout — rendered inside the scroll container */}
+          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
+            <div style={{
+              padding: '12px 16px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              borderTop: '1px solid var(--border)',
+            }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+          )}
+
         </div>
       </div>
 
@@ -710,6 +854,32 @@ export default function GanttGrid({
           }}
         >
           {dragTooltip.text}
+        </div>
+      )}
+
+      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
+      {matchTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: matchTooltip.x + 12,
+            top: matchTooltip.y - 36,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {matchTooltip.reasons.map(r => (
+            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
+          ))}
         </div>
       )}
     </div>

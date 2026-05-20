@@ -30,12 +30,14 @@ This document organizes development into discrete phases with effort estimates a
 | 8.2.1 | [Gantt Bar Drag — Resize & Move](#phase-821-gantt-bar-drag--resize--move) | M — 1–2 days | ✅ |
 | 8.3 | [Web — Real-Time WebSocket Sync](#phase-83-web--real-time-websocket-sync) | M — 1–2 days | ✅ |
 | 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ✅ |
-| 8.5 | [Search with Highlight](#phase-85-search-with-highlight) | S — 1 day | ⬜ |
+| 8.5 | [Find (In-View)](#phase-85-find-in-view) | M — 1–2 days | ✅ |
 | 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ⬜ |
 | 10 | [Team Configuration](#phase-10-team-configuration) | M — 1–2 days | ⬜ |
 | 11 | [Web — Calendar, List & Kanban Views](#phase-11-web--calendar-list--kanban-views) | L — 1 wk | ⬜ |
 | 12 | [Calendar Sync — Google & CalDAV](#phase-12-calendar-sync--google--caldav) | XL — 1–2 wks | ⬜ |
 | 13 | [Data Portability & Polish](#phase-13-data-portability--polish) | M — 3–5 days | ⬜ |
+| 14 | [External Connectors (Webhooks)](#phase-14-external-connectors-webhooks) | M — 3–5 days | ⬜ |
+| 15 | [Global Search](#phase-15-global-search) | M — 2–3 days | ⬜ |
 
 **Parking Lot (v2):** MySQL/Postgres adapters, CLI, MCP server, mobile apps, Microsoft/Outlook sync, multi-tenant hosting, SSO, notifications.
 
@@ -329,23 +331,60 @@ Server-side user preferences so view settings survive login/logout and sync acro
 
 ---
 
-### Phase 8.5 — Search with Highlight
-**Status:** ⬜ | **Effort:** S (1 day)
+### Phase 8.5 — Find (In-View)
+**Status:** ✅ Done — 2026-05-20 | **Effort:** M (1–2 days)
 
-Client-side search that highlights matching events in the active view.
+Browser-style "find in page" for the active view. Scoped to events the current view has already loaded; respects active filters. **Global cross-team search is deferred to [Phase 15](#phase-15-global-search).**
+
+**Design rationale:**
+Two distinct tools, not one box. **Find** answers *"highlight what I'm looking at"* — fast, keyboard-driven, walks matches. Global **Search** (Phase 15) answers *"find an event when I don't know where it lives"* — palette-style, navigates across teams/timelines. Mixing them in one input is where these UIs get muddy. With Find + the upcoming List view (Phase 11), we expect ~95% of real-world lookup needs to be covered.
 
 **Scope:**
-- Search input in TopBar between FilterDropdown and ProfileMenu (~200px, expands on focus)
-- Debounced client-side search against already-fetched event titles
-- Matching events: highlighted (amber outline or background glow)
-- Non-matching events: dimmed (opacity ~0.3)
-- Empty search field: all events render normally
-- Clear button (X) resets
+
+*Trigger & layout:*
+- Find bar opens on `Ctrl/Cmd+F` (and via a search icon in the TopBar between FilterDropdown and ProfileMenu)
+- `Esc` closes; clear button (×) resets the query
+- Bar shows: query input · match counter (`3 / 12`) · prev/next chevrons · close
+
+*Match scope (client-side, against already-fetched events):*
+- Event title, description, tag names, assignee display names, parent event title
+- Case-insensitive, debounced (~150ms)
+- Search respects active filters by default — the visible view defines the search world
+
+*Visual treatment:*
+- Matching events: amber outline / glow (uses existing design tokens)
+- Non-matching events: dimmed to ~0.3 opacity
+- **Active** match (the one prev/next is parked on): stronger outline + subtle pulse, so users can tell it apart from the other matches
+- For non-title matches, a small badge or tooltip on hover surfaces *why it matched* (e.g. `matched tag #urgent`, `matched assignee Jane`) so highlights on otherwise-blank-looking cards aren't mysterious
+
+*Navigation:*
+- `Enter` / `Shift+Enter` (and the ◀ ▶ chevrons) walk forward/backward through matches
+- On step, the Gantt auto-scrolls **both axes** to center the active match (horizontal pan to the event's date range, vertical scroll to its row)
+- If the active match lives inside a collapsed group, the group expands automatically
+
+*Empty-state behavior:*
+- Zero matches, no filters active → bar shows `No matches`
+- Zero matches **in view**, but filters are active → soft inline callout: *"No matches in current view. [Clear filters]"*. (We do **not** silently search outside the filters — that's Phase 15's job.)
+
+*Persistence:*
+- The query itself is **not** persisted across navigation or reloads — Find is ephemeral by design (matches browser Cmd+F muscle memory)
+- Open/closed state of the bar is also ephemeral
+
+**Out of scope (explicitly):**
+- Cross-team or cross-timeline search → Phase 15
+- Server-side full-text search → Phase 15
+- Saved searches / recent queries → Phase 15
+- Highlighting matches that aren't in the currently-loaded event set (no dynamic loading exists yet; revisit when/if windowed loading lands)
 
 **Exit criteria — safe to pause when:**
-- Typing in the search bar dims non-matching events and highlights matches in the Gantt view
-- Clearing the search restores all events to normal appearance
-- Search works across all granularity levels
+- `Ctrl/Cmd+F` opens the Find bar; `Esc` closes it
+- Typing dims non-matches and highlights matches across title, description, tags, assignees, and parent title
+- Match counter shows `N / M` and updates as the query changes
+- Prev/next (and `Enter` / `Shift+Enter`) cycle through matches, auto-scrolling the Gantt to center each one
+- Active match is visually distinguishable from other matches
+- Non-title matches surface a "why matched" hint on hover
+- With filters active and zero in-view matches, the "Clear filters" callout appears
+- Find works correctly at all granularity levels and with all group-by modes
 
 ---
 
@@ -455,6 +494,36 @@ Client-side search that highlights matching events in the active view.
 - Generating a webhook creates a unique URL for the team
 - Sending a dummy JSON payload to that URL creates an `is_external` event block mapped to a user
 - Trying to drag or edit that block in the UI is prevented (read-only mode)
+
+---
+
+### Phase 15 — Global Search
+**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
+
+Cross-team, cross-timeline event search via a command palette. Complements (does **not** replace) the in-view Find from [Phase 8.5](#phase-85-find-in-view).
+
+**Why a separate phase:**
+By the time we reach Phase 15 we'll have: Find (8.5), List view (11), real-time sync (8.3), and likely more events per team than fit in one fetch. Global Search needs server-side full-text and a different UX surface (a palette, not an inline bar), so it earns its own phase. With Find + List already shipped, this should feel like the natural "I genuinely don't know where this event is" escape hatch — used rarely but valued when needed.
+
+**Directional scope (to be firmed up before the phase):**
+- Command palette opened via `Ctrl/Cmd+K` (separate keybinding from Find's `Ctrl/Cmd+F`)
+- Server-side search endpoint: `GET /search/events?q=` — scoped to teams/timelines the caller can access
+- Full-text index over title, description, tags, assignee names (SQLite FTS5 for the default backend; equivalent for MySQL/Postgres adapters when those land)
+- Results grouped by team → timeline, each row showing event title, date range, assignees, and a snippet of the matched field
+- Selecting a result navigates to that timeline and **hands off to Find**, pre-seeding the query so the event is highlighted on arrival (reuses 8.5's scroll-to-match logic)
+- Keyboard-first: arrow keys to move, Enter to navigate, Esc to close
+- Recent searches / pinned searches — stretch goal, evaluate during the phase
+
+**Open questions (resolve before starting):**
+- Does Search surface archived events by default, or behind a toggle?
+- Do we index event descriptions in v1, or just title/tags/assignees? (description indexing has size implications for SQLite FTS5)
+- Permission model: do we filter results post-query or push the auth predicate into the FTS query?
+
+**Exit criteria (placeholder — refine in-phase):**
+- `Ctrl/Cmd+K` opens a palette returning results across every team the user belongs to
+- Selecting a result navigates to the correct timeline and the event is visibly highlighted on arrival
+- Users with no access to a team never see that team's events in results
+- Search returns within ~200ms for a database with 10k events
 
 ---
 
