@@ -2,6 +2,52 @@
 
 ---
 
+## 2026-05-20 — Phase 8.4: Persistent View Settings
+
+### What was built
+- **Migration 004** (`user_preferences` table): `(id, user_id, timeline_id, key, value, updated_at)` with `UNIQUE(user_id, timeline_id, key)`. Uses empty string `''` as the sentinel for global (non-timeline-scoped) prefs so the UNIQUE constraint works without relying on SQLite's NULL-distinct behaviour.
+- **`UserPreferenceRepo`** (`internal/db/user_preference_repo.go`): `List(userID, timelineID)` and `Upsert(p)` using SQLite's `ON CONFLICT ... DO UPDATE` for atomic upserts.
+- **`GET /users/me/preferences?timeline_id=`**: returns all prefs for the authenticated user in the given scope (empty = global). No team membership check needed — prefs are user-owned.
+- **`PUT /users/me/preferences`**: accepts `{ key, value, timelineId? }`. Validates that `value` is valid JSON, then upserts. Returns the resulting preference row.
+- **OpenAPI spec** updated with `UserPreference` schema and both endpoints under a new `users` tag. TypeScript types regenerated.
+- **`usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks** (`hooks/usePreferences.ts`): TanStack Query wrappers. `usePreferenceMap` returns a stable `Record<string, unknown>` for easy key lookup.
+- **`DashboardPage` wiring**:
+  - On first render for a timeline, fetches per-timeline prefs via `usePreferenceMap` and applies `group_by`, `sort_by`, `zoom_granularity`, `color_by` to toolbar state. A `prefsAppliedForTimeline` ref prevents the subsequent state changes from immediately writing defaults back.
+  - Toolbar state changes (`groupBy`, `sortBy`, `granularity`, `colorBy`) trigger `upsert` with the new value scoped to the active timeline.
+  - Theme changes trigger a global-scope upsert (no `timelineId`).
+
+### Preference tiers
+| Key | Scope |
+|---|---|
+| `theme` | Global (`timeline_id = ''`) |
+| `group_by` | Per-timeline |
+| `sort_by` | Per-timeline |
+| `zoom_granularity` | Per-timeline |
+| `color_by` | Per-timeline |
+
+### Exit criteria status
+- **Changing zoom/group/sort, switching timelines, and switching back restores original settings**: ✅ implemented — each timeline switch re-reads prefs from server before marking applied.
+- **Dark mode persists across logout/login**: ✅ implemented — theme written to global pref on every toggle.
+- **Settings sync between tabs via API (not localStorage)**: ✅ implemented — all state is stored server-side; a fresh tab load fetches current values from `GET /users/me/preferences`.
+
+### Files changed
+- `packages/api/internal/db/migrations/004_user_preferences.sql` — new table
+- `packages/api/internal/models/models.go` — `UserPreference` type
+- `packages/api/internal/db/user_preference_repo.go` — `List` + `Upsert`
+- `packages/api/internal/api/api_types.gen.go` — `UserPreference`, `UpsertPreferenceJSONBody` types added
+- `packages/api/internal/api/user_preference_handler.go` — two new handlers
+- `packages/api/internal/api/server.go` — `preferences` field, updated constructor, two new routes
+- `packages/api/cmd/draba/main.go` — wire `NewUserPreferenceRepo`
+- All test files using `NewServer` — updated to pass new `preferencesRepo` argument
+- `packages/shared/openapi.yaml` — `UserPreference` schema + two endpoints
+- `packages/shared/src/index.ts` — regenerated TS types
+- `packages/web/src/hooks/usePreferences.ts` — new hook file
+- `packages/web/src/pages/DashboardPage.tsx` — preference load + save wiring
+- `docs/ROADMAP.md` — Phase 8.4 ✅ Done
+- `docs/TASKS.md` — all Phase 8.4 tasks checked off
+
+---
+
 ## 2026-05-19 — Phase 8.3: Web — Real-Time WebSocket Sync
 
 ### What was built

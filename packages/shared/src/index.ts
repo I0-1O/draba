@@ -93,6 +93,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/me/preferences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get preferences for the authenticated user
+         * @description Returns all preferences matching the given scope. Omit timeline_id
+         *     (or pass an empty string) to fetch global preferences.
+         */
+        get: operations["getPreferences"];
+        /** Create or update a single preference */
+        put: operations["upsertPreference"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/teams": {
         parameters: {
             query?: never;
@@ -426,6 +448,18 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        UserPreference: {
+            id: string;
+            userId: string;
+            /** @description Empty string or absent means global (not timeline-scoped). */
+            timelineId?: string | null;
+            /** @description Preference key (e.g. group_by, sort_by, zoom_granularity, theme). */
+            key: string;
+            /** @description JSON-encoded preference value. */
+            value: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
         AuthResponse: {
             user: components["schemas"]["User"];
             accessToken: string;
@@ -660,6 +694,65 @@ export interface operations {
                     "application/json": components["schemas"]["User"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getPreferences: {
+        parameters: {
+            query?: {
+                /** @description Scope results to a specific timeline. Omit for global prefs. */
+                timeline_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Array of matching preferences. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserPreference"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    upsertPreference: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Preference key (e.g. group_by, sort_by, zoom_granularity, theme). */
+                    key: string;
+                    /** @description JSON-encoded preference value. */
+                    value: string;
+                    /** @description Omit or pass "" for a global preference. */
+                    timelineId?: string | null;
+                };
+            };
+        };
+        responses: {
+            /** @description Upserted preference. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserPreference"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             500: components["responses"]["InternalError"];
         };

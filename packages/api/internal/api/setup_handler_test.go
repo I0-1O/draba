@@ -58,6 +58,7 @@ func TestSetupStatus_NoSetupNeeded(t *testing.T) {
 		db.NewEventRepo(database),
 		db.NewTimelineRepo(database),
 		db.NewSavedFilterRepo(database),
+		db.NewUserPreferenceRepo(database),
 		toks, tier.Unlimited, bus, hub,
 	).Routes()
 

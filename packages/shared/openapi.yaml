@@ -254,6 +254,28 @@ components:
           type: string
           format: date-time
 
+    UserPreference:
+      type: object
+      required: [id, userId, key, value, updatedAt]
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        timelineId:
+          type: string
+          nullable: true
+          description: Empty string or absent means global (not timeline-scoped).
+        key:
+          type: string
+          description: Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
+        value:
+          type: string
+          description: JSON-encoded preference value.
+        updatedAt:
+          type: string
+          format: date-time
+
     AuthResponse:
       type: object
       required: [user, accessToken, refreshToken]
@@ -529,6 +551,72 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── User preferences ─────────────────────────────────────────
+
+  /users/me/preferences:
+    get:
+      operationId: getPreferences
+      summary: Get preferences for the authenticated user
+      description: |
+        Returns all preferences matching the given scope. Omit timeline_id
+        (or pass an empty string) to fetch global preferences.
+      tags: [users]
+      parameters:
+        - name: timeline_id
+          in: query
+          required: false
+          description: Scope results to a specific timeline. Omit for global prefs.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Array of matching preferences.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserPreference"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      operationId: upsertPreference
+      summary: Create or update a single preference
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, value]
+              properties:
+                key:
+                  type: string
+                  description: Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
+                value:
+                  type: string
+                  description: JSON-encoded preference value.
+                timelineId:
+                  type: string
+                  nullable: true
+                  description: Omit or pass "" for a global preference.
+      responses:
+        "200":
+          description: Upserted preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserPreference"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "500":

@@ -37,6 +37,7 @@ type Server struct {
 	events       *db.EventRepo
 	timelines    TimelineStore
 	savedFilters *db.SavedFilterRepo
+	preferences  *db.UserPreferenceRepo
 	tokens       *auth.TokenService
 	tier         tier.Tier
 	bus          *events.Bus
@@ -46,7 +47,7 @@ type Server struct {
 
 // NewServer constructs a Server with its required dependencies. It does not
 // touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, eventsRepo *db.EventRepo, timelinesRepo TimelineStore, savedFiltersRepo *db.SavedFilterRepo, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
+func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, eventsRepo *db.EventRepo, timelinesRepo TimelineStore, savedFiltersRepo *db.SavedFilterRepo, preferencesRepo *db.UserPreferenceRepo, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
 	return &Server{
 		users:        users,
 		invites:      invites,
@@ -54,6 +55,7 @@ func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, e
 		events:       eventsRepo,
 		timelines:    timelinesRepo,
 		savedFilters: savedFiltersRepo,
+		preferences:  preferencesRepo,
 		tokens:       tokens,
 		tier:         t,
 		bus:          bus,
@@ -81,6 +83,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /auth/login", s.handleLogin)
 	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
 	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
 
 	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
 	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))

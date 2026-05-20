@@ -29,7 +29,7 @@ This document organizes development into discrete phases with effort estimates a
 | 8.2 | [Web — Gantt Interactions](#phase-82-web--gantt-interactions) | L — 3–5 days | ✅ |
 | 8.2.1 | [Gantt Bar Drag — Resize & Move](#phase-821-gantt-bar-drag--resize--move) | M — 1–2 days | ✅ |
 | 8.3 | [Web — Real-Time WebSocket Sync](#phase-83-web--real-time-websocket-sync) | M — 1–2 days | ✅ |
-| 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ⬜ |
+| 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ✅ |
 | 8.5 | [Search with Highlight](#phase-85-search-with-highlight) | S — 1 day | ⬜ |
 | 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ⬜ |
 | 10 | [Team Configuration](#phase-10-team-configuration) | M — 1–2 days | ⬜ |
@@ -309,7 +309,7 @@ Builds on 8.2. Wire live WebSocket deltas into the timeline's state.
 ---
 
 ### Phase 8.4 — Persistent View Settings
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** ✅ Done — 2026-05-20 | **Effort:** M (2–3 days)
 
 Server-side user preferences so view settings survive login/logout and sync across devices.
 

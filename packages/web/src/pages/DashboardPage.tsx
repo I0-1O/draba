@@ -5,7 +5,7 @@
  * initial view. Team-selection UI and full sidebar wiring come in a later phase.
  */
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import Sidebar from '@/components/layout/Sidebar'
 import TopBar, { type ViewMode } from '@/components/layout/TopBar'
 import RightSidebar from '@/components/layout/RightSidebar'
@@ -16,6 +16,7 @@ import EventCreatePanel from '@/components/gantt/EventCreatePanel'
 import { FilterProvider } from '@/contexts/FilterContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
 import { useMyTeams, useTeamTimelines, useTeamEventSync } from '@/hooks/useTeamEvents'
 import type { components } from '@draba/shared'
@@ -40,7 +41,7 @@ const DROPDOWN_BTN: React.CSSProperties = {
 
 function DashboardShell() {
   const { logout, accessToken, user } = useAuth()
-  const { isDark, toggle: toggleDark } = useDarkMode()
+  const { isDark, toggle: toggleDark, theme } = useDarkMode()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [view, setView] = useState<ViewMode>('gantt')
   const [profileOpen, setProfileOpen] = useState(false)
@@ -57,6 +58,11 @@ function DashboardShell() {
   const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
   const [colorBy, setColorBy] = useState<ColorBy>('event')
   const profileRef = useRef<HTMLDivElement>(null)
+  // Preference persistence
+  const upsert = useUpsertPreference()
+  // Track whether we've applied server prefs for the active timeline so we
+  // don't immediately write defaults back before the server data arrives.
+  const prefsAppliedForTimeline = useRef<string | null>(null)
 
 
   useEffect(() => {
@@ -85,8 +91,55 @@ function DashboardShell() {
 
   const { data: timelines = [] } = useTeamTimelines(teamId)
   const activeTimeline = timelines[0]
+  const activeTimelineId = activeTimeline?.id
 
   useTeamEventSync(teamId, accessToken)
+
+  // Per-timeline preferences: restore toolbar state when the active timeline changes.
+  const timelinePrefs = usePreferenceMap(activeTimelineId)
+  useEffect(() => {
+    if (!activeTimelineId) return
+    // Skip if we already applied prefs for this timeline (avoid overwriting user changes).
+    if (prefsAppliedForTimeline.current === activeTimelineId) return
+    prefsAppliedForTimeline.current = activeTimelineId
+
+    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
+    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
+    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
+    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
+  }, [activeTimelineId, timelinePrefs])
+
+  // Save toolbar state changes to per-timeline prefs.
+  const saveTimelinePref = useCallback((key: string, value: string) => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
+  }, [activeTimelineId, upsert])
+
+  useEffect(() => {
+    // Only save after we've applied server prefs (prefsAppliedForTimeline is set).
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('group_by', groupBy)
+  }, [groupBy]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('sort_by', sortBy)
+  }, [sortBy]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('zoom_granularity', granularity)
+  }, [granularity]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('color_by', colorBy)
+  }, [colorBy]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Global preferences: persist dark mode setting.
+  useEffect(() => {
+    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
+  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
