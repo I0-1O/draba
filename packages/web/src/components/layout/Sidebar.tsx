@@ -24,7 +24,7 @@ interface Props {
   onActiveColorChange?: (color: string) => void;
   onActiveNameChange?: (name: string) => void;
   onNewEvent?: () => void;
-  apiTimelines?: Array<{ id: string; name: string }>;
+  apiTimelines?: Array<{ id: string; name: string; startDate?: string; endDate?: string }>;
   activeTimelineId?: string;
   onActiveTimelineChange?: (id: string) => void;
 }
@@ -38,6 +38,21 @@ interface Timeline {
   name: string;
   color: string;
   icon: React.ReactNode;
+  startDate?: string;
+  endDate?: string;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function formatDateRange(startDate?: string, endDate?: string): string {
+  if (!startDate || !endDate) return ''
+  const s = new Date(startDate + 'T00:00:00')
+  const e = new Date(endDate + 'T00:00:00')
+  const diffDays = (e.getTime() - s.getTime()) / 86_400_000
+  if (diffDays < 90) {
+    return `${MONTHS[s.getMonth()]} ${s.getDate()} – ${MONTHS[e.getMonth()]} ${e.getDate()} ${e.getFullYear()}`
+  }
+  return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
 }
 
 interface Member {
@@ -48,10 +63,10 @@ interface Member {
 }
 
 const DEMO_TIMELINES: Timeline[] = [
-  { id: '1', name: 'Q1 2027 Roadmap',            color: '#1A97A2', icon: <Code2 {...ICON_SM} /> },
-  { id: '2', name: 'New Logo GTM',                color: '#6366F1', icon: <Palette {...ICON_SM} /> },
-  { id: '3', name: 'Q4 2026 Roadmap',             color: '#F17B2B', icon: <BarChart3 {...ICON_SM} /> },
-  { id: '4', name: 'Project Pinky and the Brain', color: '#E11D48', icon: <Megaphone {...ICON_SM} /> },
+  { id: '1', name: 'Q1 2027 Roadmap',            color: '#1A97A2', icon: <Code2 {...ICON_SM} />,    startDate: '2027-01-01', endDate: '2027-03-31' },
+  { id: '2', name: 'New Logo GTM',                color: '#6366F1', icon: <Palette {...ICON_SM} />,  startDate: '2026-12-01', endDate: '2027-01-15' },
+  { id: '3', name: 'Q4 2026 Roadmap',             color: '#F17B2B', icon: <BarChart3 {...ICON_SM} />, startDate: '2026-10-01', endDate: '2026-12-31' },
+  { id: '4', name: 'Project Pinky and the Brain', color: '#E11D48', icon: <Megaphone {...ICON_SM} />, startDate: '2026-11-15', endDate: '2026-12-20' },
 ];
 
 const DEMO_ARCHIVED: Timeline[] = [
@@ -69,12 +84,14 @@ interface TimelineItemProps {
   timeline: Timeline;
   active: boolean;
   collapsed: boolean;
+  showDate?: boolean;
   onClick: () => void;
   onSettings: () => void;
 }
 
-function TimelineItem({ timeline, active, collapsed, onClick, onSettings }: TimelineItemProps) {
+function TimelineItem({ timeline, active, collapsed, showDate = true, onClick, onSettings }: TimelineItemProps) {
   const [hovered, setHovered] = useState(false);
+  const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
 
   return (
     <div
@@ -102,7 +119,7 @@ function TimelineItem({ timeline, active, collapsed, onClick, onSettings }: Time
           display: 'flex',
           alignItems: 'center',
           gap: 8,
-          padding: collapsed ? '7px 14px' : '7px 8px 7px 16px',
+          padding: collapsed ? '7px 14px' : '6px 8px 6px 16px',
           background: 'none',
           border: 'none',
           color: active ? 'white' : 'rgba(255,255,255,0.65)',
@@ -130,9 +147,16 @@ function TimelineItem({ timeline, active, collapsed, onClick, onSettings }: Time
           {timeline.icon}
         </span>
         {!collapsed && (
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {timeline.name}
-          </span>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {timeline.name}
+            </div>
+            {dateRange && (
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {dateRange}
+              </div>
+            )}
+          </div>
         )}
       </button>
 
@@ -241,6 +265,8 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
         name: t.name,
         color: TIMELINE_COLORS[i % TIMELINE_COLORS.length],
         icon: <LineChart {...ICON_SM} />,
+        startDate: t.startDate,
+        endDate: t.endDate,
       }))
     : DEMO_TIMELINES
   const activeId = activeTimelineId ?? internalActiveId
@@ -671,6 +697,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
               timeline={activeTimeline}
               active={true}
               collapsed={false}
+              showDate={false}
               onClick={() => setTimelinesOpen(true)}
               onSettings={() => {}}
             />

@@ -45,7 +45,7 @@ export default function TopBar({
   return (
     <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
       {/* Left zone: view switcher */}
-      <div className="flex-1 flex items-center justify-start">
+      <div className="flex items-center justify-start shrink-0">
         <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
           {VIEWS.map(v => (
             <button
@@ -78,7 +78,7 @@ export default function TopBar({
       </div>
 
       {/* Right zone: Find bar / trigger, Filter, profile slot */}
-      <div className="flex-1 flex items-center justify-end gap-1.5 min-w-0">
+      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
         {findBarOpen ? (
           <FindBar />
         ) : (

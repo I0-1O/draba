@@ -114,10 +114,11 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
           height: 28,
           fontSize: 12,
           fontWeight: 600,
+          maxWidth: 200,
         }}
       >
         <Filter size={13} strokeWidth={1.8} style={{ flexShrink: 0 }} />
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 140 }}>{label}</span>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>{label}</span>
         <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0 }} />
       </button>
 
@@ -153,7 +154,7 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
                 onMouseEnter={e => { if (!isSelected(f)) e.currentTarget.style.background = 'var(--muted)' }}
                 onMouseLeave={e => { if (!isSelected(f)) e.currentTarget.style.background = 'none' }}
               >
-                {p.label}
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.label}</span>
               </button>
             )
           })}
@@ -177,7 +178,7 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
                     onMouseEnter={e => { if (!isSelected(f)) e.currentTarget.style.background = 'var(--muted)' }}
                     onMouseLeave={e => { if (!isSelected(f)) e.currentTarget.style.background = 'none' }}
                   >
-                    Events for {label}
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Events for {label}</span>
                   </button>
                 )
               })}
@@ -202,7 +203,7 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
                     onMouseEnter={e => { if (!isSelected(f)) e.currentTarget.style.background = 'var(--muted)' }}
                     onMouseLeave={e => { if (!isSelected(f)) e.currentTarget.style.background = 'none' }}
                   >
-                    {s.name}
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
                   </button>
                 )
               })}

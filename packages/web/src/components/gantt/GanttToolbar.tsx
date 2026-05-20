@@ -56,7 +56,7 @@ export default function GanttToolbar({
   };
 
   return (
-    <div className="flex items-center gap-2 px-3.5 h-9 bg-card border-b border-border shrink-0">
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
       {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
       <style>{`
         .gantt-zoom-slider {
