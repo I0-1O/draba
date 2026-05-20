@@ -115,7 +115,7 @@ type SavedFilter struct {
 }
 
 // UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is ” for global preferences so the
+// scoped to a timeline. TimelineID is “” for global preferences so the
 // UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
 // Serialised JSON omits TimelineID when empty so callers see null for global prefs.
 type UserPreference struct {

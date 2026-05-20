@@ -63,6 +63,8 @@ function DashboardShell() {
   // Track whether we've applied server prefs for the active timeline so we
   // don't immediately write defaults back before the server data arrives.
   const prefsAppliedForTimeline = useRef<string | null>(null)
+  // One-shot guard: init activeTimelineId from global prefs only on first load.
+  const timelineIdInitialized = useRef(false)
 
 
   useEffect(() => {
@@ -84,17 +86,29 @@ function DashboardShell() {
     .join('')
     .toUpperCase()
 
-  // Use the first team and timeline the user belongs to.
-  // Full team-selection UI comes in a later phase.
+  // Global preferences — restored on login to seed team/timeline selection.
+  const { isSuccess: globalPrefsSettled } = usePreferences()
+  const globalPrefMap = usePreferenceMap()
+
+  // Use the first team the user belongs to.
+  // Full team-selection UI comes in a later phase; selected_team is persisted
+  // now so that phase can restore it without a migration.
   const { data: teams = [] } = useMyTeams()
   const teamId = teams[0]?.id ?? ''
 
   const { data: timelines = [] } = useTeamTimelines(teamId)
   const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
-  // Initialize from first timeline once the list loads.
+  // Initialize activeTimelineId from the saved global pref (selected_timeline),
+  // falling back to timelines[0] when no pref is stored or the saved timeline
+  // is no longer in the list. Waits for global prefs to settle so we don't
+  // immediately overwrite a restored value with the fallback.
   useEffect(() => {
-    if (timelines.length > 0 && !activeTimelineId) setActiveTimelineId(timelines[0].id)
-  }, [timelines, activeTimelineId])
+    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
+    timelineIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
+    const exists = saved && timelines.some(t => t.id === saved)
+    setActiveTimelineId(exists ? saved : timelines[0].id)
+  }, [timelines, globalPrefsSettled, globalPrefMap])
   const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
 
   const handleTimelineChange = useCallback((id: string) => {
@@ -145,10 +159,20 @@ function DashboardShell() {
     saveTimelinePref('color_by', colorBy)
   }, [colorBy, saveTimelinePref])
 
-  // Global preferences: persist dark mode setting.
+  // Global preferences: persist dark mode, active team, and active timeline.
   useEffect(() => {
     upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
   }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!teamId) return
+    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
+  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
+  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
