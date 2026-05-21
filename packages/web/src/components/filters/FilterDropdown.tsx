@@ -178,7 +178,7 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
                     onMouseEnter={e => { if (!isSelected(f)) e.currentTarget.style.background = 'var(--muted)' }}
                     onMouseLeave={e => { if (!isSelected(f)) e.currentTarget.style.background = 'none' }}
                   >
-                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Events for {label}</span>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Activities for {label}</span>
                   </button>
                 )
               })}

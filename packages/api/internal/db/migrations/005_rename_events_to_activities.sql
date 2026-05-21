@@ -6,6 +6,8 @@
 -- after step 1, before we rename the child tables in steps 2 and 3.
 --
 -- Rollback SQL (if needed without a DB restore):
+--   ALTER TABLE activity_tags RENAME COLUMN activity_id TO event_id;
+--   ALTER TABLE activity_assignments RENAME COLUMN activity_id TO event_id;
 --   ALTER TABLE activities RENAME COLUMN parent_activity_id TO parent_event_id;
 --   ALTER TABLE activities RENAME TO events;
 --   ALTER TABLE activity_tags RENAME TO event_tags;

@@ -265,12 +265,12 @@ Three polish items bundled together.
 Builds on 8.1. Full CRUD interactions on the timeline.
 
 **Scope:**
-- Click activity block → open `EventDetailPanel` (view mode)
+- Click activity block → open `ActivityDetailPanel` (view mode) *(shipped as `EventDetailPanel`; renamed in Phase 9.5)*
 - Edit button → inline editing form (title, description, date range, status, assignees)
-- Save → `PATCH /events/:id`, optimistic update, close panel
-- Delete → `DELETE /events/:id`, confirm dialog, remove from timeline
-- Drag on empty lane cell → capture start/end date range → open `EventCreateForm` pre-filled with lane member + dates
-- Submit form → `POST /teams/:id/events`, add block to timeline
+- Save → `PATCH /activities/:id`, optimistic update, close panel *(shipped as `PATCH /events/:id`; renamed in Phase 9.5)*
+- Delete → `DELETE /activities/:id`, confirm dialog, remove from timeline *(shipped as `DELETE /events/:id`; renamed in Phase 9.5)*
+- Drag on empty lane cell → capture start/end date range → open `ActivityCreatePanel` pre-filled with lane member + dates *(shipped as `EventCreateForm`; renamed in Phase 9.5)*
+- Submit form → `POST /teams/:id/activities`, add block to timeline *(shipped as `POST /teams/:id/events`; renamed in Phase 9.5)*
 
 **Exit criteria — safe to pause when:**
 - Clicking an activity block opens an edit panel; changes save and reflect immediately in the UI

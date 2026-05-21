@@ -90,6 +90,14 @@ The token management **UI** is intentionally deferred to Phase 10.4 per ROADMAP.
 
 ---
 
+## 2026-05-21 — /test-phase 9.5
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 8 pass (2 fixes applied mid-run: stale "Events for {label}" string in FilterDropdown.tsx; deleted dead EventPanel.tsx)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-05-20 — /test-phase 9
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

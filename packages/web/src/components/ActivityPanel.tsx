@@ -5,7 +5,7 @@ import type { DrabaActivity, ActivityStatus, Member } from '../types';
 import { ACTIVITY_COLORS, STATUS_LABELS } from '../types';
 
 interface Props {
-  event: DrabaActivity;
+  activity: DrabaActivity;
   members: Member[];
   onClose: () => void;
   onChange: (patch: Partial<DrabaActivity>) => void;
@@ -22,28 +22,28 @@ const FIELD_LABEL: React.CSSProperties = {
 };
 
 /**
- * Right-side detail panel for a selected timeline event.
+ * Right-side detail panel for a selected activity.
  *
  * Editing model:
  *  - `title` and `notes` use local state and commit on blur, so we don't
  *    fire an `onChange` for every keystroke.
  *  - `status` and `color` commit immediately (single discrete choice).
- *  - The effect resyncs local state when the selected event changes
- *    (keyed on `event.id`), otherwise stale text would persist when the
- *    user clicks a different event.
+ *  - The effect resyncs local state when the selected activity changes
+ *    (keyed on `activity.id`), otherwise stale text would persist when the
+ *    user clicks a different activity.
  */
-export default function EventPanel({ event, members, onClose, onChange, onDelete }: Props) {
-  const member = members.find(m => m.id === event.memberId);
-  const [title, setTitle] = useState(event.title);
-  const [notes, setNotes] = useState(event.notes ?? '');
-  const [status, setStatus] = useState<ActivityStatus>(event.status);
+export default function ActivityPanel({ activity, members, onClose, onChange, onDelete }: Props) {
+  const member = members.find(m => m.id === activity.memberId);
+  const [title, setTitle] = useState(activity.title);
+  const [notes, setNotes] = useState(activity.notes ?? '');
+  const [status, setStatus] = useState<ActivityStatus>(activity.status);
 
-  // Reset local edits when the panel switches to a different event.
+  // Reset local edits when the panel switches to a different activity.
   useEffect(() => {
-    setTitle(event.title);
-    setNotes(event.notes ?? '');
-    setStatus(event.status);
-  }, [event.id]);
+    setTitle(activity.title);
+    setNotes(activity.notes ?? '');
+    setStatus(activity.status);
+  }, [activity.id]);
 
   const handleStatusChange = (next: ActivityStatus) => {
     setStatus(next);
@@ -81,7 +81,7 @@ export default function EventPanel({ event, members, onClose, onChange, onDelete
               width: 12,
               height: 12,
               borderRadius: 3,
-              background: event.color,
+              background: activity.color,
               flexShrink: 0,
             }}
           />
@@ -168,7 +168,7 @@ export default function EventPanel({ event, members, onClose, onChange, onDelete
                 background: 'var(--background)',
               }}
             >
-              {event.startDate}
+              {activity.startDate}
             </div>
             <ArrowRight size={12} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
             <div
@@ -182,7 +182,7 @@ export default function EventPanel({ event, members, onClose, onChange, onDelete
                 background: 'var(--background)',
               }}
             >
-              {event.endDate}
+              {activity.endDate}
             </div>
           </div>
         </div>
@@ -226,7 +226,7 @@ export default function EventPanel({ event, members, onClose, onChange, onDelete
                   borderRadius: 4,
                   background: c,
                   cursor: 'pointer',
-                  border: event.color === c ? '2px solid var(--foreground)' : '2px solid transparent',
+                  border: activity.color === c ? '2px solid var(--foreground)' : '2px solid transparent',
                   transition: 'transform 0.1s',
                   padding: 0,
                 }}

@@ -38,7 +38,7 @@ const ACTIVITIES: ApiActivity[] = [
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe('matchEvents', () => {
+describe('matchActivities', () => {
   it('returns empty array for empty query', () => {
     expect(matchEvents('', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
     expect(matchEvents('   ', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)

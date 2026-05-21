@@ -59,12 +59,12 @@ Timelines are named viewing windows — a name and a date range — scoped to a 
 - [ ] External / public visibility is handled via the **Shares** model (below) — a timeline is not inherently "public" or "restricted"; it becomes externally visible only via a share link the team explicitly creates
 
 ### Timeline Views
-The primary view is a Gantt chart. Additional views display the same underlying events in different formats.
+The primary view is a Gantt chart. Additional views display the same underlying activities in different formats.
 
 - [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per activity, bars span their date range; see `docs/design/UX_PATTERNS.md`
   - A **timeline sub-toolbar** sits between the top bar and the grid. It provides:
     - **Zoom** — variable column width (day granularity, zoom in/out)
-    - **Group by** — controls how event rows are organized:
+    - **Group by** — controls how activity rows are organized:
       - _None_ — flat list, sorted by the active sort key
       - _Member_ — one labeled section per assigned team member; events with multiple assignees appear under their primary assignee
       - _Parent activity_ — root activities shown first; child events (those with `parentActivityId` set) indented beneath their parent
