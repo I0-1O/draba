@@ -191,9 +191,56 @@ Reorganizes the filter dropdown into four explicit sections. Filters are stored 
 - [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
 - [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
 
+### The Great Event → Activity Rename (Phase 9.5)
+Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEventToActivity.md](GreatEventToActivity.md). Roadmap: [Phase 9.5](ROADMAP.md#phase-95--rename-event--activity-the-great-rename).
+
+> **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
+
+**DB:**
+- [ ] Write migration `005_rename_events_to_activities.sql` (`ALTER TABLE ... RENAME`)
+- [ ] Rename indexes containing `event` in their name
+- [ ] Update `migrations_test.go` to assert new table + column names
+- [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
+
+**Go API:**
+- [ ] `models.Event` → `models.Activity`
+- [ ] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo`
+- [ ] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions
+- [ ] `server.go`: routes `/events*` → `/activities*`
+- [ ] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
+- [ ] Update `bus_test.go`, `hub_test.go` wire-string assertions
+- [ ] `golangci-lint run` clean, `go test ./...` passes
+
+**OpenAPI + generated types:**
+- [ ] `packages/shared/openapi.yaml`: schema, paths, operationIds, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
+- [ ] Run `pnpm --filter shared generate`; verify `Activity` exports, zero `Event` exports
+
+**Web:**
+- [ ] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
+- [ ] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys
+- [ ] `useWebSocket.ts`: update message-type switch to `activity.*`
+- [ ] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*`; fix imports
+- [ ] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels
+- [ ] `pnpm --filter web lint` clean
+
+**Tests + seed:**
+- [ ] Rename `event_handler_test.go` → `activity_handler_test.go`
+- [ ] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql`; update INSERTs + cleanup
+
+**Docs:**
+- [ ] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md
+- [ ] Hand-review: ROADMAP Phase 3 title → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
+- [ ] Do **not** rewrite `docs/log.md` historical entries
+- [ ] Add Phase 9.5 entry to `docs/log.md`
+
+**Verification (smoke against http://epcot.lan:8081):**
+- [ ] Create / edit / archive / unarchive / delete an Activity end-to-end
+- [ ] WebSocket frames arrive as `activity.created` / `.updated` / `.deleted`
+- [ ] Final sweep `rg "\bevent" packages/ docs/` returns only expected hits (bus package, calendar fields, log.md)
+
 ### Phase 10 — Entity Management (data-cornerstone CRUD)
 
-Closes CRUD gaps for the three core data entities. Events are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
+Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
 
 ---
 

@@ -32,6 +32,7 @@ This document organizes development into discrete phases with effort estimates a
 | 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ✅ |
 | 8.5 | [Find (In-View)](#phase-85-find-in-view) | M — 1–2 days | ✅ |
 | 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ✅ |
+| 9.5 | [Rename Event → Activity (The Great Rename)](#phase-95--rename-event--activity-the-great-rename) | M — 1–2 days | ⬜ |
 | 10.1 | [Teams — Full CRUD (API + UI)](#phase-101--teams--full-crud-api--ui) | M — 2 days | ⬜ |
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
@@ -414,9 +415,35 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 
 ---
 
+### Phase 9.5 — Rename Event → Activity (The Great Rename)
+**Status:** ⬜ | **Effort:** M (1–2 days)
+
+Rename the domain entity `Event` → `Activity` end-to-end (DB, Go API, OpenAPI, generated TS, web hooks/components, user-facing copy, docs). The pub/sub bus keeps its `internal/events` package name (correct event-driven-architecture term), but its message-type constants and wire strings move to `activity.*`. Calendar fields (`google_event_id`, `caldav_uid`) are preserved — they map to external VEVENT identifiers.
+
+**Why now:** the name collides with internal pub/sub events and with calendar VEVENTs. Cost of disambiguation grows fast in Phase 12 (Calendar Sync) and Phase 15 (Webhooks). Cheapest to fix while pre-1.0, single LAN test instance, no external API consumers.
+
+**Approach:** hard cutover. No `/events` aliases, no dual message types. Single migration via `ALTER TABLE RENAME`. See **[GreatEventToActivity.md](GreatEventToActivity.md)** for the full runbook (token map, per-layer checklist, verification, rollback).
+
+**Scope (summary — see runbook for the full list):**
+- DB: `events` → `activities`, `event_tags` → `activity_tags`, `event_assignments` → `activity_assignments`, `parent_event_id` → `parent_activity_id`. New migration `005_rename_events_to_activities.sql`. **Keep** `google_event_id` and `caldav_uid`.
+- Go: `models.Event` → `Activity`; `EventRepo` → `ActivityRepo`; `event_handler.go` → `activity_handler.go`; all routes `/events*` → `/activities*`; bus constants `EventCreated/Updated/Deleted` → `ActivityCreated/Updated/Deleted` and wire strings `event.*` → `activity.*`. **Keep** `internal/events` package name and `TimelineCreated/Updated`.
+- OpenAPI: `Event` schema → `Activity`; all operationIds, tags, paths. **Keep** `googleEventId`/`caldavUid` fields. Regenerate TS types.
+- Web: `useTeamEvents` → `useTeamActivities`; `EventDetailPanel`/`EventCreatePanel`/`EventPanel` → `Activity*`; `DrabaEvent`/`EventStatus`/`EVENT_COLORS` → `Activity*`/`ACTIVITY_COLORS`; UI strings ("Add Event" → "Add Activity", sidebar "Events" → "Activities", etc.); WebSocket message switch updated.
+- Tests, seed (`seed-find-test-events.sql` → `…-activities.sql`), and docs (ROADMAP/REQUIREMENTS/ARCHITECTURE/CONVENTIONS/TESTING/UX_PATTERNS) swept.
+
+**Exit criteria — safe to pause when:**
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+- Migration applies cleanly against a copy of the production DB; row counts unchanged; `PRAGMA foreign_key_check` returns no rows
+- Smoke test on test docker passes: create / edit / archive / unarchive / delete an Activity; WebSocket frames arrive as `activity.created` (not `event.created`)
+- `googleEventId` / `caldavUid` still present in OpenAPI `Activity` schema and in the `activities` table
+- Final-sweep grep returns only the expected remaining matches (bus package, calendar fields, historical log)
+- `docs/log.md` Phase 9.5 entry written
+
+---
+
 ### Phase 10 — Entity Management (data-cornerstone CRUD)
 
-**Framing:** Phase 10 closes the gaps in CRUD for the three core data entities — Teams, Timelines, Events — plus the cross-cutting settings shell. Today the first-run wizard creates one of each and there is no path to manage them afterward. We tackle them entity-by-entity, top-down, so that by the time Phase 11 (views) ships, the data layer underneath is fully manageable. Events are already CRUD-complete from Phases 3 / 8.2 / 8.2.1 (archive lands in Phase 9), so Phase 10 only needs to address Teams and Timelines.
+**Framing:** Phase 10 closes the gaps in CRUD for the three core data entities — Teams, Timelines, Activities (renamed from Events in Phase 9.5) — plus the cross-cutting settings shell. Today the first-run wizard creates one of each and there is no path to manage them afterward. We tackle them entity-by-entity, top-down, so that by the time Phase 11 (views) ships, the data layer underneath is fully manageable. Activities are already CRUD-complete from Phases 3 / 8.2 / 8.2.1 (archive lands in Phase 9), so Phase 10 only needs to address Teams and Timelines.
 
 Sub-phase dependency: 10.1 (Teams) → 10.2 (Statuses) → 10.3 (Timelines) → 10.4 (Profile/Tokens/Admin). 10.2 depends on 10.1 because the statuses tab lives inside `/settings/team/:id`. 10.3 doesn't strictly depend on 10.2 but is sequenced after for clean delivery.
 
