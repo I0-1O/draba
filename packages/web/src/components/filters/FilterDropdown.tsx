@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Filter, ChevronDown, Plus, Settings2 } from 'lucide-react'
 import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
-import { useTeamMembers } from '@/hooks/useTeamEvents'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
 import { useSavedFilters } from '@/hooks/useSavedFilters'
 import { useAuth } from '@/contexts/AuthContext'
 

@@ -15,13 +15,8 @@ export type TeamMember = Schemas["TeamMember"];
 /** Team member extended with user display fields (email, displayName, avatarUrl). */
 export type TeamMemberWithUser = Schemas["TeamMemberWithUser"];
 export type Invite = Schemas["Invite"];
-/**
- * API event — a scheduled work item assigned to a team.
- *
- * Named `Event` to mirror the server model; note this shadows the global DOM
- * `Event` type. If both are needed in the same file, alias one at the import site.
- */
-export type Event = Schemas["Event"];
+/** API activity — a scheduled work item assigned to a team. */
+export type Activity = Schemas["Activity"];
 export type AuthResponse = Schemas["AuthResponse"];
 export type RefreshResponse = Schemas["RefreshResponse"];
 export type ApiError = Schemas["ApiError"];

@@ -278,7 +278,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
   const startW = useRef(SIDEBAR_MIN);
 
   useEffect(() => {
-    function onMouseMove(e: MouseActivity) {
+    function onMouseMove(e: MouseEvent) {
       if (!dragging.current) return;
       const delta = e.clientX - startX.current;
       setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
@@ -297,7 +297,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
     };
   }, []);
 
-  function onHandleMouseDown(e: React.MouseActivity) {
+  function onHandleMouseDown(e: React.MouseEvent) {
     e.preventDefault();
     dragging.current = true;
     startX.current = e.clientX;
