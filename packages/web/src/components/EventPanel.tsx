@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react';
 import { X, ArrowRight, Trash2 } from 'lucide-react';
 import MemberAvatar from './MemberAvatar';
-import type { DrabaEvent, EventStatus, Member } from '../types';
-import { EVENT_COLORS, STATUS_LABELS } from '../types';
+import type { DrabaActivity, ActivityStatus, Member } from '../types';
+import { ACTIVITY_COLORS, STATUS_LABELS } from '../types';
 
 interface Props {
-  event: DrabaEvent;
+  event: DrabaActivity;
   members: Member[];
   onClose: () => void;
-  onChange: (patch: Partial<DrabaEvent>) => void;
+  onChange: (patch: Partial<DrabaActivity>) => void;
   onDelete?: () => void;
 }
 
@@ -36,7 +36,7 @@ export default function EventPanel({ event, members, onClose, onChange, onDelete
   const member = members.find(m => m.id === event.memberId);
   const [title, setTitle] = useState(event.title);
   const [notes, setNotes] = useState(event.notes ?? '');
-  const [status, setStatus] = useState<EventStatus>(event.status);
+  const [status, setStatus] = useState<ActivityStatus>(event.status);
 
   // Reset local edits when the panel switches to a different event.
   useEffect(() => {
@@ -45,7 +45,7 @@ export default function EventPanel({ event, members, onClose, onChange, onDelete
     setStatus(event.status);
   }, [event.id]);
 
-  const handleStatusChange = (next: EventStatus) => {
+  const handleStatusChange = (next: ActivityStatus) => {
     setStatus(next);
     onChange({ status: next });
   };
@@ -86,7 +86,7 @@ export default function EventPanel({ event, members, onClose, onChange, onDelete
             }}
           />
           <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--foreground)' }}>
-            Event detail
+            Activity detail
           </span>
         </div>
         <button
@@ -192,7 +192,7 @@ export default function EventPanel({ event, members, onClose, onChange, onDelete
           <div style={FIELD_LABEL}>Status</div>
           <select
             value={status}
-            onChange={e => handleStatusChange(e.target.value as EventStatus)}
+            onChange={e => handleStatusChange(e.target.value as ActivityStatus)}
             style={{
               width: '100%',
               fontSize: 13,
@@ -206,7 +206,7 @@ export default function EventPanel({ event, members, onClose, onChange, onDelete
               cursor: 'pointer',
             }}
           >
-            {(Object.keys(STATUS_LABELS) as EventStatus[]).map(s => (
+            {(Object.keys(STATUS_LABELS) as ActivityStatus[]).map(s => (
               <option key={s} value={s}>{STATUS_LABELS[s]}</option>
             ))}
           </select>
@@ -216,7 +216,7 @@ export default function EventPanel({ event, members, onClose, onChange, onDelete
         <div style={{ marginBottom: 16 }}>
           <div style={FIELD_LABEL}>Color</div>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {EVENT_COLORS.map(c => (
+            {ACTIVITY_COLORS.map(c => (
               <button
                 key={c}
                 onClick={() => onChange({ color: c })}

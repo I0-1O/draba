@@ -32,7 +32,7 @@ This document organizes development into discrete phases with effort estimates a
 | 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ✅ |
 | 8.5 | [Find (In-View)](#phase-85-find-in-view) | M — 1–2 days | ✅ |
 | 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ✅ |
-| 9.5 | [Rename Event → Activity (The Great Rename)](#phase-95--rename-event--activity-the-great-rename) | M — 1–2 days | ⬜ |
+| 9.5 | [Rename Event → Activity (The Great Rename)](#phase-95--rename-event--activity-the-great-rename) | M — 1–2 days | ✅ |
 | 10.1 | [Teams — Full CRUD (API + UI)](#phase-101--teams--full-crud-api--ui) | M — 2 days | ⬜ |
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
@@ -96,21 +96,21 @@ Repo created. Requirements, architecture, conventions, and design docs written.
 
 ---
 
-### Phase 3 — Core API — Events & Teams
+### Phase 3 — Core API — Activities & Teams (originally Events; renamed in Phase 9.5)
 **Status:** ✅ Done — 2026-05-03 | **Effort:** M (2–3 days)
 
 **Scope:**
 - `POST /teams` — create team
 - `POST /teams/:id/invites` — send invite
 - `GET /teams/:id/members`
-- `POST /teams/:id/events` — create event
-- `GET /teams/:id/events` — list events (date range filter)
-- `PATCH /events/:id` — update event
-- `DELETE /events/:id` — delete event
+- `POST /teams/:id/activities` — create activity (shipped as `/events`; renamed in Phase 9.5)
+- `GET /teams/:id/activities` — list activities (date range filter)
+- `PATCH /activities/:id` — update activity
+- `DELETE /activities/:id` — delete activity
 
 **Exit criteria — safe to pause when:**
 - Full invite flow works: create team → send invite → register via token → list members
-- Events can be created, listed (filtered by date range), updated, and deleted via HTTP with a valid JWT
+- Activities can be created, listed (filtered by date range), updated, and deleted via HTTP with a valid JWT
 - All responses match the expected shape (verified manually or with a test script)
 
 ---
@@ -265,7 +265,7 @@ Three polish items bundled together.
 Builds on 8.1. Full CRUD interactions on the timeline.
 
 **Scope:**
-- Click event block → open `EventDetailPanel` (view mode)
+- Click activity block → open `EventDetailPanel` (view mode)
 - Edit button → inline editing form (title, description, date range, status, assignees)
 - Save → `PATCH /events/:id`, optimistic update, close panel
 - Delete → `DELETE /events/:id`, confirm dialog, remove from timeline
@@ -273,7 +273,7 @@ Builds on 8.1. Full CRUD interactions on the timeline.
 - Submit form → `POST /teams/:id/events`, add block to timeline
 
 **Exit criteria — safe to pause when:**
-- Clicking an event block opens an edit panel; changes save and reflect immediately in the UI
+- Clicking an activity block opens an edit panel; changes save and reflect immediately in the UI
 - Dragging on an empty lane cell opens a creation form pre-filled with the selected range
 - Created and edited events appear correctly in the timeline without page reload
 
@@ -306,13 +306,13 @@ Builds on 8.2. Wire live WebSocket deltas into the timeline's state.
 
 **Scope:**
 - Connect `useWebSocket` hook (Phase 7) to subscribe to `events.*` messages for the active team
-- On `events.created` delta: insert new event block into TanStack Query cache
-- On `events.updated` delta: update existing block in cache (position + content)
-- On `events.deleted` delta: remove block from cache
+- On `activity.created` delta: insert new event block into TanStack Query cache
+- On `activity.updated` delta: update existing block in cache (position + content)
+- On `activity.deleted` delta: remove block from cache
 - Handle optimistic update conflicts (local edit in-flight when WS delta arrives for same event)
 
 **Exit criteria — safe to pause when:**
-- A second browser tab's Gantt view updates within 500ms when an event is mutated in the first tab
+- A second browser tab's Gantt view updates within 500ms when an activity is mutated in the first tab
 - No duplicate or ghost blocks after rapid create/edit/delete sequences
 
 ---
@@ -416,7 +416,7 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 ---
 
 ### Phase 9.5 — Rename Event → Activity (The Great Rename)
-**Status:** ⬜ | **Effort:** M (1–2 days)
+**Status:** ✅ Done — 2026-05-21 | **Effort:** M (1–2 days)
 
 Rename the domain entity `Event` → `Activity` end-to-end (DB, Go API, OpenAPI, generated TS, web hooks/components, user-facing copy, docs). The pub/sub bus keeps its `internal/events` package name (correct event-driven-architecture term), but its message-type constants and wire strings move to `activity.*`. Calendar fields (`google_event_id`, `caldav_uid`) are preserved — they map to external VEVENT identifiers.
 

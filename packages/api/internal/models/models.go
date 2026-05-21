@@ -6,35 +6,38 @@ package models
 
 import "time"
 
-// Event is a scheduled item of work belonging to a Team. ArchivedAt is
-// non-nil when the event is soft-deleted; list endpoints exclude archived
-// events by default.
+// Activity is a scheduled item of work belonging to a Team. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
 //
-// AssignedMemberIDs is not stored on the events table; it is populated by
-// the repository from event_assignments after every list query.
-type Event struct {
-	ID                string     `db:"id"               json:"id"`
-	TeamID            string     `db:"team_id"          json:"teamId"`
-	Title             string     `db:"title"            json:"title"`
-	Description       *string    `db:"description"      json:"description,omitempty"`
-	Icon              *string    `db:"icon"             json:"icon,omitempty"`
-	Color             *string    `db:"color"            json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"         json:"startAt"`
-	EndAt             time.Time  `db:"end_at"           json:"endAt"`
-	AllDay            bool       `db:"all_day"          json:"allDay"`
-	StatusID          *string    `db:"status_id"        json:"statusId,omitempty"`
-	ParentEventID     *string    `db:"parent_event_id"  json:"parentEventId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete" json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"         json:"location,omitempty"`
-	URL               *string    `db:"url"              json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"            json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"       json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"  json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"       json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"       json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"       json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"      json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                json:"assignedMemberIds"`
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TeamID            string     `db:"team_id"             json:"teamId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
 }
 
 // TeamMemberWithUser joins a TeamMember row with its associated User so

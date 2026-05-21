@@ -128,7 +128,7 @@ components:
           type: string
           format: date-time
 
-    Event:
+    Activity:
       type: object
       required: [id, teamId, title, startAt, endAt, allDay, createdBy, createdAt, updatedAt]
       properties:
@@ -158,7 +158,7 @@ components:
         statusId:
           type: string
           nullable: true
-        parentEventId:
+        parentActivityId:
           type: string
           nullable: true
         percentComplete:
@@ -178,9 +178,11 @@ components:
         caldavUid:
           type: string
           nullable: true
+          description: External CalDAV VEVENT UID — preserved from Phase 12 calendar sync.
         googleEventId:
           type: string
           nullable: true
+          description: External Google Calendar event ID — preserved from Phase 12 calendar sync.
         createdBy:
           type: string
         createdAt:
@@ -197,7 +199,7 @@ components:
           type: array
           items:
             type: string
-          description: IDs of team_members assigned to this event (from event_assignments).
+          description: IDs of team_members assigned to this activity (from activity_assignments).
 
     Timeline:
       type: object
@@ -409,11 +411,11 @@ components:
       schema:
         type: string
 
-    eventId:
+    activityId:
       name: id
       in: path
       required: true
-      description: Event ID.
+      description: Activity ID.
       schema:
         type: string
 
@@ -877,13 +879,13 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
-  # ── Events ───────────────────────────────────────────────────
+  # ── Activities ───────────────────────────────────────────────
 
-  /teams/{id}/events:
+  /teams/{id}/activities:
     post:
-      operationId: createEvent
-      summary: Create an event in a team
-      tags: [events]
+      operationId: createActivity
+      summary: Create an activity in a team
+      tags: [activities]
       parameters:
         - $ref: "#/components/parameters/teamId"
       requestBody:
@@ -918,7 +920,7 @@ paths:
                 statusId:
                   type: string
                   nullable: true
-                parentEventId:
+                parentActivityId:
                   type: string
                   nullable: true
                 percentComplete:
@@ -942,11 +944,11 @@ paths:
                   description: IDs of team_members to assign. Replaces all existing assignments.
       responses:
         "201":
-          description: Event created.
+          description: Activity created.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Event"
+                $ref: "#/components/schemas/Activity"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -957,42 +959,42 @@ paths:
           $ref: "#/components/responses/InternalError"
 
     get:
-      operationId: listEvents
-      summary: List events for a team
-      description: Archived events are excluded by default. Optional date-range filter on startAt.
-      tags: [events]
+      operationId: listActivities
+      summary: List activities for a team
+      description: Archived activities are excluded by default. Optional date-range filter on startAt.
+      tags: [activities]
       parameters:
         - $ref: "#/components/parameters/teamId"
         - name: from
           in: query
           required: false
-          description: Only return events where startAt >= from (RFC 3339).
+          description: Only return activities where startAt >= from (RFC 3339).
           schema:
             type: string
             format: date-time
         - name: to
           in: query
           required: false
-          description: Only return events where startAt <= to (RFC 3339).
+          description: Only return activities where startAt <= to (RFC 3339).
           schema:
             type: string
             format: date-time
         - name: archived
           in: query
           required: false
-          description: When `true`, include archived events. Default excludes them.
+          description: When `true`, include archived activities. Default excludes them.
           schema:
             type: string
             enum: [ "true", "false" ]
       responses:
         "200":
-          description: Array of events.
+          description: Array of activities.
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/Event"
+                  $ref: "#/components/schemas/Activity"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1002,14 +1004,14 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
-  /events/{id}:
+  /activities/{id}:
     patch:
-      operationId: updateEvent
-      summary: Partially update an event
+      operationId: updateActivity
+      summary: Partially update an activity
       description: Only fields present in the request body are modified (true PATCH semantics).
-      tags: [events]
+      tags: [activities]
       parameters:
-        - $ref: "#/components/parameters/eventId"
+        - $ref: "#/components/parameters/activityId"
       requestBody:
         required: true
         content:
@@ -1040,7 +1042,7 @@ paths:
                 statusId:
                   type: string
                   nullable: true
-                parentEventId:
+                parentActivityId:
                   type: string
                   nullable: true
                 percentComplete:
@@ -1064,11 +1066,11 @@ paths:
                   description: IDs of team_members to assign. Replaces all existing assignments.
       responses:
         "200":
-          description: Updated event.
+          description: Updated activity.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Event"
+                $ref: "#/components/schemas/Activity"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1081,14 +1083,14 @@ paths:
           $ref: "#/components/responses/InternalError"
 
     delete:
-      operationId: deleteEvent
-      summary: Delete an event
-      tags: [events]
+      operationId: deleteActivity
+      summary: Delete an activity
+      tags: [activities]
       parameters:
-        - $ref: "#/components/parameters/eventId"
+        - $ref: "#/components/parameters/activityId"
       responses:
         "204":
-          description: Event deleted (no body).
+          description: Activity deleted (no body).
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -1098,21 +1100,21 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
-  /events/{id}/archive:
+  /activities/{id}/archive:
     post:
-      operationId: archiveEvent
-      summary: Archive an event (soft delete)
-      description: Sets archivedAt on the event so it is hidden from default list responses but can be restored via /events/{id}/unarchive.
-      tags: [events]
+      operationId: archiveActivity
+      summary: Archive an activity (soft delete)
+      description: Sets archivedAt on the activity so it is hidden from default list responses but can be restored via /activities/{id}/unarchive.
+      tags: [activities]
       parameters:
-        - $ref: "#/components/parameters/eventId"
+        - $ref: "#/components/parameters/activityId"
       responses:
         "200":
-          description: The archived event.
+          description: The archived activity.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Event"
+                $ref: "#/components/schemas/Activity"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -1122,20 +1124,20 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
-  /events/{id}/unarchive:
+  /activities/{id}/unarchive:
     post:
-      operationId: unarchiveEvent
-      summary: Restore a previously archived event
-      tags: [events]
+      operationId: unarchiveActivity
+      summary: Restore a previously archived activity
+      tags: [activities]
       parameters:
-        - $ref: "#/components/parameters/eventId"
+        - $ref: "#/components/parameters/activityId"
       responses:
         "200":
-          description: The restored event.
+          description: The restored activity.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Event"
+                $ref: "#/components/schemas/Activity"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

@@ -29,14 +29,14 @@ func savedFilterTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID st
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
-	eventsRepo := db.NewEventRepo(database)
+	activitiesRepo := db.NewActivityRepo(database)
 	timelinesRepo := db.NewTimelineRepo(database)
 	savedFiltersRepo := db.NewSavedFilterRepo(database)
 	tokens := auth.NewTokenService("saved-filter-test-secret")
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv = api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, savedFiltersRepo, db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, savedFiltersRepo, db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@savedfilter.com", "password1", "Alice")
 

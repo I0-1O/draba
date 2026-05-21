@@ -12,7 +12,7 @@ import { createAuthFetch } from '@/lib/api'
 import { useAuth } from '@/contexts/AuthContext'
 import { useWebSocket } from '@/hooks/useWebSocket'
 
-type Event = components['schemas']['Event']
+type Activity = components['schemas']['Activity']
 type Team = components['schemas']['Team']
 type Timeline = components['schemas']['Timeline']
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
@@ -20,8 +20,8 @@ type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
 /** Query key factory — centralises cache key strings. */
 export const keys = {
   myTeams: () => ['teams'] as const,
-  teamEvents: (teamId: string, from?: string, to?: string) =>
-    ['teams', teamId, 'events', { from, to }] as const,
+  teamActivities: (teamId: string, from?: string, to?: string) =>
+    ['teams', teamId, 'activities', { from, to }] as const,
   teamMembers: (teamId: string) =>
     ['teams', teamId, 'members'] as const,
   teamTimelines: (teamId: string) =>
@@ -51,19 +51,19 @@ export function useTeamTimelines(teamId: string) {
   })
 }
 
-/** Fetches all events for a team, optionally filtered by date range. */
-export function useTeamEvents(teamId: string, from?: string, to?: string) {
+/** Fetches all activities for a team, optionally filtered by date range. */
+export function useTeamActivities(teamId: string, from?: string, to?: string) {
   const { getAccessToken } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
 
   return useQuery({
-    queryKey: keys.teamEvents(teamId, from, to),
+    queryKey: keys.teamActivities(teamId, from, to),
     queryFn: () => {
       const params = new URLSearchParams()
       if (from) params.set('from', from)
       if (to) params.set('to', to)
       const qs = params.toString()
-      return authFetch<Event[]>(`/teams/${teamId}/events${qs ? `?${qs}` : ''}`)
+      return authFetch<Activity[]>(`/teams/${teamId}/activities${qs ? `?${qs}` : ''}`)
     },
     enabled: Boolean(teamId),
   })
@@ -83,16 +83,16 @@ export function useTeamMembers(teamId: string) {
 
 /**
  * Subscribes to the team's WebSocket feed and applies surgical cache updates
- * for event.created / event.updated / event.deleted deltas.
+ * for activity.created / activity.updated / activity.deleted deltas.
  *
- * Conflict strategy: for event.updated, incoming deltas are only applied when
- * their updatedAt timestamp is strictly newer than the cached version. This
- * prevents self-echo (our own PATCH broadcast arriving back) and handles the
- * last-writer-wins case where a concurrent remote edit arrives while our
- * mutation is in-flight — the server-returned updatedAt on our onSuccess
- * will always win if our PATCH was truly last.
+ * Conflict strategy: for activity.updated, incoming deltas are only applied
+ * when their updatedAt timestamp is strictly newer than the cached version.
+ * This prevents self-echo (our own PATCH broadcast arriving back) and handles
+ * the last-writer-wins case where a concurrent remote edit arrives while our
+ * mutation is in-flight — the server-returned updatedAt on our onSuccess will
+ * always win if our PATCH was truly last.
  */
-export function useTeamEventSync(
+export function useTeamActivitySync(
   teamId: string,
   accessToken: string | null | undefined,
 ) {
@@ -102,37 +102,37 @@ export function useTeamEventSync(
     (msg: { type: string; payload?: unknown }) => {
       if (!teamId || !msg.payload) return
 
-      if (msg.type === 'event.created') {
-        const incoming = msg.payload as Event
-        client.setQueriesData<Event[]>(
-          { queryKey: ['teams', teamId, 'events'] },
+      if (msg.type === 'activity.created') {
+        const incoming = msg.payload as Activity
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['teams', teamId, 'activities'] },
           (old) => {
             if (!old) return old
             // Guard against duplicate delivery.
-            if (old.some((e) => e.id === incoming.id)) return old
+            if (old.some((a) => a.id === incoming.id)) return old
             return [...old, incoming]
           },
         )
-      } else if (msg.type === 'event.updated') {
-        const incoming = msg.payload as Event
-        client.setQueriesData<Event[]>(
-          { queryKey: ['teams', teamId, 'events'] },
+      } else if (msg.type === 'activity.updated') {
+        const incoming = msg.payload as Activity
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['teams', teamId, 'activities'] },
           (old) => {
             if (!old) return old
-            return old.map((e) => {
-              if (e.id !== incoming.id) return e
+            return old.map((a) => {
+              if (a.id !== incoming.id) return a
               // Skip if the cache already holds the same or a newer version.
-              const cachedMs = new Date(e.updatedAt).getTime()
+              const cachedMs = new Date(a.updatedAt).getTime()
               const incomingMs = new Date(incoming.updatedAt).getTime()
-              return incomingMs > cachedMs ? incoming : e
+              return incomingMs > cachedMs ? incoming : a
             })
           },
         )
-      } else if (msg.type === 'event.deleted') {
+      } else if (msg.type === 'activity.deleted') {
         const { id } = msg.payload as { id: string }
-        client.setQueriesData<Event[]>(
-          { queryKey: ['teams', teamId, 'events'] },
-          (old) => old?.filter((e) => e.id !== id),
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['teams', teamId, 'activities'] },
+          (old) => old?.filter((a) => a.id !== id),
         )
       }
     },
@@ -146,7 +146,7 @@ export function useTeamEventSync(
   })
 }
 
-interface CreateEventInput {
+interface CreateActivityInput {
   title: string
   startAt: string
   endAt: string
@@ -155,8 +155,8 @@ interface CreateEventInput {
   assignedMemberIds?: string[]
 }
 
-interface UpdateEventInput {
-  eventId: string
+interface UpdateActivityInput {
+  activityId: string
   patch: {
     title?: string
     description?: string | null
@@ -170,25 +170,25 @@ interface UpdateEventInput {
   }
 }
 
-/** Creates an event and inserts it directly into the cache. */
-export function useCreateEvent(teamId: string) {
+/** Creates an activity and inserts it directly into the cache. */
+export function useCreateActivity(teamId: string) {
   const { getAccessToken } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
   const client = useQueryClient()
 
   return useMutation({
-    mutationFn: (input: CreateEventInput) =>
-      authFetch<Event>(`/teams/${teamId}/events`, {
+    mutationFn: (input: CreateActivityInput) =>
+      authFetch<Activity>(`/teams/${teamId}/activities`, {
         method: 'POST',
         body: JSON.stringify(input),
       }),
     onSuccess: (created) => {
-      client.setQueriesData<Event[]>(
-        { queryKey: ['teams', teamId, 'events'] },
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['teams', teamId, 'activities'] },
         (old) => {
           if (!old) return old
-          // WS self-echo may also insert this event; deduplicate by id.
-          if (old.some((e) => e.id === created.id)) return old
+          // WS self-echo may also insert this activity; deduplicate by id.
+          if (old.some((a) => a.id === created.id)) return old
           return [...old, created]
         },
       )
@@ -196,41 +196,41 @@ export function useCreateEvent(teamId: string) {
   })
 }
 
-/** PATCHes an event and optimistically updates the cache. */
-export function useUpdateEvent(teamId: string) {
+/** PATCHes an activity and optimistically updates the cache. */
+export function useUpdateActivity(teamId: string) {
   const { getAccessToken } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
   const client = useQueryClient()
 
   return useMutation({
-    mutationFn: ({ eventId, patch }: UpdateEventInput) =>
-      authFetch<Event>(`/events/${eventId}`, {
+    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
+      authFetch<Activity>(`/activities/${activityId}`, {
         method: 'PATCH',
         body: JSON.stringify(patch),
       }),
     onSuccess: (updated) => {
-      // Update the event in all matching cache entries for the team.
-      client.setQueriesData<Event[]>(
-        { queryKey: ['teams', teamId, 'events'] },
-        (old) => old?.map((e) => (e.id === updated.id ? updated : e)),
+      // Update the activity in all matching cache entries for the team.
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['teams', teamId, 'activities'] },
+        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
       )
     },
   })
 }
 
-/** Deletes an event and removes it from the cache. */
-export function useDeleteEvent(teamId: string) {
+/** Deletes an activity and removes it from the cache. */
+export function useDeleteActivity(teamId: string) {
   const { getAccessToken } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
   const client = useQueryClient()
 
   return useMutation({
-    mutationFn: (eventId: string) =>
-      authFetch<void>(`/events/${eventId}`, { method: 'DELETE' }),
-    onSuccess: (_data, eventId) => {
-      client.setQueriesData<Event[]>(
-        { queryKey: ['teams', teamId, 'events'] },
-        (old) => old?.filter((e) => e.id !== eventId),
+    mutationFn: (activityId: string) =>
+      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['teams', teamId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
       )
     },
   })

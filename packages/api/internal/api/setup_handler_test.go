@@ -55,7 +55,7 @@ func TestSetupStatus_NoSetupNeeded(t *testing.T) {
 		usersRepo,
 		db.NewInviteRepo(database),
 		db.NewTeamRepo(database),
-		db.NewEventRepo(database),
+		db.NewActivityRepo(database),
 		db.NewTimelineRepo(database),
 		db.NewSavedFilterRepo(database),
 		db.NewUserPreferenceRepo(database),

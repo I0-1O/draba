@@ -13,7 +13,7 @@ func TestBus_PublishDelivered(t *testing.T) {
 	ch := b.Subscribe()
 	defer b.Unsubscribe(ch)
 
-	msg := Message{Type: EventCreated, TeamID: "team1", Payload: "test"}
+	msg := Message{Type: ActivityCreated, TeamID: "team1", Payload: "test"}
 	b.Publish(msg)
 
 	select {
@@ -31,12 +31,12 @@ func TestBus_MultipleSubscribers(t *testing.T) {
 	defer b.Unsubscribe(ch1)
 	defer b.Unsubscribe(ch2)
 
-	b.Publish(Message{Type: EventUpdated, TeamID: "team1"})
+	b.Publish(Message{Type: ActivityUpdated, TeamID: "team1"})
 
 	for _, ch := range []chan Message{ch1, ch2} {
 		select {
 		case got := <-ch:
-			assert.Equal(t, EventUpdated, got.Type)
+			assert.Equal(t, ActivityUpdated, got.Type)
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("subscriber did not receive message")
 		}
@@ -52,11 +52,11 @@ func TestBus_Unsubscribe_StopsDelivery(t *testing.T) {
 	ch2 := b.Subscribe()
 	defer b.Unsubscribe(ch2)
 
-	b.Publish(Message{Type: EventDeleted, TeamID: "team1"})
+	b.Publish(Message{Type: ActivityDeleted, TeamID: "team1"})
 
 	select {
 	case got := <-ch2:
-		assert.Equal(t, EventDeleted, got.Type)
+		assert.Equal(t, ActivityDeleted, got.Type)
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("ch2 did not receive message after ch was unsubscribed")
 	}
@@ -65,6 +65,6 @@ func TestBus_Unsubscribe_StopsDelivery(t *testing.T) {
 func TestBus_NoSubscribers_DoesNotPanic(t *testing.T) {
 	b := NewBus()
 	require.NotPanics(t, func() {
-		b.Publish(Message{Type: EventCreated, TeamID: "team1"})
+		b.Publish(Message{Type: ActivityCreated, TeamID: "team1"})
 	})
 }

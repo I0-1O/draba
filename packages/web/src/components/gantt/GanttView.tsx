@@ -12,10 +12,10 @@
  */
 
 import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import GanttGrid, { type GanttEvent, type GanttRow, type FindState } from './GanttGrid';
-import { useTeamEvents, useTeamMembers, useUpdateEvent } from '@/hooks/useTeamEvents';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTeamActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
 import type { components } from '@draba/shared';
-import { type Member, EVENT_COLORS, MEMBER_COLORS } from '@/types';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
 import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
 import {
   generateColumns,
@@ -28,7 +28,7 @@ import { matchEvents } from '@/lib/findMatcher';
 import { useFind } from '@/contexts/FindContext';
 import { useFilter } from '@/contexts/FilterContext';
 
-type ApiEvent = components['schemas']['Event'];
+type ApiActivity = components['schemas']['Activity'];
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
 
 interface Props {
@@ -41,14 +41,14 @@ interface Props {
   sortBy: SortBy;
   granularity: TimeGranularity | 'auto';
   colorBy: ColorBy;
-  selectedEventId?: string | null;
-  onSelectEvent?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an event. */
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
   onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
   /** Called once members are loaded, so the parent can access them for panels. */
   onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an event is selected — passes the full API event object. */
-  onSelectApiEvent?: (event: ApiEvent | null) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
 }
 
 /** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
@@ -97,23 +97,23 @@ function toMember(m: TeamMemberWithUser, index: number): Member {
 }
 
 /** Intermediate type that carries original API fields alongside view-state. */
-interface RichEvent extends GanttEvent {
+interface RichActivity extends GanttActivity {
   startAtMs: number;
   endAtMs: number;
-  parentEventId: string | null;
+  parentActivityId: string | null;
   primaryMemberId: string | null;
   assignedMemberIds: string[];
 }
 
-function toRichEvent(
-  ev: ApiEvent,
+function toRichActivity(
+  ev: ApiActivity,
   index: number,
   memberById: Record<string, Member>,
   viewStart: Date,
   viewEnd: Date,
   columns: ColumnDef[],
   colorBy: ColorBy,
-): RichEvent | null {
+): RichActivity | null {
   const evStart = new Date(toDateOnly(ev.startAt));
   const evEnd = new Date(toDateOnly(ev.endAt));
 
@@ -127,9 +127,9 @@ function toRichEvent(
   const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
 
   const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? EVENT_COLORS[index % EVENT_COLORS.length]) :
-    colorBy === 'status' ? statusColorFromId((ev as ApiEvent & { statusId?: string | null }).statusId) :
-    /* event */ (ev.color ?? EVENT_COLORS[index % EVENT_COLORS.length]);
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
 
   return {
     id: ev.id,
@@ -138,10 +138,10 @@ function toRichEvent(
     span,
     color,
     members,
-    isChild: Boolean(ev.parentEventId),
+    isChild: Boolean(ev.parentActivityId),
     startAtMs: new Date(ev.startAt).getTime(),
     endAtMs: new Date(ev.endAt).getTime(),
-    parentEventId: ev.parentEventId ?? null,
+    parentActivityId: ev.parentActivityId ?? null,
     primaryMemberId: members[0]?.id ?? null,
     assignedMemberIds: assignedIds,
   };
@@ -149,8 +149,8 @@ function toRichEvent(
 
 // ── Sorting ──────────────────────────────────────────────────────────────────
 
-function sortEvents(events: RichEvent[], sortBy: SortBy): RichEvent[] {
-  return [...events].sort((a, b) => {
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
     if (sortBy === 'title') return a.title.localeCompare(b.title);
     if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
     return a.startAtMs - b.startAtMs;
@@ -160,19 +160,19 @@ function sortEvents(events: RichEvent[], sortBy: SortBy): RichEvent[] {
 // ── Grouping ─────────────────────────────────────────────────────────────────
 
 function buildRows(
-  events: RichEvent[],
+  activities: RichActivity[],
   members: Member[],
   groupBy: GroupBy,
   sortBy: SortBy,
 ): GanttRow[] {
-  const sorted = sortEvents(events, sortBy);
+  const sorted = sortActivities(activities, sortBy);
 
   if (groupBy === 'none') {
-    return sorted.map(ev => ({ kind: 'event' as const, event: ev }));
+    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
   }
 
   if (groupBy === 'member') {
-    const buckets: Record<string, RichEvent[]> = {};
+    const buckets: Record<string, RichActivity[]> = {};
     for (const ev of sorted) {
       const key = ev.primaryMemberId ?? '__none__';
       (buckets[key] ??= []).push(ev);
@@ -183,12 +183,12 @@ function buildRows(
       const evs = buckets[m.id];
       if (!evs?.length) continue;
       rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
-      for (const ev of evs) rows.push({ kind: 'event', event: { ...ev, isChild: false } });
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
     }
     const unassigned = buckets['__none__'];
     if (unassigned?.length) {
       rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
-      for (const ev of unassigned) rows.push({ kind: 'event', event: { ...ev, isChild: false } });
+      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
     }
     return rows;
   }
@@ -198,28 +198,28 @@ function buildRows(
     const rows: GanttRow[] = [];
 
     for (const ev of sorted) {
-      if (placed.has(ev.id) || ev.parentEventId) continue;
+      if (placed.has(ev.id) || ev.parentActivityId) continue;
       placed.add(ev.id);
-      rows.push({ kind: 'event', event: { ...ev, isChild: false } });
+      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
 
       for (const child of sorted) {
-        if (child.parentEventId === ev.id) {
+        if (child.parentActivityId === ev.id) {
           placed.add(child.id);
-          rows.push({ kind: 'event', event: { ...child, isChild: true } });
+          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
         }
       }
     }
 
     for (const ev of sorted) {
       if (!placed.has(ev.id)) {
-        rows.push({ kind: 'event', event: { ...ev, isChild: true } });
+        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
       }
     }
 
     return rows;
   }
 
-  return sorted.map(ev => ({ kind: 'event' as const, event: ev }));
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -232,13 +232,13 @@ export default function GanttView({
   sortBy,
   granularity,
   colorBy,
-  selectedEventId = null,
-  onSelectEvent = () => {},
+  selectedActivityId = null,
+  onSelectActivity = () => {},
   onLaneDrag,
   onMembersLoaded,
-  onSelectApiEvent,
+  onSelectApiActivity,
 }: Props) {
-  const updateEvent = useUpdateEvent(teamId);
+  const updateActivity = useUpdateActivity(teamId);
   const today = todayMidnight();
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(800);
@@ -293,7 +293,7 @@ export default function GanttView({
   const to = viewEnd.toISOString();
 
   const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiEvents = [], isLoading } = useTeamEvents(teamId, from, to);
+  const { data: apiActivities = [], isLoading } = useTeamActivities(teamId, from, to);
 
   const members: Member[] = useMemo(
     () => apiMembers.map((m, i) => toMember(m, i)),
@@ -315,29 +315,29 @@ export default function GanttView({
   }, [members]);
 
   const rows: GanttRow[] = useMemo(() => {
-    const richEvents = apiEvents
-      .map((ev, i) => toRichEvent(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
-      .filter((e): e is RichEvent => e !== null);
-    return buildRows(richEvents, members, groupBy, sortBy);
+    const richActivities = apiActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiEvents, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
+  }, [apiActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
 
   // ── Find: compute matches and register with context ───────────────────────
 
   const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, apiEvents, members, apiEvents),
+    () => matchEvents(debouncedQuery, apiActivities, members, apiActivities),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, apiEvents, members],
+    [debouncedQuery, apiActivities, members],
   );
 
   const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.eventId)),
+    () => new Set(matchResults.map(r => r.activityId)),
     [matchResults],
   );
 
   const computedMatchReasons = useMemo(() => {
     const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.eventId, r.reasons));
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
     return map;
   }, [matchResults]);
 
@@ -345,8 +345,8 @@ export default function GanttView({
   // visual top-to-bottom sequence rather than the arbitrary API order.
   const orderedMatchIds = useMemo(
     () => rows
-      .filter(r => r.kind === 'event' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'event'; event: GanttEvent }).event.id),
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
     [rows, matchedSet],
   );
 
@@ -370,20 +370,20 @@ export default function GanttView({
 
   // ── Bar drag ─────────────────────────────────────────────────────────────
 
-  const handleBarDrag = useCallback((eventId: string, newStartDate: Date, newEndDate: Date) => {
-    updateEvent.mutate({
-      eventId,
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    updateActivity.mutate({
+      activityId,
       patch: {
         startAt: newStartDate.toISOString(),
         endAt: newEndDate.toISOString(),
       },
     });
-  }, [updateEvent]);
+  }, [updateActivity]);
 
   if (isLoading) {
     return (
       <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading events…
+        Loading activities…
       </div>
     );
   }
@@ -394,13 +394,13 @@ export default function GanttView({
         rows={rows}
         columns={columns}
         todayIndex={todayIdx}
-        selectedEventId={selectedEventId}
+        selectedActivityId={selectedActivityId}
         findState={findState}
-        onSelectEvent={(id) => {
-          onSelectEvent(id);
-          if (onSelectApiEvent) {
-            const found = id ? (apiEvents.find(e => e.id === id) ?? null) : null;
-            onSelectApiEvent(found);
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
           }
         }}
         onLaneDrag={onLaneDrag}

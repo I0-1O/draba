@@ -14,7 +14,7 @@ This runs `openapi-typescript` against `openapi.yaml` and writes to `src/index.t
 
 ## Usage in packages/web
 ```ts
-import type { Event, Team, Timeline } from '@draba/shared'
+import type { Activity, Team, Timeline } from '@draba/shared'
 ```
 
 ## Important

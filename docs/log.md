@@ -2,6 +2,52 @@
 
 ---
 
+## 2026-05-21 — Phase 9.5: The Great Event → Activity Rename
+
+### What was built
+
+Hard cutover renaming the domain entity `Event` → `Activity` across every layer. No aliases, no backward-compat shims.
+
+**DB (migration 005):**
+- `events` → `activities`, `event_tags` → `activity_tags`, `event_assignments` → `activity_assignments` via `ALTER TABLE RENAME`.
+- `parent_event_id` → `parent_activity_id` column rename.
+- `event_id` column renamed to `activity_id` in both `activity_tags` and `activity_assignments`.
+- `google_event_id` and `caldav_uid` columns preserved — they identify external VEVENT records.
+
+**Go API:**
+- `models.Event` → `models.Activity`; `ParentEventID` → `ParentActivityID` with updated `db:` and `json:` tags.
+- `db/event_repo.go` → `db/activity_repo.go`; `EventRepo` → `ActivityRepo`; all SQL tables/columns updated.
+- `api/event_handler.go` → `api/activity_handler.go`; all handler funcs renamed; routes `/teams/{id}/events` → `/teams/{id}/activities`, `/events/{id}` → `/activities/{id}`, archive/unarchive likewise.
+- `server.go`: `events *db.EventRepo` → `activities *db.ActivityRepo`; `NewServer` signature updated; `main.go` updated.
+- `internal/events/bus.go`: `EventCreated/Updated/Deleted` → `ActivityCreated/Updated/Deleted`; wire strings `event.*` → `activity.*`. Package name `internal/events` and `TimelineCreated/Updated` unchanged.
+- `api_types.gen.go`: `Event` → `Activity`, `CreateEventJSONBody` → `CreateActivityJSONBody`, `UpdateEventJSONBody` → `UpdateActivityJSONBody`, `ListEventsParams` → `ListActivitiesParams`, `EventId` → `ActivityId`.
+
+**OpenAPI + generated types:**
+- `packages/shared/openapi.yaml`: `Event` schema → `Activity`; all operationIds, tags, paths; `parentEventId` → `parentActivityId`; `caldavUid`/`googleEventId` preserved. `eventId` parameter → `activityId`.
+- `pnpm --filter shared generate` run; TypeScript now exports `Activity`, `CreateActivityJSONBody`, etc.
+
+**Web:**
+- `useTeamEvents.ts` → `useTeamActivities.ts`; all hooks renamed (`useTeamEvents` → `useTeamActivities`, `useTeamEventSync` → `useTeamActivitySync`, etc.); query keys `'events'` → `'activities'`; API paths updated.
+- `EventDetailPanel.tsx` → `ActivityDetailPanel.tsx`; `EventCreatePanel.tsx` → `ActivityCreatePanel.tsx`; `EventPanel.tsx` updated in-place.
+- `types/index.ts`: `DrabaEvent` → `DrabaActivity`, `EventStatus` → `ActivityStatus`, `EVENT_COLORS` → `ACTIVITY_COLORS`.
+- `GanttGrid.tsx`: `GanttEvent` → `GanttActivity`; `kind: 'event'` → `kind: 'activity'` discriminant; column header "Event" → "Activity"; empty state "No viewable events" → "No viewable activities".
+- `GanttView.tsx`: `RichEvent` → `RichActivity`; all `parentEventId` → `parentActivityId`; `useTeamEvents` → `useTeamActivities`; `useUpdateEvent` → `useUpdateActivity`.
+- `GanttToolbar.tsx`: `ColorBy` value `'event'` → `'activity'`; option labels updated; default in `DashboardPage` updated.
+- `findMatcher.ts` + test: `eventId` → `activityId` in `MatchResult`; `parentEventId` → `parentActivityId`; `Event` schema type → `Activity`.
+- `Sidebar.tsx`: `onNewEvent` → `onNewActivity`; section label "Event" → "Activity".
+- `DashboardPage.tsx`: all component imports, state variables, and prop names updated.
+
+**Tests + seed:**
+- `event_handler_test.go` → `activity_handler_test.go`; all test functions, URLs, and variable names updated.
+- `archive_test.go`: event archive test updated to use `/activities/` paths.
+- `bus_test.go`, `hub_test.go`: `EventCreated/Updated/Deleted` → `ActivityCreated/Updated/Deleted`.
+- `migrations_test.go`: table list updated to `activities`, `activity_tags`, `activity_assignments`.
+- `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql`; `INSERT INTO activities`, `INSERT INTO activity_assignments`.
+
+**Verification:** `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web test` all pass.
+
+---
+
 ## 2026-05-20 — Phase 9: API Token Auth & Archive
 
 ### What was built

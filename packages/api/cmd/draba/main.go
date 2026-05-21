@@ -75,7 +75,7 @@ func main() {
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
-	eventRepo := db.NewEventRepo(database)
+	activityRepo := db.NewActivityRepo(database)
 	timelineRepo := db.NewTimelineRepo(database)
 	savedFilterRepo := db.NewSavedFilterRepo(database)
 	preferenceRepo := db.NewUserPreferenceRepo(database)
@@ -94,7 +94,7 @@ func main() {
 		slog.Info("modules loaded", "count", len(mods))
 	}
 
-	srv := api.NewServer(users, invites, teams, eventRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, tokens, t, bus, hub)
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, tokens, t, bus, hub)
 
 	// Wire up the embedded React SPA when a production build is present.
 	// In dev the static/ directory only has .gitkeep so this is a no-op.

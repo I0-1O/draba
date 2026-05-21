@@ -19,8 +19,8 @@ func TestMigrate_Idempotent(t *testing.T) {
 	// Verify all expected tables exist.
 	tables := []string{
 		"users", "teams", "team_members", "team_statuses",
-		"invites", "api_tokens", "events", "event_tags",
-		"event_assignments", "timelines", "timeline_access",
+		"invites", "api_tokens", "activities", "activity_tags",
+		"activity_assignments", "timelines", "timeline_access",
 		"calendar_connections",
 	}
 	for _, table := range tables {

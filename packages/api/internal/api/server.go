@@ -36,7 +36,7 @@ type Server struct {
 	users        *db.UserRepo
 	invites      *db.InviteRepo
 	teams        *db.TeamRepo
-	events       *db.EventRepo
+	activities   *db.ActivityRepo
 	timelines    TimelineStore
 	savedFilters *db.SavedFilterRepo
 	preferences  *db.UserPreferenceRepo
@@ -50,12 +50,12 @@ type Server struct {
 
 // NewServer constructs a Server with its required dependencies. It does not
 // touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, eventsRepo *db.EventRepo, timelinesRepo TimelineStore, savedFiltersRepo *db.SavedFilterRepo, preferencesRepo *db.UserPreferenceRepo, apiTokensRepo *db.APITokenRepo, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
+func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, activitiesRepo *db.ActivityRepo, timelinesRepo TimelineStore, savedFiltersRepo *db.SavedFilterRepo, preferencesRepo *db.UserPreferenceRepo, apiTokensRepo *db.APITokenRepo, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
 	return &Server{
 		users:        users,
 		invites:      invites,
 		teams:        teams,
-		events:       eventsRepo,
+		activities:   activitiesRepo,
 		timelines:    timelinesRepo,
 		savedFilters: savedFiltersRepo,
 		preferences:  preferencesRepo,
@@ -100,12 +100,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
 	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
 	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/events", chain(s.handleCreateEvent, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/events", chain(s.handleListEvents, s.authMiddleware))
-	mux.HandleFunc("PATCH /events/{id}", chain(s.handleUpdateEvent, s.authMiddleware))
-	mux.HandleFunc("DELETE /events/{id}", chain(s.handleDeleteEvent, s.authMiddleware))
-	mux.HandleFunc("POST /events/{id}/archive", chain(s.handleArchiveEvent, s.authMiddleware))
-	mux.HandleFunc("POST /events/{id}/unarchive", chain(s.handleUnarchiveEvent, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
 
 	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
 	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))

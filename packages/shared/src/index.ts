@@ -236,7 +236,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/teams/{id}/events": {
+    "/teams/{id}/activities": {
         parameters: {
             query?: never;
             header?: never;
@@ -244,20 +244,20 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List events for a team
-         * @description Archived events are excluded by default. Optional date-range filter on startAt.
+         * List activities for a team
+         * @description Archived activities are excluded by default. Optional date-range filter on startAt.
          */
-        get: operations["listEvents"];
+        get: operations["listActivities"];
         put?: never;
-        /** Create an event in a team */
-        post: operations["createEvent"];
+        /** Create an activity in a team */
+        post: operations["createActivity"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/events/{id}": {
+    "/activities/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -267,18 +267,18 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete an event */
-        delete: operations["deleteEvent"];
+        /** Delete an activity */
+        delete: operations["deleteActivity"];
         options?: never;
         head?: never;
         /**
-         * Partially update an event
+         * Partially update an activity
          * @description Only fields present in the request body are modified (true PATCH semantics).
          */
-        patch: operations["updateEvent"];
+        patch: operations["updateActivity"];
         trace?: never;
     };
-    "/events/{id}/archive": {
+    "/activities/{id}/archive": {
         parameters: {
             query?: never;
             header?: never;
@@ -288,17 +288,17 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Archive an event (soft delete)
-         * @description Sets archivedAt on the event so it is hidden from default list responses but can be restored via /events/{id}/unarchive.
+         * Archive an activity (soft delete)
+         * @description Sets archivedAt on the activity so it is hidden from default list responses but can be restored via /activities/{id}/unarchive.
          */
-        post: operations["archiveEvent"];
+        post: operations["archiveActivity"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/events/{id}/unarchive": {
+    "/activities/{id}/unarchive": {
         parameters: {
             query?: never;
             header?: never;
@@ -307,8 +307,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Restore a previously archived event */
-        post: operations["unarchiveEvent"];
+        /** Restore a previously archived activity */
+        post: operations["unarchiveActivity"];
         delete?: never;
         options?: never;
         head?: never;
@@ -505,7 +505,7 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
         };
-        Event: {
+        Activity: {
             id: string;
             teamId: string;
             title: string;
@@ -518,12 +518,14 @@ export interface components {
             endAt: string;
             allDay: boolean;
             statusId?: string | null;
-            parentEventId?: string | null;
+            parentActivityId?: string | null;
             percentComplete?: number | null;
             location?: string | null;
             url?: string | null;
             rrule?: string | null;
+            /** @description External CalDAV VEVENT UID — preserved from Phase 12 calendar sync. */
             caldavUid?: string | null;
+            /** @description External Google Calendar event ID — preserved from Phase 12 calendar sync. */
             googleEventId?: string | null;
             createdBy: string;
             /** Format: date-time */
@@ -532,7 +534,7 @@ export interface components {
             updatedAt: string;
             /** Format: date-time */
             archivedAt?: string | null;
-            /** @description IDs of team_members assigned to this event (from event_assignments). */
+            /** @description IDs of team_members assigned to this activity (from activity_assignments). */
             assignedMemberIds?: string[];
         };
         Timeline: {
@@ -673,8 +675,8 @@ export interface components {
     parameters: {
         /** @description Team ID. */
         teamId: string;
-        /** @description Event ID. */
-        eventId: string;
+        /** @description Activity ID. */
+        activityId: string;
         /** @description Timeline ID. */
         timelineId: string;
         /** @description Saved filter ID. */
@@ -1116,14 +1118,14 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    listEvents: {
+    listActivities: {
         parameters: {
             query?: {
-                /** @description Only return events where startAt >= from (RFC 3339). */
+                /** @description Only return activities where startAt >= from (RFC 3339). */
                 from?: string;
-                /** @description Only return events where startAt <= to (RFC 3339). */
+                /** @description Only return activities where startAt <= to (RFC 3339). */
                 to?: string;
-                /** @description When `true`, include archived events. Default excludes them. */
+                /** @description When `true`, include archived activities. Default excludes them. */
                 archived?: "true" | "false";
             };
             header?: never;
@@ -1135,13 +1137,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Array of events. */
+            /** @description Array of activities. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Event"][];
+                    "application/json": components["schemas"]["Activity"][];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -1150,7 +1152,7 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    createEvent: {
+    createActivity: {
         parameters: {
             query?: never;
             header?: never;
@@ -1174,7 +1176,7 @@ export interface operations {
                     /** @default false */
                     allDay?: boolean;
                     statusId?: string | null;
-                    parentEventId?: string | null;
+                    parentActivityId?: string | null;
                     percentComplete?: number | null;
                     location?: string | null;
                     url?: string | null;
@@ -1185,13 +1187,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Event created. */
+            /** @description Activity created. */
             201: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Event"];
+                    "application/json": components["schemas"]["Activity"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -1200,19 +1202,19 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    deleteEvent: {
+    deleteActivity: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /** @description Event ID. */
-                id: components["parameters"]["eventId"];
+                /** @description Activity ID. */
+                id: components["parameters"]["activityId"];
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Event deleted (no body). */
+            /** @description Activity deleted (no body). */
             204: {
                 headers: {
                     [name: string]: unknown;
@@ -1225,13 +1227,13 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    updateEvent: {
+    updateActivity: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /** @description Event ID. */
-                id: components["parameters"]["eventId"];
+                /** @description Activity ID. */
+                id: components["parameters"]["activityId"];
             };
             cookie?: never;
         };
@@ -1248,7 +1250,7 @@ export interface operations {
                     endAt?: string;
                     allDay?: boolean;
                     statusId?: string | null;
-                    parentEventId?: string | null;
+                    parentActivityId?: string | null;
                     percentComplete?: number | null;
                     location?: string | null;
                     url?: string | null;
@@ -1259,13 +1261,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Updated event. */
+            /** @description Updated activity. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Event"];
+                    "application/json": components["schemas"]["Activity"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -1275,25 +1277,25 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    archiveEvent: {
+    archiveActivity: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /** @description Event ID. */
-                id: components["parameters"]["eventId"];
+                /** @description Activity ID. */
+                id: components["parameters"]["activityId"];
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description The archived event. */
+            /** @description The archived activity. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Event"];
+                    "application/json": components["schemas"]["Activity"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -1302,25 +1304,25 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    unarchiveEvent: {
+    unarchiveActivity: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /** @description Event ID. */
-                id: components["parameters"]["eventId"];
+                /** @description Activity ID. */
+                id: components["parameters"]["activityId"];
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description The restored event. */
+            /** @description The restored activity. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Event"];
+                    "application/json": components["schemas"]["Activity"];
                 };
             };
             401: components["responses"]["Unauthorized"];

@@ -1,43 +1,44 @@
 /**
- * findMatcher — pure client-side event search.
+ * findMatcher — pure client-side activity search.
  *
- * Matches against already-fetched events using the debounced query string.
- * Only fields present in the OpenAPI Event schema are searched; tags are
- * deferred until the API adds them (Phase ?). Parent-event title lookup
- * requires allEvents (the full fetched list, not just the visible slice).
+ * Matches against already-fetched activities using the debounced query string.
+ * Only fields present in the OpenAPI Activity schema are searched; tags are
+ * deferred until the API adds them (Phase ?). Parent-activity title lookup
+ * requires allActivities (the full fetched list, not just the visible slice).
  */
 
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
 
-type ApiEvent = components['schemas']['Event']
+type ApiActivity = components['schemas']['Activity']
 
 export interface MatchResult {
-  eventId: string
+  activityId: string
   /** Human-readable match reasons, e.g. ['description', 'assignee: Jane']. */
   reasons: string[]
 }
 
 /**
- * Returns a MatchResult for each event in visibleEvents that contains query
- * in any searchable field. The first reason is 'title' when the title matches;
- * other reasons are labelled by field for use in the "why matched" tooltip.
+ * Returns a MatchResult for each activity in visibleActivities that contains
+ * query in any searchable field. The first reason is 'title' when the title
+ * matches; other reasons are labelled by field for use in the "why matched"
+ * tooltip.
  */
 export function matchEvents(
   query: string,
-  visibleEvents: ApiEvent[],
+  visibleActivities: ApiActivity[],
   members: Member[],
-  allEvents: ApiEvent[],
+  allActivities: ApiActivity[],
 ): MatchResult[] {
   const q = query.trim().toLowerCase()
   if (!q) return []
 
   const memberById = new Map(members.map(m => [m.id, m.name]))
-  const eventById = new Map(allEvents.map(e => [e.id, e]))
+  const activityById = new Map(allActivities.map(a => [a.id, a]))
 
   const results: MatchResult[] = []
 
-  for (const ev of visibleEvents) {
+  for (const ev of visibleActivities) {
     const reasons: string[] = []
 
     if (ev.title.toLowerCase().includes(q)) reasons.push('title')
@@ -51,14 +52,14 @@ export function matchEvents(
       }
     }
 
-    if (ev.parentEventId) {
-      const parent = eventById.get(ev.parentEventId)
+    if (ev.parentActivityId) {
+      const parent = activityById.get(ev.parentActivityId)
       if (parent && parent.title.toLowerCase().includes(q)) {
         reasons.push(`parent: ${parent.title}`)
       }
     }
 
-    if (reasons.length > 0) results.push({ eventId: ev.id, reasons })
+    if (reasons.length > 0) results.push({ activityId: ev.id, reasons })
   }
 
   return results

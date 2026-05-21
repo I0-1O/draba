@@ -1,26 +1,26 @@
 /**
- * EventDetailPanel — right-side slide-in panel for a selected Gantt event.
+ * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
  *
  * Fields: icon (stub), title, dates + allDay, assigned to (member rows),
- * status (stub), tags (stub), color, parent event (stub), % complete (stub),
+ * status (stub), tags (stub), color, parent activity (stub), % complete (stub),
  * location, url, description. All functional fields save on change/blur via
- * PATCH /events/:id.
+ * PATCH /activities/:id.
  */
 
 import { useState, useEffect } from 'react'
 import { X, Trash2, ArrowRight, Loader2, Smile, Tag, ChevronDown } from 'lucide-react'
 import MemberAvatar from '@/components/MemberAvatar'
-import { useUpdateEvent, useDeleteEvent } from '@/hooks/useTeamEvents'
+import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
-import { EVENT_COLORS } from '@/types'
+import { ACTIVITY_COLORS } from '@/types'
 
-type ApiEvent = components['schemas']['Event']
+type ApiActivity = components['schemas']['Activity']
 
 const PANEL_WIDTH = 300
 
 interface Props {
-  event: ApiEvent | null
+  event: ApiActivity | null
   open: boolean
   members: Member[]
   teamId: string
@@ -84,22 +84,22 @@ const INPUT: React.CSSProperties = {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function EventDetailPanel({ event, open, members, teamId, onClose }: Props) {
-  const updateMutation = useUpdateEvent(teamId)
-  const deleteMutation = useDeleteEvent(teamId)
+export default function ActivityDetailPanel({ event, open, members, teamId, onClose }: Props) {
+  const updateMutation = useUpdateActivity(teamId)
+  const deleteMutation = useDeleteActivity(teamId)
 
   const [title, setTitle] = useState(event?.title ?? '')
   const [description, setDescription] = useState(event?.description ?? '')
   const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
   const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
   const [allDay, setAllDay] = useState(event?.allDay ?? false)
-  const [color, setColor] = useState(event?.color ?? EVENT_COLORS[0])
+  const [color, setColor] = useState(event?.color ?? ACTIVITY_COLORS[0])
   const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
   const [location, setLocation] = useState(event?.location ?? '')
   const [url, setUrl] = useState(event?.url ?? '')
   const [confirmDelete, setConfirmDelete] = useState(false)
 
-  // Re-sync when the selected event changes.
+  // Re-sync when the selected activity changes.
   useEffect(() => {
     if (!event) return
     setTitle(event.title)
@@ -107,7 +107,7 @@ export default function EventDetailPanel({ event, open, members, teamId, onClose
     setStartDate(toDateInput(event.startAt))
     setEndDate(toDateInput(event.endAt))
     setAllDay(event.allDay)
-    setColor(event.color ?? EVENT_COLORS[0])
+    setColor(event.color ?? ACTIVITY_COLORS[0])
     setAssignedIds(event.assignedMemberIds ?? [])
     setLocation(event.location ?? '')
     setUrl(event.url ?? '')
@@ -119,7 +119,7 @@ export default function EventDetailPanel({ event, open, members, teamId, onClose
 
   function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
     if (!event) return
-    updateMutation.mutate({ eventId: event.id, patch })
+    updateMutation.mutate({ activityId: event.id, patch })
   }
 
   function handleTitleBlur() {
@@ -172,7 +172,7 @@ export default function EventDetailPanel({ event, open, members, teamId, onClose
     deleteMutation.mutate(event.id, { onSuccess: onClose })
   }
 
-  const currentColor = color ?? EVENT_COLORS[0]
+  const currentColor = color ?? ACTIVITY_COLORS[0]
 
   return (
     <div
@@ -198,7 +198,7 @@ export default function EventDetailPanel({ event, open, members, teamId, onClose
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
             <div style={{ width: 10, height: 10, borderRadius: 3, background: currentColor, flexShrink: 0 }} />
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Event detail</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
             {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
           </div>
           <button
@@ -356,7 +356,7 @@ export default function EventDetailPanel({ event, open, members, teamId, onClose
             <div style={{ display: 'flex', alignItems: 'center' }}>
               <span style={FIELD_LABEL}>Color</span>
               <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', flex: 1 }}>
-                {EVENT_COLORS.map(c => (
+                {ACTIVITY_COLORS.map(c => (
                   <button
                     key={c}
                     onClick={() => handleColorChange(c)}
@@ -380,7 +380,7 @@ export default function EventDetailPanel({ event, open, members, teamId, onClose
           <div style={{ marginBottom: 12 }}>
             <div style={SEC_LABEL}>Details</div>
 
-            {/* Parent event stub */}
+            {/* Parent activity stub */}
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
               <span style={FIELD_LABEL}>Parent</span>
               <div style={{ ...STUB_VALUE }}>
@@ -507,7 +507,7 @@ export default function EventDetailPanel({ event, open, members, teamId, onClose
               }}
             >
               <Trash2 size={12} strokeWidth={2} />
-              Delete event
+              Delete activity
             </button>
           )}
         </div>

@@ -11,7 +11,7 @@ import { cn } from '@/lib/utils';
 export type { TimeGranularity } from './granularity';
 export type GroupBy = 'none' | 'member' | 'parent';
 export type SortBy = 'startDate' | 'endDate' | 'title';
-export type ColorBy = 'event' | 'member' | 'status';
+export type ColorBy = 'activity' | 'member' | 'status';
 
 interface Props {
   groupBy: GroupBy;
@@ -165,7 +165,7 @@ export default function GanttToolbar({
       >
         <option value="none">None</option>
         <option value="member">Member</option>
-        <option value="parent">Parent event</option>
+        <option value="parent">Parent activity</option>
       </select>
 
       <div className={divider} />
@@ -191,14 +191,14 @@ export default function GanttToolbar({
         value={colorBy}
         onChange={e => onColorByChange(e.target.value as ColorBy)}
       >
-        <option value="event">Event</option>
+        <option value="activity">Activity</option>
         <option value="member">Member</option>
         <option value="status">Status</option>
       </select>
 
       <div className="flex-1" />
 
-      <button className={ctrlBtn} onClick={onExport} title="Export events (coming soon)">
+      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
         <Download size={13} strokeWidth={1.8} />
         Export
       </button>

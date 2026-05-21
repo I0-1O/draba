@@ -23,7 +23,7 @@ interface Props {
   onToggle: () => void;
   onActiveColorChange?: (color: string) => void;
   onActiveNameChange?: (name: string) => void;
-  onNewEvent?: () => void;
+  onNewActivity?: () => void;
   apiTimelines?: Array<{ id: string; name: string; startDate?: string; endDate?: string }>;
   activeTimelineId?: string;
   onActiveTimelineChange?: (id: string) => void;
@@ -249,10 +249,10 @@ function ConnectorItem({ name, status, color }: { name: string; status: string; 
  */
 const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
 
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewEvent, apiTimelines, activeTimelineId, onActiveTimelineChange }: Props) {
+export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange }: Props) {
   const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
   const [teamOpen, setTeamOpen] = useState(true);
-  const [eventOpen, setEventOpen] = useState(true);
+  const [activityOpen, setActivityOpen] = useState(true);
   const [connectorsOpen, setConnectorsOpen] = useState(true);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [timelinesOpen, setTimelinesOpen] = useState(true);
@@ -278,7 +278,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
   const startW = useRef(SIDEBAR_MIN);
 
   useEffect(() => {
-    function onMouseMove(e: MouseEvent) {
+    function onMouseMove(e: MouseActivity) {
       if (!dragging.current) return;
       const delta = e.clientX - startX.current;
       setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
@@ -297,7 +297,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
     };
   }, []);
 
-  function onHandleMouseDown(e: React.MouseEvent) {
+  function onHandleMouseDown(e: React.MouseActivity) {
     e.preventDefault();
     dragging.current = true;
     startX.current = e.clientX;
@@ -408,10 +408,10 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
               {activeTimeline.icon}
             </div>
 
-            {/* New event */}
+            {/* New activity */}
             <button
-              title="New event"
-              onClick={onNewEvent}
+              title="New activity"
+              onClick={onNewActivity}
               style={{
                 width: 28,
                 height: 28,
@@ -703,13 +703,13 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
             />
           ))}
         </div>
-        {/* Event section */}
+        {/* Activity section */}
         {!collapsed && (
           <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
             {/* Header with collapse toggle + quick-add icon */}
             <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
               <button
-                onClick={() => setEventOpen(o => !o)}
+                onClick={() => setActivityOpen(o => !o)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 6, flex: 1,
                   background: 'none', border: 'none', cursor: 'pointer',
@@ -718,15 +718,15 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                 }}
               >
                 <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Event
+                  Activity
                 </span>
-                {eventOpen
+                {activityOpen
                   ? <ChevronDown width={12} height={12} strokeWidth={2} />
                   : <ChevronRight width={12} height={12} strokeWidth={2} />}
               </button>
               <button
-                title="New event"
-                onClick={onNewEvent}
+                title="New activity"
+                onClick={onNewActivity}
                 style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   width: 24, height: 24, borderRadius: 5,
@@ -740,10 +740,10 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
               </button>
             </div>
 
-            {/* New event + Import events — only when section is expanded */}
-            {eventOpen && (
+            {/* New activity + Import activities — only when section is expanded */}
+            {activityOpen && (
               <button
-                onClick={onNewEvent}
+                onClick={onNewActivity}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
                   padding: '6px 16px', background: 'none', border: 'none',
@@ -754,11 +754,11 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                 onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.6)')}
               >
                 <Plus width={13} height={13} strokeWidth={1.8} />
-                New event
+                New activity
               </button>
             )}
 
-            {eventOpen && (
+            {activityOpen && (
               <button
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
@@ -770,7 +770,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                 onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.6)')}
               >
                 <Upload width={13} height={13} strokeWidth={1.8} />
-                Import events
+                Import activities
               </button>
             )}
           </div>

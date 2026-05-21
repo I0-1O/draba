@@ -11,19 +11,19 @@ import TopBar, { type ViewMode } from '@/components/layout/TopBar'
 import RightSidebar from '@/components/layout/RightSidebar'
 import GanttView from '@/components/gantt/GanttView'
 import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
-import EventDetailPanel from '@/components/gantt/EventDetailPanel'
-import EventCreatePanel from '@/components/gantt/EventCreatePanel'
+import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
+import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
 import { FilterProvider } from '@/contexts/FilterContext'
 import { FindProvider, useFind } from '@/contexts/FindContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { useMyTeams, useTeamTimelines, useTeamEventSync } from '@/hooks/useTeamEvents'
+import { useMyTeams, useTeamTimelines, useTeamActivitySync } from '@/hooks/useTeamActivities'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
 
-type ApiEvent = components['schemas']['Event']
+type ApiActivity = components['schemas']['Activity']
 
 const DROPDOWN_BTN: React.CSSProperties = {
   display: 'flex',
@@ -47,8 +47,8 @@ function DashboardShell() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [view, setView] = useState<ViewMode>('gantt')
   const [profileOpen, setProfileOpen] = useState(false)
-  const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
-  const [selectedApiEvent, setSelectedApiEvent] = useState<ApiEvent | null>(null)
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
+  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
   const [ganttMembers, setGanttMembers] = useState<Member[]>([])
   const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
   const [activeTimelineColor, setActiveTimelineColor] = useState('#1A97A2')
@@ -58,7 +58,7 @@ function DashboardShell() {
   const [groupBy, setGroupBy] = useState<GroupBy>('none')
   const [sortBy, setSortBy] = useState<SortBy>('startDate')
   const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
-  const [colorBy, setColorBy] = useState<ColorBy>('event')
+  const [colorBy, setColorBy] = useState<ColorBy>('activity')
   const profileRef = useRef<HTMLDivElement>(null)
   // Preference persistence
   const upsert = useUpsertPreference()
@@ -130,7 +130,7 @@ function DashboardShell() {
     setActiveTimelineId(id)
   }, [])
 
-  useTeamEventSync(teamId, accessToken)
+  useTeamActivitySync(teamId, accessToken)
 
   // Per-timeline preferences: restore toolbar state when the active timeline changes.
   // isSuccess gate ensures we don't mark prefs applied before the query resolves.
@@ -198,10 +198,10 @@ function DashboardShell() {
         apiTimelines={timelines}
         activeTimelineId={activeTimelineId}
         onActiveTimelineChange={handleTimelineChange}
-        onNewEvent={() => {
+        onNewActivity={() => {
           const today = new Date().toISOString().slice(0, 10)
-          setSelectedEventId(null)
-          setSelectedApiEvent(null)
+          setSelectedActivityId(null)
+          setSelectedApiActivity(null)
           setFilterEditorOpen(false)
           setCreateDefaults({ start: today, end: today, memberId: null })
         }}
@@ -318,15 +318,15 @@ function DashboardShell() {
               sortBy={sortBy}
               granularity={granularity}
               colorBy={colorBy}
-              selectedEventId={selectedEventId}
-              onSelectEvent={(id) => {
-                setSelectedEventId(id)
-                if (!id) { setSelectedApiEvent(null); setCreateDefaults(null) }
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
               }}
-              onSelectApiEvent={(ev) => {
-                setSelectedApiEvent(ev)
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
                 setCreateDefaults(null)
-                if (ev) setFilterEditorOpen(false)
+                if (activity) setFilterEditorOpen(false)
               }}
               onMembersLoaded={setGanttMembers}
             />
@@ -344,18 +344,18 @@ function DashboardShell() {
         </div>
       </div>
 
-      {/* Event detail panel — slides in from right when an event is selected */}
-      <EventDetailPanel
-        open={Boolean(selectedApiEvent)}
-        event={selectedApiEvent}
+      {/* Activity detail panel — slides in from right when an activity is selected */}
+      <ActivityDetailPanel
+        open={Boolean(selectedApiActivity)}
+        event={selectedApiActivity}
         members={ganttMembers}
         teamId={teamId}
-        onClose={() => { setSelectedEventId(null); setSelectedApiEvent(null) }}
+        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null) }}
       />
 
-      {/* Event create panel — slides in from New Event button or future drag */}
-      <EventCreatePanel
-        open={Boolean(createDefaults) && !selectedApiEvent}
+      {/* Activity create panel — slides in from New Activity button or future drag */}
+      <ActivityCreatePanel
+        open={Boolean(createDefaults) && !selectedApiActivity}
         teamId={teamId}
         members={ganttMembers}
         defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}

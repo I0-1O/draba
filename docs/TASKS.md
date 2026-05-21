@@ -197,41 +197,41 @@ Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEvent
 > **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
 
 **DB:**
-- [ ] Write migration `005_rename_events_to_activities.sql` (`ALTER TABLE ... RENAME`)
-- [ ] Rename indexes containing `event` in their name
-- [ ] Update `migrations_test.go` to assert new table + column names
+- [x] Write migration `005_rename_events_to_activities.sql` — 2026-05-21 (`ALTER TABLE ... RENAME`)
+- [x] Rename indexes containing `event` in their name — 2026-05-21
+- [x] Update `migrations_test.go` to assert new table + column names — 2026-05-21
 - [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
 
 **Go API:**
-- [ ] `models.Event` → `models.Activity`
-- [ ] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo`
-- [ ] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions
-- [ ] `server.go`: routes `/events*` → `/activities*`
-- [ ] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
-- [ ] Update `bus_test.go`, `hub_test.go` wire-string assertions
-- [ ] `golangci-lint run` clean, `go test ./...` passes
+- [x] `models.Event` → `models.Activity` — 2026-05-21
+- [x] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo` — 2026-05-21
+- [x] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions — 2026-05-21
+- [x] `server.go`: routes `/events*` → `/activities*` — 2026-05-21
+- [x] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` — 2026-05-21 → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
+- [x] Update `bus_test.go`, `hub_test.go` wire-string assertions — 2026-05-21
+- [x] `golangci-lint run` clean, `go test ./...` passes — 2026-05-21
 
 **OpenAPI + generated types:**
-- [ ] `packages/shared/openapi.yaml`: schema, paths, operationIds, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
-- [ ] Run `pnpm --filter shared generate`; verify `Activity` exports, zero `Event` exports
+- [x] `packages/shared/openapi.yaml`: schema, paths, operationIds — 2026-05-21, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
+- [x] Run `pnpm --filter shared generate`; verify `Activity` exports — 2026-05-21, zero `Event` exports
 
 **Web:**
-- [ ] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
-- [ ] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys
-- [ ] `useWebSocket.ts`: update message-type switch to `activity.*`
-- [ ] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*`; fix imports
-- [ ] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels
-- [ ] `pnpm --filter web lint` clean
+- [x] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` — 2026-05-21 → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
+- [x] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys — 2026-05-21
+- [x] `useWebSocket.ts`: update message-type switch to `activity.*` — 2026-05-21
+- [x] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*` — 2026-05-21; fix imports
+- [x] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels — 2026-05-21
+- [x] `pnpm --filter web lint` clean — 2026-05-21
 
 **Tests + seed:**
-- [ ] Rename `event_handler_test.go` → `activity_handler_test.go`
-- [ ] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql`; update INSERTs + cleanup
+- [x] Rename `event_handler_test.go` → `activity_handler_test.go` — 2026-05-21
+- [x] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql` — 2026-05-21; update INSERTs + cleanup
 
 **Docs:**
-- [ ] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md
-- [ ] Hand-review: ROADMAP Phase 3 title → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
-- [ ] Do **not** rewrite `docs/log.md` historical entries
-- [ ] Add Phase 9.5 entry to `docs/log.md`
+- [x] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md — 2026-05-21
+- [x] Hand-review: ROADMAP Phase 3 title — 2026-05-21 → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
+- [x] Do **not** rewrite `docs/log.md` historical entries — 2026-05-21
+- [x] Add Phase 9.5 entry to `docs/log.md` — 2026-05-21
 
 **Verification (smoke against http://epcot.lan:8081):**
 - [ ] Create / edit / archive / unarchive / delete an Activity end-to-end

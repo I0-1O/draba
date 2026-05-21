@@ -7,16 +7,16 @@ package events
 import "sync"
 
 // Type is a dot-separated string identifying the category and action of a
-// domain event (e.g. "event.created").
+// domain event (e.g. "activity.created").
 type Type string
 
 const (
-	// EventCreated is published after a new event is persisted.
-	EventCreated Type = "event.created"
-	// EventUpdated is published after an existing event is modified.
-	EventUpdated Type = "event.updated"
-	// EventDeleted is published after an event is removed.
-	EventDeleted Type = "event.deleted"
+	// ActivityCreated is published after a new activity is persisted.
+	ActivityCreated Type = "activity.created"
+	// ActivityUpdated is published after an existing activity is modified.
+	ActivityUpdated Type = "activity.updated"
+	// ActivityDeleted is published after an activity is removed.
+	ActivityDeleted Type = "activity.deleted"
 
 	// TimelineCreated is published after a new timeline is persisted.
 	TimelineCreated Type = "timeline.created"
@@ -29,7 +29,7 @@ const (
 type Message struct {
 	Type    Type   // identifies the action
 	TeamID  string // routes the message to team-scoped subscribers
-	Payload any    // the full model (e.g. *models.Event) or a deletion stub
+	Payload any    // the full model (e.g. *models.Activity) or a deletion stub
 }
 
 // Bus is a lightweight in-process pub/sub broker. Subscribers receive all

@@ -64,13 +64,13 @@ func timelineTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID strin
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
-	eventsRepo := db.NewEventRepo(database)
+	activitiesRepo := db.NewActivityRepo(database)
 	timelinesRepo := db.NewTimelineRepo(database)
 	tokens := auth.NewTokenService("timeline-test-secret")
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv = api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@timeline.com", "password1", "Alice")
 
@@ -295,12 +295,12 @@ func TestGetTimeline_MemberGrantedAccessAllowed(t *testing.T) {
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
-	eventsRepo := db.NewEventRepo(database)
+	activitiesRepo := db.NewActivityRepo(database)
 	timelinesRepo := db.NewTimelineRepo(database)
 	tokens := auth.NewTokenService("access-test-secret")
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
-	srv := api.NewServer(users, invites, teams, eventsRepo, timelinesRepo,
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo,
 		db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ := seedUser(t, srv, "alice@access.com", "password1", "Alice")
@@ -430,14 +430,14 @@ func TestCreateTimeline_RestrictedGrantAccessError(t *testing.T) {
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
-	eventsRepo := db.NewEventRepo(database)
+	activitiesRepo := db.NewActivityRepo(database)
 	realTimelines := db.NewTimelineRepo(database)
 	fake := &fakeTimelineStore{real: realTimelines, grantAccessErr: errors.New("injected DB error")}
 	tokens := auth.NewTokenService("timeline-test-secret")
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv := api.NewServer(users, invites, teams, eventsRepo, fake, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, activitiesRepo, fake, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ := seedUser(t, srv, "alice@granterr.com", "password1", "Alice")
 
@@ -465,13 +465,13 @@ func TestCreateTimeline_PublishesBusMessage(t *testing.T) {
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
-	eventsRepo := db.NewEventRepo(database)
+	activitiesRepo := db.NewActivityRepo(database)
 	timelinesRepo := db.NewTimelineRepo(database)
 	tokens := auth.NewTokenService("timeline-bus-secret")
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv := api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ := seedUser(t, srv, "alice@tlbus.com", "password1", "Alice")
 

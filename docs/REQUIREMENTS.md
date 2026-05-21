@@ -39,18 +39,18 @@ Programmatic access (CLI, webhooks, MCP) uses scoped API tokens rather than user
 - [ ] Admins can promote a member to admin
 - [ ] Teams have a name and a list of members
 
-### Events
-Events are the core data object — a block of time assigned to one or more people.
+### Activities
+Activities are the core data object — a block of time assigned to one or more people.
 
-- [ ] Events have: title, start date/time, end date/time, description/notes, status, percent complete, tags, icon, color, assigned people (one or more)
-- [ ] Events can have a parent event (another event within the same team), enabling simple nesting (e.g., "Launch Week" contains "Design Review")
-- [ ] Events store all standard CalDAV VEVENT fields natively (UID, DTSTART, DTEND, SUMMARY, DESCRIPTION, LOCATION, URL, RRULE, etc.) so no information is lost in sync
-- [ ] Events support recurrence rules (RRULE) from CalDAV/Google
-- [ ] Events are scoped to a team
-- [ ] Events can be archived (hidden from active views but not deleted; recoverable)
+- [ ] Activities have: title, start date/time, end date/time, description/notes, status, percent complete, tags, icon, color, assigned people (one or more)
+- [ ] Activities can have a parent activity (another event within the same team), enabling simple nesting (e.g., "Launch Week" contains "Design Review")
+- [ ] Activities store all standard CalDAV VEVENT fields natively (UID, DTSTART, DTEND, SUMMARY, DESCRIPTION, LOCATION, URL, RRULE, etc.) so no information is lost in sync
+- [ ] Activities support recurrence rules (RRULE) from CalDAV/Google
+- [ ] Activities are scoped to a team
+- [ ] Activities can be archived (hidden from active views but not deleted; recoverable)
 
 ### Timelines
-Timelines are named viewing windows — a name and a date range — scoped to a team. They are not data containers; they are views over the team's events.
+Timelines are named viewing windows — a name and a date range — scoped to a team. They are not data containers; they are views over the team's activities.
 
 - [ ] Teams can create multiple timelines, including overlapping ones
 - [ ] Each timeline has: name, start date, end date
@@ -61,18 +61,18 @@ Timelines are named viewing windows — a name and a date range — scoped to a 
 ### Timeline Views
 The primary view is a Gantt chart. Additional views display the same underlying events in different formats.
 
-- [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per event, bars span their date range; see `docs/design/UX_PATTERNS.md`
+- [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per activity, bars span their date range; see `docs/design/UX_PATTERNS.md`
   - A **timeline sub-toolbar** sits between the top bar and the grid. It provides:
     - **Zoom** — variable column width (day granularity, zoom in/out)
     - **Group by** — controls how event rows are organized:
       - _None_ — flat list, sorted by the active sort key
       - _Member_ — one labeled section per assigned team member; events with multiple assignees appear under their primary assignee
-      - _Parent event_ — root events shown first; child events (those with `parentEventId` set) indented beneath their parent
+      - _Parent activity_ — root activities shown first; child events (those with `parentActivityId` set) indented beneath their parent
     - **Sort by** — Start date (default), End date, Title A–Z
     - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
 - [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
-- [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of events; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many events at once.
-- [ ] **Kanban view** — read-only; columns = statuses (in the team's configured status order); cards = events, color-coded by assigned person(s); multiple assignees shown as stacked color indicators. This is a viewing mode only — dragging cards to change status is out of scope for v1.
+- [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of activities; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many activities at once.
+- [ ] **Kanban view** — read-only; columns = statuses (in the team's configured status order); cards = activities, color-coded by assigned person(s); multiple assignees shown as stacked color indicators. This is a viewing mode only — dragging cards to change status is out of scope for v1.
 - [ ] View switcher in the timeline header to toggle between available views
 - [ ] Each view persists its own toolbar state per timeline (group / sort / zoom / column visibility / filter preset) via user preferences
 

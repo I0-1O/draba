@@ -105,7 +105,7 @@ func TestHub_BroadcastToSubscribedTeam(t *testing.T) {
 	// Give the hub time to register the subscription before publishing.
 	time.Sleep(50 * time.Millisecond)
 
-	bus.Publish(events.Message{Type: events.EventCreated, TeamID: "team1", Payload: map[string]string{"id": "evt1"}})
+	bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: "team1", Payload: map[string]string{"id": "evt1"}})
 
 	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	_, raw, err := conn.ReadMessage()
@@ -113,7 +113,7 @@ func TestHub_BroadcastToSubscribedTeam(t *testing.T) {
 
 	var got OutboundMsg
 	require.NoError(t, json.Unmarshal(raw, &got))
-	assert.Equal(t, string(events.EventCreated), got.Type)
+	assert.Equal(t, string(events.ActivityCreated), got.Type)
 }
 
 func TestHub_NoLeakToOtherTeam(t *testing.T) {
@@ -131,7 +131,7 @@ func TestHub_NoLeakToOtherTeam(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Publish only to teamA.
-	bus.Publish(events.Message{Type: events.EventUpdated, TeamID: "teamA"})
+	bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: "teamA"})
 
 	// connA (subscribed to teamA) should receive it.
 	connA.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
@@ -156,7 +156,7 @@ func TestHub_TwoClientsOnSameTeamBothReceive(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	bus.Publish(events.Message{Type: events.EventDeleted, TeamID: "team1"})
+	bus.Publish(events.Message{Type: events.ActivityDeleted, TeamID: "team1"})
 
 	for _, conn := range []*websocket.Conn{conn1, conn2} {
 		conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
@@ -164,7 +164,7 @@ func TestHub_TwoClientsOnSameTeamBothReceive(t *testing.T) {
 		require.NoError(t, err)
 		var got OutboundMsg
 		require.NoError(t, json.Unmarshal(raw, &got))
-		assert.Equal(t, string(events.EventDeleted), got.Type)
+		assert.Equal(t, string(events.ActivityDeleted), got.Type)
 	}
 }
 
@@ -216,7 +216,7 @@ func TestHub_SubscribeRejectsByNonMember(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Publish an event to team1; the connection should not receive it.
-	bus.Publish(events.Message{Type: events.EventCreated, TeamID: "team1"})
+	bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: "team1"})
 
 	conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	_, raw, err := conn.ReadMessage()

@@ -78,23 +78,23 @@ api_tokens
   scope (read|add|edit_own|edit_all),
   last_used_at, created_at, revoked_at (nullable)
 
-events
+activities
   id, team_id, title, description, status, percent_complete,
   icon, color, start_at, end_at, all_day,
   status_id (FK → team_statuses),
-  parent_event_id (nullable → self-ref FK),
+  parent_activity_id (nullable → self-ref FK),
   location, url, rrule,
-  caldav_uid, google_event_id,     -- external IDs for sync
+  caldav_uid, google_event_id,     -- external IDs for sync (VEVENT identifiers)
   created_by, created_at, updated_at, archived_at (nullable)
 
-event_tags
-  event_id, tag
+activity_tags
+  activity_id, tag
 
-event_assignments
-  event_id, team_member_id (FK → team_members.id)
+activity_assignments
+  activity_id, team_member_id (FK → team_members.id)
 
-event_links
-  id, event_id (FK), provider (e.g. asana), external_id, url
+activity_links
+  id, activity_id (FK), provider (e.g. asana), external_id, url
 
 timelines
   id, team_id, name, start_date, end_date,
@@ -116,9 +116,9 @@ calendar_connections
 
 ### Key Relationships
 
-- An event belongs to a team and can be assigned to multiple users (`event_assignments`)
-- An event can have a parent event (same team), enabling nesting without a separate Project entity
-- An event created via an external integration has `is_external=true` and an associated `event_links` record
+- An activity belongs to a team and can be assigned to multiple users (`activity_assignments`)
+- An activity can have a parent activity (same team), enabling nesting without a separate Project entity
+- An activity created via an external integration has `is_external=true` and an associated `activity_links` record
 - A timeline is a named date range over a team's events — not a data container
 - Calendar connections are per-user; each user chooses which calendars to sync their events to
 
@@ -126,10 +126,10 @@ calendar_connections
 
 ## Data Flow
 
-### Event Create / Update
+### Activity Create / Update
 
 1. Client sends REST request → API handler validates and writes to DB
-2. Handler publishes typed event to internal event bus (e.g., `events.updated`)
+2. Handler publishes typed event to internal event bus (e.g., `activity.updated`)
 3. Event bus fans out to consumers:
    - **WebSocket broadcaster** — pushes delta to all connected clients subscribed to that team
    - **Calendar sync worker** — pushes change to Google Calendar and/or CalDAV for each assigned user who has a connection
@@ -138,15 +138,15 @@ calendar_connections
 
 1. External system (e.g. Asana) pushes a payload to `POST /webhooks/:provider/:token`
 2. Handler verifies the token against `team_inbound_webhooks` to identify the team
-3. Handler parses the payload, finds or creates an event (setting `is_external=true`), and updates `event_links`
-4. Publishes `events.updated` to the event bus → WebSocket broadcast (UI renders block as read-only)
+3. Handler parses the payload, finds or creates an activity (setting `is_external=true`), and updates `activity_links`
+4. Publishes `activity.updated` to the event bus → WebSocket broadcast (UI renders block as read-only)
 
 ### Inbound Google Calendar Sync
 
 1. Google pushes a webhook notification to `/webhooks/google`
-2. Handler fetches the changed event from Google Calendar API
-3. Upserts the event in draba DB (matched on `google_event_id`)
-4. Publishes `events.updated` to the event bus → WebSocket broadcast
+2. Handler fetches the changed activity from Google Calendar API
+3. Upserts the activity in draba DB (matched on `google_event_id`)
+4. Publishes `activity.updated` to the event bus → WebSocket broadcast
 
 ### CalDAV (Inbound from iOS/macOS)
 
@@ -158,7 +158,7 @@ calendar_connections
 
 - WebSocket connections are scoped per team
 - On connect, client subscribes to one or more team rooms
-- Server broadcasts JSON delta payloads on `events.*` and `timeline.*` events
+- Server broadcasts JSON delta payloads on `activity.*` and `timeline.*` messages
 
 ---
 

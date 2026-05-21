@@ -32,8 +32,8 @@ const GROUP_H = 30;
 const COL_W = 80;
 const EDGE_W = 8; // px hit zone for resize handles
 
-/** A positioned event bar ready for rendering. */
-export interface GanttEvent {
+/** A positioned activity bar ready for rendering. */
+export interface GanttActivity {
   id: string;
   title: string;
   /** Fractional column start (0-based). */
@@ -47,7 +47,7 @@ export interface GanttEvent {
 
 export type GanttRow =
   | { kind: 'group'; id: string; label: string; color: string; count: number }
-  | { kind: 'event'; event: GanttEvent };
+  | { kind: 'activity'; event: GanttActivity };
 
 /** Visual state for the in-view Find feature. Passed from GanttView. */
 export interface FindState {
@@ -106,12 +106,12 @@ interface Props {
   columns: ColumnDef[];
   /** Fractional column index of today (-1 if outside range). */
   todayIndex: number;
-  selectedEventId: string | null;
-  onSelectEvent: (id: string | null) => void;
-  /** Called when the user drags on an empty lane cell to create an event. */
+  selectedActivityId: string | null;
+  onSelectActivity: (id: string | null) => void;
+  /** Called when the user drags on an empty lane cell to create an activity. */
   onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
   /** Called when the user drags a bar edge or body to resize/move it. */
-  onBarDrag?: (eventId: string, newStartDate: Date, newEndDate: Date) => void;
+  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
   /** Find state from GanttView; absent when the find bar is closed/idle. */
   findState?: FindState;
   /** Called when the user clicks "Clear filters" in the no-matches callout. */
@@ -147,8 +147,8 @@ export default function GanttGrid({
   rows,
   columns,
   todayIndex,
-  selectedEventId,
-  onSelectEvent,
+  selectedActivityId,
+  onSelectActivity,
   onLaneDrag,
   onBarDrag,
   findState,
@@ -189,20 +189,20 @@ export default function GanttGrid({
     const currentRows = rowsRef.current;
 
     let y = HEADER_H;
-    let matchedEvent: GanttEvent | null = null;
+    let matchedActivity: GanttActivity | null = null;
     for (const row of currentRows) {
-      if (row.kind === 'event' && row.event.id === activeId) {
-        matchedEvent = row.event;
+      if (row.kind === 'activity' && row.event.id === activeId) {
+        matchedActivity = row.event;
         break;
       }
       y += row.kind === 'group' ? GROUP_H : ROW_H;
     }
-    if (!matchedEvent) return;
+    if (!matchedActivity) return;
 
     const viewH = container.clientHeight;
     const viewW = container.clientWidth;
     const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
-    const eventCenterX = LABEL_COL_W + (matchedEvent.startCol + matchedEvent.span / 2) * COL_W;
+    const eventCenterX = LABEL_COL_W + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
     const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
 
     container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
@@ -254,7 +254,7 @@ export default function GanttGrid({
 
   const handleBarMouseDown = useCallback((
     e: React.MouseEvent<HTMLDivElement>,
-    ev: GanttEvent,
+    ev: GanttActivity,
     zone: BarDragZone,
   ) => {
     if (!onBarDrag) return;
@@ -331,7 +331,7 @@ export default function GanttGrid({
       if (s && onBarDrag) {
         const sd = colToStartDate(s.snapStartCol, columns);
         const ed = colToEndDate(s.snapEndCol, columns);
-        onBarDrag(s.eventId, sd, ed);
+        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
       }
       barDragRef.current = null;
       setBarDrag(null);
@@ -366,7 +366,7 @@ export default function GanttGrid({
           background: 'var(--card)',
         }}
       >
-        Event
+        Activity
       </div>
 
       {columns.map((col, i) => {
@@ -452,7 +452,7 @@ export default function GanttGrid({
           </div>
         </div>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-          <EmptyState message="No viewable events" />
+          <EmptyState message="No viewable activities" />
           {showNoMatchCallout && findState.filtersActive && (
             <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
               No matches in current view.{' '}
@@ -551,7 +551,7 @@ export default function GanttGrid({
             }
 
             const ev = row.event;
-            const selected = selectedEventId === ev.id;
+            const selected = selectedActivityId === ev.id;
             const indent = ev.isChild ? 20 : 0;
             const evIsMatch = isMatch(ev.id);
             const evIsActive = isActive(ev.id);
@@ -589,7 +589,7 @@ export default function GanttGrid({
                     cursor: 'pointer',
                     transition: 'background 0.1s',
                   }}
-                  onClick={() => onSelectEvent(ev.id === selectedEventId ? null : ev.id)}
+                  onClick={() => onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
                   onMouseEnter={e => {
                     e.currentTarget.style.background = 'var(--muted)';
                   }}
@@ -717,7 +717,7 @@ export default function GanttGrid({
                       <div
                         onClick={() => {
                           // Bar click always selects — use the label cell to deselect.
-                          if (!isDragging) onSelectEvent(ev.id);
+                          if (!isDragging) onSelectActivity(ev.id);
                         }}
                         onMouseDown={e => {
                           if (!onBarDrag) { e.stopPropagation(); return; }

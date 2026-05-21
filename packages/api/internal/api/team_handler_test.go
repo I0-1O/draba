@@ -32,13 +32,13 @@ func newTeamTestServer(t *testing.T) (http.Handler, *auth.TokenService) {
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)
 	teams := db.NewTeamRepo(database)
-	eventsRepo := db.NewEventRepo(database)
+	activitiesRepo := db.NewActivityRepo(database)
 	timelinesRepo := db.NewTimelineRepo(database)
 	tokens := auth.NewTokenService("team-test-secret")
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv := api.NewServer(users, invites, teams, eventsRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
 	return srv, tokens
 }
 
@@ -335,7 +335,7 @@ func TestTierTeamLimit(t *testing.T) {
 	bus2 := events.NewBus()
 	hub2 := ws.NewHub(bus2, toks2, func(_, _ string) error { return nil })
 	srv := api.NewServer(
-		users, db.NewInviteRepo(database), teamsRepo, db.NewEventRepo(database), db.NewTimelineRepo(database),
+		users, db.NewInviteRepo(database), teamsRepo, db.NewActivityRepo(database), db.NewTimelineRepo(database),
 		db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), toks2, tier.Team, bus2, hub2,
 	).Routes()
 

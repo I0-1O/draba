@@ -26,11 +26,11 @@ export const MEMBER_COLORS: string[] = [
 ];
 
 /**
- * Event-block palette. Inlined as hex (not CSS vars) because event colors
- * are persisted with the event and travel through the API; a stable literal
+ * Activity-block palette. Inlined as hex (not CSS vars) because activity colors
+ * are persisted with the activity and travel through the API; a stable literal
  * survives theme changes and DB inspection.
  */
-export const EVENT_COLORS: string[] = [
+export const ACTIVITY_COLORS: string[] = [
   '#288C9B',
   '#F29E4C',
   '#9B59B6',
@@ -41,13 +41,13 @@ export const EVENT_COLORS: string[] = [
   '#8BC34A',
 ];
 
-// ── Legacy types — kept for EventPanel until Phase 8.2 rewrites it ──────────
+// ── Legacy types — kept for ActivityPanel until Phase 8.2 rewrites it ──────────
 
-/** @deprecated Phase 8.2 will replace this with the API Event type. */
-export type EventStatus = 'planned' | 'in-progress' | 'done';
+/** @deprecated Phase 8.2 will replace this with the API Activity type. */
+export type ActivityStatus = 'planned' | 'in-progress' | 'done';
 
-/** @deprecated Phase 8.2 will replace this with the API Event type. */
-export interface DrabaEvent {
+/** @deprecated Phase 8.2 will replace this with the API Activity type. */
+export interface DrabaActivity {
   id: string;
   title: string;
   memberId: string;
@@ -56,12 +56,12 @@ export interface DrabaEvent {
   startCol: number;
   span: number;
   color: string;
-  status: EventStatus;
+  status: ActivityStatus;
   notes?: string;
 }
 
 /** @deprecated Phase 8.2 will replace this with resolved team_statuses labels. */
-export const STATUS_LABELS: Record<EventStatus, string> = {
+export const STATUS_LABELS: Record<ActivityStatus, string> = {
   'planned':     'Planned',
   'in-progress': 'In progress',
   'done':        'Done',

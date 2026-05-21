@@ -1,4 +1,4 @@
--- seed-find-test-events.sql
+-- seed-find-test-activities.sql
 --
 -- Creates 5 events that exercise every match field in the Find (Phase 8.5)
 -- feature: title, description, assignee display name, and parent event title.
@@ -7,7 +7,7 @@
 -- in the Gantt view regardless of which timeline you've set up.
 --
 -- Run against the test database:
---   sqlite3 /path/to/draba.db < scripts/seed-find-test-events.sql
+--   sqlite3 /path/to/draba.db < scripts/seed-find-test-activities.sql
 --
 -- To remove the test events afterwards, see the DELETE block at the bottom.
 
@@ -16,7 +16,7 @@ BEGIN;
 -- ── Event 1: TITLE match ─────────────────────────────────────────────────────
 -- Search "Alpha" → this event highlights.
 
-INSERT INTO events (id, team_id, title, description, color, start_at, end_at, all_day, created_by)
+INSERT INTO activities (id, team_id, title, description, color, start_at, end_at, all_day, created_by)
 SELECT
     lower(hex(randomblob(16))),
     t.id,
@@ -38,7 +38,7 @@ LIMIT 1;
 -- Search "retrospective" → title doesn't match, but description does.
 -- The "why matched: description" tooltip should appear on hover.
 
-INSERT INTO events (id, team_id, title, description, color, start_at, end_at, all_day, created_by)
+INSERT INTO activities (id, team_id, title, description, color, start_at, end_at, all_day, created_by)
 SELECT
     lower(hex(randomblob(16))),
     t.id,
@@ -61,7 +61,7 @@ LIMIT 1;
 -- Search by that member's display name → the "why matched: assignee: <name>"
 -- tooltip should appear on hover.
 
-INSERT INTO events (id, team_id, title, description, color, start_at, end_at, all_day, created_by)
+INSERT INTO activities (id, team_id, title, description, color, start_at, end_at, all_day, created_by)
 SELECT
     lower(hex(randomblob(16))),
     t.id,
@@ -78,9 +78,9 @@ JOIN timelines tl ON tl.team_id = t.id AND tl.archived_at IS NULL
 ORDER BY tl.created_at ASC
 LIMIT 1;
 
-INSERT INTO event_assignments (event_id, team_member_id)
+INSERT INTO activity_assignments (event_id, team_member_id)
 SELECT e.id, tm.id
-FROM events e
+FROM activities e
 JOIN team_members tm ON tm.team_id = e.team_id
 WHERE e.title = 'Design Handoff'
   AND e.archived_at IS NULL
@@ -91,7 +91,7 @@ LIMIT 1;
 -- ── Event 4: PARENT event ─────────────────────────────────────────────────────
 -- Parent of Event 5 below.
 
-INSERT INTO events (id, team_id, title, description, color, start_at, end_at, all_day, created_by)
+INSERT INTO activities (id, team_id, title, description, color, start_at, end_at, all_day, created_by)
 SELECT
     lower(hex(randomblob(16))),
     t.id,
@@ -114,7 +114,7 @@ LIMIT 1;
 -- but the parent title does. Search "Roadmap" → both events highlight; this
 -- one should show "why matched: parent: Roadmap Review" on hover.
 
-INSERT INTO events (id, team_id, title, description, color, start_at, end_at, all_day, parent_event_id, created_by)
+INSERT INTO activities (id, team_id, title, description, color, start_at, end_at, all_day, parent_activity_id, created_by)
 SELECT
     lower(hex(randomblob(16))),
     parent.team_id,
@@ -126,7 +126,7 @@ SELECT
     1,
     parent.id,
     parent.created_by
-FROM events parent
+FROM activities parent
 JOIN timelines tl ON tl.team_id = parent.team_id AND tl.archived_at IS NULL
 WHERE parent.title = 'Roadmap Review'
   AND parent.archived_at IS NULL
@@ -136,7 +136,7 @@ LIMIT 1;
 COMMIT;
 
 -- ── Cleanup (run separately when done) ────────────────────────────────────────
--- DELETE FROM events
+-- DELETE FROM activities
 -- WHERE title IN (
 --     'Alpha Release Planning',
 --     'Sprint Review',

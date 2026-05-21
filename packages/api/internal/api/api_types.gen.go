@@ -157,29 +157,29 @@ type AuthResponse struct {
 	User         User   `json:"user"`
 }
 
-// Event defines model for Event.
-type Event struct {
-	AllDay          bool       `json:"allDay"`
-	ArchivedAt      *time.Time `json:"archivedAt,omitempty"`
-	CaldavUid       *string    `json:"caldavUid,omitempty"`
-	Color           *string    `json:"color,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	CreatedBy       string     `json:"createdBy"`
-	Description     *string    `json:"description,omitempty"`
-	EndAt           time.Time  `json:"endAt"`
-	GoogleEventId   *string    `json:"googleEventId,omitempty"`
-	Icon            *string    `json:"icon,omitempty"`
-	Id              string     `json:"id"`
-	Location        *string    `json:"location,omitempty"`
-	ParentEventId   *string    `json:"parentEventId,omitempty"`
-	PercentComplete *int       `json:"percentComplete,omitempty"`
-	Rrule           *string    `json:"rrule,omitempty"`
-	StartAt         time.Time  `json:"startAt"`
-	StatusId        *string    `json:"statusId,omitempty"`
-	TeamId          string     `json:"teamId"`
-	Title           string     `json:"title"`
-	UpdatedAt       time.Time  `json:"updatedAt"`
-	Url             *string    `json:"url,omitempty"`
+// Activity defines model for Activity.
+type Activity struct {
+	AllDay           bool       `json:"allDay"`
+	ArchivedAt       *time.Time `json:"archivedAt,omitempty"`
+	CaldavUid        *string    `json:"caldavUid,omitempty"`
+	Color            *string    `json:"color,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	CreatedBy        string     `json:"createdBy"`
+	Description      *string    `json:"description,omitempty"`
+	EndAt            time.Time  `json:"endAt"`
+	GoogleEventId    *string    `json:"googleEventId,omitempty"`
+	Icon             *string    `json:"icon,omitempty"`
+	Id               string     `json:"id"`
+	Location         *string    `json:"location,omitempty"`
+	ParentActivityId *string    `json:"parentActivityId,omitempty"`
+	PercentComplete  *int       `json:"percentComplete,omitempty"`
+	Rrule            *string    `json:"rrule,omitempty"`
+	StartAt          time.Time  `json:"startAt"`
+	StatusId         *string    `json:"statusId,omitempty"`
+	TeamId           string     `json:"teamId"`
+	Title            string     `json:"title"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+	Url              *string    `json:"url,omitempty"`
 }
 
 // HealthResponse defines model for HealthResponse.
@@ -314,8 +314,8 @@ type User struct {
 	UpdatedAt   time.Time           `json:"updatedAt"`
 }
 
-// EventId defines model for eventId.
-type EventId = string
+// ActivityId defines model for activityId.
+type ActivityId = string
 
 // SavedFilterId defines model for savedFilterId.
 type SavedFilterId = string
@@ -369,21 +369,21 @@ type RegisterJSONBody struct {
 	Password    string              `json:"password"`
 }
 
-// UpdateEventJSONBody defines parameters for UpdateEvent.
-type UpdateEventJSONBody struct {
-	AllDay          *bool      `json:"allDay,omitempty"`
-	Color           *string    `json:"color,omitempty"`
-	Description     *string    `json:"description,omitempty"`
-	EndAt           *time.Time `json:"endAt,omitempty"`
-	Icon            *string    `json:"icon,omitempty"`
-	Location        *string    `json:"location,omitempty"`
-	ParentEventId   *string    `json:"parentEventId,omitempty"`
-	PercentComplete *int       `json:"percentComplete,omitempty"`
-	Rrule           *string    `json:"rrule,omitempty"`
-	StartAt         *time.Time `json:"startAt,omitempty"`
-	StatusId        *string    `json:"statusId,omitempty"`
-	Title           *string    `json:"title,omitempty"`
-	Url             *string    `json:"url,omitempty"`
+// UpdateActivityJSONBody defines parameters for UpdateActivity.
+type UpdateActivityJSONBody struct {
+	AllDay           *bool      `json:"allDay,omitempty"`
+	Color            *string    `json:"color,omitempty"`
+	Description      *string    `json:"description,omitempty"`
+	EndAt            *time.Time `json:"endAt,omitempty"`
+	Icon             *string    `json:"icon,omitempty"`
+	Location         *string    `json:"location,omitempty"`
+	ParentActivityId *string    `json:"parentActivityId,omitempty"`
+	PercentComplete  *int       `json:"percentComplete,omitempty"`
+	Rrule            *string    `json:"rrule,omitempty"`
+	StartAt          *time.Time `json:"startAt,omitempty"`
+	StatusId         *string    `json:"statusId,omitempty"`
+	Title            *string    `json:"title,omitempty"`
+	Url              *string    `json:"url,omitempty"`
 }
 
 // UpdateSavedFilterJSONBody defines parameters for UpdateSavedFilter.
@@ -397,31 +397,31 @@ type CreateTeamJSONBody struct {
 	Name string `json:"name"`
 }
 
-// ListEventsParams defines parameters for ListEvents.
-type ListEventsParams struct {
-	// From Only return events where startAt >= from (RFC 3339).
+// ListActivitiesParams defines parameters for ListActivities.
+type ListActivitiesParams struct {
+	// From Only return activities where startAt >= from (RFC 3339).
 	From *time.Time `form:"from,omitempty" json:"from,omitempty"`
 
-	// To Only return events where startAt <= to (RFC 3339).
+	// To Only return activities where startAt <= to (RFC 3339).
 	To *time.Time `form:"to,omitempty" json:"to,omitempty"`
 }
 
-// CreateEventJSONBody defines parameters for CreateEvent.
-type CreateEventJSONBody struct {
-	AllDay             *bool     `json:"allDay,omitempty"`
-	AssignedMemberIds  *[]string `json:"assignedMemberIds,omitempty"`
-	Color              *string   `json:"color,omitempty"`
-	Description        *string   `json:"description,omitempty"`
-	EndAt              time.Time `json:"endAt"`
-	Icon               *string   `json:"icon,omitempty"`
-	Location           *string   `json:"location,omitempty"`
-	ParentEventId      *string   `json:"parentEventId,omitempty"`
-	PercentComplete    *int      `json:"percentComplete,omitempty"`
-	Rrule              *string   `json:"rrule,omitempty"`
-	StartAt            time.Time `json:"startAt"`
-	StatusId           *string   `json:"statusId,omitempty"`
-	Title              string    `json:"title"`
-	Url                *string   `json:"url,omitempty"`
+// CreateActivityJSONBody defines parameters for CreateActivity.
+type CreateActivityJSONBody struct {
+	AllDay            *bool     `json:"allDay,omitempty"`
+	AssignedMemberIds *[]string `json:"assignedMemberIds,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	Description       *string   `json:"description,omitempty"`
+	EndAt             time.Time `json:"endAt"`
+	Icon              *string   `json:"icon,omitempty"`
+	Location          *string   `json:"location,omitempty"`
+	ParentActivityId  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	Rrule             *string   `json:"rrule,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	StatusId          *string   `json:"statusId,omitempty"`
+	Title             string    `json:"title"`
+	Url               *string   `json:"url,omitempty"`
 }
 
 // CreateInviteJSONBody defines parameters for CreateInvite.
@@ -461,8 +461,8 @@ type RefreshTokenJSONRequestBody RefreshTokenJSONBody
 // RegisterJSONRequestBody defines body for Register for application/json ContentType.
 type RegisterJSONRequestBody RegisterJSONBody
 
-// UpdateEventJSONRequestBody defines body for UpdateEvent for application/json ContentType.
-type UpdateEventJSONRequestBody UpdateEventJSONBody
+// UpdateActivityJSONRequestBody defines body for UpdateActivity for application/json ContentType.
+type UpdateActivityJSONRequestBody UpdateActivityJSONBody
 
 // UpdateSavedFilterJSONRequestBody defines body for UpdateSavedFilter for application/json ContentType.
 type UpdateSavedFilterJSONRequestBody UpdateSavedFilterJSONBody
@@ -470,8 +470,8 @@ type UpdateSavedFilterJSONRequestBody UpdateSavedFilterJSONBody
 // CreateTeamJSONRequestBody defines body for CreateTeam for application/json ContentType.
 type CreateTeamJSONRequestBody CreateTeamJSONBody
 
-// CreateEventJSONRequestBody defines body for CreateEvent for application/json ContentType.
-type CreateEventJSONRequestBody CreateEventJSONBody
+// CreateActivityJSONRequestBody defines body for CreateActivity for application/json ContentType.
+type CreateActivityJSONRequestBody CreateActivityJSONBody
 
 // CreateInviteJSONRequestBody defines body for CreateInvite for application/json ContentType.
 type CreateInviteJSONRequestBody CreateInviteJSONBody

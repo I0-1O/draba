@@ -1,16 +1,16 @@
 /**
- * EventCreatePanel — right-side slide-in panel for creating a new Gantt event.
+ * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
  *
  * Defaults come from the drag selection: start/end date and the lane member.
- * Submits via POST /teams/:id/events.
+ * Submits via POST /teams/:id/activities.
  */
 
 import { useState } from 'react'
 import { X, ArrowRight, Loader2 } from 'lucide-react'
 import MemberAvatar from '@/components/MemberAvatar'
-import { useCreateEvent } from '@/hooks/useTeamEvents'
+import { useCreateActivity } from '@/hooks/useTeamActivities'
 import type { Member } from '@/types'
-import { EVENT_COLORS } from '@/types'
+import { ACTIVITY_COLORS } from '@/types'
 
 const PANEL_WIDTH = 300
 
@@ -33,7 +33,7 @@ const LABEL: React.CSSProperties = {
   marginBottom: 4,
 }
 
-export default function EventCreatePanel({
+export default function ActivityCreatePanel({
   open,
   teamId,
   members,
@@ -42,13 +42,13 @@ export default function EventCreatePanel({
   defaultMemberId,
   onClose,
 }: Props) {
-  const createMutation = useCreateEvent(teamId)
+  const createMutation = useCreateActivity(teamId)
 
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [startDate, setStartDate] = useState(defaultStart)
   const [endDate, setEndDate] = useState(defaultEnd)
-  const [color, setColor] = useState(EVENT_COLORS[0])
+  const [color, setColor] = useState(ACTIVITY_COLORS[0])
   const [assignedIds, setAssignedIds] = useState<string[]>(
     defaultMemberId ? [defaultMemberId] : [],
   )
@@ -104,7 +104,7 @@ export default function EventCreatePanel({
           flexShrink: 0,
         }}
       >
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New event</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
         <button
           onClick={onClose}
           style={{
@@ -129,7 +129,7 @@ export default function EventCreatePanel({
             autoFocus
             value={title}
             onChange={e => setTitle(e.target.value)}
-            placeholder="Event title…"
+            placeholder="Activity title…"
             style={{
               width: '100%', boxSizing: 'border-box',
               fontSize: 13, fontWeight: 600, color: 'var(--foreground)',
@@ -200,7 +200,7 @@ export default function EventCreatePanel({
         <div>
           <div style={LABEL}>Color</div>
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-            {EVENT_COLORS.map(c => (
+            {ACTIVITY_COLORS.map(c => (
               <button
                 key={c}
                 type="button"
@@ -275,7 +275,7 @@ export default function EventCreatePanel({
           }}
         >
           {creating && <Loader2 size={13} className="animate-spin" />}
-          Create event
+          Create activity
         </button>
       </div>
     </div>
