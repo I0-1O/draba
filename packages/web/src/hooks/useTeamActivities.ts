@@ -152,6 +152,7 @@ interface CreateActivityInput {
   endAt: string
   description?: string | null
   color?: string | null
+  icon?: string | null
   assignedMemberIds?: string[]
 }
 
@@ -164,6 +165,7 @@ interface UpdateActivityInput {
     endAt?: string
     allDay?: boolean
     color?: string | null
+    icon?: string | null
     location?: string | null
     url?: string | null
     assignedMemberIds?: string[]
