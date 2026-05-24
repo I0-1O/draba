@@ -56,6 +56,14 @@ components:
           type: string
         slug:
           type: string
+        color:
+          type: string
+          nullable: true
+          description: Identity color ID (e.g. "teal"). Null until explicitly set.
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID (e.g. "briefcase") or special value. Null until explicitly set.
         createdAt:
           type: string
           format: date-time
@@ -81,6 +89,11 @@ components:
         color:
           type: string
           nullable: true
+          description: Identity color ID (e.g. "teal"). Null until explicitly set.
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID or special value. Null until explicitly set.
         joinedAt:
           type: string
           format: date-time
@@ -211,6 +224,14 @@ components:
           type: string
         name:
           type: string
+        color:
+          type: string
+          nullable: true
+          description: Identity color ID (e.g. "teal"). Null until explicitly set.
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID or special value. Null until explicitly set.
         startDate:
           type: string
           format: date

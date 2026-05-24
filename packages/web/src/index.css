@@ -42,15 +42,23 @@
   --color-charcoal:   #343A40;
   --color-off-white:  #F8F9FA;
 
-  /* Member colors — data values, not theme tokens */
-  --member-1-teal:    #288C9B;
-  --member-2-amber:   #F29E4C;
-  --member-3-sky:     #5BC0DE;
-  --member-4-emerald: #2ECC71;
-  --member-5-violet:  #9B59B6;
-  --member-6-rose:    #E74C3C;
-  --member-7-indigo:  #5C6BC0;
-  --member-8-lime:    #8BC34A;
+  /* Identity palette — 16 colors; mirrors IDENTITY_COLORS in identity-constants.ts */
+  --identity-teal:    #288C9B;
+  --identity-cyan:    #06B6D4;
+  --identity-blue:    #3B82F6;
+  --identity-indigo:  #6366F1;
+  --identity-violet:  #8B5CF6;
+  --identity-purple:  #A855F7;
+  --identity-pink:    #EC4899;
+  --identity-rose:    #F43F5E;
+  --identity-red:     #EF4444;
+  --identity-orange:  #F97316;
+  --identity-amber:   #F59E0B;
+  --identity-yellow:  #EAB308;
+  --identity-lime:    #84CC16;
+  --identity-green:   #22C55E;
+  --identity-slate:   #64748B;
+  --identity-stone:   #78716C;
 
   /* ── Semantic light-mode tokens (shadcn HSL convention) ── */
   --background:             hsl(210 17% 98%);   /* #F8F9FA */

@@ -3,43 +3,23 @@
  *
  * Wire-format API types come from generated definitions in `packages/shared/`.
  * Only view-state types (computed from API data) live here.
+ *
+ * ACTIVITY_COLORS and MEMBER_COLORS are now re-exported from identity-constants
+ * so there is a single source of truth for the 16-color palette.
  */
+
+export { ACTIVITY_COLORS, MEMBER_COLORS } from '@/components/identity/identity-constants';
 
 /** A person who can be assigned to events on a timeline. */
 export interface Member {
   id: string;
   name: string;
   initials: string;
+  /** Hex color resolved from the member's identity colorId (or legacy fallback). */
   color: string;
+  /** Identity color ID (e.g. "teal"). Present when the member has an identity record. */
+  colorId?: string;
 }
-
-/** Member-avatar palette — references CSS custom properties from index.css. */
-export const MEMBER_COLORS: string[] = [
-  'var(--member-1-teal)',
-  'var(--member-2-amber)',
-  'var(--member-3-sky)',
-  'var(--member-4-emerald)',
-  'var(--member-5-violet)',
-  'var(--member-6-rose)',
-  'var(--member-7-indigo)',
-  'var(--member-8-lime)',
-];
-
-/**
- * Activity-block palette. Inlined as hex (not CSS vars) because activity colors
- * are persisted with the activity and travel through the API; a stable literal
- * survives theme changes and DB inspection.
- */
-export const ACTIVITY_COLORS: string[] = [
-  '#288C9B',
-  '#F29E4C',
-  '#9B59B6',
-  '#2ECC71',
-  '#5C6BC0',
-  '#E74C3C',
-  '#5BC0DE',
-  '#8BC34A',
-];
 
 // ── Legacy types — kept for ActivityPanel until Phase 8.2 rewrites it ──────────
 

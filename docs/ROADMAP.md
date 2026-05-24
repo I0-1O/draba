@@ -33,6 +33,7 @@ This document organizes development into discrete phases with effort estimates a
 | 8.5 | [Find (In-View)](#phase-85-find-in-view) | M — 1–2 days | ✅ |
 | 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ✅ |
 | 9.5 | [Rename Event → Activity (The Great Rename)](#phase-95--rename-event--activity-the-great-rename) | M — 1–2 days | ✅ |
+| 9.6 | [Identity System (Color + Icon)](#phase-96--identity-system-color--icon) | M — 2–3 days | 🔄 |
 | 10.1 | [Teams — Full CRUD (API + UI)](#phase-101--teams--full-crud-api--ui) | M — 2 days | ⬜ |
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
@@ -441,11 +442,69 @@ Rename the domain entity `Event` → `Activity` end-to-end (DB, Go API, OpenAPI,
 
 ---
 
+### Phase 9.6 — Identity System (Color + Icon)
+**Status:** 🔄 In Progress — 2026-05-24, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
+
+Builds a reusable Identity component system — a color + icon pair that gives every major entity (activities, timelines, teams, members) a consistent visual fingerprint. Ships the component library, expands the color palette from 8 to 16, adds schema fields where missing, and swaps the new components into every existing UI surface that edits color or icon.
+
+**Why now:** Phase 10.x builds full CRUD for teams, timelines, and members. Each will need an identity editor. Building the component system now means 10.x simply drops `<IdentityWidget>` into each form instead of inventing bespoke color/icon pickers per entity. The existing `ActivityDetailPanel` already has a color picker (8 squares) and an icon stub ("coming soon") — this phase replaces both with the real thing.
+
+**Design reference:** [docs/design/IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md) — full spec, palette, component API. Prototype: `docs/design/assets/identity-widget-prototype.html`.
+
+**Scope:**
+
+*Schema (migration 006):*
+- Add `icon TEXT` column to `team_members` (nullable)
+- Add `color TEXT`, `icon TEXT` columns to `teams` (nullable)
+- Add `color TEXT`, `icon TEXT` columns to `timelines` (nullable)
+- Convert existing `activities.color` hex values → color IDs (e.g. `#288C9B` → `teal`)
+- Convert existing `team_members.color` hex values → color IDs
+- Activities already have both `icon` and `color` columns — no structural change needed
+
+*API:*
+- Update `models.go`: add `Icon` and `Color` fields to `Team` and `Timeline`; add `Icon` field to `TeamMember`
+- Update OpenAPI spec: add `icon`/`color` to `Team` and `Timeline` schemas; add `icon` to `TeamMember` schema
+- Existing PATCH endpoints already handle `color` and `icon` for activities — no new endpoints needed; Team/Timeline PATCH lands in Phase 10.x
+- Regenerate TypeScript types
+
+*Web — component library (`src/components/identity/`):*
+- `identity-constants.ts` — 16-color palette, 64-icon list, name-text helpers, legacy hex→colorId mapping
+- `Badge.tsx` — read-only identity display (replaces and supersedes `MemberAvatar`)
+- `IdentityTrigger.tsx` — clickable badge with chevron pip
+- `IdentityPicker.tsx` — popover panel: color grid + name options + icon grid
+- `IdentityWidget.tsx` — composed trigger + popover with portal positioning
+
+*Web — integration into existing surfaces:*
+- `ActivityDetailPanel`: replace the 8-color swatch grid and icon stub with `<IdentityWidget>`; color changes now persist as color IDs
+- `ActivityCreatePanel`: add optional `<IdentityWidget>` for setting identity at creation time
+- Gantt bar label column: replace inline color dot with `<Badge>` (square, 20px)
+- Sidebar timeline rows: replace inline colored squares with `<Badge>` (square, 22px)
+- Sidebar member rows: replace inline colored circles with `<Badge>` (circle, 22px)
+- `MemberAvatar`: refactor to delegate to `<Badge>` internally (preserves existing API, avoids a sweeping import change)
+- Update `ACTIVITY_COLORS` and `MEMBER_COLORS` arrays → import from `identity-constants.ts`
+- Update CSS custom properties `--member-N-*` → identity palette hex values
+
+*Design system docs:*
+- Update `DESIGN_SYSTEM.md`: replace 8-color member palette section with 16-color identity palette
+- Add `IDENTITY_SYSTEM.md` as the canonical reference for the identity data model and component specs
+
+**Exit criteria — safe to pause when:**
+- `<Badge>` renders correctly in all four modes: Lucide icon, 1-letter, 2-letter, none — at sizes 20–40px, both shapes
+- `<IdentityWidget>` opens a popover with 16 colors, 4 name options, and 64 icons; selecting any fires `onChange` immediately
+- The `ActivityDetailPanel` uses `<IdentityWidget>` instead of the old color grid + icon stub; color persists as a color ID (e.g. `"violet"`, not `"#8B5CF6"`)
+- Existing activities with legacy hex colors display correctly (hex→colorId mapping works)
+- Sidebar member and timeline rows use `<Badge>` instead of inline styled divs
+- Migration 006 applies cleanly: new columns added, existing hex values converted to color IDs
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+- `docs/log.md` Phase 9.6 entry written
+
+---
+
 ### Phase 10 — Entity Management (data-cornerstone CRUD)
 
 **Framing:** Phase 10 closes the gaps in CRUD for the three core data entities — Teams, Timelines, Activities (renamed from Events in Phase 9.5) — plus the cross-cutting settings shell. Today the first-run wizard creates one of each and there is no path to manage them afterward. We tackle them entity-by-entity, top-down, so that by the time Phase 11 (views) ships, the data layer underneath is fully manageable. Activities are already CRUD-complete from Phases 3 / 8.2 / 8.2.1 (archive lands in Phase 9), so Phase 10 only needs to address Teams and Timelines.
 
-Sub-phase dependency: 10.1 (Teams) → 10.2 (Statuses) → 10.3 (Timelines) → 10.4 (Profile/Tokens/Admin). 10.2 depends on 10.1 because the statuses tab lives inside `/settings/team/:id`. 10.3 doesn't strictly depend on 10.2 but is sequenced after for clean delivery.
+Sub-phase dependency: 9.6 (Identity) → 10.1 (Teams) → 10.2 (Statuses) → 10.3 (Timelines) → 10.4 (Profile/Tokens/Admin). All entity forms use the `<IdentityWidget>` from 9.6 for color/icon editing. 10.2 depends on 10.1 because the statuses tab lives inside `/settings/team/:id`. 10.3 doesn't strictly depend on 10.2 but is sequenced after for clean delivery.
 
 ---
 

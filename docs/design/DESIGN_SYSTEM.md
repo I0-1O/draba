@@ -138,24 +138,33 @@ Copy this into `packages/web/src/index.css` after `shadcn init`:
 
 ---
 
-## Member Colors
+## Identity Color Palette (Phase 9.6+)
 
-Each team member has a display color used in Kanban view and other person-first views. These are data (stored in `team_members.color`), not theme tokens — they do not change with dark/light mode.
+Every major entity (Activity, Timeline, Team, Team Member) carries an **Identity** — a color + icon pair. Colors are stored as IDs (e.g. `"teal"`), not hex values. The `Badge` component resolves an ID to its hex for rendering.
 
-Eight colors are pre-defined; the palette cycles if a team exceeds 8 members. Admins and members can override their assigned color.
+> Full spec: [`docs/design/IDENTITY_SYSTEM.md`](IDENTITY_SYSTEM.md).
+> Component API: `src/components/identity/`.
 
-| Slot | Name | Hex | Notes |
-|------|------|-----|-------|
-| 1 | Teal | `#288C9B` | Brand primary |
-| 2 | Amber | `#F29E4C` | Brand secondary |
-| 3 | Sky | `#5BC0DE` | Brand accent |
-| 4 | Emerald | `#2ECC71` | Fresh green |
-| 5 | Violet | `#9B59B6` | Purple — distinct from blues |
-| 6 | Rose | `#E74C3C` | Red-rose — reserved feel |
-| 7 | Indigo | `#5C6BC0` | Blue-purple — calm |
-| 8 | Lime | `#8BC34A` | Yellow-green — high contrast |
+16 colors, all ≥3:1 contrast ratio against both light and dark backgrounds with white text overlay:
 
-All member colors must maintain a minimum 3:1 contrast ratio against both light (`#F8F9FA`) and dark (`#1C2128`) backgrounds when used as block fills with white/dark text overlay. Verify during implementation.
+| ID | Name | Hex | Notes |
+|----|------|-----|-------|
+| `teal` | Teal | `#288C9B` | Brand primary |
+| `cyan` | Cyan | `#06B6D4` | |
+| `blue` | Blue | `#3B82F6` | |
+| `indigo` | Indigo | `#6366F1` | |
+| `violet` | Violet | `#8B5CF6` | |
+| `purple` | Purple | `#A855F7` | |
+| `pink` | Pink | `#EC4899` | |
+| `rose` | Rose | `#F43F5E` | |
+| `red` | Red | `#EF4444` | |
+| `orange` | Orange | `#F97316` | |
+| `amber` | Amber | `#F59E0B` | |
+| `yellow` | Yellow | `#EAB308` | |
+| `lime` | Lime | `#84CC16` | |
+| `green` | Green | `#22C55E` | |
+| `slate` | Slate | `#64748B` | Neutral cool |
+| `stone` | Stone | `#78716C` | Neutral warm |
 
 ---
 

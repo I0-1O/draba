@@ -468,6 +468,10 @@ export interface components {
             id: string;
             name: string;
             slug: string;
+            /** @description Identity color ID (e.g. "teal"). Null until explicitly set. */
+            color?: string | null;
+            /** @description Identity icon ID (e.g. "briefcase") or special value. Null until explicitly set. */
+            icon?: string | null;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -480,7 +484,10 @@ export interface components {
             userId?: string | null;
             /** @enum {string} */
             role: "owner" | "admin" | "member";
+            /** @description Identity color ID (e.g. "teal"). Null until explicitly set. */
             color?: string | null;
+            /** @description Identity icon ID or special value. Null until explicitly set. */
+            icon?: string | null;
             /** Format: date-time */
             joinedAt: string;
         };
@@ -541,6 +548,10 @@ export interface components {
             id: string;
             teamId: string;
             name: string;
+            /** @description Identity color ID (e.g. "teal"). Null until explicitly set. */
+            color?: string | null;
+            /** @description Identity icon ID or special value. Null until explicitly set. */
+            icon?: string | null;
             /** Format: date */
             startDate: string;
             /** Format: date */

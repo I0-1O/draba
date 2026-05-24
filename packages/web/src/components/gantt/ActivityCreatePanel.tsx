@@ -8,9 +8,10 @@
 import { useState } from 'react'
 import { X, ArrowRight, Loader2 } from 'lucide-react'
 import MemberAvatar from '@/components/MemberAvatar'
+import IdentityWidget from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
 import { useCreateActivity } from '@/hooks/useTeamActivities'
 import type { Member } from '@/types'
-import { ACTIVITY_COLORS } from '@/types'
 
 const PANEL_WIDTH = 300
 
@@ -48,7 +49,7 @@ export default function ActivityCreatePanel({
   const [description, setDescription] = useState('')
   const [startDate, setStartDate] = useState(defaultStart)
   const [endDate, setEndDate] = useState(defaultEnd)
-  const [color, setColor] = useState(ACTIVITY_COLORS[0])
+  const [identity, setIdentity] = useState<Identity>({ colorId: 'teal', iconId: '__none__' })
   const [assignedIds, setAssignedIds] = useState<string[]>(
     defaultMemberId ? [defaultMemberId] : [],
   )
@@ -71,7 +72,8 @@ export default function ActivityCreatePanel({
         startAt: `${startDate}T00:00:00Z`,
         endAt: `${endDate}T00:00:00Z`,
         description: description.trim() || null,
-        color,
+        color: identity.colorId,
+        icon: identity.iconId,
         assignedMemberIds: assignedIds,
       },
       { onSuccess: onClose },
@@ -196,26 +198,15 @@ export default function ActivityCreatePanel({
           </div>
         </div>
 
-        {/* Color */}
+        {/* Identity (color + icon) */}
         <div>
-          <div style={LABEL}>Color</div>
-          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-            {ACTIVITY_COLORS.map(c => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => setColor(c)}
-                style={{
-                  width: 20, height: 20, borderRadius: 4, background: c,
-                  cursor: 'pointer', padding: 0,
-                  border: color === c ? '2px solid var(--foreground)' : '2px solid transparent',
-                  transition: 'transform 0.1s',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.transform = 'scale(1.15)')}
-                onMouseLeave={e => (e.currentTarget.style.transform = '')}
-              />
-            ))}
-          </div>
+          <div style={LABEL}>Identity</div>
+          <IdentityWidget
+            identity={identity}
+            name={title || 'New Activity'}
+            shape="square"
+            onChange={setIdentity}
+          />
         </div>
 
         {/* Assignees */}

@@ -82,7 +82,7 @@ func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, err
 	var members []*models.TeamMemberWithUser
 	err := r.db.Select(&members, `
 		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.joined_at,
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at,
 			COALESCE(u.email, '')                          AS email,
 			COALESCE(u.display_name, tm.display_name, '') AS display_name,
 			u.avatar_url

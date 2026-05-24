@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Identity Widget — Draba</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #0d1117; font-family: 'Inter', system-ui, sans-serif; color: #e6edf3; overflow: hidden; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 99px; }
+  button { font-family: inherit; cursor: pointer; }
+  input { font-family: inherit; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useMemo } = React;
+
+// ── Tokens ────────────────────────────────────────────────────────────────────
+const T = {
+  bg0:'#0d1117', bg1:'#161b22', bg2:'#21262d', bg3:'#2d333b', bg4:'#373e47',
+  border:'#30363d', border2:'#21262d',
+  text1:'#e6edf3', text2:'#8b949e', text3:'#484f58',
+  accent:'#288C9B',
+};
+
+// ── 16 colors ─────────────────────────────────────────────────────────────────
+const COLORS = [
+  {id:'teal',   hex:'#288C9B'},{id:'cyan',   hex:'#06B6D4'},
+  {id:'blue',   hex:'#3B82F6'},{id:'indigo', hex:'#6366F1'},
+  {id:'violet', hex:'#8B5CF6'},{id:'purple', hex:'#A855F7'},
+  {id:'pink',   hex:'#EC4899'},{id:'rose',   hex:'#F43F5E'},
+  {id:'red',    hex:'#EF4444'},{id:'orange', hex:'#F97316'},
+  {id:'amber',  hex:'#F59E0B'},{id:'yellow', hex:'#EAB308'},
+  {id:'lime',   hex:'#84CC16'},{id:'green',  hex:'#22C55E'},
+  {id:'slate',  hex:'#64748B'},{id:'stone',  hex:'#78716C'},
+];
+
+// ── 64 Lucide icons ───────────────────────────────────────────────────────────
+const ICONS = {
+  'activity':      [['polyline',{points:'22 12 18 12 15 21 9 3 6 12 2 12'}]],
+  'archive':       [['polyline',{points:'21 8 21 21 3 21 3 8'}],['rect',{x:'1',y:'3',width:'22',height:'5'}],['line',{x1:'10',y1:'12',x2:'14',y2:'12'}]],
+  'award':         [['circle',{cx:'12',cy:'8',r:'7'}],['polyline',{points:'8.21 13.89 7 23 12 20 17 23 15.79 13.88'}]],
+  'bar-chart':     [['line',{x1:'18',y1:'20',x2:'18',y2:'10'}],['line',{x1:'12',y1:'20',x2:'12',y2:'4'}],['line',{x1:'6',y1:'20',x2:'6',y2:'14'}]],
+  'bell':          [['path',{d:'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9'}],['path',{d:'M13.73 21a2 2 0 0 1-3.46 0'}]],
+  'bookmark':      [['path',{d:'M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'}]],
+  'briefcase':     [['rect',{x:'2',y:'7',width:'20',height:'14',rx:'2',ry:'2'}],['path',{d:'M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16'}]],
+  'calendar':      [['rect',{x:'3',y:'4',width:'18',height:'18',rx:'2',ry:'2'}],['line',{x1:'16',y1:'2',x2:'16',y2:'6'}],['line',{x1:'8',y1:'2',x2:'8',y2:'6'}],['line',{x1:'3',y1:'10',x2:'21',y2:'10'}]],
+  'check-circle':  [['path',{d:'M22 11.08V12a10 10 0 1 1-5.93-9.14'}],['polyline',{points:'22 4 12 14.01 9 11.01'}]],
+  'clipboard':     [['path',{d:'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2'}],['rect',{x:'8',y:'2',width:'8',height:'4',rx:'1',ry:'1'}]],
+  'clock':         [['circle',{cx:'12',cy:'12',r:'10'}],['polyline',{points:'12 6 12 12 16 14'}]],
+  'cloud':         [['path',{d:'M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z'}]],
+  'code':          [['polyline',{points:'16 18 22 12 16 6'}],['polyline',{points:'8 6 2 12 8 18'}]],
+  'coffee':        [['path',{d:'M18 8h1a4 4 0 0 1 0 8h-1'}],['path',{d:'M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z'}],['line',{x1:'6',y1:'1',x2:'6',y2:'4'}],['line',{x1:'10',y1:'1',x2:'10',y2:'4'}],['line',{x1:'14',y1:'1',x2:'14',y2:'4'}]],
+  'compass':       [['circle',{cx:'12',cy:'12',r:'10'}],['polygon',{points:'16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76'}]],
+  'cpu':           [['rect',{x:'4',y:'4',width:'16',height:'16',rx:'2',ry:'2'}],['rect',{x:'9',y:'9',width:'6',height:'6'}],['line',{x1:'9',y1:'1',x2:'9',y2:'4'}],['line',{x1:'15',y1:'1',x2:'15',y2:'4'}],['line',{x1:'9',y1:'20',x2:'9',y2:'23'}],['line',{x1:'15',y1:'20',x2:'15',y2:'23'}],['line',{x1:'20',y1:'9',x2:'23',y2:'9'}],['line',{x1:'1',y1:'9',x2:'4',y2:'9'}]],
+  'database':      [['ellipse',{cx:'12',cy:'5',rx:'9',ry:'3'}],['path',{d:'M21 12c0 1.66-4 3-9 3s-9-1.34-9-3'}],['path',{d:'M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5'}]],
+  'download':      [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'7 10 12 15 17 10'}],['line',{x1:'12',y1:'15',x2:'12',y2:'3'}]],
+  'edit':          [['path',{d:'M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7'}],['path',{d:'M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z'}]],
+  'eye':           [['path',{d:'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z'}],['circle',{cx:'12',cy:'12',r:'3'}]],
+  'file-text':     [['path',{d:'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'}],['polyline',{points:'14 2 14 8 20 8'}],['line',{x1:'16',y1:'13',x2:'8',y2:'13'}],['line',{x1:'16',y1:'17',x2:'8',y2:'17'}]],
+  'filter':        [['polygon',{points:'22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3'}]],
+  'flag':          [['path',{d:'M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z'}],['line',{x1:'4',y1:'22',x2:'4',y2:'15'}]],
+  'folder':        [['path',{d:'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'}]],
+  'git-branch':    [['line',{x1:'6',y1:'3',x2:'6',y2:'15'}],['circle',{cx:'18',cy:'6',r:'3'}],['circle',{cx:'6',cy:'18',r:'3'}],['path',{d:'M18 9a9 9 0 0 1-9 9'}]],
+  'globe':         [['circle',{cx:'12',cy:'12',r:'10'}],['line',{x1:'2',y1:'12',x2:'22',y2:'12'}],['path',{d:'M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'}]],
+  'grid':          [['rect',{x:'3',y:'3',width:'7',height:'7'}],['rect',{x:'14',y:'3',width:'7',height:'7'}],['rect',{x:'14',y:'14',width:'7',height:'7'}],['rect',{x:'3',y:'14',width:'7',height:'7'}]],
+  'heart':         [['path',{d:'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z'}]],
+  'help-circle':   [['circle',{cx:'12',cy:'12',r:'10'}],['path',{d:'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3'}],['line',{x1:'12',y1:'17',x2:'12.01',y2:'17'}]],
+  'home':          [['path',{d:'M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'}],['polyline',{points:'9 22 9 12 15 12 15 22'}]],
+  'info':          [['circle',{cx:'12',cy:'12',r:'10'}],['line',{x1:'12',y1:'16',x2:'12',y2:'12'}],['line',{x1:'12',y1:'8',x2:'12.01',y2:'8'}]],
+  'layers':        [['polygon',{points:'12 2 2 7 12 12 22 7 12 2'}],['polyline',{points:'2 17 12 22 22 17'}],['polyline',{points:'2 12 12 17 22 12'}]],
+  'link':          [['path',{d:'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'}],['path',{d:'M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'}]],
+  'list':          [['line',{x1:'8',y1:'6',x2:'21',y2:'6'}],['line',{x1:'8',y1:'12',x2:'21',y2:'12'}],['line',{x1:'8',y1:'18',x2:'21',y2:'18'}],['line',{x1:'3',y1:'6',x2:'3.01',y2:'6'}],['line',{x1:'3',y1:'12',x2:'3.01',y2:'12'}],['line',{x1:'3',y1:'18',x2:'3.01',y2:'18'}]],
+  'lock':          [['rect',{x:'3',y:'11',width:'18',height:'11',rx:'2',ry:'2'}],['path',{d:'M7 11V7a5 5 0 0 1 10 0v4'}]],
+  'mail':          [['path',{d:'M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z'}],['polyline',{points:'22 6 12 13 2 6'}]],
+  'map':           [['polygon',{points:'1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6'}],['line',{x1:'8',y1:'2',x2:'8',y2:'18'}],['line',{x1:'16',y1:'6',x2:'16',y2:'22'}]],
+  'message-circle':[['path',{d:'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'}]],
+  'moon':          [['path',{d:'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'}]],
+  'package':       [['path',{d:'M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'}],['polyline',{points:'3.27 6.96 12 12.01 20.73 6.96'}],['line',{x1:'12',y1:'22.08',x2:'12',y2:'12'}]],
+  'pencil':        [['path',{d:'M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z'}]],
+  'phone':         [['path',{d:'M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.56 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z'}]],
+  'pie-chart':     [['path',{d:'M21.21 15.89A10 10 0 1 1 8 2.83'}],['path',{d:'M22 12A10 10 0 0 0 12 2v10z'}]],
+  'plug':          [['path',{d:'M18.36 6.64a9 9 0 1 1-12.73 0'}],['line',{x1:'12',y1:'2',x2:'12',y2:'12'}]],
+  'refresh-cw':    [['polyline',{points:'23 4 23 10 17 10'}],['polyline',{points:'1 20 1 14 7 14'}],['path',{d:'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15'}]],
+  'search':        [['circle',{cx:'11',cy:'11',r:'8'}],['line',{x1:'21',y1:'21',x2:'16.65',y2:'16.65'}]],
+  'server':        [['rect',{x:'2',y:'2',width:'20',height:'8',rx:'2',ry:'2'}],['rect',{x:'2',y:'14',width:'20',height:'8',rx:'2',ry:'2'}],['line',{x1:'6',y1:'6',x2:'6.01',y2:'6'}],['line',{x1:'6',y1:'18',x2:'6.01',y2:'18'}]],
+  'settings':      [['circle',{cx:'12',cy:'12',r:'3'}],['path',{d:'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z'}]],
+  'share':         [['circle',{cx:'18',cy:'5',r:'3'}],['circle',{cx:'6',cy:'12',r:'3'}],['circle',{cx:'18',cy:'19',r:'3'}],['line',{x1:'8.59',y1:'13.51',x2:'15.42',y2:'17.49'}],['line',{x1:'15.41',y1:'6.51',x2:'8.59',y2:'10.49'}]],
+  'shield':        [['path',{d:'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'}]],
+  'star':          [['polygon',{points:'12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2'}]],
+  'sun':           [['circle',{cx:'12',cy:'12',r:'5'}],['line',{x1:'12',y1:'1',x2:'12',y2:'3'}],['line',{x1:'12',y1:'21',x2:'12',y2:'23'}],['line',{x1:'4.22',y1:'4.22',x2:'5.64',y2:'5.64'}],['line',{x1:'18.36',y1:'18.36',x2:'19.78',y2:'19.78'}],['line',{x1:'1',y1:'12',x2:'3',y2:'12'}],['line',{x1:'21',y1:'12',x2:'23',y2:'12'}]],
+  'tag':           [['path',{d:'M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z'}],['line',{x1:'7',y1:'7',x2:'7.01',y2:'7'}]],
+  'target':        [['circle',{cx:'12',cy:'12',r:'10'}],['circle',{cx:'12',cy:'12',r:'6'}],['circle',{cx:'12',cy:'12',r:'2'}]],
+  'terminal':      [['polyline',{points:'4 17 10 11 4 5'}],['line',{x1:'12',y1:'19',x2:'20',y2:'19'}]],
+  'trash':         [['polyline',{points:'3 6 5 6 21 6'}],['path',{d:'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'}]],
+  'trending-up':   [['polyline',{points:'23 6 13.5 15.5 8.5 10.5 1 18'}],['polyline',{points:'17 6 23 6 23 12'}]],
+  'upload':        [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'17 8 12 3 7 8'}],['line',{x1:'12',y1:'3',x2:'12',y2:'15'}]],
+  'user':          [['path',{d:'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'}],['circle',{cx:'12',cy:'7',r:'4'}]],
+  'users':         [['path',{d:'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2'}],['circle',{cx:'9',cy:'7',r:'4'}],['path',{d:'M23 21v-2a4 4 0 0 0-3-3.87'}],['path',{d:'M16 3.13a4 4 0 0 1 0 7.75'}]],
+  'wifi':          [['path',{d:'M5 12.55a11 11 0 0 1 14.08 0'}],['path',{d:'M1.42 9a16 16 0 0 1 21.16 0'}],['path',{d:'M8.53 16.11a6 6 0 0 1 6.95 0'}],['line',{x1:'12',y1:'20',x2:'12.01',y2:'20'}]],
+  'zap':           [['polygon',{points:'13 2 3 14 12 14 11 22 21 10 12 10 13 2'}]],
+};
+const ICON_IDS = Object.keys(ICONS).sort(); // exactly 64
+
+// ── Name-based identity helpers ───────────────────────────────────────────────
+const NAME_IDS = ['__name_1__','__name_2__','__name_words__'];
+function isNameId(id) { return NAME_IDS.includes(id); }
+function isNoneId(id) { return id === '__none__'; }
+function getNameText(iconId, name) {
+  const n = name || '?';
+  if (iconId === '__name_1__') return n[0].toUpperCase();
+  if (iconId === '__name_2__') return n.slice(0,2).toUpperCase();
+  if (iconId === '__name_words__') {
+    const words = n.trim().split(/\s+/);
+    return words.length >= 2 ? (words[0][0]+words[1][0]).toUpperCase() : n.slice(0,2).toUpperCase();
+  }
+  return n[0].toUpperCase();
+}
+
+// ── Icon renderer ─────────────────────────────────────────────────────────────
+function Icon({ id, size=16, color='currentColor', sw=1.75 }) {
+  const d = ICONS[id]; if (!d) return null;
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none"
+      stroke={color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+      {d.map(([tag,p],i)=>React.createElement(tag,{key:i,...p}))}
+    </svg>
+  );
+}
+
+// ── Badge (shared, used in sidebar + settings) ────────────────────────────────
+function Badge({ identity, name, shape='square', size=26 }) {
+  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  const r = shape==='circle' ? '50%' : Math.round(size*0.26)+'px';
+  const nameText = getNameText(identity.iconId, name);
+  return (
+    <div style={{
+      width:size, height:size, borderRadius:r, background:color.hex, flexShrink:0,
+      display:'flex', alignItems:'center', justifyContent:'center',
+      transition:'background 0.15s',
+    }}>
+      {isNameId(identity.iconId)
+        ? <span style={{fontSize:Math.round(size*(nameText.length>1?0.37:0.52)),fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:nameText.length>1?'-0.5px':'0'}}>{nameText}</span>
+        : isNoneId(identity.iconId) ? null
+        : <Icon id={identity.iconId} size={Math.round(size*0.54)} color="rgba(255,255,255,0.95)" sw={2}/>
+      }
+    </div>
+  );
+}
+
+// ── Compact Identity Picker (popover content) ─────────────────────────────────
+function IdentityPicker({ identity, name, shape, onChange }) {
+  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  const letter = (name||'?')[0].toUpperCase();
+
+  const ColorBtn = ({ c }) => {
+    const [hov,setHov]=useState(false);
+    const sel = c.id===identity.colorId;
+    return (
+      <button onClick={()=>onChange({...identity,colorId:c.id})} title={c.id}
+        onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+        style={{
+          width:24,height:24,borderRadius:'50%',background:c.hex,border:'none',
+          outline:'none',cursor:'pointer',position:'relative',
+          transform:hov&&!sel?'scale(1.18)':'scale(1)',
+          boxShadow:sel?`0 0 0 2px ${T.bg2}, 0 0 0 3.5px ${c.hex}`:'none',
+          transition:'transform 0.1s, box-shadow 0.1s',
+        }}>
+        {sel&&<svg viewBox="0 0 24 24" width={10} height={10} fill="none" stroke="rgba(255,255,255,.9)" strokeWidth={3.2} strokeLinecap="round" strokeLinejoin="round" style={{position:'absolute',inset:0,margin:'auto'}}><polyline points="20 6 9 17 4 12"/></svg>}
+      </button>
+    );
+  };
+
+  const IconCell = ({ id }) => {
+    const [hov,setHov]=useState(false);
+    const sel = identity.iconId===id && identity.iconId!=='__name__';
+    return (
+      <button onClick={()=>onChange({...identity,iconId:id})} title={id}
+        onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+        style={{
+          width:34,height:34,border:'none',borderRadius:6,cursor:'pointer',
+          display:'flex',alignItems:'center',justifyContent:'center',
+          background:sel?color.hex:hov?T.bg4:'transparent',
+          outline:sel?`2px solid ${color.hex}44`:'none',outlineOffset:1,
+          transition:'background 0.08s',
+        }}>
+        <Icon id={id} size={17} color={sel?'#fff':hov?T.text1:T.text2} sw={1.75}/>
+      </button>
+    );
+  };
+
+  return (
+    <div style={{
+      width:312, background:T.bg2, border:`1px solid ${T.border}`,
+      borderRadius:10, boxShadow:'0 12px 32px rgba(0,0,0,.5)', overflow:'hidden',
+    }}>
+      {/* Colors */}
+      <div style={{padding:'11px 12px 10px',borderBottom:`1px solid ${T.border}`}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:9,justifyItems:'center'}}>
+          {COLORS.map(c=><ColorBtn key={c.id} c={c}/>)}
+        </div>
+      </div>
+
+      {/* Name options — 3 variants */}
+      <div style={{padding:'9px 12px 6px',display:'flex',gap:6}}>
+        {[
+          {id:'__none__',     label:'None'},
+          {id:'__name_1__',   label:'1 letter'},
+          {id:'__name_2__',   label:'2 letters'},
+          {id:'__name_words__',label:'1 + 1 words'},
+        ].map(opt=>{
+  const txt = opt.id === '__none__' ? '' : getNameText(opt.id, name);
+          const sel = identity.iconId===opt.id;
+          return (
+            <button key={opt.id} onClick={()=>onChange({...identity,iconId:opt.id})}
+              style={{
+                flex:1, padding:'8px 4px 7px',
+                border:`1px solid ${sel?color.hex:T.border2}`,
+                borderRadius:8, background:sel?`${color.hex}18`:T.bg3,
+                cursor:'pointer', display:'flex', flexDirection:'column', alignItems:'center', gap:7,
+                transition:'border-color 0.1s, background 0.1s',
+              }}>
+              <div style={{
+                width:28,height:28,borderRadius:shape==='circle'?'50%':'7px',
+                background: opt.id==='__none__' ? 'transparent' : color.hex,
+                border: opt.id==='__none__' ? `1.5px dashed ${T.border}` : 'none',
+                display:'flex',alignItems:'center',justifyContent:'center',
+              }}>
+                {opt.id !== '__none__' && (
+                  <span style={{fontSize:txt.length>1?11:14,fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:txt.length>1?'-0.5px':'0'}}>{txt}</span>
+                )}
+              </div>
+              <span style={{fontSize:10,color:sel?color.hex:T.text3,fontWeight:500,textAlign:'center',lineHeight:1.2}}>{opt.label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Icon grid */}
+      <div style={{padding:'6px 12px 10px'}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:2}}>
+          {ICON_IDS.map(id=><IconCell key={id} id={id}/>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Identity trigger (small badge + ▾ ) ───────────────────────────────────────
+function IdentityTrigger({ identity, name, shape, open, onClick }) {
+  const [hov,setHov]=useState(false);
+  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  return (
+    <button onClick={onClick}
+      onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+      style={{
+        position:'relative', background:'none', border:'none', padding:0,
+        outline:open||hov?`2px solid ${color.hex}88`:'none',
+        borderRadius:shape==='circle'?'50%':'8px', outlineOffset:2,
+        transition:'outline 0.1s',
+      }}>
+      <div style={{
+        width:28,height:28,borderRadius:shape==='circle'?'50%':'7px',
+        background:color.hex, display:'flex', alignItems:'center', justifyContent:'center',
+        filter:hov||open?'brightness(1.12)':'none', transition:'filter 0.1s',
+      }}>
+        {isNameId(identity.iconId)
+          ? <span style={{fontSize:getNameText(identity.iconId,name).length>1?11:14,fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:getNameText(identity.iconId,name).length>1?'-0.5px':'0'}}>{getNameText(identity.iconId,name)}</span>
+          : isNoneId(identity.iconId) ? null
+          : <Icon id={identity.iconId} size={15} color="rgba(255,255,255,0.95)" sw={2}/>
+        }
+      </div>
+      {/* Chevron pip */}
+      <div style={{
+        position:'absolute', bottom:-3, right:-3, width:13, height:13, borderRadius:'50%',
+        background:T.bg1, border:`1.5px solid ${T.border}`,
+        display:'flex', alignItems:'center', justifyContent:'center',
+      }}>
+        <svg viewBox="0 0 24 24" width={7} height={7} fill="none" stroke={T.text2} strokeWidth={3} strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+    </button>
+  );
+}
+
+// ── Identity Widget (trigger + popover) ───────────────────────────────────────
+function IdentityWidget({ identity, name, shape, onChange }) {
+  const [open,setOpen]=useState(false);
+  const [pos,setPos]=useState({top:0,left:0});
+  const triggerRef=useRef(null);
+  const popoverRef=useRef(null);
+  const PICKER_W=312;
+
+  useEffect(()=>{
+    if(!open) return;
+    const fn=(e)=>{
+      if(triggerRef.current?.contains(e.target)) return;
+      if(popoverRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown',fn);
+    return()=>document.removeEventListener('mousedown',fn);
+  },[open]);
+
+  const handleOpen=()=>{
+    if(triggerRef.current){
+      const r=triggerRef.current.getBoundingClientRect();
+      let left=r.left;
+      if(left+PICKER_W>window.innerWidth-8) left=window.innerWidth-PICKER_W-8;
+      if(left<8) left=8;
+      setPos({top:r.bottom+8, left});
+    }
+    setOpen(o=>!o);
+  };
+
+  return (
+    <>
+      <div ref={triggerRef} style={{display:'inline-block'}}>
+        <IdentityTrigger identity={identity} name={name} shape={shape} open={open} onClick={handleOpen}/>
+      </div>
+      {open && ReactDOM.createPortal(
+        <div ref={popoverRef} style={{position:'fixed',top:pos.top,left:pos.left,zIndex:9999}}>
+          <IdentityPicker identity={identity} name={name} shape={shape} onChange={v=>onChange(v)}/>
+        </div>,
+        document.body
+      )}
+    </> 
+  );
+}
+
+// ── Mock field label ──────────────────────────────────────────────────────────
+const FL = ({children})=>(
+  <div style={{fontSize:11,fontWeight:600,letterSpacing:'.6px',color:T.text3,textTransform:'uppercase',marginBottom:6}}>
+    {children}
+  </div>
+);
+
+// ── Settings Panel ────────────────────────────────────────────────────────────
+function SettingsPanel({ identity, name, onChange }) {
+  return (
+    <div style={{
+      width:280, height:'100%', background:T.bg1,
+      borderLeft:`1px solid ${T.border}`,
+      display:'flex', flexDirection:'column', overflowY:'auto', flexShrink:0,
+    }}>
+      {/* Header */}
+      <div style={{
+        padding:'14px 16px', borderBottom:`1px solid ${T.border}`,
+        display:'flex', alignItems:'center', gap:10, flexShrink:0,
+      }}>
+        <Badge identity={identity} name={name} shape="square" size={24}/>
+        <span style={{fontSize:14,fontWeight:600,color:T.text1,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
+        <button style={{background:'none',border:'none',color:T.text3,padding:2}}>
+          <Icon id="edit" size={14} color={T.text3}/>
+        </button>
+      </div>
+
+      <div style={{padding:'16px',display:'flex',flexDirection:'column',gap:20}}>
+        {/* Identity field */}
+        <div>
+          <FL>Identity</FL>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <IdentityWidget identity={identity} name={name} shape="square" onChange={onChange}/>
+          </div>
+        </div>
+
+        {/* Mock: Name */}
+        <div>
+          <FL>Name</FL>
+          <div style={{
+            padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,
+            borderRadius:6,fontSize:13,color:T.text2,
+          }}>{name}</div>
+        </div>
+
+        {/* Mock: Dates */}
+        <div>
+          <FL>Date range</FL>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <div style={{flex:1,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text2}}>Dec 1, 2026</div>
+            <span style={{color:T.text3,fontSize:12}}>→</span>
+            <div style={{flex:1,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text2}}>Jan 15, 2027</div>
+          </div>
+        </div>
+
+        {/* Mock: Team */}
+        <div>
+          <FL>Team</FL>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6}}>
+            <div style={{width:20,height:20,borderRadius:'50%',background:'#A855F7',display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <span style={{fontSize:10,fontWeight:700,color:'#fff'}}>P</span>
+            </div>
+            <span style={{fontSize:13,color:T.text2}}>Product Marketing</span>
+          </div>
+        </div>
+
+        {/* Mock: Description */}
+        <div>
+          <FL>Description</FL>
+          <div style={{padding:'8px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text3,minHeight:60}}>
+            Optional description…
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+const SB_TIMELINES = [
+  {name:'Q1 2027 Roadmap',  iconId:'zap',         colorId:'teal',   shape:'square'},
+  {name:'New Logo GTM',     active:true},
+  {name:'Q4 2026 Roadmap',  iconId:'trending-up', colorId:'orange', shape:'square'},
+  {name:'Project Pinky',    iconId:'heart',       colorId:'rose',   shape:'square'},
+];
+
+function Sidebar({ identity, name }) {
+  return (
+    <div style={{width:220,height:'100%',background:T.bg1,borderRight:`1px solid ${T.border}`,flexShrink:0,overflowY:'auto'}}>
+      {/* Logo */}
+      <div style={{padding:'14px 16px',borderBottom:`1px solid ${T.border}`,display:'flex',alignItems:'center',gap:8}}>
+        <div style={{width:24,height:24,borderRadius:5,background:T.accent,display:'flex',alignItems:'center',justifyContent:'center'}}>
+          <Icon id="layers" size={13} color="#fff" sw={2}/>
+        </div>
+        <span style={{fontSize:15,fontWeight:600,color:T.text1}}>draba</span>
+      </div>
+
+      <div style={{padding:'16px 12px 8px'}}>
+        {/* Team */}
+        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,paddingLeft:4}}>Team</div>
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'5px 8px',borderRadius:6,marginBottom:10}}>
+          <div style={{width:22,height:22,borderRadius:'50%',background:'#A855F7',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+            <span style={{fontSize:11,fontWeight:700,color:'#fff'}}>P</span>
+          </div>
+          <span style={{fontSize:13,fontWeight:500,color:T.text1}}>Product Marketing</span>
+        </div>
+
+        {/* Members */}
+        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,paddingLeft:4}}>Members</div>
+        {[['LK','#22C55E','Lindsay K.'],['JD','#6366F1','John Doe'],['SM','#F97316','Sarah M.']].map(([ini,bg,n])=>(
+          <div key={n} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 8px',borderRadius:6}}>
+            <div style={{width:22,height:22,borderRadius:'50%',background:bg,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <span style={{fontSize:10,fontWeight:700,color:'#fff'}}>{ini}</span>
+            </div>
+            <span style={{fontSize:13,color:T.text2}}>{n}</span>
+          </div>
+        ))}
+
+        {/* Timelines */}
+        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,marginTop:16,paddingLeft:4}}>Timeline</div>
+        {SB_TIMELINES.map(tl=>(
+          <div key={tl.name} style={{
+            display:'flex',alignItems:'center',gap:8,padding:'5px 8px',borderRadius:6,
+            background:tl.active?T.bg3:'transparent',
+          }}>
+            {tl.active
+              ? <Badge identity={identity} name={name} shape="square" size={22}/>
+              : <div style={{width:22,height:22,borderRadius:'5px',background:COLORS.find(c=>c.id===tl.colorId)?.hex||'#64748B',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                  <Icon id={tl.iconId} size={12} color="rgba(255,255,255,0.9)" sw={2}/>
+                </div>
+            }
+            <span style={{fontSize:13,fontWeight:tl.active?500:400,color:tl.active?T.text1:T.text2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{tl.name}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [identity, setIdentity] = useState({ iconId:'zap', colorId:'violet' });
+  const name = 'New Logo GTM';
+
+  return (
+    <div style={{height:'100vh',display:'flex',background:T.bg0}}>
+      <Sidebar identity={identity} name={name}/>
+      {/* Main content placeholder */}
+      <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:12,opacity:.35}}>
+        <Icon id="bar-chart" size={48} color={T.text3} sw={1.25}/>
+        <span style={{fontSize:13,color:T.text3}}>Gantt view · New Logo GTM</span>
+      </div>
+      <SettingsPanel identity={identity} name={name} onChange={setIdentity}/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

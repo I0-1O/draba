@@ -8,12 +8,13 @@
  */
 
 import { useState, useEffect } from 'react'
-import { X, Trash2, ArrowRight, Loader2, Smile, Tag, ChevronDown } from 'lucide-react'
+import { X, Trash2, ArrowRight, Loader2, Tag, ChevronDown } from 'lucide-react'
 import MemberAvatar from '@/components/MemberAvatar'
+import IdentityWidget from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
 import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
-import { ACTIVITY_COLORS } from '@/types'
 
 type ApiActivity = components['schemas']['Activity']
 
@@ -93,7 +94,10 @@ export default function ActivityDetailPanel({ event, open, members, teamId, onCl
   const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
   const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
   const [allDay, setAllDay] = useState(event?.allDay ?? false)
-  const [color, setColor] = useState(event?.color ?? ACTIVITY_COLORS[0])
+  const [identity, setIdentity] = useState<Identity>({
+    colorId: event?.color ?? 'teal',
+    iconId: event?.icon ?? '__none__',
+  })
   const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
   const [location, setLocation] = useState(event?.location ?? '')
   const [url, setUrl] = useState(event?.url ?? '')
@@ -107,7 +111,7 @@ export default function ActivityDetailPanel({ event, open, members, teamId, onCl
     setStartDate(toDateInput(event.startAt))
     setEndDate(toDateInput(event.endAt))
     setAllDay(event.allDay)
-    setColor(event.color ?? ACTIVITY_COLORS[0])
+    setIdentity({ colorId: event.color ?? 'teal', iconId: event.icon ?? '__none__' })
     setAssignedIds(event.assignedMemberIds ?? [])
     setLocation(event.location ?? '')
     setUrl(event.url ?? '')
@@ -154,9 +158,9 @@ export default function ActivityDetailPanel({ event, open, members, teamId, onCl
     save({ allDay: next })
   }
 
-  function handleColorChange(c: string) {
-    setColor(c)
-    save({ color: c })
+  function handleIdentityChange(next: Identity) {
+    setIdentity(next)
+    save({ color: next.colorId, icon: next.iconId })
   }
 
   function toggleAssignee(memberId: string) {
@@ -171,8 +175,6 @@ export default function ActivityDetailPanel({ event, open, members, teamId, onCl
     if (!event) return
     deleteMutation.mutate(event.id, { onSuccess: onClose })
   }
-
-  const currentColor = color ?? ACTIVITY_COLORS[0]
 
   return (
     <div
@@ -197,7 +199,6 @@ export default function ActivityDetailPanel({ event, open, members, teamId, onCl
           borderBottom: '1px solid var(--border)', flexShrink: 0,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <div style={{ width: 10, height: 10, borderRadius: 3, background: currentColor, flexShrink: 0 }} />
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
             {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
           </div>
@@ -218,21 +219,16 @@ export default function ActivityDetailPanel({ event, open, members, teamId, onCl
         {/* ── Scrollable body ── */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
 
-          {/* Title + Icon stub */}
+          {/* Identity widget + Title */}
           <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
-            {/* Icon stub */}
-            <button
-              title="Icon — coming soon"
-              style={{
-                width: 32, height: 32, borderRadius: 6, flexShrink: 0,
-                border: '1px solid var(--border)', background: 'var(--background)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                cursor: 'default', color: 'var(--muted-foreground)', opacity: 0.5,
-                marginTop: 1,
-              }}
-            >
-              <Smile size={15} strokeWidth={1.5} />
-            </button>
+            <div style={{ marginTop: 2, flexShrink: 0 }}>
+              <IdentityWidget
+                identity={identity}
+                name={title || event?.title || ''}
+                shape="square"
+                onChange={handleIdentityChange}
+              />
+            </div>
             {/* Title */}
             <input
               value={title}
@@ -352,24 +348,11 @@ export default function ActivityDetailPanel({ event, open, members, teamId, onCl
               </div>
             </div>
 
-            {/* Color */}
+            {/* Identity (color + icon) — handled by the widget in the title row above */}
             <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>Color</span>
-              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', flex: 1 }}>
-                {ACTIVITY_COLORS.map(c => (
-                  <button
-                    key={c}
-                    onClick={() => handleColorChange(c)}
-                    style={{
-                      width: 18, height: 18, borderRadius: 4, background: c,
-                      cursor: 'pointer', padding: 0, flexShrink: 0,
-                      border: currentColor === c ? '2px solid var(--foreground)' : '2px solid transparent',
-                      transition: 'transform 0.1s',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.transform = 'scale(1.18)')}
-                    onMouseLeave={e => (e.currentTarget.style.transform = '')}
-                  />
-                ))}
+              <span style={FIELD_LABEL}>Identity</span>
+              <div style={{ flex: 1, fontSize: 11, color: 'var(--muted-foreground)', opacity: 0.7 }}>
+                Use the icon above to edit
               </div>
             </div>
           </div>

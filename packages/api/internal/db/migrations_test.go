@@ -30,4 +30,20 @@ func TestMigrate_Idempotent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, count, "table %q should exist", table)
 	}
+
+	// Verify identity columns added by migration 006.
+	identityColumns := []struct{ table, col string }{
+		{"team_members", "icon"},
+		{"teams", "color"},
+		{"teams", "icon"},
+		{"timelines", "color"},
+		{"timelines", "icon"},
+	}
+	for _, tc := range identityColumns {
+		var colCount int
+		err := database.Get(&colCount,
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, tc.table, tc.col)
+		require.NoError(t, err)
+		assert.Equal(t, 1, colCount, "column %q.%q should exist", tc.table, tc.col)
+	}
 }

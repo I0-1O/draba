@@ -64,18 +64,23 @@ type User struct {
 	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
 }
 
-// Team is a workspace that groups users and their scheduled work.
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin.
 type Team struct {
 	ID        string    `db:"id"         json:"id"`
 	Name      string    `db:"name"       json:"name"`
 	Slug      string    `db:"slug"       json:"slug"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	Icon      *string   `db:"icon"       json:"icon,omitempty"`
 	CreatedAt time.Time `db:"created_at" json:"createdAt"`
 	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
 }
 
 // TeamMember is the join row that puts a person in a Team. UserID is nil
 // for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member".
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
 type TeamMember struct {
 	ID          string    `db:"id"           json:"id"`
 	TeamID      string    `db:"team_id"      json:"teamId"`
@@ -83,19 +88,23 @@ type TeamMember struct {
 	DisplayName *string   `db:"display_name" json:"displayName,omitempty"`
 	Role        string    `db:"role"         json:"role"`
 	Color       *string   `db:"color"        json:"color,omitempty"`
+	Icon        *string   `db:"icon"         json:"icon,omitempty"`
 	JoinedAt    time.Time `db:"joined_at"    json:"joinedAt"`
 }
 
 // Timeline is a named date range over a team's events. It is not a data
 // container — it is a view over a team's events for a given date window.
 // Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL.
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
 type Timeline struct {
 	ID         string     `db:"id"          json:"id"`
 	TeamID     string     `db:"team_id"     json:"teamId"`
 	Name       string     `db:"name"        json:"name"`
 	StartDate  string     `db:"start_date"  json:"startDate"`
 	EndDate    string     `db:"end_date"    json:"endDate"`
+	Color      *string    `db:"color"       json:"color,omitempty"`
+	Icon       *string    `db:"icon"        json:"icon,omitempty"`
 	ShareToken string     `db:"share_token" json:"shareToken"`
 	IcalToken  string     `db:"ical_token"  json:"icalToken"`
 	CreatedBy  string     `db:"created_by"  json:"createdBy"`

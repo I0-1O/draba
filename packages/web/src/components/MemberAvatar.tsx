@@ -1,4 +1,14 @@
+/**
+ * MemberAvatar — circular member badge using the identity system.
+ *
+ * Delegates to Badge internally so it inherits all identity rendering rules
+ * (name initials, Lucide icons, color resolution). The external prop API is
+ * unchanged so all existing call sites continue to work without modification.
+ */
+
+import Badge from './identity/Badge';
 import type { Member } from '../types';
+import { hexToColorId } from './identity/identity-constants';
 
 interface Props {
   member: Member | undefined;
@@ -6,35 +16,33 @@ interface Props {
   className?: string;
 }
 
-/**
- * Circular avatar showing a member's initials over their assigned color.
- * Falls back to a muted background and empty label when `member` is undefined,
- * so callers can render skeletons without conditionals.
- */
 export default function MemberAvatar({ member, size = 28, className }: Props) {
-  // Tuned by eye: 38% of diameter keeps two-letter initials inside the circle
-  // at every size we use (22–32px) without per-size overrides.
-  const fontSize = Math.round(size * 0.38);
+  if (!member) {
+    // Skeleton / undefined fallback: muted circle with no content.
+    return (
+      <div
+        className={className}
+        style={{
+          width: size,
+          height: size,
+          borderRadius: '50%',
+          background: 'var(--muted)',
+          flexShrink: 0,
+        }}
+      />
+    );
+  }
+
+  // Resolve colorId: prefer explicit colorId, else map legacy hex.
+  const colorId = member.colorId ?? hexToColorId(member.color);
+
   return (
-    <div
+    <Badge
+      identity={{ colorId, iconId: '__name_words__' }}
+      name={member.name}
+      shape="circle"
+      size={size}
       className={className}
-      style={{
-        width: size,
-        height: size,
-        borderRadius: '50%',
-        background: member?.color ?? 'var(--muted)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontSize,
-        fontWeight: 700,
-        color: 'white',
-        flexShrink: 0,
-        fontFamily: 'var(--font-sans)',
-        userSelect: 'none',
-      }}
-    >
-      {member?.initials}
-    </div>
+    />
   );
 }

@@ -14,6 +14,7 @@ import {
   Megaphone,
   Plug,
 } from 'lucide-react';
+import Badge from '@/components/identity/Badge';
 
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 360;
@@ -131,21 +132,12 @@ function TimelineItem({ timeline, active, collapsed, showDate = true, onClick, o
           minWidth: 0,
         }}
       >
-        <span
-          style={{
-            width: 20,
-            height: 20,
-            borderRadius: 5,
-            background: timeline.color,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'white',
-            flexShrink: 0,
-          }}
-        >
-          {timeline.icon}
-        </span>
+        <Badge
+          identity={{ colorId: timeline.color, iconId: '__none__' }}
+          name={timeline.name}
+          shape="square"
+          size={20}
+        />
         {!collapsed && (
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -564,21 +556,12 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                         onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
                         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                       >
-                        <div style={{
-                          width: 20,
-                          height: 20,
-                          borderRadius: '50%',
-                          background: m.color,
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          fontSize: 9,
-                          fontWeight: 700,
-                          color: 'white',
-                          flexShrink: 0,
-                        }}>
-                          {m.initials}
-                        </div>
+                        <Badge
+                          identity={{ colorId: m.color, iconId: '__name_words__' }}
+                          name={m.name}
+                          shape="circle"
+                          size={20}
+                        />
                         <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {m.name}
                         </span>

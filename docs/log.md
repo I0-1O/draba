@@ -2,6 +2,51 @@
 
 ---
 
+## 2026-05-24 — Phase 9.6: Identity System (Color + Icon)
+
+### What was built
+
+A reusable Identity component system — a color + icon pair that gives every major entity (activities, timelines, teams, members) a consistent visual fingerprint. Expanded the color palette from 8 to 16, added schema fields to teams/timelines/team_members, and replaced every existing color/icon surface with the new components.
+
+**DB (migration 006):**
+- Added `icon TEXT` to `team_members`; `color TEXT` + `icon TEXT` to `teams`; `color TEXT` + `icon TEXT` to `timelines`.
+- Converted existing `activities.color` and `team_members.color` hex values → identity color IDs (e.g. `#288C9B` → `"teal"`).
+
+**Go API:**
+- `models.Team`: added `Color *string`, `Icon *string`.
+- `models.TeamMember`: added `Icon *string`.
+- `models.Timeline`: added `Color *string`, `Icon *string`.
+- `team_repo.go ListMembers`: query updated to SELECT `tm.icon`.
+- `migrations_test.go`: assertions added for all five new identity columns.
+- OpenAPI spec: `Team`, `TeamMember`, `Timeline` schemas updated with `color`/`icon` fields.
+- TypeScript types regenerated.
+
+**Web — identity component library (`src/components/identity/`):**
+- `identity-constants.ts`: 16-color palette (`IDENTITY_COLORS`), 64-icon list (`IDENTITY_ICONS`), `hexToColorId()` legacy mapping, `resolveColorHex()`, `getNameText()`, and palette re-exports (`ACTIVITY_COLORS`, `MEMBER_COLORS`).
+- `Badge.tsx`: read-only identity badge — handles Lucide icons, name-text initials (`__name_1__`, `__name_2__`, `__name_words__`), color-only (`__none__`), both shapes (square/circle), any size 20–40px.
+- `IdentityTrigger.tsx`: clickable badge with chevron pip, colored outline ring on hover/open.
+- `IdentityPicker.tsx`: popover content — 16-color grid (8×2) + 4 name options + 64-icon grid (8×8); fires `onChange` on every selection.
+- `IdentityWidget.tsx`: composed trigger + picker with portal positioning, click-outside-to-close.
+
+**Web — integration:**
+- `ActivityDetailPanel`: icon stub + 8-color swatch replaced by `<IdentityWidget>`; saves `colorId` + `iconId` via PATCH.
+- `ActivityCreatePanel`: 8-color swatch replaced by `<IdentityWidget>`.
+- `GanttGrid`: label column 8px color dot replaced by `<Badge size={20} shape="square">`.
+- `Sidebar` timeline rows: inline colored span replaced by `<Badge size={20} shape="square">`.
+- `Sidebar` member rows: inline colored circle div replaced by `<Badge size={20} shape="circle">`.
+- `MemberAvatar`: refactored to delegate to `<Badge>` internally; external API unchanged.
+- `GanttView.toMember`: now resolves colorId → hex for `Member.color`; also populates `Member.colorId`.
+- `GanttView.toRichActivity`: passes `iconId` from API activity through to `GanttActivity`.
+
+**Palette consolidation:**
+- `types/index.ts`: `ACTIVITY_COLORS` and `MEMBER_COLORS` are now re-exported from `identity-constants.ts`.
+- `index.css`: `--member-N-*` CSS vars replaced with `--identity-<name>` vars for all 16 colors.
+- `DESIGN_SYSTEM.md`: 8-color member palette section replaced with 16-color identity palette reference.
+
+**Exit criteria status:** All criteria met — lint clean, tests pass. Identity widget and Badge render correctly. Manual UI verification needed on live Docker instance.
+
+---
+
 ## 2026-05-21 — Phase 9.5: The Great Event → Activity Rename
 
 ### What was built

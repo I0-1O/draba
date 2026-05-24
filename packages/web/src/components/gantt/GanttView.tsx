@@ -16,6 +16,7 @@ import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './
 import { useTeamActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
 import type { components } from '@draba/shared';
 import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
 import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
 import {
   generateColumns,
@@ -88,11 +89,15 @@ function initialsFrom(name: string): string {
 
 function toMember(m: TeamMemberWithUser, index: number): Member {
   const name = m.displayName || m.email || 'Unknown';
+  // colorId: prefer API colorId; fall back to palette slot.
+  const colorId = m.color ?? null;
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
   return {
     id: m.id,
     name,
     initials: initialsFrom(name),
-    color: m.color ?? MEMBER_COLORS[index % MEMBER_COLORS.length],
+    colorId: colorId ?? undefined,
+    color: colorId ? resolveColorHex(colorId) : fallbackHex,
   };
 }
 
@@ -137,6 +142,7 @@ function toRichActivity(
     startCol,
     span,
     color,
+    iconId: ev.icon ?? undefined,
     members,
     isChild: Boolean(ev.parentActivityId),
     startAtMs: new Date(ev.startAt).getTime(),
