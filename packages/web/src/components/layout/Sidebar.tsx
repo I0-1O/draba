@@ -19,6 +19,14 @@ import { Badge } from '@/components/identity/Badge';
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 360;
 
+interface ApiTeam {
+  id: string;
+  name: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+}
+
 interface Props {
   collapsed: boolean;
   onToggle: () => void;
@@ -28,6 +36,12 @@ interface Props {
   apiTimelines?: Array<{ id: string; name: string; startDate?: string; endDate?: string }>;
   activeTimelineId?: string;
   onActiveTimelineChange?: (id: string) => void;
+  // Team management
+  activeTeam?: ApiTeam;
+  archivedTeams?: ApiTeam[];
+  onNewTeam?: () => void;
+  onEditTeam?: (team: ApiTeam) => void;
+  onUnarchiveTeam?: (teamId: string) => void;
 }
 
 const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
@@ -241,7 +255,7 @@ function ConnectorItem({ name, status, color }: { name: string; status: string; 
  */
 const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
 
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange }: Props) {
+export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, archivedTeams = [], onNewTeam, onEditTeam, onUnarchiveTeam }: Props) {
   const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
   const [teamOpen, setTeamOpen] = useState(true);
   const [activityOpen, setActivityOpen] = useState(true);
@@ -458,7 +472,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                 : <ChevronRight width={12} height={12} strokeWidth={2} />}
             </button>
 
-            {/* Team row — always visible when section is open or closed */}
+            {/* Team row — shows real team data; gear icon opens edit modal */}
             <div
               onMouseEnter={() => setTeamHovered(true)}
               onMouseLeave={() => setTeamHovered(false)}
@@ -471,26 +485,18 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                 minHeight: 34,
               }}
             >
-              <div style={{
-                width: 20,
-                height: 20,
-                borderRadius: 5,
-                background: 'var(--primary)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 10,
-                fontWeight: 700,
-                color: 'white',
-                flexShrink: 0,
-              }}>
-                P
-              </div>
+              <Badge
+                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: '__name_1__' }}
+                name={activeTeam?.name ?? 'Team'}
+                shape="square"
+                size={20}
+              />
               <span style={{ fontSize: 13, fontWeight: 600, color: 'white', flex: 1, marginLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
-                Product Marketing
+                {activeTeam?.name ?? 'Team'}
               </span>
               <button
                 title="Team settings"
+                onClick={e => { e.stopPropagation(); if (activeTeam) onEditTeam?.(activeTeam); }}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -513,6 +519,50 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                 <Settings2 {...ICON_SM} />
               </button>
             </div>
+
+            {/* New team button — shown when team section is open */}
+            {teamOpen && (
+              <button
+                onClick={onNewTeam}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '4px 16px', background: 'none', border: 'none',
+                  color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+              >
+                <Plus {...ICON_SM} />
+                New team
+              </button>
+            )}
+
+            {/* Archived teams — collapsed sub-section under team, when open */}
+            {teamOpen && archivedTeams.length > 0 && (
+              <div style={{ padding: '2px 16px 6px' }}>
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, marginBottom: 4 }}>
+                  Archived
+                </div>
+                {archivedTeams.map(t => (
+                  <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', opacity: 0.55 }}>
+                    <Badge identity={{ color: t.color ?? '#484f58', icon: '__name_1__' }} name={t.name} shape="square" size={16} />
+                    <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {t.name}
+                    </span>
+                    <button
+                      onClick={() => onUnarchiveTeam?.(t.id)}
+                      title="Restore team"
+                      style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', fontSize: 10, fontFamily: 'inherit', padding: '1px 6px', borderRadius: 4 }}
+                      onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+                      onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+                    >
+                      Restore
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* Members — only when team section is expanded */}
             {teamOpen && (

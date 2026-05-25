@@ -196,6 +196,47 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
+        /**
+         * Partially update a team (admin only)
+         * @description Only fields present in the request body are modified. Only team admins may update.
+         */
+        patch: operations["updateTeam"];
+        trace?: never;
+    };
+    "/teams/{id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive a team (admin only)
+         * @description Sets archivedAt on the team. The team is hidden from active pickers but all data is preserved.
+         */
+        post: operations["archiveTeam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/unarchive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore a previously archived team (admin only) */
+        post: operations["unarchiveTeam"];
+        delete?: never;
+        options?: never;
+        head?: never;
         patch?: never;
         trace?: never;
     };
@@ -468,6 +509,8 @@ export interface components {
             id: string;
             name: string;
             slug: string;
+            description?: string | null;
+            notes?: string | null;
             /** @description Identity color ID (e.g. "teal"). Null until explicitly set. */
             color?: string | null;
             /** @description Identity icon ID (e.g. "briefcase") or special value. Null until explicitly set. */
@@ -476,6 +519,8 @@ export interface components {
             createdAt: string;
             /** Format: date-time */
             updatedAt: string;
+            /** Format: date-time */
+            archivedAt?: string | null;
         };
         TeamMember: {
             /** @description Team-member record ID (team_members.id). */
@@ -984,7 +1029,10 @@ export interface operations {
     };
     listTeams: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description When `true`, include archived teams. Default excludes them. */
+                archived?: "true" | "false";
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -1015,6 +1063,10 @@ export interface operations {
             content: {
                 "application/json": {
                     name: string;
+                    description?: string | null;
+                    notes?: string | null;
+                    color?: string | null;
+                    icon?: string | null;
                 };
             };
         };
@@ -1047,6 +1099,98 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Team record. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Team"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name?: string;
+                    description?: string | null;
+                    notes?: string | null;
+                    color?: string | null;
+                    icon?: string | null;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated team. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Team"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    archiveTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The archived team. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Team"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    unarchiveTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The restored team. */
             200: {
                 headers: {
                     [name: string]: unknown;

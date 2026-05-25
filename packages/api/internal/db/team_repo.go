@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -29,14 +30,42 @@ func NewTeamRepo(db *sqlx.DB) *TeamRepo {
 // already taken.
 func (r *TeamRepo) Create(team *models.Team) error {
 	_, err := r.db.NamedExec(`
-		INSERT INTO teams (id, name, slug, created_at, updated_at)
-		VALUES (:id, :name, :slug, :created_at, :updated_at)
+		INSERT INTO teams (id, name, slug, description, notes, color, icon, created_at, updated_at)
+		VALUES (:id, :name, :slug, :description, :notes, :color, :icon, :created_at, :updated_at)
 	`, team)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrDuplicateName
 		}
 		return fmt.Errorf("creating team: %w", err)
+	}
+	return nil
+}
+
+// Update writes mutable team fields (name, slug, description, notes, color,
+// icon, updated_at). It does not touch archived_at or created_at.
+func (r *TeamRepo) Update(team *models.Team) error {
+	_, err := r.db.NamedExec(`
+		UPDATE teams
+		SET name = :name, slug = :slug, description = :description, notes = :notes,
+		    color = :color, icon = :icon, updated_at = :updated_at
+		WHERE id = :id
+	`, team)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateName
+		}
+		return fmt.Errorf("updating team: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears the archived_at timestamp on a team.
+func (r *TeamRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(`UPDATE teams SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now(), id)
+	if err != nil {
+		return fmt.Errorf("setting team archived: %w", err)
 	}
 	return nil
 }
@@ -98,16 +127,19 @@ func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, err
 }
 
 // ListByUserID returns all teams the given user belongs to, ordered by
-// creation date ascending.
-func (r *TeamRepo) ListByUserID(userID string) ([]*models.Team, error) {
+// creation date ascending. When includeArchived is false (the default),
+// archived teams are excluded.
+func (r *TeamRepo) ListByUserID(userID string, includeArchived bool) ([]*models.Team, error) {
 	teams := make([]*models.Team, 0)
-	err := r.db.Select(&teams, `
+	query := `
 		SELECT t.* FROM teams t
 		JOIN team_members tm ON tm.team_id = t.id
-		WHERE tm.user_id = ?
-		ORDER BY t.created_at ASC
-	`, userID)
-	if err != nil {
+		WHERE tm.user_id = ?`
+	if !includeArchived {
+		query += ` AND t.archived_at IS NULL`
+	}
+	query += ` ORDER BY t.created_at ASC`
+	if err := r.db.Select(&teams, query, userID); err != nil {
 		return nil, fmt.Errorf("listing teams for user: %w", err)
 	}
 	return teams, nil

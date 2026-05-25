@@ -15,7 +15,7 @@ func TestListByUserID_Empty(t *testing.T) {
 	database := openTestDB(t)
 	repo := db.NewTeamRepo(database)
 
-	teams, err := repo.ListByUserID("no-such-user")
+	teams, err := repo.ListByUserID("no-such-user", false)
 	require.NoError(t, err)
 	assert.Empty(t, teams)
 }
@@ -27,7 +27,7 @@ func TestListByUserID_ReturnsTeamsUserBelongsTo(t *testing.T) {
 	teamID, userID := seedTeamAndUser(t, database, "list-a")
 	seedTeamMember(t, database, "mem-list-a", teamID, userID)
 
-	teams, err := repo.ListByUserID(userID)
+	teams, err := repo.ListByUserID(userID, false)
 	require.NoError(t, err)
 	require.Len(t, teams, 1)
 	assert.Equal(t, teamID, teams[0].ID)
@@ -44,12 +44,12 @@ func TestListByUserID_ExcludesOtherUsersTeams(t *testing.T) {
 	teamID2, userID2 := seedTeamAndUser(t, database, "excl-b")
 	seedTeamMember(t, database, "mem-excl-b", teamID2, userID2)
 
-	teams1, err := repo.ListByUserID(userID1)
+	teams1, err := repo.ListByUserID(userID1, false)
 	require.NoError(t, err)
 	require.Len(t, teams1, 1)
 	assert.Equal(t, teamID1, teams1[0].ID)
 
-	teams2, err := repo.ListByUserID(userID2)
+	teams2, err := repo.ListByUserID(userID2, false)
 	require.NoError(t, err)
 	require.Len(t, teams2, 1)
 	assert.Equal(t, teamID2, teams2[0].ID)
@@ -72,7 +72,7 @@ func TestListByUserID_MultipleTeams(t *testing.T) {
 	seedTeamMember(t, database, "mem-multi-a", team1ID, userID)
 	seedTeamMember(t, database, "mem-multi-b", team2ID, userID)
 
-	teams, err := repo.ListByUserID(userID)
+	teams, err := repo.ListByUserID(userID, false)
 	require.NoError(t, err)
 	require.Len(t, teams, 2)
 	ids := []string{teams[0].ID, teams[1].ID}

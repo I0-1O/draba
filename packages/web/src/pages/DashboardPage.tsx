@@ -19,11 +19,14 @@ import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { useMyTeams, useTeamTimelines, useTeamActivitySync } from '@/hooks/useTeamActivities'
+import { useMyTeams, useTeamTimelines, useTeamActivitySync, useUnarchiveTeam } from '@/hooks/useTeamActivities'
+import TeamModal from '@/components/TeamModal'
+import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
 
 type ApiActivity = components['schemas']['Activity']
+type ApiTeam = components['schemas']['Team']
 
 const DROPDOWN_BTN: React.CSSProperties = {
   display: 'flex',
@@ -42,6 +45,7 @@ const DROPDOWN_BTN: React.CSSProperties = {
 
 function DashboardShell() {
   const { logout, accessToken, user } = useAuth()
+  const navigate = useNavigate()
   const { isDark, toggle: toggleDark, theme } = useDarkMode()
   const { setFindBarOpen } = useFind()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -104,11 +108,18 @@ function DashboardShell() {
   const { isSuccess: globalPrefsSettled } = usePreferences()
   const globalPrefMap = usePreferenceMap()
 
-  // Use the first team the user belongs to.
-  // Full team-selection UI comes in a later phase; selected_team is persisted
-  // now so that phase can restore it without a migration.
-  const { data: teams = [] } = useMyTeams()
-  const teamId = teams[0]?.id ?? ''
+  // Team modal state
+  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
+  const unarchiveTeam = useUnarchiveTeam()
+
+  // Fetch all teams including archived for the sidebar's archived section.
+  const { data: allTeams = [] } = useMyTeams(true)
+  const activeTeams = allTeams.filter(t => !t.archivedAt)
+  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
+
+  const teamId = activeTeams[0]?.id ?? ''
+  const activeTeam = activeTeams[0]
 
   const { data: timelines = [] } = useTeamTimelines(teamId)
   const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
@@ -205,6 +216,11 @@ function DashboardShell() {
           setFilterEditorOpen(false)
           setCreateDefaults({ start: today, end: today, memberId: null })
         }}
+        activeTeam={activeTeam}
+        archivedTeams={archivedTeams}
+        onNewTeam={() => { setEditingTeam(null); setTeamModalMode('new'); }}
+        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
+        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
       />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
@@ -266,6 +282,7 @@ function DashboardShell() {
                     {isDark ? 'Dark mode' : 'Light mode'}
                   </button>
                   <button
+                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
                     style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
                     onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'none')}
@@ -373,6 +390,15 @@ function DashboardShell() {
           Filter editor coming soon.
         </p>
       </RightSidebar>
+
+      {/* Team modal — create or edit */}
+      {teamModalMode && (
+        <TeamModal
+          mode={teamModalMode}
+          team={editingTeam ?? undefined}
+          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
+        />
+      )}
     </div>
   )
 }

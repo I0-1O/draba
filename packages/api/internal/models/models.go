@@ -66,15 +66,19 @@ type User struct {
 
 // Team is a workspace that groups users and their scheduled work. Color and
 // Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin.
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
 type Team struct {
-	ID        string    `db:"id"         json:"id"`
-	Name      string    `db:"name"       json:"name"`
-	Slug      string    `db:"slug"       json:"slug"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	Icon      *string   `db:"icon"       json:"icon,omitempty"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+	ID          string     `db:"id"          json:"id"`
+	Name        string     `db:"name"        json:"name"`
+	Slug        string     `db:"slug"        json:"slug"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
 }
 
 // TeamMember is the join row that puts a person in a Team. UserID is nil

@@ -55,15 +55,21 @@ The server also implements a built-in CalDAV endpoint, allowing iOS/macOS Calend
 
 ```
 users
-  id, email, password_hash, display_name, avatar_url, created_at, updated_at
+  id, email, password_hash, display_name, avatar_url, is_superadmin,
+  created_at, updated_at, archived_at (nullable)
+  -- archived_at: when set, user account is inactivated (login rejected)
 
 teams
-  id, name, slug, created_at, updated_at
+  id, name, slug, description (nullable), notes (nullable),
+  color (nullable), icon (nullable), invite_link_token (nullable),
+  created_at, updated_at, archived_at (nullable)
 
 team_members
-  id, team_id, user_id (nullable), display_name (nullable), role (admin|member), color, joined_at
+  id, team_id, user_id (nullable), display_name (nullable), role (admin|member),
+  color, icon (nullable), joined_at, archived_at (nullable)
   -- user_id is null and display_name is populated for login-less "Participants"
   -- role="admin" represents a Team Admin
+  -- archived_at: when set, member is inactivated (access disabled, data preserved)
 
 team_statuses
   id, team_id, name, color, position, created_at, updated_at

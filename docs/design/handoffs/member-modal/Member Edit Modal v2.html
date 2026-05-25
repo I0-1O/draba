@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Member Edit Modal v2 — Draba</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:#0d1117;font-family:'Inter',system-ui,sans-serif;color:#e6edf3}
+  button,input{font-family:inherit}
+  ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#30363d;border-radius:99px}
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useMemo } = React;
+
+// ── Tokens ────────────────────────────────────────────────────────────────────
+const T = {
+  bg0:'#0d1117', bg1:'#161b22', bg2:'#21262d', bg3:'#2d333b', bg4:'#373e47',
+  border:'#30363d', border2:'#21262d',
+  text1:'#e6edf3', text2:'#8b949e', text3:'#484f58',
+  accent:'#288C9B', danger:'#EF4444', warn:'#F97316', success:'#22C55E', promote:'#6366F1',
+};
+
+// ── Colors + Icons ────────────────────────────────────────────────────────────
+const COLORS = [
+  {id:'teal',hex:'#288C9B'},{id:'cyan',hex:'#06B6D4'},{id:'blue',hex:'#3B82F6'},{id:'indigo',hex:'#6366F1'},
+  {id:'violet',hex:'#8B5CF6'},{id:'purple',hex:'#A855F7'},{id:'pink',hex:'#EC4899'},{id:'rose',hex:'#F43F5E'},
+  {id:'red',hex:'#EF4444'},{id:'orange',hex:'#F97316'},{id:'amber',hex:'#F59E0B'},{id:'yellow',hex:'#EAB308'},
+  {id:'lime',hex:'#84CC16'},{id:'green',hex:'#22C55E'},{id:'slate',hex:'#64748B'},{id:'stone',hex:'#78716C'},
+];
+const ICONS = {
+  'x':          [['line',{x1:18,y1:6,x2:6,y2:18}],['line',{x1:6,y1:6,x2:18,y2:18}]],
+  'check':      [['polyline',{points:'20 6 9 17 4 12'}]],
+  'chevron-down':[['polyline',{points:'6 9 12 15 18 9'}]],
+  'mail':       [['path',{d:'M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z'}],['polyline',{points:'22 6 12 13 2 6'}]],
+  'trash':      [['polyline',{points:'3 6 5 6 21 6'}],['path',{d:'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'}]],
+  'slash':      [['circle',{cx:12,cy:12,r:10}],['line',{x1:4.93,y1:4.93,x2:19.07,y2:19.07}]],
+  'refresh-cw': [['polyline',{points:'23 4 23 10 17 10'}],['polyline',{points:'1 20 1 14 7 14'}],['path',{d:'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15'}]],
+  'users':      [['path',{d:'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2'}],['circle',{cx:9,cy:7,r:4}],['path',{d:'M23 21v-2a4 4 0 0 0-3-3.87'}],['path',{d:'M16 3.13a4 4 0 0 1 0 7.75'}]],
+  'activity':   [['polyline',{points:'22 12 18 12 15 21 9 3 6 12 2 12'}]],
+  'calendar':   [['rect',{x:3,y:4,width:18,height:18,rx:2,ry:2}],['line',{x1:16,y1:2,x2:16,y2:6}],['line',{x1:8,y1:2,x2:8,y2:6}],['line',{x1:3,y1:10,x2:21,y2:10}]],
+  // identity icons subset
+  'award':      [['circle',{cx:12,cy:8,r:7}],['polyline',{points:'8.21 13.89 7 23 12 20 17 23 15.79 13.88'}]],
+  'bell':       [['path',{d:'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9'}],['path',{d:'M13.73 21a2 2 0 0 1-3.46 0'}]],
+  'briefcase':  [['rect',{x:2,y:7,width:20,height:14,rx:2,ry:2}],['path',{d:'M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16'}]],
+  'code':       [['polyline',{points:'16 18 22 12 16 6'}],['polyline',{points:'8 6 2 12 8 18'}]],
+  'compass':    [['circle',{cx:12,cy:12,r:10}],['polygon',{points:'16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76'}]],
+  'flag':       [['path',{d:'M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z'}],['line',{x1:4,y1:22,x2:4,y2:15}]],
+  'globe':      [['circle',{cx:12,cy:12,r:10}],['line',{x1:2,y1:12,x2:22,y2:12}],['path',{d:'M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'}]],
+  'heart':      [['path',{d:'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z'}]],
+  'home':       [['path',{d:'M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'}],['polyline',{points:'9 22 9 12 15 12 15 22'}]],
+  'layers':     [['polygon',{points:'12 2 2 7 12 12 22 7 12 2'}],['polyline',{points:'2 17 12 22 22 17'}],['polyline',{points:'2 12 12 17 22 12'}]],
+  'star':       [['polygon',{points:'12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2'}]],
+  'tag':        [['path',{d:'M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z'}],['line',{x1:7,y1:7,x2:7.01,y2:7}]],
+  'zap':        [['polygon',{points:'13 2 3 14 12 14 11 22 21 10 12 10 13 2'}]],
+  'user':       [['path',{d:'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'}],['circle',{cx:12,cy:7,r:4}]],
+  'target':     [['circle',{cx:12,cy:12,r:10}],['circle',{cx:12,cy:12,r:6}],['circle',{cx:12,cy:12,r:2}]],
+  'shield':     [['path',{d:'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'}]],
+  'shield-on':  [['path',{d:'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'}],['polyline',{points:'9 12 11 14 15 10'}]],
+  'trending-up':[['polyline',{points:'23 6 13.5 15.5 8.5 10.5 1 18'}],['polyline',{points:'17 6 23 6 23 12'}]],
+};
+const ICON_IDS = ['award','bell','briefcase','code','compass','flag','globe','heart','home','layers','star','tag','target','trending-up','user','users','zap','shield','activity','calendar'];
+
+function Icon({id,size=16,color='currentColor',sw=1.75}) {
+  const d=ICONS[id]; if(!d) return null;
+  return <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke={color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">{d.map(([t,p],i)=>React.createElement(t,{key:i,...p}))}</svg>;
+}
+
+// ── Mock members ──────────────────────────────────────────────────────────────
+const MOCK_MEMBERS = [
+  { id:'lk', name:'Lindsay K.',     email:'lindsay@draba.app', identity:{iconId:'__name_1__',colorId:'green'},  isAccountAdmin:false,
+    stub:false, joinedDate:'Mar 15, 2026', lastActive:'Today',
+    stats:{
+      timelines:{active:2,archived:1},
+      activities:{pastDue:1,running:4,upcoming:5,unscheduled:2,archived:3}
+    },
+    teams:[{name:'Product Marketing',color:'#A855F7',initials:'P',role:'Admin'},{name:'Brand Strategy',color:'#3B82F6',initials:'B',role:'Member'}] },
+  { id:'jd', name:'John Doe',       email:'john@draba.app',    identity:{iconId:'__name_words__',colorId:'indigo'}, isAccountAdmin:true,
+    stub:false, joinedDate:'Jan 8, 2026',  lastActive:'2 days ago',
+    stats:{
+      timelines:{active:1,archived:0},
+      activities:{pastDue:1,running:2,upcoming:3,unscheduled:1,archived:0}
+    },
+    teams:[{name:'Product Marketing',color:'#A855F7',initials:'P',role:'Member'}] },
+  { id:'sm', name:'Sarah M.',       email:null,                identity:{iconId:'__name_1__',colorId:'orange'},  isAccountAdmin:false,
+    stub:true,  joinedDate:'May 10, 2026', lastActive:'Never (stub)',
+    stats:{
+      timelines:{active:1,archived:0},
+      activities:{pastDue:0,running:1,upcoming:2,unscheduled:1,archived:0}
+    },
+    teams:[{name:'Product Marketing',color:'#A855F7',initials:'P',role:'Stub'}] },
+  { id:'tb', name:'Test Bootstrap', email:'tb@draba.app',      identity:{iconId:'user',colorId:'teal'},          isAccountAdmin:false,
+    stub:false, joinedDate:'May 1, 2026',  lastActive:'1 week ago',
+    stats:{
+      timelines:{active:1,archived:0},
+      activities:{pastDue:0,running:0,upcoming:0,unscheduled:0,archived:0}
+    },
+    teams:[{name:'Product Marketing',color:'#A855F7',initials:'P',role:'Member'}] },
+];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const NAME_IDS=['__name_1__','__name_2__','__name_words__','__none__'];
+function isNameId(id){return NAME_IDS.includes(id);}
+function getNameText(iconId,name){
+  const n=name||'?';
+  if(iconId==='__name_1__') return n[0].toUpperCase();
+  if(iconId==='__name_2__') return n.slice(0,2).toUpperCase();
+  if(iconId==='__name_words__'){const w=n.trim().split(/\s+/);return w.length>=2?(w[0][0]+w[1][0]).toUpperCase():n.slice(0,2).toUpperCase();}
+  return '';
+}
+
+function IdentityBadge({identity,name,size=28}) {
+  const color=COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  const txt=isNameId(identity.iconId)?getNameText(identity.iconId,name):null;
+  return (
+    <div style={{width:size,height:size,borderRadius:'50%',background:color.hex,flexShrink:0,
+      display:'flex',alignItems:'center',justifyContent:'center',transition:'background .15s'}}>
+      {identity.iconId==='__none__'?null:txt
+        ?<span style={{fontSize:Math.round(size*(txt.length>1?.38:.52)),fontWeight:700,color:'rgba(255,255,255,.95)',lineHeight:1,letterSpacing:txt.length>1?'-.5px':'0'}}>{txt}</span>
+        :<Icon id={identity.iconId} size={Math.round(size*.54)} color="rgba(255,255,255,.95)" sw={2}/>
+      }
+    </div>
+  );
+}
+
+function IdentityPicker({identity,name,onChange}) {
+  const color=COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  const [open,setOpen]=useState(false);
+  const trigRef=useRef(null);
+  const popRef=useRef(null);
+  const [pos,setPos]=useState({top:0,left:0});
+  useEffect(()=>{
+    if(!open)return;
+    const fn=(e)=>{if(!trigRef.current?.contains(e.target)&&!popRef.current?.contains(e.target))setOpen(false);};
+    document.addEventListener('mousedown',fn);return()=>document.removeEventListener('mousedown',fn);
+  },[open]);
+  const handleOpen=()=>{
+    if(trigRef.current){const r=trigRef.current.getBoundingClientRect();let l=r.left;if(l+312>window.innerWidth-8)l=window.innerWidth-320;setPos({top:r.bottom+6,left:l});}
+    setOpen(o=>!o);
+  };
+  const nameOpts=[{id:'__none__',label:'None'},{id:'__name_1__',label:'1 letter'},{id:'__name_2__',label:'2 letters'},{id:'__name_words__',label:'1+1 words'}];
+  return (
+    <>
+      <button ref={trigRef} onClick={handleOpen} title="Change identity"
+        style={{position:'relative',background:'none',border:'none',padding:0,cursor:'pointer',
+          outline:open?`2px solid ${color.hex}88`:'none',borderRadius:'50%',outlineOffset:2}}>
+        <IdentityBadge identity={identity} name={name} size={40}/>
+        <div style={{position:'absolute',bottom:-3,right:-3,width:14,height:14,borderRadius:'50%',
+          background:T.bg2,border:`1.5px solid ${T.border}`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+          <svg viewBox="0 0 24 24" width={7} height={7} fill="none" stroke={T.text2} strokeWidth={3} strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+      </button>
+      {open&&ReactDOM.createPortal(
+        <div ref={popRef} style={{position:'fixed',top:pos.top,left:pos.left,zIndex:11000,
+          width:312,background:T.bg2,border:`1px solid ${T.border}`,borderRadius:10,boxShadow:'0 12px 32px rgba(0,0,0,.6)',overflow:'hidden'}}>
+          <div style={{padding:'11px 12px 10px',borderBottom:`1px solid ${T.border}`}}>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:9,justifyItems:'center'}}>
+              {COLORS.map(c=>{const sel=c.id===identity.colorId;return <button key={c.id} onClick={()=>onChange({...identity,colorId:c.id})}
+                style={{width:24,height:24,borderRadius:'50%',background:c.hex,border:'none',outline:'none',cursor:'pointer',position:'relative',
+                  boxShadow:sel?`0 0 0 2px ${T.bg2},0 0 0 3.5px ${c.hex}`:'none',transition:'box-shadow .1s'}}>
+                {sel&&<svg viewBox="0 0 24 24" width={10} height={10} fill="none" stroke="rgba(255,255,255,.9)" strokeWidth={3.2} strokeLinecap="round" strokeLinejoin="round" style={{position:'absolute',inset:0,margin:'auto'}}><polyline points="20 6 9 17 4 12"/></svg>}
+              </button>;})}
+            </div>
+          </div>
+          <div style={{padding:'8px 12px 6px',display:'flex',gap:5}}>
+            {nameOpts.map(opt=>{const txt=opt.id==='__none__'?'':getNameText(opt.id,name);const sel=identity.iconId===opt.id;return <button key={opt.id} onClick={()=>onChange({...identity,iconId:opt.id})}
+              style={{flex:1,padding:'6px 3px',border:`1px solid ${sel?color.hex:T.border2}`,borderRadius:7,background:sel?`${color.hex}18`:T.bg3,cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',gap:5,transition:'all .1s'}}>
+              <div style={{width:26,height:26,borderRadius:'50%',background:opt.id==='__none__'?'transparent':color.hex,border:opt.id==='__none__'?`1.5px dashed ${T.border}`:'none',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                {txt&&<span style={{fontSize:txt.length>1?10:13,fontWeight:700,color:'rgba(255,255,255,.95)',lineHeight:1}}>{txt}</span>}
+              </div>
+              <span style={{fontSize:9,color:sel?color.hex:T.text3,fontWeight:500,textAlign:'center',lineHeight:1.1}}>{opt.label}</span>
+            </button>;})}
+          </div>
+          <div style={{padding:'4px 12px 10px',display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:2}}>
+            {ICON_IDS.map(id=>{const sel=identity.iconId===id;return <button key={id} onClick={()=>onChange({...identity,iconId:id})} title={id}
+              style={{width:34,height:34,border:'none',borderRadius:6,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',background:sel?color.hex:'transparent',transition:'background .08s'}}>
+              <Icon id={id} size={16} color={sel?'#fff':T.text2} sw={1.75}/>
+            </button>;})}
+          </div>
+        </div>,document.body
+      )}
+    </>
+  );
+}
+
+// ── Stat chip ─────────────────────────────────────────────────────────────────
+function StatChip({label,value,color}) {
+  return (
+    <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:3,
+      padding:'10px 14px',background:T.bg3,borderRadius:8,minWidth:72,
+      borderTop:`2px solid ${color}`}}>
+      <span style={{fontSize:18,fontWeight:700,color:T.text1,lineHeight:1}}>{value}</span>
+      <span style={{fontSize:10,color:T.text3,fontWeight:500,letterSpacing:'.3px',textTransform:'uppercase'}}>{label}</span>
+    </div>
+  );
+}
+
+// ── Danger confirmation ───────────────────────────────────────────────────────
+function DangerConfirm({type,memberName,onCancel,onConfirm}) {
+  const cfg = type==='delete'
+    ? {icon:'trash',iconColor:T.danger,bg:`${T.danger}18`,border:`${T.danger}44`,
+       title:`Delete "${memberName}"?`,
+       body:'This will permanently remove their account from Draba. This cannot be undone.',
+       btnColor:T.danger,btnBg:`${T.danger}22`,btnBorder:`${T.danger}66`,btnLabel:'Delete member'}
+    : type==='inactivate'
+    ? {icon:'slash',iconColor:T.warn,bg:`${T.warn}18`,border:`${T.warn}44`,
+       title:`Inactivate "${memberName}"?`,
+       body:'Their access will be disabled. Assigned activities remain intact. You can reactivate the account at any time.',
+       btnColor:T.warn,btnBg:`${T.warn}22`,btnBorder:`${T.warn}66`,btnLabel:'Inactivate account'}
+    : {icon:'shield-on',iconColor:T.promote,bg:`${T.promote}18`,border:`${T.promote}44`,
+       title:`Promote "${memberName}" to Account Admin?`,
+       body:'They will have full system access: manage all teams, members, and account settings across Draba. This can be reversed at any time.',
+       btnColor:T.promote,btnBg:`${T.promote}22`,btnBorder:`${T.promote}66`,btnLabel:'Promote to Account Admin'};
+  return (
+    <div style={{padding:'32px 28px',display:'flex',flexDirection:'column',alignItems:'center',gap:16,textAlign:'center'}}>
+      <div style={{width:48,height:48,borderRadius:12,background:cfg.bg,border:`1.5px solid ${cfg.border}`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+        <Icon id={cfg.icon} size={22} color={cfg.iconColor} sw={1.75}/>
+      </div>
+      <div>
+        <div style={{fontSize:16,fontWeight:600,color:T.text1,marginBottom:6}}>{cfg.title}</div>
+        <div style={{fontSize:13,color:T.text2,lineHeight:1.6,maxWidth:380}}>{cfg.body}</div>
+      </div>
+      <div style={{display:'flex',gap:10,marginTop:4}}>
+        <button onClick={onCancel} style={{padding:'8px 20px',background:'none',border:`1px solid ${T.border}`,borderRadius:8,color:T.text2,fontSize:13,cursor:'pointer'}}>Cancel</button>
+        <button onClick={onConfirm} style={{padding:'8px 20px',background:cfg.btnBg,border:`1px solid ${cfg.btnBorder}`,borderRadius:8,color:cfg.btnColor,fontSize:13,fontWeight:600,cursor:'pointer'}}>{cfg.btnLabel}</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Field label ───────────────────────────────────────────────────────────────
+const FL=({children})=>(
+  <div style={{fontSize:11,fontWeight:600,letterSpacing:'.6px',color:T.text3,textTransform:'uppercase',marginBottom:6}}>{children}</div>
+);
+
+// ── Member modal ──────────────────────────────────────────────────────────────
+function MemberModal({member, viewerRole, onClose}) {
+  const [name,setName]=useState(member.name);
+  const [email,setEmail]=useState(member.email||'');
+  const [identity,setIdentity]=useState(member.identity);
+  const [resetSent,setResetSent]=useState(false);
+  const [dangerAction,setDangerAction]=useState(null); // 'inactivate' | 'delete' | null
+
+  const color=COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  const activeActivityCount = member.stats.activities.pastDue + member.stats.activities.running + member.stats.activities.upcoming + member.stats.activities.unscheduled;
+  const isDeletable    = activeActivityCount===0 && member.teams.length===1;
+  const isAccountAdmin = viewerRole==='accountadmin';
+  const isTeamAdmin    = viewerRole==='teamadmin' || isAccountAdmin;
+  const [memberIsAdmin, setMemberIsAdmin] = useState(member.isAccountAdmin||false);
+
+  const handleReset=()=>{setResetSent(true);setTimeout(()=>setResetSent(false),4000);};
+
+  if(dangerAction) return ReactDOM.createPortal(
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.7)',zIndex:10000,display:'flex',alignItems:'center',justifyContent:'center'}}>
+      <div style={{background:T.bg2,border:`1px solid ${T.border}`,borderRadius:14,width:500,boxShadow:'0 24px 64px rgba(0,0,0,.6)',overflow:'hidden'}}>
+        <DangerConfirm type={dangerAction} memberName={name} onCancel={()=>setDangerAction(null)} onConfirm={()=>{
+          if(dangerAction==='promote'){setMemberIsAdmin(true);setDangerAction(null);}
+          else{alert(`Member ${dangerAction==='delete'?'deleted':'inactivated'}.`);onClose();}
+        }}/>
+      </div>
+    </div>, document.body
+  );
+
+  return ReactDOM.createPortal(
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.7)',zIndex:10000,display:'flex',alignItems:'center',justifyContent:'center'}}
+      onClick={onClose}>
+      <div style={{background:T.bg2,border:`1px solid ${T.border}`,borderRadius:14,width:560,maxHeight:'90vh',
+        display:'flex',flexDirection:'column',boxShadow:'0 24px 64px rgba(0,0,0,.6)',overflow:'hidden'}}
+        onClick={e=>e.stopPropagation()}>
+
+        {/* Header */}
+        <div style={{padding:'16px 20px',borderBottom:`1px solid ${T.border}`,display:'flex',alignItems:'center',gap:12,flexShrink:0}}>
+          <IdentityPicker identity={identity} name={name} onChange={setIdentity}/>
+          <div style={{flex:1}}>
+            <div style={{fontSize:11,fontWeight:600,letterSpacing:'.6px',color:T.text3,textTransform:'uppercase',marginBottom:2}}>
+              {member.stub?'Stub member':'Team member'} · {viewerRole==='accountadmin'?'Account admin view':'Team admin view'}
+            </div>
+            <div style={{fontSize:16,fontWeight:600,color:T.text1,display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+              {name||'—'}
+              {member.stub&&<span style={{fontSize:11,color:T.warn,background:`${T.warn}15`,padding:'2px 7px',borderRadius:99,fontWeight:600}}>No login</span>}
+              {memberIsAdmin&&<span style={{fontSize:11,color:T.promote,background:`${T.promote}15`,border:`1px solid ${T.promote}44`,padding:'2px 7px',borderRadius:99,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><Icon id="shield-on" size={10} color={T.promote} sw={2.5}/>Account Admin</span>}
+            </div>
+          </div>
+          <button onClick={onClose} style={{background:'none',border:'none',padding:4,cursor:'pointer'}}>
+            <Icon id="x" size={18} color={T.text3}/>
+          </button>
+        </div>
+
+        {/* Scrollable content */}
+        <div style={{flex:1,overflowY:'auto',padding:'20px',display:'flex',flexDirection:'column',gap:18}}>
+
+          {/* Name + Email */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+            <div>
+              <FL>Name</FL>
+              <input value={name} onChange={e=>setName(e.target.value)}
+                style={{width:'100%',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:7,padding:'8px 12px',color:T.text1,fontSize:13,outline:'none'}}/>
+            </div>
+            <div>
+              <FL>Email</FL>
+              {member.stub
+                ? <div style={{padding:'8px 12px',background:T.bg3,border:`1px dashed ${T.border}`,borderRadius:7,fontSize:13,color:T.text3}}>No email — stub member</div>
+                : <input value={email} onChange={e=>setEmail(e.target.value)}
+                    style={{width:'100%',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:7,padding:'8px 12px',color:T.text1,fontSize:13,outline:'none'}}/>
+              }
+            </div>
+          </div>
+
+          {/* Stats */}
+          <div style={{display:'flex',flexDirection:'column',gap:12}}>
+            <div>
+              <FL>Timelines</FL>
+              <div style={{display:'flex',gap:8}}>
+                <StatChip label="Active"   value={member.stats.timelines.active}   color={T.accent}/>
+                <StatChip label="Archived" value={member.stats.timelines.archived} color={T.text3}/>
+              </div>
+            </div>
+            <div>
+              <FL>Activities</FL>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                <StatChip label="Past due"    value={member.stats.activities.pastDue}    color={member.stats.activities.pastDue>0?T.danger:T.text3}/>
+                <StatChip label="Running"     value={member.stats.activities.running}     color={T.accent}/>
+                <StatChip label="Upcoming"    value={member.stats.activities.upcoming}    color={'#3B82F6'}/>
+                <StatChip label="Unscheduled" value={member.stats.activities.unscheduled} color={T.text2}/>
+                <StatChip label="Archived"    value={member.stats.activities.archived}    color={T.text3}/>
+              </div>
+            </div>
+          </div>
+
+          {/* Joined / last active */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+            <div>
+              <FL>Member since</FL>
+              <div style={{display:'flex',alignItems:'center',gap:7,padding:'8px 12px',background:T.bg3,borderRadius:7,fontSize:13,color:T.text2}}>
+                <Icon id="calendar" size={13} color={T.text3}/>
+                {member.joinedDate}
+              </div>
+            </div>
+            <div>
+              <FL>Last active</FL>
+              <div style={{display:'flex',alignItems:'center',gap:7,padding:'8px 12px',background:T.bg3,borderRadius:7,fontSize:13,color:member.lastActive==='Never (stub)'?T.text3:T.text2}}>
+                <Icon id="activity" size={13} color={T.text3}/>
+                {member.lastActive}
+              </div>
+            </div>
+          </div>
+
+          {/* Teams */}
+          <div>
+            <FL>Teams ({member.teams.length})</FL>
+            <div style={{display:'flex',flexDirection:'column',gap:6}}>
+              {member.teams.map((t,i)=>(
+                <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'7px 10px',background:T.bg3,borderRadius:8}}>
+                  <div style={{width:22,height:22,borderRadius:'5px',background:t.color,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                    <span style={{fontSize:11,fontWeight:700,color:'#fff'}}>{t.initials}</span>
+                  </div>
+                  <span style={{flex:1,fontSize:13,color:T.text1}}>{t.name}</span>
+                  <span style={{fontSize:11,color:T.text3,background:T.bg4,borderRadius:99,padding:'2px 8px',fontWeight:500}}>{t.role}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Password reset — team admin + has email */}
+          {isTeamAdmin&&!member.stub&&(
+            <div style={{borderTop:`1px solid ${T.border2}`,paddingTop:18}}>
+              <FL>Account</FL>
+              <div style={{display:'flex',alignItems:'center',gap:12}}>
+                <button onClick={handleReset}
+                  style={{display:'flex',alignItems:'center',gap:7,padding:'8px 14px',
+                    background:resetSent?`${T.success}18`:'none',
+                    border:`1px solid ${resetSent?T.success:T.border}`,
+                    borderRadius:8,color:resetSent?T.success:T.text2,fontSize:13,cursor:'pointer',transition:'all .2s'}}>
+                  <Icon id={resetSent?'check':'mail'} size={14} color={resetSent?T.success:T.text2}/>
+                  {resetSent?`Reset email sent to ${member.email}`:'Send password reset email'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Account admin actions */}
+          {isAccountAdmin&&(
+            <div style={{borderTop:`1px solid ${T.border2}`,paddingTop:18}}>
+              <FL>Account admin actions</FL>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+
+                {/* Promote / already admin */}
+                {!member.stub&&(
+                  memberIsAdmin
+                    ? <div style={{display:'flex',alignItems:'center',gap:6,padding:'7px 12px',
+                        background:`${T.promote}12`,border:`1px solid ${T.promote}33`,
+                        borderRadius:8,fontSize:12,color:T.promote}}>
+                        <Icon id="shield-on" size={13} color={T.promote} sw={2}/>
+                        Already an Account Admin
+                      </div>
+                    : <button onClick={()=>setDangerAction('promote')}
+                        style={{display:'flex',alignItems:'center',gap:7,padding:'7px 14px',background:`${T.promote}15`,
+                          border:`1px solid ${T.promote}44`,borderRadius:8,color:T.promote,fontSize:13,fontWeight:500,cursor:'pointer'}}>
+                        <Icon id="shield-on" size={13} color={T.promote}/>
+                        Promote to Account Admin
+                      </button>
+                )}
+
+                {/* Inactivate or Delete */}
+                {isDeletable
+                  ? <button onClick={()=>setDangerAction('delete')}
+                      style={{display:'flex',alignItems:'center',gap:7,padding:'7px 14px',background:`${T.danger}15`,
+                        border:`1px solid ${T.danger}44`,borderRadius:8,color:T.danger,fontSize:13,fontWeight:500,cursor:'pointer'}}>
+                      <Icon id="trash" size={13} color={T.danger}/>
+                      Delete member
+                    </button>
+                  : <button onClick={()=>setDangerAction('inactivate')}
+                      style={{display:'flex',alignItems:'center',gap:7,padding:'7px 14px',background:`${T.warn}15`,
+                        border:`1px solid ${T.warn}44`,borderRadius:8,color:T.warn,fontSize:13,fontWeight:500,cursor:'pointer'}}>
+                      <Icon id="slash" size={13} color={T.warn}/>
+                      Inactivate account
+                    </button>
+                }
+                {!isDeletable&&member.stats.total>0&&(
+                  <span style={{fontSize:11,color:T.text3,alignSelf:'center'}}>
+                    Delete unavailable — member has {member.stats.total} assigned {member.stats.total===1?'activity':'activities'}
+                    {member.teams.length>1?` and is in ${member.teams.length} teams`:''}.
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{padding:'12px 20px',borderTop:`1px solid ${T.border}`,display:'flex',justifyContent:'flex-end',gap:8,flexShrink:0}}>
+          <button onClick={onClose} style={{padding:'7px 16px',background:'none',border:`1px solid ${T.border}`,borderRadius:8,color:T.text2,fontSize:13,cursor:'pointer'}}>Cancel</button>
+          <button style={{padding:'7px 18px',background:color.hex,border:'none',borderRadius:8,color:'#fff',fontSize:13,fontWeight:600,cursor:'pointer'}}>
+            Save changes
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [selected,setSelected]=useState(null);
+  const [viewerRole,setViewerRole]=useState('teamadmin');
+
+  return (
+    <div style={{minHeight:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:20,background:T.bg0,padding:32}}>
+      {/* Viewer role toggle */}
+      <div style={{display:'flex',alignItems:'center',gap:10}}>
+        <span style={{fontSize:12,color:T.text3}}>Viewing as:</span>
+        {['teamadmin','accountadmin'].map(r=>(
+          <button key={r} onClick={()=>setViewerRole(r)}
+            style={{padding:'5px 14px',borderRadius:6,border:`1px solid ${viewerRole===r?T.accent:T.border}`,
+              background:viewerRole===r?`${T.accent}22`:'transparent',
+              color:viewerRole===r?T.accent:T.text2,fontSize:12,fontWeight:500,cursor:'pointer'}}>
+            {r==='teamadmin'?'Team Admin':'Account Admin'}
+          </button>
+        ))}
+      </div>
+
+      {/* Member picker */}
+      <div style={{display:'flex',flexDirection:'column',gap:8,alignItems:'center'}}>
+        <span style={{fontSize:12,color:T.text3}}>Select a member to edit:</span>
+        <div style={{display:'flex',gap:10,flexWrap:'wrap',justifyContent:'center'}}>
+          {MOCK_MEMBERS.map(m=>(
+            <button key={m.id} onClick={()=>setSelected(m)}
+              style={{display:'flex',alignItems:'center',gap:8,padding:'8px 14px',
+                background:T.bg2,border:`1px solid ${T.border}`,borderRadius:8,cursor:'pointer'}}>
+              <IdentityBadge identity={m.identity} name={m.name} size={24}/>
+              <div style={{textAlign:'left'}}>
+                <div style={{fontSize:13,fontWeight:500,color:T.text1}}>{m.name}</div>
+                <div style={{fontSize:10,color:T.text3}}>{m.stub?'Stub · no login':(()=>{const tot=m.stats.activities.pastDue+m.stats.activities.running+m.stats.activities.upcoming+m.stats.activities.unscheduled;return tot===0?'No active activities':tot+' activit'+(tot===1?'y':'ies')+' · '+m.teams.length+' team'+(m.teams.length>1?'s':'');})()}}</div>
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{fontSize:11,color:T.text3,textAlign:'center',lineHeight:1.8}}>
+        Team Admin: can edit profile + send password reset<br/>
+        Account Admin: + promote to account admin · inactivate (has activities) · delete (no activities, 1 team)<br/>
+        Stub members: no email field, no password reset · cannot be promoted<br/>
+        John Doe is pre-set as an existing Account Admin — try viewing him
+      </div>
+
+      {selected&&<MemberModal member={selected} viewerRole={viewerRole} onClose={()=>setSelected(null)}/>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

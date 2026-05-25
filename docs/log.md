@@ -2,6 +2,39 @@
 
 ---
 
+## 2026-05-25 — Phase 10.1.1: Teams — CRUD & Management
+
+**Migration 008** (`008_team_crud.sql`): added `description TEXT`, `notes TEXT`, and `archived_at DATETIME` columns to `teams`.
+
+**API:**
+- `models.Team` updated with `Description`, `Notes`, `ArchivedAt` fields.
+- `TeamRepo.Create` updated to persist `description`, `notes`, `color`, `icon`.
+- `TeamRepo.Update` added — writes mutable team fields (name, slug, description, notes, color, icon).
+- `TeamRepo.SetArchived` added — sets or clears `archived_at`.
+- `TeamRepo.ListByUserID` updated with `includeArchived bool` parameter; excludes archived by default.
+- New handlers: `PATCH /teams/{id}` (admin only), `POST /teams/{id}/archive`, `POST /teams/{id}/unarchive`.
+- `GET /teams` now accepts `?archived=true`.
+- `POST /teams` now accepts optional `description`, `notes`, `color`, `icon` fields.
+- OpenAPI spec updated: `Team` schema gains `description`, `notes`, `archivedAt`; `CreateTeamInput` extended; `PatchTeamInput` added; new archive/unarchive paths added.
+- TypeScript types regenerated.
+- `migrations_test.go` asserts the three new columns on `teams`.
+
+**Web:**
+- `useMyTeams(includeArchived?)` — optional param to fetch archived teams too.
+- `useTeam(teamId)` — fetch single team detail.
+- `useCreateTeam`, `useUpdateTeam`, `useArchiveTeam`, `useUnarchiveTeam` mutations.
+- `TeamModal` — creates or edits a team. Settings tab fully functional (IdentityWidget, name, description, notes). Members tab is a locked placeholder (Phase 10.1.2). Archive confirmation dialog with amber styling. "Saved" banner auto-dismisses after 3s.
+- `SettingsPage` — `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4).
+- `App.tsx` — `/settings` and `/settings/*` routes added (protected).
+- `DashboardPage` — wires team CRUD: active team, archived teams list, TeamModal state, unarchive mutation; Settings dropdown button navigates to `/settings`.
+- `Sidebar` — team section now shows real team name/badge; gear icon opens TeamModal in edit mode; "New team" button opens TeamModal in new mode; archived teams shown with Restore action.
+
+**Checks:** `golangci-lint run` clean · `go test ./...` passes · `pnpm --filter web lint` clean.
+
+**Needs manual verification on Docker:** create second team from picker, edit/archive/unarchive, TeamModal in both modes, "Saved" banner, Settings route.
+
+---
+
 ## 2026-05-24 — Phase 9.6 post-review: hex storage + named exports + tests
 
 **Architecture change — hex colors stored in DB:**

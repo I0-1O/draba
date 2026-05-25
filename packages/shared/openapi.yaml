@@ -56,6 +56,12 @@ components:
           type: string
         slug:
           type: string
+        description:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
         color:
           type: string
           nullable: true
@@ -69,6 +75,10 @@ components:
           format: date-time
         updatedAt:
           type: string
+          format: date-time
+        archivedAt:
+          type: string
+          nullable: true
           format: date-time
 
     TeamMember:
@@ -768,6 +778,14 @@ paths:
       operationId: listTeams
       summary: List teams for the authenticated user
       tags: [teams]
+      parameters:
+        - name: archived
+          in: query
+          required: false
+          description: When `true`, include archived teams. Default excludes them.
+          schema:
+            type: string
+            enum: [ "true", "false" ]
       responses:
         "200":
           description: Array of teams the user belongs to.
@@ -798,6 +816,18 @@ paths:
                 name:
                   type: string
                   minLength: 1
+                description:
+                  type: string
+                  nullable: true
+                notes:
+                  type: string
+                  nullable: true
+                color:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
       responses:
         "201":
           description: Team created.
@@ -825,6 +855,100 @@ paths:
       responses:
         "200":
           description: Team record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    patch:
+      operationId: updateTeam
+      summary: Partially update a team (admin only)
+      description: Only fields present in the request body are modified. Only team admins may update.
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                description:
+                  type: string
+                  nullable: true
+                notes:
+                  type: string
+                  nullable: true
+                color:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
+      responses:
+        "200":
+          description: Updated team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/archive:
+    post:
+      operationId: archiveTeam
+      summary: Archive a team (admin only)
+      description: Sets archivedAt on the team. The team is hidden from active pickers but all data is preserved.
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: The archived team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/unarchive:
+    post:
+      operationId: unarchiveTeam
+      summary: Restore a previously archived team (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: The restored team.
           content:
             application/json:
               schema:

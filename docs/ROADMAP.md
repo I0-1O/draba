@@ -34,7 +34,8 @@ This document organizes development into discrete phases with effort estimates a
 | 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ✅ |
 | 9.5 | [Rename Event → Activity (The Great Rename)](#phase-95--rename-event--activity-the-great-rename) | M — 1–2 days | ✅ |
 | 9.6 | [Identity System (Color + Icon)](#phase-96--identity-system-color--icon) | M — 2–3 days | 🔄 |
-| 10.1 | [Teams — Full CRUD (API + UI)](#phase-101--teams--full-crud-api--ui) | M — 2 days | ⬜ |
+| 10.1.1 | [Teams — CRUD & Management](#phase-1011--teams--crud--management) | M — 2 days | 🔄 |
+| 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | ⬜ |
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
 | 10.4 | [Profile, Tokens & Admin Settings (Web)](#phase-104--profile-tokens--admin-settings-web) | S — 1 day | ⬜ |
@@ -504,60 +505,173 @@ Builds a reusable Identity component system — a color + icon pair that gives e
 
 **Framing:** Phase 10 closes the gaps in CRUD for the three core data entities — Teams, Timelines, Activities (renamed from Events in Phase 9.5) — plus the cross-cutting settings shell. Today the first-run wizard creates one of each and there is no path to manage them afterward. We tackle them entity-by-entity, top-down, so that by the time Phase 11 (views) ships, the data layer underneath is fully manageable. Activities are already CRUD-complete from Phases 3 / 8.2 / 8.2.1 (archive lands in Phase 9), so Phase 10 only needs to address Teams and Timelines.
 
-Sub-phase dependency: 9.6 (Identity) → 10.1 (Teams) → 10.2 (Statuses) → 10.3 (Timelines) → 10.4 (Profile/Tokens/Admin). All entity forms use the `<IdentityWidget>` from 9.6 for color/icon editing. 10.2 depends on 10.1 because the statuses tab lives inside `/settings/team/:id`. 10.3 doesn't strictly depend on 10.2 but is sequenced after for clean delivery.
+Sub-phase dependency: 9.6 (Identity) → 10.1.1 (Teams) → 10.1.2 (Members) → 10.2 (Statuses) → 10.3 (Timelines) → 10.4 (Profile/Tokens/Admin). All entity forms use the `<IdentityWidget>` from 9.6 for color/icon editing. 10.1.2 depends on 10.1.1 because the Members tab lives inside the Team Modal and member API endpoints are team-scoped. 10.2 depends on 10.1.2 because the statuses tab sits alongside the Members tab in team settings. 10.3 doesn't strictly depend on 10.2 but is sequenced after for clean delivery.
+
+**Design references:**
+- Team Modal handoff: `docs/design/handoffs/team-modal/` — create + edit flows, Settings tab, Members tab, archive confirmation
+- Member Edit Modal handoff: `docs/design/handoffs/member-modal/` — member profile editing, stats, admin actions
 
 ---
 
-### Phase 10.1 — Teams — Full CRUD (API + UI)
-**Status:** ⬜ | **Effort:** M (2 days)
+### Phase 10.1.1 — Teams — CRUD & Management
+**Status:** 🔄 In Progress — 2026-05-25, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2 days)
 
-Closes the Teams cornerstone. Today a user can create one team via the first-run wizard and never manage it again. After this phase, teams are a fully manageable entity from both API and UI.
+Closes the Teams data entity. Today a user can create one team via the first-run wizard and never manage it again. After this phase, teams are a fully manageable entity from both API and UI. Ships the Team Modal component with the Settings tab functional; the Members tab UI is scaffolded but locked until 10.1.2.
 
 **Design rationale:**
-Teams are the outermost data scope — everything else (timelines, events, members, statuses, tokens, shares) hangs off a team. Without a way to rename, reconfigure, manage members, or add additional teams, the rest of the app is essentially read-only at the structural level. This is also where the existing Up-Next "Member Management (Sidebar)" task block lands — those tasks are absorbed here rather than shipped separately.
+Teams are the outermost data scope — everything else (timelines, activities, members, statuses, tokens, shares) hangs off a team. Without a way to rename, reconfigure, or add additional teams, the rest of the app is essentially read-only at the structural level. This phase focuses on the team entity itself; member management is split to [Phase 10.1.2](#phase-1012--members--management--editing) to keep each phase focused.
 
 **Scope:**
 
+*Schema (migration 008):*
+- Add `description TEXT` column to `teams` (nullable)
+- Add `notes TEXT` column to `teams` (nullable)
+- Add `archived_at DATETIME` column to `teams` (nullable)
+
 *API — team-level:*
-- `GET /teams/:id` — full team detail (name, timezone, week start, member count, timeline count)
-- `PATCH /teams/:id` — rename, change timezone, change week start day (admin only)
-- `POST /teams/:id/archive` and `POST /teams/:id/unarchive` (depends on Phase 9 archive)
-- `POST /teams` already exists (Phase 3) — exposed via a new "Create team" UI path
+- `GET /teams/:id` — full team detail (name, description, notes, icon, color, timezone, week start, member count, timeline count, archived_at)
+- `PATCH /teams/:id` — update name, description, notes, icon, color (admin only)
+- `POST /teams/:id/archive` and `POST /teams/:id/unarchive` (depends on Phase 9 archive pattern)
+- Update `POST /teams` to accept `description`, `notes`, `icon`, `color` on creation
+- `GET /teams` already exists — add `?archived=true` to include archived teams
 
-*API — member-level:*
-- `POST /teams/:id/members` — add existing registered user by `userId` (admin only)
-- `PATCH /teams/:id/members/:memberId` — update display name, color, role (admin for role; member can set own color/display name)
-- `DELETE /teams/:id/members/:memberId` — remove member; reject if last admin
-- `POST /teams/:id/participants` — create login-less participant (admin only; from Phase 8.0 schema)
+*Web — Team Modal component (`<TeamModal>`):*
+- Modal shell: header (identity badge + team name), tab bar (Settings / Members), scrollable content, footer
+- Two modes: `new` (create) and `edit` (existing team)
+- **Settings tab**: identity picker (square shape), name (required), description, notes fields
+- **Members tab**: scaffolded as locked/disabled in this phase — tooltip "Save the team first" in new mode; placeholder content in edit mode until 10.1.2 ships
+- Footer: Cancel, Save changes / Create team (primary button uses team color); Archive team button (edit mode only)
+- "Saved" banner: shown briefly after new team creation, auto-dismisses after 3 seconds
+- New-team flow: Settings tab only → Create team → banner → Members tab unlocks (but content is 10.1.2)
+- Archive confirmation dialog: replaces modal content, amber styling, preserves all data
 
-*API — invite-level:*
-- `GET /teams/:id/invites` — list pending invites
-- `DELETE /teams/:id/invites/:inviteId` — cancel pending invite
-- (`POST /teams/:id/invites` already exists — Phase 3)
+*Web — team picker + settings shell:*
+- "New team" affordance in the team picker dropdown → opens Team Modal in `new` mode
+- Existing team gear/edit icon → opens Team Modal in `edit` mode
+- `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4)
+- Archived teams surfaced in team picker under a collapsed "Archived" section with unarchive affordance
 
-*Web:*
-- "New team" affordance in the team picker → create-team modal (name, timezone, week start)
-- `/settings/team/:id` — General tab: name, timezone, week start, archive button
-- `/settings/team/:id` — Members tab: list with role / color / last seen; promote / demote / remove; pending invites with resend / cancel; "Invite new" + "Add existing user" entry points
-- `/settings/team/:id` — Participants tab: create / rename / archive login-less members
-- Team archive flow: confirmation dialog, removes team from active picker, surfaces in an "Archived teams" section
-- Inline member quick-edit in the sidebar (gear icon on hover) opens a lightweight drawer that reuses Members-tab components
+*OpenAPI + types:*
+- Update `Team` schema: add `description`, `notes`, `archivedAt` fields
+- Update `CreateTeamInput` and `PatchTeamInput` bodies
+- Regenerate TypeScript types
 
 **Exit criteria — safe to pause when:**
 - A user can create a second team from the team picker without going through the first-run wizard
-- A team admin can rename their team, change timezone, and change week start from `/settings/team/:id`
-- A team admin can add a registered user, invite a new email, cancel a pending invite, promote a member to admin, change a member's color, and remove a member — all from the Members tab
-- A non-admin member visiting `/settings/team/:id` sees the page in read-only form
+- The Team Modal opens in both `new` and `edit` modes with correct behavior
+- A team admin can edit name, description, notes, icon, and color via the Settings tab
+- The Members tab is visible but locked/placeholder (ready for 10.1.2 to fill in)
 - Archiving a team removes it from the active picker; unarchive restores it
+- The "Saved" banner appears after creating a new team and auto-dismisses
+- A non-admin member cannot access team edit actions (modal opens in read-only or is hidden)
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 10.1.2 — Members — Management & Editing
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Fills in the Members tab of the Team Modal and adds the standalone Member Edit Modal. Covers the full member lifecycle: add, edit, role changes, inactivation, removal, participant management, and both email invites and reusable invite links.
+
+**Design rationale:**
+Member management is the most interaction-dense part of team administration. Splitting it from the team entity work (10.1.1) keeps each phase focused — 10.1.1 closes the "team as a data entity" gap, while 10.1.2 closes the "people within a team" gap. The Member Edit Modal introduces member-level stats and admin actions that require new API endpoints and computation.
+
+**Terminology mapping:**
+- **Participant** = login-less team member (team_members with `user_id = NULL`). The design handoffs use "stub" but we use "Participant" — it's the established codebase term (Phase 8.0) and more user-friendly. The UI displays "Participant" in role dropdowns and "No login" pills; the backend model is unchanged.
+- "Inactivate" in the UI maps to the existing `archived_at` pattern on `team_members`. Archiving a member disables their access but preserves their data and activity assignments.
+- "Super Admin" in the UI maps to the existing `users.is_superadmin` field.
+
+**Scope:**
+
+*Schema (migration 009):*
+- Add `archived_at DATETIME` column to `team_members` (nullable) — supports member inactivation
+- Add `archived_at DATETIME` column to `users` (nullable) — supports account-level inactivation by superadmin
+- Add `invite_link_token TEXT` column to `teams` (nullable, unique) — reusable team invite link
+
+*API — member CRUD:*
+- `GET /teams/:id/members/:memberId` — full member detail including stats (timeline counts, activity counts by date status)
+- `POST /teams/:id/members` — add existing registered user by `userId` (admin only)
+- `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; member can set own display name/color/icon)
+- `DELETE /teams/:id/members/:memberId` — remove member from team; reject if last admin
+- `POST /teams/:id/members/:memberId/archive` — inactivate member (sets `archived_at`)
+- `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clears `archived_at`)
+
+*API — participant CRUD:*
+- `POST /teams/:id/participants` — create login-less participant (admin only); accepts name, icon, color, optional email (reference only)
+- Participants are managed via the same `PATCH` and `DELETE` member endpoints (role is always `member`, `user_id` stays NULL)
+
+*API — invites:*
+- `GET /teams/:id/invites` — list pending invites (email, sent date, status)
+- `DELETE /teams/:id/invites/:inviteId` — revoke/cancel a pending invite
+- `POST /teams/:id/invites` already exists (Phase 3) — verified working
+- `POST /teams/:id/invite-link` — generate or regenerate a reusable team invite link token
+- `GET /teams/:id/invite-link` — get the current invite link (or null if none)
+- `DELETE /teams/:id/invite-link` — revoke the current invite link
+- `POST /auth/register` — update to accept reusable invite link tokens (in addition to existing one-time invite tokens)
+
+*API — member stats (computed, not stored):*
+- Timeline counts: active timelines the member has access to, archived timelines
+- Activity counts (date-relative, not status-relative):
+  - **Past due**: end date passed, on an active timeline
+  - **Running**: start date passed + end date in future, on an active timeline
+  - **Upcoming**: start date not yet reached, on an active timeline
+  - **Unscheduled**: no start or end date set, on an active timeline
+  - **Archived**: on archived timelines (historical count)
+
+*API — superadmin actions:*
+- `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only; not applicable to participants)
+- `POST /users/:id/archive` — inactivate user account (superadmin only; sets `users.archived_at`)
+- `POST /users/:id/unarchive` — reactivate user account (superadmin only)
+- `DELETE /users/:id` — hard delete user (superadmin only; only when deletable — no active activities, single team)
+- Auth middleware: reject login attempts from archived users with a clear error message
+
+*Web — Team Modal Members tab:*
+- Search/add input: search registered users by name/email, or type an email to send an invite
+- Search results dropdown: user matches with "Add" button, email-only results with "Invite" button; already-added users shown muted
+- Participant creation: inline expandable form with identity picker, name (required), optional email
+- Member list: each row shows avatar (dashed border if participant), name, "No login" pill (participants), email, role dropdown, remove (×) button
+- Role dropdown (`<RoleDropdown>`): three options — Admin (teal), Member (muted), Participant (amber) — with descriptions; role changes save immediately via PATCH
+- Pending invitations section: invite rows with email, sent date, "Revoke" button (red)
+- Invite link section: generated URL with copy button (transitions to "Copied!" for 2s), explanatory note; admins can regenerate or revoke
+
+*Web — Member Edit Modal (`<MemberModal>`):*
+- Opened from member list rows (in Team Modal or sidebar gear icon)
+- Header: identity picker (40px circle, editable), subline (participant/team member + viewer role), name with role badges
+- Scrollable content:
+  - Name + email fields (email read-only for stubs)
+  - Timeline stats chips (active, archived) with color-coded top borders
+  - Activity stats chips (past due, running, upcoming, unscheduled, archived) — date-relative
+  - Joined date + last active date (read-only)
+  - Teams list showing all teams the member belongs to with role pills
+  - Account section (non-participant only): password reset button — UI present but shows "SMTP not configured" until Phase 14
+  - Super Admin actions section (superadmin viewer only): promote to super admin, inactivate/delete with confirmation dialogs
+- Footer: Cancel + Save changes (in member's identity color)
+- Role permission matrix: team admins can edit name/email/identity; superadmins additionally see promote/inactivate/delete
+- Confirmation dialogs: promote (indigo), inactivate (amber), delete (red) — each with icon, title, body copy, cancel/confirm buttons
+- Deletable rule: member can be deleted only when they have zero active activities and belong to a single team
+
+*Web — sidebar integration:*
+- Member rows in sidebar: gear icon on hover → opens Member Edit Modal
+- Inactivated members: shown with reduced opacity and "Inactive" indicator; filterable
+
+**Exit criteria — safe to pause when:**
+- The Team Modal Members tab is fully functional: search/add users, send email invites, create participants, manage roles, revoke invites
+- A team admin can add a registered user, invite a new email, create a participant, change a member's role, and remove a member
+- The reusable invite link can be generated, copied, and used to register a new account
+- The Member Edit Modal opens from member list rows and shows correct stats and fields
+- A superadmin can promote a member to super admin, inactivate an account, and delete a deletable member — all with confirmation dialogs
+- Inactivated members cannot log in; reactivation restores access
+- A non-admin member sees member list in read-only form (no role changes, no add/remove)
 - Removing the last admin from a team returns a validation error
-- The sidebar gear-icon member quick-edit drawer saves changes that immediately reflect in the Members tab
+- Password reset button is present but shows "SMTP not configured" state
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
 
 ---
 
 ### Phase 10.2 — Team Statuses & Member Colors (API + UI)
 **Status:** ⬜ | **Effort:** M (1–2 days)
 
-Statuses are team-scoped configuration; pairing them with the Statuses tab UI in one phase keeps the API and the only consumer of that API shipping together. Required before Phase 11.3 (Kanban) so admins can configure columns.
+Statuses are team-scoped configuration; pairing them with the Statuses tab UI in one phase keeps the API and the only consumer of that API shipping together. Required before Phase 11.3 (Kanban) so admins can configure columns. Depends on 10.1.2 (Members) because the statuses tab sits alongside the Members tab in team settings.
 
 **Scope:**
 

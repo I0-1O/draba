@@ -48,6 +48,16 @@ func TestMigrate_Idempotent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, colCount, "column %q.%q should exist", tc.table, tc.col)
 	}
+
+	// Verify team CRUD columns added by migration 008.
+	teamCrudColumns := []string{"description", "notes", "archived_at"}
+	for _, col := range teamCrudColumns {
+		var colCount int
+		err := database.Get(&colCount,
+			`SELECT COUNT(*) FROM pragma_table_info('teams') WHERE name = ?`, col)
+		require.NoError(t, err)
+		assert.Equal(t, 1, colCount, "column teams.%q should exist", col)
+	}
 }
 
 // TestMigrate_006_007_ColorConversion verifies the two-step color conversion:

@@ -147,7 +147,7 @@ In-view "find in page" with highlight + match navigation. Scoped to already-load
 
 ## Up Next
 
-> **Member management work is absorbed into Phase 10.1 (Teams — Full CRUD)** — see the dedicated 10.1 task block below. The previously enumerated sidebar gear-icon + add-member-sheet tasks are reframed there.
+> **Member management work is split across Phase 10.1.1 (Teams — CRUD) and Phase 10.1.2 (Members — Management & Editing)**. Team entity CRUD (create, edit, archive) is in 10.1.1; member lifecycle (add, edit, roles, invites, stubs, inactivation, admin actions) is in 10.1.2. The previously enumerated sidebar gear-icon + add-member-sheet tasks are absorbed into 10.1.2.
 
 ### Web — Filter Scoping (FilterDropdown + API)
 Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
@@ -294,49 +294,152 @@ Reusable Identity component system (color + icon) for all entities. Design spec:
 
 Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
 
+Design references:
+- Team Modal: `docs/design/handoffs/team-modal/` — Settings tab, Members tab, archive flow
+- Member Edit Modal: `docs/design/handoffs/member-modal/` — member profile, stats, admin actions
+
 ---
 
-### Teams — Full CRUD (Phase 10.1)
-Closes the Teams cornerstone. Absorbs the previous "Web — Member Management (Sidebar)" Up-Next block.
+### Teams — CRUD & Management (Phase 10.1.1)
+Closes the Teams data entity. Ships the Team Modal with Settings tab functional; Members tab scaffolded as locked/placeholder until 10.1.2.
+
+**Schema (migration 008):**
+- [x] Add `description TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `notes TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `archived_at DATETIME` column to `teams` (nullable) — 2026-05-25
+- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
 
 **API — team-level:**
-- [ ] `GET /teams/:id` — full team detail (name, timezone, week start, member count, timeline count)
-- [ ] `PATCH /teams/:id` — rename, change timezone, change week start day (admin only)
-- [ ] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` (depends on Phase 9)
+- [x] `GET /teams/:id` — full team detail (name, description, notes, icon, color, archived_at) — 2026-05-25
+- [x] `PATCH /teams/:id` — update name, description, notes, icon, color (admin only) — 2026-05-25
+- [x] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` — 2026-05-25
+- [x] Update `POST /teams` to accept `description`, `notes`, `icon`, `color` — 2026-05-25
+- [x] Update `GET /teams` — add `?archived=true` to include archived teams — 2026-05-25
 
-**API — member-level:**
-- [ ] `POST /teams/:id/members` — add existing registered user by `userId`; admin only
-- [ ] `PATCH /teams/:id/members/:memberId` — update display name, color, role (admin for role; member can set own color/display name)
-- [ ] `DELETE /teams/:id/members/:memberId` — remove member; reject if last admin
-- [ ] `POST /teams/:id/participants` — create login-less participant (admin only; from 8.0 schema)
+**OpenAPI + types:**
+- [x] Update `Team` schema: add `description`, `notes`, `archivedAt` — 2026-05-25
+- [x] Update `CreateTeamInput` and `PatchTeamInput` request bodies — 2026-05-25
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-25
 
-**API — invite-level:**
-- [ ] `GET /teams/:id/invites` — list pending invites
-- [ ] `DELETE /teams/:id/invites/:inviteId` — cancel pending invite
+**Web — Team Modal (`<TeamModal>`):**
+- [x] Modal shell: portal, backdrop, panel (580px, dark theme), header, tab bar, scrollable content, footer — 2026-05-25
+- [x] Header: identity badge (36px square) + label ("NEW TEAM" / "EDIT TEAM") + team name + close button — 2026-05-25
+- [x] Tab bar: Settings (active) + Members (locked/placeholder in this phase) — 2026-05-25
+- [x] Members tab locked state: opacity 0.45, not-allowed cursor, tooltip "Save the team first to add members" — 2026-05-25
+- [x] Settings tab: `<IdentityPicker>` (square shape), name (required), description, notes (textarea) — 2026-05-25
+- [x] Footer: Archive team button (edit mode, left side), Cancel + Create team / Save changes (right side, team-color primary button) — 2026-05-25
+- [x] "Saved" banner: appears after new team creation, auto-dismisses after 3s — 2026-05-25
+- [x] New-team flow: Settings tab → Create team → banner → Members tab unlocks (placeholder content) — 2026-05-25
+- [x] Edit-team flow: pre-populated Settings tab, Members tab unlocked (placeholder) — 2026-05-25
+- [x] Archive confirmation dialog: replaces modal content, amber styling, icon, title, body, Cancel + Archive team buttons — 2026-05-25
 
-**Web — team creation & general settings:**
-- [ ] "New team" affordance in the team picker → create-team modal (name, timezone, week start)
-- [ ] `/settings/team/:id` General tab: name, timezone, week start, archive button
-- [ ] Team archive flow: confirmation dialog; archived teams surfaced in an "Archived teams" section
-- [ ] `/settings` route shell with left-nav (foundation lands here; sections fill in across 10.1–10.4)
+**Web — team picker + settings shell:**
+- [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
+- [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
+- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4) — 2026-05-25
+- [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
+- [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
 
-**Web — member management (`/settings/team/:id` Members tab):**
-- [ ] Member list with role, color swatch, last seen
-- [ ] Member row hover → gear icon → member config drawer: editable display name, `<IdentityWidget>` (circle shape, from Phase 9.6), role selector; save → `PATCH /teams/:id/members/:memberId`
-- [ ] "Add member" sheet with two modes:
-  - _Add existing user_ — search registered users not yet on this team → `POST /teams/:id/members` with `userId`
-  - _Send invite_ — email → `POST /teams/:id/invites`; pending row appears in list immediately
-- [ ] Pending invites list with cancel (×) → `DELETE /teams/:id/invites/:id`
-- [ ] Non-admin view of Members tab is read-only
-- [ ] Sidebar gear-icon member quick-edit drawer reuses Members-tab components
+**Testing & verification:**
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
+- [ ] Manual: create second team from picker, edit existing team, archive/unarchive
+- [ ] Manual: Team Modal opens in both modes with correct Settings tab behavior
+- [x] `docs/log.md` Phase 10.1.1 entry written — 2026-05-25
 
-**Web — participants (`/settings/team/:id` Participants tab):**
-- [ ] Create / rename / archive login-less participants
+---
+
+### Members — Management & Editing (Phase 10.1.2)
+Fills in the Team Modal Members tab and adds the Member Edit Modal. Full member lifecycle: add, edit, roles, stubs, invites, reusable invite link, stats, inactivation, superadmin actions. Depends on 10.1.1 (Team Modal shell).
+
+**Terminology:** "Participant" = login-less team member (backend: `user_id = NULL`). Design handoffs use "stub" but we use "Participant" — established in Phase 8.0, more user-friendly. "Inactivate" = `archived_at`-based disabling. "Super Admin" = `is_superadmin`.
+
+**Schema (migration 009):**
+- [ ] Add `archived_at DATETIME` column to `team_members` (nullable) — member inactivation
+- [ ] Add `archived_at DATETIME` column to `users` (nullable) — account-level inactivation
+- [ ] Add `invite_link_token TEXT UNIQUE` column to `teams` (nullable) — reusable invite link
+- [ ] Update `migrations_test.go` to assert new columns
+
+**API — member CRUD:**
+- [ ] `GET /teams/:id/members/:memberId` — full member detail with computed stats
+- [ ] `POST /teams/:id/members` — add existing registered user by `userId` (admin only)
+- [ ] `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; self for own name/color/icon)
+- [ ] `DELETE /teams/:id/members/:memberId` — remove from team; reject if last admin
+- [ ] `POST /teams/:id/members/:memberId/archive` — inactivate member (set `archived_at`)
+- [ ] `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clear `archived_at`)
+
+**API — participant CRUD:**
+- [ ] `POST /teams/:id/participants` — create login-less participant (admin only); name, icon, color, optional email
+- [ ] Participants managed via same PATCH/DELETE member endpoints (role always `member`, `user_id` stays NULL)
+
+**API — invites:**
+- [ ] `GET /teams/:id/invites` — list pending invites (email, sent date)
+- [ ] `DELETE /teams/:id/invites/:inviteId` — revoke/cancel pending invite
+- [ ] `POST /teams/:id/invite-link` — generate or regenerate reusable team invite link token
+- [ ] `GET /teams/:id/invite-link` — get current invite link (or null)
+- [ ] `DELETE /teams/:id/invite-link` — revoke current invite link
+- [ ] Update `POST /auth/register` to accept reusable invite link tokens alongside existing one-time tokens
+
+**API — member stats (computed per request, not stored):**
+- [ ] Timeline counts: active, archived (per member)
+- [ ] Activity counts: past due, running, upcoming, unscheduled, archived (date-relative, not status-relative)
+
+**API — superadmin actions:**
+- [ ] `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only, not applicable to participants)
+- [ ] `POST /users/:id/archive` — inactivate user account (superadmin only)
+- [ ] `POST /users/:id/unarchive` — reactivate user account (superadmin only)
+- [ ] `DELETE /users/:id` — hard delete user (superadmin only; zero active activities + single team only)
+- [ ] Auth middleware: reject login from archived users with clear error
+
+**OpenAPI + types:**
+- [ ] Add `MemberDetail` schema with stats, teams list, archived_at
+- [ ] Add invite link endpoints to spec
+- [ ] Add superadmin action endpoints to spec
+- [ ] Update `TeamMember` schema with `archivedAt`
+- [ ] Regenerate TypeScript types
+
+**Web — Team Modal Members tab:**
+- [ ] Search/add input: search users by name/email, or type email to invite; clear button
+- [ ] Search results dropdown: user matches with "Add" / "Already added" / "Invite pending"; email-only with "Invite"
+- [ ] Participant creation: expandable inline form — identity picker (circle), name (required), optional email, "Create participant" button (amber)
+- [ ] Member list: avatar (dashed border for stubs), name, "No login" pill (stubs, amber), email, `<RoleDropdown>`, remove (×)
+- [ ] `<RoleDropdown>`: Admin (teal), Member (muted), Participant (amber) — with descriptions; portal-rendered; role changes save immediately
+- [ ] Pending invitations section: rows with dashed-circle mail icon, email, sent date, "Revoke" button (red)
+- [ ] Invite link section: URL display + "Copy link" button (teal transition to "Copied!"), explanatory note below
+- [ ] Member count badge on Members tab label
+
+**Web — Member Edit Modal (`<MemberModal>`):**
+- [ ] Modal shell: portal, backdrop, 560px panel, header / scrollable content / footer
+- [ ] Header: `<IdentityPicker>` (40px circle), subline (participant/team member + viewer role label), name + badges ("No login" amber, "Super Admin" indigo)
+- [ ] Name + email row: 2-column grid; email read-only for participants ("No email — participant" placeholder)
+- [ ] Timeline stats: 2 chips — Active (teal border), Archived (muted border)
+- [ ] Activity stats: 5 chips — Past due (red if >0), Running (teal), Upcoming (blue), Unscheduled (muted), Archived (muted)
+- [ ] Joined / Last active: read-only pills with icons
+- [ ] Teams list: each row with team badge (square, initials), team name, role pill
+- [ ] Account section (team admin + non-participant): password reset button — shows "SMTP not configured" until Phase 14
+- [ ] Super Admin actions section (superadmin viewer only): Promote to Super Admin button (indigo), Inactivate (amber) / Delete (red) based on deletability
+- [ ] Promote confirmation dialog: indigo icon, title, body, Cancel + Promote; updates badge in header on confirm
+- [ ] Inactivate confirmation dialog: amber icon, title, body, Cancel + Inactivate; closes modal on confirm
+- [ ] Delete confirmation dialog: red icon, title, body, Cancel + Delete; closes modal on confirm
+- [ ] Footer: Cancel + Save changes (member identity color)
+- [ ] Deletable rule: zero active activities (past due + running + upcoming + unscheduled === 0) AND single team membership
+- [ ] Role permission matrix enforcement: team admin vs superadmin capability differences
+
+**Web — sidebar integration:**
+- [ ] Member rows: gear icon on hover → opens `<MemberModal>` for that member
+- [ ] Inactivated members: reduced opacity, "Inactive" indicator
+
+**Testing & verification:**
+- [ ] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+- [ ] Manual: add user, invite email, create participant, change roles, remove member
+- [ ] Manual: generate invite link, copy, register new user via link
+- [ ] Manual: Member Modal shows correct stats, admin actions work with confirmations
+- [ ] Manual: inactivated user cannot log in; reactivation restores access
+- [ ] `docs/log.md` Phase 10.1.2 entry written
 
 ---
 
 ### Team Statuses & Member Colors (Phase 10.2)
-API + UI bundled. Required before Phase 11.3 (Kanban).
+API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
 
 **API:**
 - [ ] `team_statuses` migration and repository
@@ -350,7 +453,7 @@ API + UI bundled. Required before Phase 11.3 (Kanban).
 **Web (`/settings/team/:id` Statuses tab):**
 - [ ] Drag-to-reorder list with inline rename + color picker
 - [ ] Delete-with-replacement dialog: lists affected event count, picker for replacement
-- [ ] Member identity picker in Members tab uses `<IdentityWidget>` (Phase 9.6) wired to color + icon fields
+- [ ] Member identity picker in Members tab uses `<IdentityWidget>` (Phase 9.6, wired in 10.1.2) confirmed working with color + icon fields
 
 ---
 
