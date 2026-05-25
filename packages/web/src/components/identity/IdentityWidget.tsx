@@ -8,8 +8,8 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import IdentityTrigger from './IdentityTrigger';
-import IdentityPicker from './IdentityPicker';
+import { IdentityTrigger } from './IdentityTrigger';
+import { IdentityPicker } from './IdentityPicker';
 import type { Identity } from './identity-constants';
 
 interface Props {
@@ -19,7 +19,7 @@ interface Props {
   onChange: (next: Identity) => void;
 }
 
-export default function IdentityWidget({ identity, name, shape = 'square', onChange }: Props) {
+export function IdentityWidget({ identity, name, shape = 'square', onChange }: Props) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLDivElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -29,7 +29,7 @@ export default function IdentityWidget({ identity, name, shape = 'square', onCha
     if (!triggerRef.current) return;
     const rect = triggerRef.current.getBoundingClientRect();
     const pickerW = 240;
-    const pickerH = 320; // approximate; may overflow downward
+    const pickerH = 320;
     const gap = 6;
 
     // Prefer opening below the trigger; flip up if it would clip the viewport bottom.
@@ -53,7 +53,6 @@ export default function IdentityWidget({ identity, name, shape = 'square', onCha
     return () => window.removeEventListener('resize', positionPicker);
   }, [open, positionPicker]);
 
-  // Close on click outside.
   useEffect(() => {
     if (!open) return;
     function handleClick(e: MouseEvent) {
@@ -95,7 +94,7 @@ export default function IdentityWidget({ identity, name, shape = 'square', onCha
             identity={identity}
             name={name}
             shape={shape}
-            onChange={next => { onChange(next); }}
+            onChange={onChange}
           />
         </div>,
         document.body,

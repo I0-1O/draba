@@ -6,16 +6,16 @@
  * Section 3: Icon grid — 64 Lucide icons in an 8×8 grid.
  *
  * All changes fire onChange immediately — no save/cancel.
+ * onChange receives hex color values (e.g. '#288C9B'), not palette name IDs.
  */
 
 import * as LucideIcons from 'lucide-react';
 import { Check } from 'lucide-react';
-import Badge from './Badge';
+import { Badge } from './Badge';
 import type { Identity } from './identity-constants';
 import {
   IDENTITY_COLORS,
   IDENTITY_ICONS,
-  resolveColorHex,
   iconIdToPascal,
 } from './identity-constants';
 
@@ -27,10 +27,10 @@ interface Props {
 }
 
 const NAME_OPTIONS = [
-  { iconId: '__none__',       label: 'None' },
-  { iconId: '__name_1__',     label: '1 letter' },
-  { iconId: '__name_2__',     label: '2 letters' },
-  { iconId: '__name_words__', label: '1+1 words' },
+  { icon: '__none__',       label: 'None' },
+  { icon: '__name_1__',     label: '1 letter' },
+  { icon: '__name_2__',     label: '2 letters' },
+  { icon: '__name_words__', label: '1+1 words' },
 ] as const;
 
 const SEC_LABEL: React.CSSProperties = {
@@ -42,16 +42,16 @@ const SEC_LABEL: React.CSSProperties = {
   marginBottom: 8,
 };
 
-export default function IdentityPicker({ identity, name, shape = 'square', onChange }: Props) {
-  const isNameOption = NAME_OPTIONS.some(o => o.iconId === identity.iconId);
-  const isIconOption = !isNameOption && identity.iconId !== '__none__';
+export function IdentityPicker({ identity, name, shape = 'square', onChange }: Props) {
+  const isNameOption = NAME_OPTIONS.some(o => o.icon === identity.icon);
+  const isIconOption = !isNameOption && identity.icon !== '__none__';
 
-  function setColor(colorId: string) {
-    onChange({ ...identity, colorId });
+  function setColor(hex: string) {
+    onChange({ ...identity, color: hex });
   }
 
-  function setIconId(iconId: string) {
-    onChange({ ...identity, iconId });
+  function setIcon(icon: string) {
+    onChange({ ...identity, icon });
   }
 
   return (
@@ -71,13 +71,13 @@ export default function IdentityPicker({ identity, name, shape = 'square', onCha
         <div style={SEC_LABEL}>Color</div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 4 }}>
           {IDENTITY_COLORS.map(c => {
-            const selected = identity.colorId === c.id;
+            const selected = identity.color === c.hex;
             return (
               <button
                 key={c.id}
                 type="button"
                 title={c.name}
-                onClick={() => setColor(c.id)}
+                onClick={() => setColor(c.hex)}
                 style={{
                   width: 22,
                   height: 22,
@@ -107,14 +107,14 @@ export default function IdentityPicker({ identity, name, shape = 'square', onCha
         <div style={SEC_LABEL}>Label</div>
         <div style={{ display: 'flex', gap: 6 }}>
           {NAME_OPTIONS.map(opt => {
-            const selected = identity.iconId === opt.iconId;
-            const accentHex = resolveColorHex(identity.colorId);
+            const selected = identity.icon === opt.icon;
+            const accentHex = identity.color;
             return (
               <button
-                key={opt.iconId}
+                key={opt.icon}
                 type="button"
                 title={opt.label}
-                onClick={() => setIconId(opt.iconId)}
+                onClick={() => setIcon(opt.icon)}
                 style={{
                   flex: 1,
                   display: 'flex',
@@ -130,7 +130,7 @@ export default function IdentityPicker({ identity, name, shape = 'square', onCha
                 }}
               >
                 <Badge
-                  identity={{ colorId: identity.colorId, iconId: opt.iconId }}
+                  identity={{ color: identity.color, icon: opt.icon }}
                   name={name}
                   shape={shape}
                   size={20}
@@ -153,14 +153,14 @@ export default function IdentityPicker({ identity, name, shape = 'square', onCha
             const IconComponent = LucideIcons[pascalName] as React.ComponentType<{ size: number; strokeWidth: number }> | undefined;
             if (!IconComponent) return null;
 
-            const selected = identity.iconId === iconId && isIconOption;
-            const accentHex = resolveColorHex(identity.colorId);
+            const selected = identity.icon === iconId && isIconOption;
+            const accentHex = identity.color;
             return (
               <button
                 key={`${iconId}-${i}`}
                 type="button"
                 title={iconId}
-                onClick={() => setIconId(iconId)}
+                onClick={() => setIcon(iconId)}
                 style={{
                   width: 24,
                   height: 24,

@@ -15,10 +15,8 @@ export interface Member {
   id: string;
   name: string;
   initials: string;
-  /** Hex color resolved from the member's identity colorId (or legacy fallback). */
+  /** Hex color for display (e.g. '#288C9B'). Falls back to palette slot when not set. */
   color: string;
-  /** Identity color ID (e.g. "teal"). Present when the member has an identity record. */
-  colorId?: string;
 }
 
 // ── Legacy types — kept for ActivityPanel until Phase 8.2 rewrites it ──────────

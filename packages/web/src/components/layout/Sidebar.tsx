@@ -14,7 +14,7 @@ import {
   Megaphone,
   Plug,
 } from 'lucide-react';
-import Badge from '@/components/identity/Badge';
+import { Badge } from '@/components/identity/Badge';
 
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 360;
@@ -133,7 +133,7 @@ function TimelineItem({ timeline, active, collapsed, showDate = true, onClick, o
         }}
       >
         <Badge
-          identity={{ colorId: timeline.color, iconId: '__none__' }}
+          identity={{ color: timeline.color, icon: '__none__' }}
           name={timeline.name}
           shape="square"
           size={20}
@@ -557,7 +557,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                       >
                         <Badge
-                          identity={{ colorId: m.color, iconId: '__name_words__' }}
+                          identity={{ color: m.color, icon: '__name_words__' }}
                           name={m.name}
                           shape="circle"
                           size={20}

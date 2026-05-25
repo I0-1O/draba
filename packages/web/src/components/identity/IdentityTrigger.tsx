@@ -6,9 +6,8 @@
  */
 
 import { ChevronDown } from 'lucide-react';
-import Badge from './Badge';
+import { Badge } from './Badge';
 import type { Identity } from './identity-constants';
-import { resolveColorHex } from './identity-constants';
 
 interface Props {
   identity: Identity;
@@ -18,8 +17,8 @@ interface Props {
   onClick?: () => void;
 }
 
-export default function IdentityTrigger({ identity, name, shape = 'square', open = false, onClick }: Props) {
-  const accentColor = resolveColorHex(identity.colorId);
+export function IdentityTrigger({ identity, name, shape = 'square', open = false, onClick }: Props) {
+  const accentColor = identity.color;
 
   return (
     <button

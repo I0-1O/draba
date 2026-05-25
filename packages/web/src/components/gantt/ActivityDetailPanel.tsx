@@ -10,7 +10,7 @@
 import { useState, useEffect } from 'react'
 import { X, Trash2, ArrowRight, Loader2, Tag, ChevronDown } from 'lucide-react'
 import MemberAvatar from '@/components/MemberAvatar'
-import IdentityWidget from '@/components/identity/IdentityWidget'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import type { Identity } from '@/components/identity/identity-constants'
 import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
 import type { components } from '@draba/shared'
@@ -95,8 +95,8 @@ export default function ActivityDetailPanel({ event, open, members, teamId, onCl
   const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
   const [allDay, setAllDay] = useState(event?.allDay ?? false)
   const [identity, setIdentity] = useState<Identity>({
-    colorId: event?.color ?? 'teal',
-    iconId: event?.icon ?? '__none__',
+    color: event?.color ?? '#288C9B',
+    icon: event?.icon ?? '__none__',
   })
   const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
   const [location, setLocation] = useState(event?.location ?? '')
@@ -111,7 +111,7 @@ export default function ActivityDetailPanel({ event, open, members, teamId, onCl
     setStartDate(toDateInput(event.startAt))
     setEndDate(toDateInput(event.endAt))
     setAllDay(event.allDay)
-    setIdentity({ colorId: event.color ?? 'teal', iconId: event.icon ?? '__none__' })
+    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
     setAssignedIds(event.assignedMemberIds ?? [])
     setLocation(event.location ?? '')
     setUrl(event.url ?? '')
@@ -160,7 +160,7 @@ export default function ActivityDetailPanel({ event, open, members, teamId, onCl
 
   function handleIdentityChange(next: Identity) {
     setIdentity(next)
-    save({ color: next.colorId, icon: next.iconId })
+    save({ color: next.color, icon: next.icon })
   }
 
   function toggleAssignee(memberId: string) {

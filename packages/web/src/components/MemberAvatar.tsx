@@ -6,9 +6,8 @@
  * unchanged so all existing call sites continue to work without modification.
  */
 
-import Badge from './identity/Badge';
+import { Badge } from './identity/Badge';
 import type { Member } from '../types';
-import { hexToColorId } from './identity/identity-constants';
 
 interface Props {
   member: Member | undefined;
@@ -18,7 +17,6 @@ interface Props {
 
 export default function MemberAvatar({ member, size = 28, className }: Props) {
   if (!member) {
-    // Skeleton / undefined fallback: muted circle with no content.
     return (
       <div
         className={className}
@@ -33,12 +31,9 @@ export default function MemberAvatar({ member, size = 28, className }: Props) {
     );
   }
 
-  // Resolve colorId: prefer explicit colorId, else map legacy hex.
-  const colorId = member.colorId ?? hexToColorId(member.color);
-
   return (
     <Badge
-      identity={{ colorId, iconId: '__name_words__' }}
+      identity={{ color: member.color, icon: '__name_words__' }}
       name={member.name}
       shape="circle"
       size={size}

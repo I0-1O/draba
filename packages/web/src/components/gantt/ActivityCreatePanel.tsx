@@ -8,7 +8,7 @@
 import { useState } from 'react'
 import { X, ArrowRight, Loader2 } from 'lucide-react'
 import MemberAvatar from '@/components/MemberAvatar'
-import IdentityWidget from '@/components/identity/IdentityWidget'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import type { Identity } from '@/components/identity/identity-constants'
 import { useCreateActivity } from '@/hooks/useTeamActivities'
 import type { Member } from '@/types'
@@ -49,7 +49,7 @@ export default function ActivityCreatePanel({
   const [description, setDescription] = useState('')
   const [startDate, setStartDate] = useState(defaultStart)
   const [endDate, setEndDate] = useState(defaultEnd)
-  const [identity, setIdentity] = useState<Identity>({ colorId: 'teal', iconId: '__none__' })
+  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
   const [assignedIds, setAssignedIds] = useState<string[]>(
     defaultMemberId ? [defaultMemberId] : [],
   )
@@ -72,8 +72,8 @@ export default function ActivityCreatePanel({
         startAt: `${startDate}T00:00:00Z`,
         endAt: `${endDate}T00:00:00Z`,
         description: description.trim() || null,
-        color: identity.colorId,
-        icon: identity.iconId,
+        color: identity.color,
+        icon: identity.icon,
         assignedMemberIds: assignedIds,
       },
       { onSuccess: onClose },

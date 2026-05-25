@@ -89,15 +89,12 @@ function initialsFrom(name: string): string {
 
 function toMember(m: TeamMemberWithUser, index: number): Member {
   const name = m.displayName || m.email || 'Unknown';
-  // colorId: prefer API colorId; fall back to palette slot.
-  const colorId = m.color ?? null;
   const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
   return {
     id: m.id,
     name,
     initials: initialsFrom(name),
-    colorId: colorId ?? undefined,
-    color: colorId ? resolveColorHex(colorId) : fallbackHex,
+    color: resolveColorHex(m.color) || fallbackHex,
   };
 }
 
@@ -142,7 +139,7 @@ function toRichActivity(
     startCol,
     span,
     color,
-    iconId: ev.icon ?? undefined,
+    icon: ev.icon ?? undefined,
     members,
     isChild: Boolean(ev.parentActivityId),
     startAtMs: new Date(ev.startAt).getTime(),

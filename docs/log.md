@@ -2,6 +2,35 @@
 
 ---
 
+## 2026-05-24 — Phase 9.6 post-review: hex storage + named exports + tests
+
+**Architecture change — hex colors stored in DB:**
+- Added migration 007: converts palette name IDs written by migration 006 back to canonical hex values (e.g. `'teal'` → `'#288C9B'`). Hex is the durable ground truth; palette names are UI-only.
+- `Identity` interface: renamed `colorId` → `color` (hex) and `iconId` → `icon` throughout.
+- `IdentityPicker` now fires `onChange` with the selected hex value directly, not the palette name ID.
+- Removed `hexToColorId()` and the `LEGACY_HEX_TO_ID` map from `identity-constants.ts`; `resolveColorHex` simplified to hex pass-through with colorId backward-compat fallback.
+- `Member.colorId` removed from types — `Member.color` is always hex.
+- `GanttActivity.iconId` renamed to `icon`; `GanttView.toMember` no longer sets `colorId`.
+
+**Named exports:** All five identity components switched from `export default` to named exports (`Badge`, `IdentityTrigger`, `IdentityPicker`, `IdentityWidget`). All import sites updated.
+
+**Tests (blocker fixes):**
+- `migrations_test.go`: added `TestMigrate_006_007_ColorConversion` (verifies the full 006→007 hex conversion round-trip) and `TestMigrate_HexStorageRoundTrip` (verifies hex values survive storage unchanged).
+- `identity-constants.test.ts` (new): 22 unit tests covering `resolveColorHex`, `iconIdToPascal`, `getNameText`, and the `IDENTITY_COLORS` palette invariants.
+
+All checks pass: `go test ./...`, `golangci-lint run`, `pnpm --filter web lint`, `pnpm --filter web test`.
+
+---
+
+## 2026-05-24 — /test-phase 9.5
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (0 fail, 0 skip)
+- Smoke target: http://epcot.lan:8081
+- Notes: ws-smoke code-verified (no wscat available); 2 cosmetic residuals in web (stale JSDoc in useWebSocket.ts:7, `matchEvents` function name in findMatcher.ts:27 — no runtime impact)
+
+---
+
 ## 2026-05-24 — Phase 9.6: Identity System (Color + Icon)
 
 ### What was built

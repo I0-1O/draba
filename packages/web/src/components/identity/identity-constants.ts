@@ -1,15 +1,16 @@
 /**
  * Identity system constants — the single source of truth for the 16-color palette,
- * 64-icon library, and legacy hex→colorId migration mapping.
+ * 64-icon library, and color resolution helpers.
  *
- * The `Identity` type is the data model for every entity's visual fingerprint.
- * All color values stored in the DB are color IDs (e.g. "teal"), not hex values.
+ * Colors are stored as hex values (e.g. '#288C9B') in the DB and throughout the
+ * system. The palette names are UI-only — swapping a palette color never requires
+ * a DB migration, only a change here.
  */
 
 /** A color + icon pair that visually identifies an entity. */
 export interface Identity {
-  /** One of the 16 IDENTITY_COLORS ids. */
-  colorId: string;
+  /** Hex color string, e.g. '#288C9B'. */
+  color: string;
   /**
    * Lucide icon id (kebab-case), OR one of the special name tokens:
    *   '__name_1__'     → first letter of entity name
@@ -17,7 +18,7 @@ export interface Identity {
    *   '__name_words__' → first letter of each word
    *   '__none__'       → color only, no content
    */
-  iconId: string;
+  icon: string;
 }
 
 export interface IdentityColor {
@@ -72,58 +73,28 @@ export type SpecialIconId = typeof SPECIAL_ICON_IDS[number];
 
 // ── Default identities per entity type ────────────────────────────────────────
 
-export const DEFAULT_ACTIVITY_IDENTITY: Identity  = { colorId: 'teal', iconId: '__none__' };
-export const DEFAULT_TIMELINE_IDENTITY: Identity  = { colorId: 'teal', iconId: '__none__' };
-export const DEFAULT_TEAM_IDENTITY: Identity      = { colorId: 'teal', iconId: '__name_2__' };
-export const DEFAULT_MEMBER_IDENTITY: Identity    = { colorId: 'teal', iconId: '__name_words__' };
+export const DEFAULT_ACTIVITY_IDENTITY: Identity  = { color: '#288C9B', icon: '__none__' };
+export const DEFAULT_TIMELINE_IDENTITY: Identity  = { color: '#288C9B', icon: '__none__' };
+export const DEFAULT_TEAM_IDENTITY: Identity      = { color: '#288C9B', icon: '__name_2__' };
+export const DEFAULT_MEMBER_IDENTITY: Identity    = { color: '#288C9B', icon: '__name_words__' };
 
 // ── Color resolution ──────────────────────────────────────────────────────────
 
+/** Palette name → hex lookup for resolving legacy colorId strings. */
 const COLOR_BY_ID: Record<string, string> = Object.fromEntries(
   IDENTITY_COLORS.map(c => [c.id, c.hex]),
 );
 
-/** Legacy hex values stored before migration 006. Maps to the nearest color ID. */
-const LEGACY_HEX_TO_ID: Record<string, string> = {
-  '#288C9B': 'teal',
-  '#F29E4C': 'amber',
-  '#5BC0DE': 'cyan',
-  '#2ECC71': 'green',
-  '#9B59B6': 'violet',
-  '#E74C3C': 'rose',
-  '#5C6BC0': 'indigo',
-  '#8BC34A': 'lime',
-  // lowercase variants
-  '#288c9b': 'teal',
-  '#f29e4c': 'amber',
-  '#5bc0de': 'cyan',
-  '#2ecc71': 'green',
-  '#9b59b6': 'violet',
-  '#e74c3c': 'rose',
-  '#5c6bc0': 'indigo',
-  '#8bc34a': 'lime',
-};
-
 /**
- * Resolves a color value (either a color ID like "teal" or a legacy hex like
- * "#288C9B") to its hex string for use as a CSS background-color.
- * Falls back to teal when the value is unrecognised or absent.
+ * Resolves a color value to a hex string safe to use as CSS background-color.
+ * Accepts hex values (pass-through), palette name IDs (backward compat for
+ * any rows written before migration 007), and null/undefined (falls back to teal).
  */
 export function resolveColorHex(colorOrId: string | null | undefined): string {
-  if (!colorOrId) return COLOR_BY_ID['teal'];
-  if (colorOrId.startsWith('#')) {
-    const mappedId = LEGACY_HEX_TO_ID[colorOrId];
-    return mappedId ? COLOR_BY_ID[mappedId] : colorOrId;
-  }
-  return COLOR_BY_ID[colorOrId] ?? COLOR_BY_ID['teal'];
-}
-
-/**
- * Maps a legacy hex color to its identity color ID.
- * Returns 'teal' when the hex is unrecognised.
- */
-export function hexToColorId(hex: string): string {
-  return LEGACY_HEX_TO_ID[hex] ?? LEGACY_HEX_TO_ID[hex.toLowerCase()] ?? 'teal';
+  const fallback = '#288C9B';
+  if (!colorOrId) return fallback;
+  if (colorOrId.startsWith('#')) return colorOrId;
+  return COLOR_BY_ID[colorOrId] ?? fallback;
 }
 
 // ── Icon name helpers ─────────────────────────────────────────────────────────
@@ -143,18 +114,17 @@ export function iconIdToPascal(iconId: string): string {
  * Derives the text content that should appear inside a name-based badge.
  * Returns an empty string for Lucide icons or '__none__'.
  */
-export function getNameText(iconId: string, name: string): string {
+export function getNameText(icon: string, name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);
-  if (iconId === '__name_1__') return (words[0]?.[0] ?? '').toUpperCase();
-  if (iconId === '__name_2__') return name.slice(0, 2).toUpperCase();
-  if (iconId === '__name_words__') {
+  if (icon === '__name_1__') return (words[0]?.[0] ?? '').toUpperCase();
+  if (icon === '__name_2__') return name.slice(0, 2).toUpperCase();
+  if (icon === '__name_words__') {
     return words.map(w => w[0]).join('').toUpperCase().slice(0, 3);
   }
   return '';
 }
 
 // ── ACTIVITY_COLORS / MEMBER_COLORS re-exports ────────────────────────────────
-// These replace the legacy hex arrays in types/index.ts.
 
 /** Activity color palette as hex strings, in IDENTITY_COLORS order. */
 export const ACTIVITY_COLORS: string[] = IDENTITY_COLORS.map(c => c.hex);

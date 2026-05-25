@@ -20,7 +20,7 @@
 
 import { useRef, useState, useCallback, useEffect } from 'react';
 import MemberAvatar from '../MemberAvatar';
-import Badge from '../identity/Badge';
+import { Badge } from '../identity/Badge';
 import EmptyState from '../shared/EmptyState';
 import type { Member } from '../../types';
 import type { ColumnDef } from './granularity';
@@ -41,10 +41,10 @@ export interface GanttActivity {
   startCol: number;
   /** Fractional column span. */
   span: number;
-  /** Color ID (e.g. "teal") or resolved hex. Used for bar background and badge. */
+  /** Hex color for bar background and badge. */
   color: string;
   /** Icon ID from the activity's identity, if set. */
-  iconId?: string;
+  icon?: string;
   members: Member[];
   isChild: boolean;
 }
@@ -602,7 +602,7 @@ export default function GanttGrid({
                   }}
                 >
                   <Badge
-                    identity={{ colorId: ev.color, iconId: ev.iconId ?? '__none__' }}
+                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
                     name={ev.title}
                     shape="square"
                     size={20}
