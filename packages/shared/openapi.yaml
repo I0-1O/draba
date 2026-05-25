@@ -27,7 +27,7 @@ components:
 
     User:
       type: object
-      required: [id, email, displayName, createdAt, updatedAt]
+      required: [id, email, displayName, isSuperadmin, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -39,6 +39,8 @@ components:
         avatarUrl:
           type: string
           nullable: true
+        isSuperadmin:
+          type: boolean
         createdAt:
           type: string
           format: date-time

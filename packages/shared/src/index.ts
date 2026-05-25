@@ -500,6 +500,7 @@ export interface components {
             email: string;
             displayName: string;
             avatarUrl?: string | null;
+            isSuperadmin: boolean;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
