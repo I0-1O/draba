@@ -19,7 +19,7 @@ import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { useMyTeams, useTeamTimelines, useTeamActivitySync, useUnarchiveTeam } from '@/hooks/useTeamActivities'
+import { useMyTeams, useTeamTimelines, useTeamActivitySync, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities'
 import TeamModal from '@/components/TeamModal'
 import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
@@ -118,8 +118,28 @@ function DashboardShell() {
   const activeTeams = allTeams.filter(t => !t.archivedAt)
   const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
 
-  const teamId = activeTeams[0]?.id ?? ''
-  const activeTeam = activeTeams[0]
+  // Explicit team selection state — initialized from global prefs or first active team.
+  const [activeTeamId, setActiveTeamId] = useState<string>('')
+  const teamIdInitialized = useRef(false)
+  useEffect(() => {
+    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
+    teamIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
+    const exists = saved && activeTeams.some(t => t.id === saved)
+    setActiveTeamId(exists ? saved : activeTeams[0].id)
+  }, [activeTeams, globalPrefsSettled, globalPrefMap])
+
+  const activeTeam = activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0]
+  const teamId = activeTeam?.id ?? ''
+
+  // Check whether the current user is an admin of the active team.
+  const { data: teamMembers = [] } = useTeamMembers(teamId)
+  const userId = (user as { id?: string } | null)?.id ?? ''
+  const canEditTeam = teamMembers.some(m => m.userId === userId && m.role === 'admin')
+
+  const handleSelectTeam = useCallback((id: string) => {
+    setActiveTeamId(id)
+  }, [])
 
   const { data: timelines = [] } = useTeamTimelines(teamId)
   const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
@@ -217,7 +237,10 @@ function DashboardShell() {
           setCreateDefaults({ start: today, end: today, memberId: null })
         }}
         activeTeam={activeTeam}
+        activeTeams={activeTeams}
         archivedTeams={archivedTeams}
+        canEditTeam={canEditTeam}
+        onSelectTeam={handleSelectTeam}
         onNewTeam={() => { setEditingTeam(null); setTeamModalMode('new'); }}
         onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
         onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
@@ -397,6 +420,7 @@ function DashboardShell() {
           mode={teamModalMode}
           team={editingTeam ?? undefined}
           onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
+          onTeamCreated={created => setActiveTeamId(created.id)}
         />
       )}
     </div>

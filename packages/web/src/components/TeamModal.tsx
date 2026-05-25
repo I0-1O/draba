@@ -1,8 +1,11 @@
 /**
  * TeamModal — create / edit a team in a portal-rendered modal.
  *
- * Phase 10.1.1: Settings tab is fully functional; Members tab is a locked
- * placeholder until Phase 10.1.2 ships the member management surface.
+ * The Members tab is rendered but locked (not hidden) so the tab bar layout
+ * is stable — Phase 10.1.2 can slot in real content without shifting surrounding UI.
+ *
+ * Identity and name live in the modal header so they remain visible while
+ * the user scrolls the Settings tab body.
  */
 
 import { useState, useEffect, useRef } from 'react';
@@ -20,6 +23,8 @@ interface Props {
   mode: 'new' | 'edit';
   team?: Team;
   onClose: () => void;
+  /** Called with the newly created team immediately after server confirmation. */
+  onTeamCreated?: (team: Team) => void;
 }
 
 type Tab = 'settings' | 'members';
@@ -94,19 +99,20 @@ const labelStyle: React.CSSProperties = {
 
 // ── Main component ──────────────────────────────────────────────────────────
 
-export default function TeamModal({ mode, team, onClose }: Props) {
+export default function TeamModal({ mode, team, onClose, onTeamCreated }: Props) {
   const [tab, setTab] = useState<Tab>('settings');
   const [teamSaved, setTeamSaved] = useState(mode === 'edit');
   const [showBanner, setShowBanner] = useState(false);
   const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
+  const [nameEditing, setNameEditing] = useState(false);
   const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
 
   const [identity, setIdentity] = useState<Identity>(resolveIdentity(team));
   const [name, setName] = useState(team?.name ?? '');
   const [description, setDescription] = useState(team?.description ?? '');
   const [notes, setNotes] = useState(team?.notes ?? '');
 
-  // Saved team id after creation — needed for subsequent edits within the modal.
   const [savedTeamId, setSavedTeamId] = useState(team?.id ?? '');
 
   const createTeam = useCreateTeam();
@@ -114,20 +120,33 @@ export default function TeamModal({ mode, team, onClose }: Props) {
   const archiveTeam = useArchiveTeam();
   const unarchiveTeam = useUnarchiveTeam();
 
+  const isArchived = Boolean(team?.archivedAt);
   const busy = createTeam.isPending || updateTeam.isPending || archiveTeam.isPending || unarchiveTeam.isPending;
 
   useEffect(() => {
     return () => { if (bannerTimer.current) clearTimeout(bannerTimer.current); };
   }, []);
 
-  // Close on Escape
+  // Focus name input when entering edit mode.
+  useEffect(() => {
+    if (nameEditing) nameInputRef.current?.focus();
+  }, [nameEditing]);
+
+  // Open in name-editing mode for new teams so the user can type right away.
+  useEffect(() => {
+    if (mode === 'new') setNameEditing(true);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        if (nameEditing) { setNameEditing(false); return; }
+        onClose();
+      }
     }
     document.addEventListener('keydown', handleKey);
     return () => document.removeEventListener('keydown', handleKey);
-  }, [onClose]);
+  }, [onClose, nameEditing]);
 
   function handleSave() {
     const trimmed = name.trim();
@@ -147,6 +166,7 @@ export default function TeamModal({ mode, team, onClose }: Props) {
           setSavedTeamId(created.id);
           setTeamSaved(true);
           setShowBanner(true);
+          onTeamCreated?.(created);
           bannerTimer.current = setTimeout(() => setShowBanner(false), 3000);
         },
       });
@@ -163,15 +183,19 @@ export default function TeamModal({ mode, team, onClose }: Props) {
     archiveTeam.mutate(tid, { onSuccess: onClose });
   }
 
+  function handleRestore() {
+    const tid = savedTeamId || team?.id;
+    if (!tid) return;
+    unarchiveTeam.mutate(tid, { onSuccess: onClose });
+  }
+
   const teamColor = identity.color;
   const isNew = mode === 'new';
   const primaryLabel = teamSaved ? 'Save changes' : 'Create team';
-
   const membersLocked = !teamSaved;
 
   return createPortal(
     <div
-      onClick={onClose}
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -179,7 +203,6 @@ export default function TeamModal({ mode, team, onClose }: Props) {
       }}
     >
       <div
-        onClick={e => e.stopPropagation()}
         style={{
           width: 580, maxHeight: '90vh', background: '#21262d',
           border: '1px solid #30363d', borderRadius: 14,
@@ -187,19 +210,49 @@ export default function TeamModal({ mode, team, onClose }: Props) {
           display: 'flex', flexDirection: 'column', overflow: 'hidden',
         }}
       >
-        {/* Header */}
+        {/* Header — identity widget + editable name */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: 12,
           padding: '16px 20px', borderBottom: '1px solid #30363d',
         }}>
           <IdentityWidget identity={identity} name={name} shape="square" onChange={setIdentity} />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.6px', textTransform: 'uppercase' }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.6px', textTransform: 'uppercase', marginBottom: 3 }}>
               {isNew ? 'New team' : 'Edit team'}
             </div>
-            <div style={{ fontSize: 16, fontWeight: 600, color: name ? '#e6edf3' : '#484f58', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {name || 'Team name…'}
-            </div>
+            {nameEditing ? (
+              <input
+                ref={nameInputRef}
+                value={name}
+                onChange={e => setName(e.target.value)}
+                onBlur={() => setNameEditing(false)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') { setNameEditing(false); }
+                  // Escape is handled globally above
+                }}
+                placeholder="Team name…"
+                style={{
+                  background: 'transparent', border: 'none',
+                  borderBottom: '1px solid #484f58',
+                  color: '#e6edf3', fontSize: 16, fontWeight: 600,
+                  fontFamily: 'inherit', width: '100%', outline: 'none',
+                  padding: '0 0 2px 0',
+                }}
+              />
+            ) : (
+              <div
+                onClick={() => setNameEditing(true)}
+                title="Click to edit name"
+                style={{
+                  fontSize: 16, fontWeight: 600,
+                  color: name ? '#e6edf3' : '#484f58',
+                  cursor: 'text',
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}
+              >
+                {name || 'Click to name this team…'}
+              </div>
+            )}
           </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 4, display: 'flex' }}>
             <X size={18} />
@@ -263,33 +316,11 @@ export default function TeamModal({ mode, team, onClose }: Props) {
             />
           ) : tab === 'settings' ? (
             <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
-              {/* Identity field */}
-              <div>
-                <label style={labelStyle}>Icon &amp; color</label>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <IdentityWidget identity={identity} name={name} shape="square" onChange={setIdentity} />
-                  <span style={{ fontSize: 12, color: '#484f58' }}>Click to change icon &amp; color</span>
-                </div>
-              </div>
-
-              {/* Name */}
-              <div>
-                <label style={labelStyle}>
-                  Name <span style={{ color: '#ef4444' }}>*</span>
-                </label>
-                <input
-                  autoFocus
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  placeholder="Team name…"
-                  style={inputStyle}
-                />
-              </div>
-
               {/* Description */}
               <div>
                 <label style={labelStyle}>Description</label>
                 <input
+                  autoFocus={mode === 'edit'}
                   value={description}
                   onChange={e => setDescription(e.target.value)}
                   placeholder="Short description of this team…"
@@ -311,12 +342,12 @@ export default function TeamModal({ mode, team, onClose }: Props) {
 
               {createTeam.isError && (
                 <div style={{ fontSize: 12, color: '#ef4444' }}>
-                  {(createTeam.error as Error).message}
+                  Something went wrong — refer to logs for details.
                 </div>
               )}
               {updateTeam.isError && (
                 <div style={{ fontSize: 12, color: '#ef4444' }}>
-                  {(updateTeam.error as Error).message}
+                  Something went wrong — refer to logs for details.
                 </div>
               )}
             </div>
@@ -338,17 +369,33 @@ export default function TeamModal({ mode, team, onClose }: Props) {
         }}>
           <div>
             {mode === 'edit' && !showArchiveConfirm && (
-              <button
-                onClick={() => setShowArchiveConfirm(true)}
-                style={{
-                  background: 'none', border: '1px solid #30363d', color: '#484f58',
-                  fontSize: 12, padding: '6px 14px', borderRadius: 7, cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit',
-                }}
-              >
-                <Archive size={13} />
-                Archive team
-              </button>
+              isArchived ? (
+                <button
+                  onClick={handleRestore}
+                  disabled={busy}
+                  style={{
+                    background: 'none', border: '1px solid #30363d', color: '#8b949e',
+                    fontSize: 12, padding: '6px 14px', borderRadius: 7, cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit',
+                    opacity: busy ? 0.6 : 1,
+                  }}
+                >
+                  <Archive size={13} />
+                  Restore team
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowArchiveConfirm(true)}
+                  style={{
+                    background: 'none', border: '1px solid #30363d', color: '#484f58',
+                    fontSize: 12, padding: '6px 14px', borderRadius: 7, cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit',
+                  }}
+                >
+                  <Archive size={13} />
+                  Archive team
+                </button>
+              )
             )}
           </div>
           <div style={{ display: 'flex', gap: 8 }}>

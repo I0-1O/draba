@@ -2,6 +2,40 @@
 
 ---
 
+## 2026-05-25 — Phase 10.1.1 post-/test-phase fixes
+
+Six issues found during /test-phase 10.1.1 review and UX testing.
+
+**1. Non-admin UI gating (blocker):**
+- Added `canEditTeam` prop to `Sidebar` derived from `useTeamMembers` in DashboardPage.
+- `TeamRow` component (new) only renders the gear/edit icon when `isActive && canEdit`.
+- Non-admin members no longer see the team settings affordance.
+
+**2. New team auto-selects in sidebar:**
+- Added `activeTeamId` state to DashboardPage (was hardcoded to `activeTeams[0]`).
+- `TeamModal.onTeamCreated` callback sets `activeTeamId(created.id)` immediately on server confirmation.
+- Sidebar now receives `activeTeams` (all non-archived) via new prop and maps them all as clickable rows; `onSelectTeam` switches the active team.
+
+**3. Same-name teams now allowed:**
+- `handleCreateTeam` and `handleUpdateTeam` append `-<id[:8]>` to the slug, guaranteeing uniqueness regardless of name.
+- `TestCreateTeam_DuplicateSlug` renamed `TestCreateTeam_SameNameAllowed` and updated to assert both 201 + distinct slugs.
+
+**4. Sidebar identity reads from API:**
+- `TeamRow` Badge now uses `team.icon ?? '__name_1__'` and `team.color` (was hardcoded `'__name_1__'` for all rows).
+- Archived team Badge likewise fixed.
+
+**5. Removed duplicate identity widget from modal:**
+- Removed the "Icon & color" `IdentityWidget` + label from the Settings tab body (it was a second copy of the header widget).
+
+**6. Removed duplicate name field; header name is now click-to-edit:**
+- Removed the "Name" input from the Settings tab body.
+- Header name area is now an inline editable input: new teams open in editing mode; existing teams click-to-edit.
+- Escape closes the name input; Enter confirms.
+
+**Checks:** `go test ./...` all pass · `golangci-lint run` clean · `pnpm --filter web lint` clean · UI verified via preview.
+
+---
+
 ## 2026-05-25 — Phase 10.1.1: Teams — CRUD & Management
 
 **Migration 008** (`008_team_crud.sql`): added `description TEXT`, `notes TEXT`, and `archived_at DATETIME` columns to `teams`.
@@ -32,6 +66,10 @@
 **Checks:** `golangci-lint run` clean · `go test ./...` passes · `pnpm --filter web lint` clean.
 
 **Needs manual verification on Docker:** create second team from picker, edit/archive/unarchive, TeamModal in both modes, "Saved" banner, Settings route.
+
+**Spec notes (not called out in phase scope):**
+- `isSuperadmin` added to OpenAPI `User` schema — this is a spec sync of a field that already existed in the Go model and DB; it is not a new feature introduced by this phase.
+- `docs/design/handoffs/member-modal/` committed in this phase as pre-checked-in design references for 10.1.2. No 10.1.2 code ships here.
 
 ---
 

@@ -252,23 +252,186 @@ func TestListTeams_ReturnsOwnTeams(t *testing.T) {
 	assert.Equal(t, "Engineering", teams[0]["name"])
 }
 
-func TestCreateTeam_DuplicateSlug(t *testing.T) {
+func TestCreateTeam_SameNameAllowed(t *testing.T) {
 	srv, _ := newTeamTestServer(t)
 	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
 
-	// First team succeeds.
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Engineering"}, token))
-	require.Equal(t, http.StatusCreated, w.Code)
+	// Two teams with the same name are allowed — slugs include the team ID so
+	// they never collide even when the names are identical.
+	w1 := httptest.NewRecorder()
+	srv.ServeHTTP(w1, authReq(http.MethodPost, "/teams", map[string]string{"name": "Engineering"}, token))
+	require.Equal(t, http.StatusCreated, w1.Code)
+	var t1 map[string]any
+	require.NoError(t, json.NewDecoder(w1.Body).Decode(&t1))
 
-	// Second team with same name produces the same slug — expect 409.
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, authReq(http.MethodPost, "/teams", map[string]string{"name": "Engineering"}, token))
-	assert.Equal(t, http.StatusConflict, w2.Code)
-	var resp map[string]any
-	require.NoError(t, json.NewDecoder(w2.Body).Decode(&resp))
-	errObj := resp["error"].(map[string]any)
-	assert.Equal(t, "TEAM_NAME_TAKEN", errObj["code"])
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var t2 map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&t2))
+
+	// Different IDs and different slugs despite identical names.
+	assert.NotEqual(t, t1["id"], t2["id"])
+	assert.NotEqual(t, t1["slug"], t2["slug"])
+	assert.Equal(t, "Engineering", t1["name"])
+	assert.Equal(t, "Engineering", t2["name"])
+}
+
+func TestUpdateTeam_Success(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Original"}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+	teamID := created["id"].(string)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPatch, fmt.Sprintf("/teams/%s", teamID),
+		map[string]any{"name": "Renamed", "description": "A description"}, token))
+	assert.Equal(t, http.StatusOK, w2.Code)
+	var updated map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&updated))
+	assert.Equal(t, "Renamed", updated["name"])
+	assert.Equal(t, "A description", updated["description"])
+}
+
+func TestUpdateTeam_NonAdminForbidden(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	aliceToken, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Acme"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+	teamID := team["id"].(string)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob@example.com", "role": "member"}, aliceToken))
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
+	bobToken, _ := seedUserWithInvite(t, srv, "bob@example.com", "password2", "Bob", inv["token"].(string))
+
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPatch, fmt.Sprintf("/teams/%s", teamID),
+		map[string]string{"name": "Hijacked"}, bobToken))
+	assert.Equal(t, http.StatusForbidden, w3.Code)
+}
+
+func TestArchiveTeam_Success(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Acme"}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+	teamID := team["id"].(string)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/archive", teamID), nil, token))
+	assert.Equal(t, http.StatusOK, w2.Code)
+	var archived map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&archived))
+	assert.NotNil(t, archived["archivedAt"])
+
+	// Default list excludes the archived team.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodGet, "/teams", nil, token))
+	var active []map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&active))
+	assert.Len(t, active, 0)
+}
+
+func TestArchiveTeam_NonAdminForbidden(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	aliceToken, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Acme"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+	teamID := team["id"].(string)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob@example.com", "role": "member"}, aliceToken))
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
+	bobToken, _ := seedUserWithInvite(t, srv, "bob@example.com", "password2", "Bob", inv["token"].(string))
+
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/archive", teamID), nil, bobToken))
+	assert.Equal(t, http.StatusForbidden, w3.Code)
+}
+
+func TestUnarchiveTeam_Success(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Acme"}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+	teamID := team["id"].(string)
+
+	// Archive.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/archive", teamID), nil, token))
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	// Unarchive.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/unarchive", teamID), nil, token))
+	assert.Equal(t, http.StatusOK, w3.Code)
+	var restored map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&restored))
+	assert.Nil(t, restored["archivedAt"])
+
+	// Active list now includes the team again.
+	w4 := httptest.NewRecorder()
+	srv.ServeHTTP(w4, authReq(http.MethodGet, "/teams", nil, token))
+	var active []map[string]any
+	require.NoError(t, json.NewDecoder(w4.Body).Decode(&active))
+	assert.Len(t, active, 1)
+}
+
+func TestListTeams_IncludesArchivedWhenParamSet(t *testing.T) {
+	srv, _ := newTeamTestServer(t)
+	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Acme"}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+	teamID := team["id"].(string)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/archive", teamID), nil, token))
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	// Without param: archived team is hidden.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodGet, "/teams", nil, token))
+	var active []map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&active))
+	assert.Len(t, active, 0)
+
+	// With ?archived=true: archived team is included.
+	w4 := httptest.NewRecorder()
+	srv.ServeHTTP(w4, authReq(http.MethodGet, "/teams?archived=true", nil, token))
+	var all []map[string]any
+	require.NoError(t, json.NewDecoder(w4.Body).Decode(&all))
+	assert.Len(t, all, 1)
+	assert.NotNil(t, all[0]["archivedAt"])
 }
 
 func TestGetTeam_Success(t *testing.T) {

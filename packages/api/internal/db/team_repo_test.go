@@ -98,3 +98,33 @@ func TestTeamRepo_Create_AndGetByID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Create Test", got.Name)
 }
+
+func TestSetArchived(t *testing.T) {
+	database := openTestDB(t)
+	repo := db.NewTeamRepo(database)
+
+	now := time.Now()
+	team := &models.Team{
+		ID:        "team-archive-test",
+		Name:      "Archive Test",
+		Slug:      "archive-test",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, repo.Create(team))
+
+	// Archive: archived_at should be populated.
+	archivedAt := time.Now()
+	require.NoError(t, repo.SetArchived("team-archive-test", &archivedAt))
+
+	got, err := repo.GetByID("team-archive-test")
+	require.NoError(t, err)
+	require.NotNil(t, got.ArchivedAt)
+
+	// Unarchive: archived_at should be cleared.
+	require.NoError(t, repo.SetArchived("team-archive-test", nil))
+
+	got2, err := repo.GetByID("team-archive-test")
+	require.NoError(t, err)
+	assert.Nil(t, got2.ArchivedAt)
+}

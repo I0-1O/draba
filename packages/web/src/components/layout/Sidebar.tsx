@@ -38,10 +38,15 @@ interface Props {
   onActiveTimelineChange?: (id: string) => void;
   // Team management
   activeTeam?: ApiTeam;
+  /** All non-archived teams. Used to render the switchable team list. */
+  activeTeams?: ApiTeam[];
   archivedTeams?: ApiTeam[];
   onNewTeam?: () => void;
   onEditTeam?: (team: ApiTeam) => void;
+  onSelectTeam?: (teamId: string) => void;
   onUnarchiveTeam?: (teamId: string) => void;
+  /** True when the current user is an admin of the active team. */
+  canEditTeam?: boolean;
 }
 
 const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
@@ -249,13 +254,93 @@ function ConnectorItem({ name, status, color }: { name: string; status: string; 
   );
 }
 
+// ── TeamRow ──────────────────────────────────────────────────────────────────
+
+interface TeamRowProps {
+  team: ApiTeam;
+  isActive: boolean;
+  canEdit: boolean;
+  onSelect?: () => void;
+  onEdit?: () => void;
+}
+
+function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={() => { if (!isActive) onSelect?.(); }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        padding: '5px 6px 5px 16px',
+        borderLeft: isActive ? `2px solid ${team.color ?? 'var(--primary)'}` : '2px solid transparent',
+        background: isActive ? 'rgba(255,255,255,0.07)' : hovered ? 'rgba(255,255,255,0.03)' : 'transparent',
+        cursor: isActive ? 'default' : 'pointer',
+        minHeight: 34,
+        transition: 'background 0.12s',
+      }}
+    >
+      <Badge
+        identity={{ color: team.color ?? 'var(--primary)', icon: team.icon ?? '__name_1__' }}
+        name={team.name}
+        shape="square"
+        size={20}
+      />
+      <span style={{
+        fontSize: 13,
+        fontWeight: isActive ? 600 : 400,
+        color: isActive ? 'white' : 'rgba(255,255,255,0.65)',
+        flex: 1,
+        marginLeft: 8,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        minWidth: 0,
+      }}>
+        {team.name}
+      </span>
+      {(
+        <button
+          title="Team settings"
+          onClick={e => { e.stopPropagation(); onEdit?.(); }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            marginRight: 6,
+            background: 'none',
+            border: 'none',
+            borderRadius: 5,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 {...ICON_SM} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
 /**
  * Left navigation rail: brand, team selector with members, and timeline list.
  * Collapsed/expanded state is driven by the parent.
  */
 const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
 
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, archivedTeams = [], onNewTeam, onEditTeam, onUnarchiveTeam }: Props) {
+export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, onUnarchiveTeam, canEditTeam = false }: Props) {
   const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
   const [teamOpen, setTeamOpen] = useState(true);
   const [activityOpen, setActivityOpen] = useState(true);
@@ -263,7 +348,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [timelinesOpen, setTimelinesOpen] = useState(true);
   const [membersOpen, setMembersOpen] = useState(true);
-  const [teamHovered, setTeamHovered] = useState(false);
+  const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
 
   const timelines: Timeline[] = apiTimelines?.length
     ? apiTimelines.map((t, i) => ({
@@ -375,25 +460,18 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
         {/* Collapsed: team + timeline icons only */}
         {collapsed && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
-            {/* Team avatar — click to expand */}
+            {/* Active team badge — click to expand */}
             <div
-              title="Product Marketing"
+              title={activeTeam?.name ?? 'Team'}
               onClick={onToggle}
-              style={{
-                width: 28,
-                height: 28,
-                borderRadius: 6,
-                background: 'var(--primary)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 11,
-                fontWeight: 700,
-                color: 'white',
-                cursor: 'pointer',
-              }}
+              style={{ cursor: 'pointer', flexShrink: 0 }}
             >
-              P
+              <Badge
+                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: activeTeam?.icon ?? '__name_1__' }}
+                name={activeTeam?.name ?? ''}
+                shape="square"
+                size={28}
+              />
             </div>
             {/* Active timeline — click to expand */}
             <div
@@ -472,53 +550,26 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                 : <ChevronRight width={12} height={12} strokeWidth={2} />}
             </button>
 
-            {/* Team row — shows real team data; gear icon opens edit modal */}
-            <div
-              onMouseEnter={() => setTeamHovered(true)}
-              onMouseLeave={() => setTeamHovered(false)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                padding: '5px 6px 5px 16px',
-                borderLeft: '2px solid transparent',
-                cursor: 'pointer',
-                minHeight: 34,
-              }}
-            >
-              <Badge
-                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: '__name_1__' }}
-                name={activeTeam?.name ?? 'Team'}
-                shape="square"
-                size={20}
+            {/* Team rows — active team highlighted; others clickable to switch */}
+            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
+              <TeamRow
+                key={t.id}
+                team={t}
+                isActive={t.id === activeTeam?.id}
+                canEdit={canEditTeam}
+                onSelect={() => onSelectTeam?.(t.id)}
+                onEdit={() => onEditTeam?.(t)}
               />
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'white', flex: 1, marginLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
-                {activeTeam?.name ?? 'Team'}
-              </span>
-              <button
-                title="Team settings"
-                onClick={e => { e.stopPropagation(); if (activeTeam) onEditTeam?.(activeTeam); }}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  width: 26,
-                  height: 26,
-                  marginRight: 6,
-                  background: 'none',
-                  border: 'none',
-                  borderRadius: 5,
-                  color: 'rgba(255,255,255,0.4)',
-                  cursor: 'pointer',
-                  opacity: teamHovered ? 1 : 0,
-                  transition: 'opacity 0.12s',
-                  flexShrink: 0,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-              >
-                <Settings2 {...ICON_SM} />
-              </button>
-            </div>
+            ))}
+            {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
+            {!activeTeams.length && activeTeam && (
+              <TeamRow
+                team={activeTeam}
+                isActive
+                canEdit={canEditTeam}
+                onEdit={() => onEditTeam?.(activeTeam)}
+              />
+            )}
 
             {/* New team button — shown when team section is open */}
             {teamOpen && (
@@ -538,28 +589,35 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
               </button>
             )}
 
-            {/* Archived teams — collapsed sub-section under team, when open */}
+            {/* Archived teams — collapsible sub-section, shown when team section is open */}
             {teamOpen && archivedTeams.length > 0 && (
-              <div style={{ padding: '2px 16px 6px' }}>
-                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, marginBottom: 4 }}>
-                  Archived
-                </div>
-                {archivedTeams.map(t => (
-                  <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', opacity: 0.55 }}>
-                    <Badge identity={{ color: t.color ?? '#484f58', icon: '__name_1__' }} name={t.name} shape="square" size={16} />
-                    <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {t.name}
-                    </span>
-                    <button
-                      onClick={() => onUnarchiveTeam?.(t.id)}
-                      title="Restore team"
-                      style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', fontSize: 10, fontFamily: 'inherit', padding: '1px 6px', borderRadius: 4 }}
-                      onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-                      onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-                    >
-                      Restore
-                    </button>
-                  </div>
+              <div>
+                <button
+                  onClick={() => setArchivedTeamsOpen(o => !o)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    width: '100%', padding: '4px 8px 4px 16px',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                >
+                  {archivedTeamsOpen
+                    ? <ChevronDown {...ICON_XS} />
+                    : <ChevronRight {...ICON_XS} />}
+                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Archived ({archivedTeams.length})
+                  </span>
+                </button>
+                {archivedTeamsOpen && archivedTeams.map(t => (
+                  <TeamRow
+                    key={t.id}
+                    team={t}
+                    isActive={false}
+                    canEdit={false}
+                    onEdit={() => onEditTeam?.(t)}
+                  />
                 ))}
               </div>
             )}

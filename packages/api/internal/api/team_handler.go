@@ -16,8 +16,6 @@ import (
 // slugRe matches any run of characters that are not lowercase ASCII alphanumeric.
 var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
 
-// handleListTeams handles GET /teams. Returns teams the authenticated user
-// belongs to. Pass ?archived=true to include archived teams.
 func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromContext(r.Context())
 	includeArchived := r.URL.Query().Get("archived") == "true"
@@ -29,8 +27,6 @@ func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, teams)
 }
 
-// handleCreateTeam handles POST /teams. The authenticated user becomes the
-// team's first admin member.
 func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	var req CreateTeamJSONBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -56,10 +52,11 @@ func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 
 	claims := claimsFromContext(r.Context())
 	now := time.Now()
+	id := newID()
 	team := &models.Team{
-		ID:          newID(),
+		ID:          id,
 		Name:        req.Name,
-		Slug:        slugify(req.Name),
+		Slug:        slugify(req.Name) + "-" + id[:8],
 		Description: req.Description,
 		Notes:       req.Notes,
 		Color:       req.Color,
@@ -92,8 +89,6 @@ func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, team)
 }
 
-// handleCreateInvite handles POST /teams/{id}/invites. Only team admins may
-// send invites. An optional email field scopes the invite to that address.
 func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
@@ -151,7 +146,9 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, invite)
 }
 
-// handleGetTeam handles GET /teams/{id}. Any team member may fetch the team record.
+// handleGetTeam checks membership before fetching the team row to avoid leaking
+// team existence to non-members (a 403 is returned whether the team is missing
+// or the caller is just not on it).
 func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
@@ -178,8 +175,6 @@ func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, team)
 }
 
-// handleListMembers handles GET /teams/{id}/members. Any team member may
-// list the membership roster.
 func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
@@ -202,8 +197,9 @@ func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, members)
 }
 
-// handleUpdateTeam handles PATCH /teams/{id}. Only team admins may update
-// team fields. Applies partial updates — only fields present in the body are changed.
+// handleUpdateTeam applies partial updates — nil fields in the request body are
+// ignored, not cleared. The caller does not need to fetch the current team state
+// before patching.
 func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
@@ -245,7 +241,7 @@ func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		team.Name = name
-		team.Slug = slugify(name)
+		team.Slug = slugify(name) + "-" + team.ID[:8]
 	}
 	if req.Description != nil {
 		team.Description = req.Description
@@ -273,8 +269,8 @@ func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, team)
 }
 
-// handleArchiveTeam handles POST /teams/{id}/archive. Only team admins may
-// archive a team.
+// handleArchiveTeam soft-deletes by setting archived_at rather than removing
+// the row, so activity history on the team is preserved and recovery is possible.
 func (s *Server) handleArchiveTeam(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
@@ -301,14 +297,16 @@ func (s *Server) handleArchiveTeam(w http.ResponseWriter, r *http.Request) {
 
 	team, err := s.teams.GetByID(teamID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive team")
 		return
 	}
 	writeJSON(w, http.StatusOK, team)
 }
 
-// handleUnarchiveTeam handles POST /teams/{id}/unarchive. Only team admins may
-// restore an archived team.
 func (s *Server) handleUnarchiveTeam(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
@@ -334,6 +332,10 @@ func (s *Server) handleUnarchiveTeam(w http.ResponseWriter, r *http.Request) {
 
 	team, err := s.teams.GetByID(teamID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to unarchive team")
 		return
 	}
