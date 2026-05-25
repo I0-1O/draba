@@ -15,6 +15,9 @@ import {
   Plug,
 } from 'lucide-react';
 import { Badge } from '@/components/identity/Badge';
+import type { components } from '@draba/shared';
+
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
 
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 360;
@@ -47,6 +50,10 @@ interface Props {
   onUnarchiveTeam?: (teamId: string) => void;
   /** True when the current user is an admin of the active team. */
   canEditTeam?: boolean;
+  /** Live member list from the API. Falls back to demo data when empty. */
+  members?: TeamMemberWithUser[];
+  /** Called when the user clicks the gear icon on a member row. */
+  onEditMember?: (member: TeamMemberWithUser) => void;
 }
 
 const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
@@ -332,6 +339,57 @@ function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
   );
 }
 
+// ── MemberSidebarRow ──────────────────────────────────────────────────────────
+
+interface MemberSidebarRowProps {
+  displayName: string;
+  color: string;
+  isInactive?: boolean;
+  onEdit?: () => void;
+}
+
+function MemberSidebarRow({ displayName, color, isInactive = false, onEdit }: MemberSidebarRowProps) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '4px 6px 4px 16px', cursor: 'default',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        opacity: isInactive ? 0.45 : 1,
+      }}
+    >
+      <Badge
+        identity={{ color, icon: '__name_words__' }}
+        name={displayName}
+        shape="circle"
+        size={20}
+      />
+      <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        {displayName}
+      </span>
+      {onEdit && hovered && (
+        <button
+          onClick={e => { e.stopPropagation(); onEdit(); }}
+          title={`Edit ${displayName}`}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 22, height: 22, marginRight: 6,
+            background: 'none', border: 'none', borderRadius: 4,
+            color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 width={12} height={12} strokeWidth={1.8} />
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
 /**
@@ -340,7 +398,7 @@ function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
  */
 const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
 
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, onUnarchiveTeam, canEditTeam = false }: Props) {
+export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, onUnarchiveTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
   const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
   const [teamOpen, setTeamOpen] = useState(true);
   const [activityOpen, setActivityOpen] = useState(true);
@@ -671,31 +729,20 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
 
                 {membersOpen && (
                   <div style={{ paddingBottom: 8 }}>
-                    {DEMO_MEMBERS.map(m => (
-                      <div
-                        key={m.id}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 8,
-                          padding: '4px 16px',
-                          borderRadius: 0,
-                          cursor: 'default',
-                        }}
-                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
-                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                      >
-                        <Badge
-                          identity={{ color: m.color, icon: '__name_words__' }}
-                          name={m.name}
-                          shape="circle"
-                          size={20}
+                    {(apiMembers ?? DEMO_MEMBERS.map(m => ({ id: m.id, teamId: '', userId: null, displayName: m.name, role: 'member', color: m.color, icon: null, joinedAt: '', email: '', avatarUrl: null }))).map(m => {
+                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
+                      const color = m.color ?? '#8b949e';
+                      const isReal = Boolean(apiMembers);
+                      return (
+                        <MemberSidebarRow
+                          key={m.id}
+                          displayName={displayName}
+                          color={color}
+                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
+                          onEdit={isReal ? () => onEditMember?.(m as TeamMemberWithUser) : undefined}
                         />
-                        <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {m.name}
-                        </span>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </>

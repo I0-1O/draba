@@ -352,3 +352,610 @@ func slugify(name string) string {
 	}
 	return s
 }
+
+// ── Member CRUD ───────────────────────────────────────────────────────────────
+
+// handleGetMember fetches a single team member with computed stats.
+func (s *Server) handleGetMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member")
+		return
+	}
+	if m.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	stats, err := s.teams.GetMemberStats(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to compute member stats")
+		return
+	}
+
+	var teams []*models.TeamMemberWithUser
+	if m.UserID != nil {
+		teams, err = s.teams.GetMemberAllTeams(*m.UserID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member teams")
+			return
+		}
+	}
+
+	// Deletable: zero active assignments and single-team membership.
+	activeActivities := stats.PastDue + stats.Running + stats.Upcoming + stats.Unscheduled
+	deletable := activeActivities == 0 && len(teams) <= 1
+
+	detail := &models.MemberDetail{
+		TeamMemberWithUser: *m,
+		Stats:              *stats,
+		Teams:              flatten(teams),
+		Deletable:          deletable,
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// handleAddMember adds an existing registered user to the team by their userID.
+func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	admin, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to add member")
+		return
+	}
+	if admin.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can add members")
+		return
+	}
+
+	var req struct {
+		UserID string `json:"userId"`
+		Role   string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	req.UserID = strings.TrimSpace(req.UserID)
+	if req.UserID == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "userId is required")
+		return
+	}
+	if req.Role == "" {
+		req.Role = "member"
+	}
+	if req.Role != "admin" && req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	// Verify the user exists.
+	if _, err := s.users.GetByID(req.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to add member")
+		return
+	}
+
+	now := time.Now()
+	uid := req.UserID
+	member := &models.TeamMember{
+		ID:       newID(),
+		TeamID:   teamID,
+		UserID:   &uid,
+		Role:     req.Role,
+		JoinedAt: now,
+	}
+	if err := s.teams.AddMember(member); err != nil {
+		writeError(w, http.StatusConflict, "ALREADY_MEMBER", "user is already a member of this team")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(member.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get created member")
+		return
+	}
+	writeJSON(w, http.StatusCreated, m)
+}
+
+// handleUpdateMember updates display_name, color, icon, and/or role.
+// Admins can change any field; regular members can only update their own
+// display_name, color, and icon (not their role).
+func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	callerMember, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	var req struct {
+		DisplayName *string `json:"displayName"`
+		Color       *string `json:"color"`
+		Icon        *string `json:"icon"`
+		Role        *string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Only admins can change role.
+	if req.Role != nil && callerMember.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can change roles")
+		return
+	}
+	// Members can only update their own identity.
+	if callerMember.Role != "admin" && callerMember.ID != memberID {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "members can only update their own profile")
+		return
+	}
+	if req.Role != nil && *req.Role != "admin" && *req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	// Prevent removing the last admin.
+	if req.Role != nil && *req.Role == "member" && target.Role == "admin" {
+		admins, err := s.teams.CountAdmins(teamID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to count admins")
+			return
+		}
+		if admins <= 1 {
+			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot demote the last admin")
+			return
+		}
+	}
+
+	if err := s.teams.UpdateMember(memberID, req.DisplayName, req.Color, req.Icon, req.Role); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get updated member")
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleDeleteMember removes a team member row. Rejects if the member is the
+// last admin.
+func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	admin, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+	if admin.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can remove members")
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	if target.Role == "admin" {
+		admins, err := s.teams.CountAdmins(teamID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+			return
+		}
+		if admins <= 1 {
+			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot remove the last admin")
+			return
+		}
+	}
+
+	if err := s.teams.DeleteMember(memberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleArchiveMember inactivates a team member (sets archived_at).
+func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	admin, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
+		return
+	}
+	if admin.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can inactivate members")
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	if target.Role == "admin" {
+		admins, err := s.teams.CountAdmins(teamID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
+			return
+		}
+		if admins <= 1 {
+			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot inactivate the last admin")
+			return
+		}
+	}
+
+	now := time.Now()
+	if err := s.teams.SetMemberArchived(memberID, &now); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get archived member")
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleUnarchiveMember reactivates an inactivated team member.
+func (s *Server) handleUnarchiveMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	admin, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
+		return
+	}
+	if admin.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can reactivate members")
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	if err := s.teams.SetMemberArchived(memberID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get reactivated member")
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleCreateParticipant creates a login-less team member (Participant).
+func (s *Server) handleCreateParticipant(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	admin, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create participant")
+		return
+	}
+	if admin.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can create participants")
+		return
+	}
+
+	var req struct {
+		Name  string  `json:"name"`
+		Color *string `json:"color"`
+		Icon  *string `json:"icon"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	now := time.Now()
+	name := req.Name
+	member := &models.TeamMember{
+		ID:          newID(),
+		TeamID:      teamID,
+		UserID:      nil,
+		DisplayName: &name,
+		Role:        "member",
+		Color:       req.Color,
+		Icon:        req.Icon,
+		JoinedAt:    now,
+	}
+	if err := s.teams.AddMember(member); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create participant")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(member.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get created participant")
+		return
+	}
+	writeJSON(w, http.StatusCreated, m)
+}
+
+// ── Invites ───────────────────────────────────────────────────────────────────
+
+// handleListInvites returns all pending invites for the team.
+func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	admin, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list invites")
+		return
+	}
+	if admin.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can list invites")
+		return
+	}
+
+	invites, err := s.invites.ListByTeam(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list invites")
+		return
+	}
+	writeJSON(w, http.StatusOK, invites)
+}
+
+// handleDeleteInvite revokes a pending invite.
+func (s *Server) handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	inviteID := r.PathValue("inviteId")
+	claims := claimsFromContext(r.Context())
+
+	admin, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite")
+		return
+	}
+	if admin.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can revoke invites")
+		return
+	}
+
+	if err := s.invites.DeleteByID(inviteID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── Invite link ───────────────────────────────────────────────────────────────
+
+// handleCreateInviteLink generates or regenerates the reusable invite link
+// token for the team. Each call replaces the previous token.
+func (s *Server) handleCreateInviteLink(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	admin, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite link")
+		return
+	}
+	if admin.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can manage invite links")
+		return
+	}
+
+	token := newID()
+	if err := s.teams.SetInviteLinkToken(teamID, &token); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite link")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+}
+
+// handleGetInviteLink returns the current invite link token for the team, or
+// null if none is set.
+func (s *Server) handleGetInviteLink(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	admin, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get invite link")
+		return
+	}
+	if admin.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can view invite links")
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get invite link")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"token": team.InviteLinkToken})
+}
+
+// handleDeleteInviteLink revokes the current invite link by clearing the token.
+func (s *Server) handleDeleteInviteLink(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	admin, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite link")
+		return
+	}
+	if admin.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can revoke invite links")
+		return
+	}
+
+	if err := s.teams.SetInviteLinkToken(teamID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite link")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSearchUsers handles GET /users/search?q= and returns matching users.
+func (s *Server) handleSearchUsers(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(q) < 2 {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "query must be at least 2 characters")
+		return
+	}
+	users, err := s.users.SearchByNameOrEmail(q)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+// flatten converts a nil slice to an empty slice for clean JSON serialisation.
+func flatten[T any](s []*T) []T {
+	out := make([]T, 0, len(s))
+	for _, v := range s {
+		if v != nil {
+			out = append(out, *v)
+		}
+	}
+	return out
+}

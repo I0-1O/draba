@@ -1,23 +1,31 @@
 /**
  * TeamModal — create / edit a team in a portal-rendered modal.
  *
- * The Members tab is rendered but locked (not hidden) so the tab bar layout
- * is stable — Phase 10.1.2 can slot in real content without shifting surrounding UI.
- *
- * Identity and name live in the modal header so they remain visible while
- * the user scrolls the Settings tab body.
+ * The Members tab is fully functional after Phase 10.1.2. The Settings tab
+ * handles team identity and metadata. Identity and name live in the modal
+ * header so they remain visible while the user scrolls the tab body.
  */
 
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Archive, Users } from 'lucide-react';
+import { X, Archive, Mail, Link2, Copy, Check, Plus, Minus, RefreshCw, UserMinus } from 'lucide-react';
 import { IdentityWidget } from '@/components/identity/IdentityWidget';
+import { IdentityPicker } from '@/components/identity/IdentityPicker';
+import { Badge } from '@/components/identity/Badge';
 import type { Identity } from '@/components/identity/identity-constants';
 import { IDENTITY_COLORS } from '@/components/identity/identity-constants';
-import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam } from '@/hooks/useTeamActivities';
+import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities';
+import {
+  useTeamInvites, useRevokeInvite,
+  useTeamInviteLink, useCreateInviteLink, useRevokeInviteLink,
+  useAddMember, useDeleteMember, useArchiveMember, useUnarchiveMember,
+  useCreateParticipant, useUpdateMember, useUserSearch,
+} from '@/hooks/useMemberManagement';
+import RoleDropdown, { type MemberRole } from '@/components/RoleDropdown';
 import type { components } from '@draba/shared';
 
 type Team = components['schemas']['Team'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
 
 interface Props {
   mode: 'new' | 'edit';
@@ -25,6 +33,8 @@ interface Props {
   onClose: () => void;
   /** Called with the newly created team immediately after server confirmation. */
   onTeamCreated?: (team: Team) => void;
+  /** Whether the current user is a team admin. */
+  isAdmin?: boolean;
 }
 
 type Tab = 'settings' | 'members';
@@ -99,7 +109,7 @@ const labelStyle: React.CSSProperties = {
 
 // ── Main component ──────────────────────────────────────────────────────────
 
-export default function TeamModal({ mode, team, onClose, onTeamCreated }: Props) {
+export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin = true }: Props) {
   const [tab, setTab] = useState<Tab>('settings');
   const [teamSaved, setTeamSaved] = useState(mode === 'edit');
   const [showBanner, setShowBanner] = useState(false);
@@ -119,6 +129,30 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated }: Props)
   const updateTeam = useUpdateTeam();
   const archiveTeam = useArchiveTeam();
   const unarchiveTeam = useUnarchiveTeam();
+
+  // Members tab state — only loaded when the team exists.
+  const activeTeamId = savedTeamId || team?.id || '';
+  const { data: members = [] } = useTeamMembers(activeTeamId);
+  const { data: invites = [] } = useTeamInvites(activeTeamId);
+  const { data: inviteLink } = useTeamInviteLink(activeTeamId);
+  const addMember = useAddMember(activeTeamId);
+  const deleteMember = useDeleteMember(activeTeamId);
+  const archiveMember = useArchiveMember(activeTeamId);
+  const unarchiveMember = useUnarchiveMember(activeTeamId);
+  const createParticipant = useCreateParticipant(activeTeamId);
+  const updateMember = useUpdateMember(activeTeamId);
+  const revokeInvite = useRevokeInvite(activeTeamId);
+  const createInviteLink = useCreateInviteLink(activeTeamId);
+  const revokeInviteLink = useRevokeInviteLink(activeTeamId);
+
+  const [searchQ, setSearchQ] = useState('');
+  const [showParticipantForm, setShowParticipantForm] = useState(false);
+  const [participantName, setParticipantName] = useState('');
+  const [participantIdentity, setParticipantIdentity] = useState<Identity>({ color: IDENTITY_COLORS[3].hex, icon: '__name_1__' });
+  const [copyLinkLabel, setCopyLinkLabel] = useState<'copy' | 'copied'>('copy');
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const { data: searchResults = [] } = useUserSearch(searchQ);
 
   const isArchived = Boolean(team?.archivedAt);
   const busy = createTeam.isPending || updateTeam.isPending || archiveTeam.isPending || unarchiveTeam.isPending;
@@ -352,12 +386,316 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated }: Props)
               )}
             </div>
           ) : (
-            // Members tab — locked placeholder for Phase 10.1.2
-            <div style={{ padding: 20, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 200, gap: 12, color: '#484f58' }}>
-              <Users size={32} strokeWidth={1.4} />
-              <div style={{ fontSize: 13, textAlign: 'center', maxWidth: 300, lineHeight: 1.6 }}>
-                Member management is coming in the next phase. You can add and manage members here once Phase 10.1.2 ships.
+            // Members tab
+            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+              {/* Search / add input */}
+              {isAdmin && (
+                <div>
+                  <label style={labelStyle}>Add member or invite by email</label>
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      value={searchQ}
+                      onChange={e => setSearchQ(e.target.value)}
+                      placeholder="Search by name or email…"
+                      style={{ ...inputStyle, paddingRight: 36 }}
+                    />
+                    {searchQ && (
+                      <button
+                        onClick={() => setSearchQ('')}
+                        style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Search results */}
+                  {searchQ.length >= 2 && (
+                    <div style={{ background: '#2d333b', border: '1px solid #30363d', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
+                      {searchResults.length === 0 ? (
+                        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <span style={{ fontSize: 12, color: '#8b949e' }}>No users found for "{searchQ}"</span>
+                          <button
+                            onClick={() => {
+                              // Trigger email invite
+                              const email = searchQ.includes('@') ? searchQ : null;
+                              if (!email) return;
+                              fetch(`/teams/${activeTeamId}/invites`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('accessToken') ?? ''}` },
+                                body: JSON.stringify({ email }),
+                              }).then(() => setSearchQ(''));
+                            }}
+                            style={{ fontSize: 11, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit' }}
+                          >
+                            <Mail size={11} style={{ display: 'inline', marginRight: 4 }} />
+                            Invite
+                          </button>
+                        </div>
+                      ) : (
+                        searchResults.map(u => {
+                          const alreadyMember = members.some(m => m.userId === u.id);
+                          return (
+                            <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: '1px solid #30363d' }}>
+                              <Badge identity={{ color: '#8b949e', icon: '__name_1__' }} name={u.displayName} shape="circle" size={22} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13, color: '#e6edf3' }}>{u.displayName}</div>
+                                <div style={{ fontSize: 11, color: '#484f58' }}>{u.email}</div>
+                              </div>
+                              {alreadyMember ? (
+                                <span style={{ fontSize: 11, color: '#484f58' }}>Already added</span>
+                              ) : (
+                                <button
+                                  onClick={() => addMember.mutate({ userId: u.id }, { onSuccess: () => setSearchQ('') })}
+                                  style={{ fontSize: 11, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4 }}
+                                >
+                                  <Plus size={11} />
+                                  Add
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Participant creation form */}
+              {isAdmin && (
+                <div>
+                  {!showParticipantForm ? (
+                    <button
+                      onClick={() => setShowParticipantForm(true)}
+                      style={{ fontSize: 12, color: '#F59E0B', background: '#F59E0B14', border: '1px solid #F59E0B44', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                    >
+                      <Plus size={12} />
+                      Add participant (no login)
+                    </button>
+                  ) : (
+                    <div style={{ background: '#2d333b', border: '1px solid #30363d', borderRadius: 8, padding: 14 }}>
+                      <label style={labelStyle}>New participant</label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <IdentityPicker
+                          identity={participantIdentity}
+                          name={participantName}
+                          shape="circle"
+                          size={32}
+                          onChange={setParticipantIdentity}
+                        />
+                        <input
+                          value={participantName}
+                          onChange={e => setParticipantName(e.target.value)}
+                          placeholder="Display name (required)…"
+                          style={{ ...inputStyle, flex: 1 }}
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => {
+                            if (!participantName.trim()) return;
+                            createParticipant.mutate({
+                              name: participantName.trim(),
+                              color: participantIdentity.color,
+                              icon: participantIdentity.icon,
+                            }, {
+                              onSuccess: () => { setParticipantName(''); setShowParticipantForm(false); },
+                            });
+                          }}
+                          disabled={!participantName.trim() || createParticipant.isPending}
+                          style={{ background: '#F59E0B', color: '#000', fontWeight: 600, fontSize: 12, padding: '7px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0, opacity: !participantName.trim() ? 0.5 : 1 }}
+                        >
+                          Create
+                        </button>
+                        <button onClick={() => setShowParticipantForm(false)} style={{ ...cancelBtnStyle, padding: '7px 10px' }}>
+                          <X size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Member list */}
+              <div>
+                <label style={labelStyle}>Members ({members.length})</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {members.map((m: TeamMemberWithUser) => {
+                    const isParticipant = !m.userId;
+                    const isInactive = Boolean(m.archivedAt);
+                    const memberRole: MemberRole = isParticipant ? 'participant' : (m.role as MemberRole);
+                    return (
+                      <div
+                        key={m.id}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 10,
+                          padding: '7px 10px', borderRadius: 7,
+                          background: isInactive ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)',
+                          opacity: isInactive ? 0.5 : 1,
+                        }}
+                      >
+                        <div style={{ flexShrink: 0, border: isParticipant ? '1.5px dashed #484f58' : 'none', borderRadius: '50%' }}>
+                          <Badge
+                            identity={{ color: m.color ?? '#8b949e', icon: m.icon ?? '__name_words__' }}
+                            name={m.displayName}
+                            shape="circle"
+                            size={24}
+                          />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ fontSize: 13, color: '#e6edf3', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.displayName}</span>
+                            {isParticipant && <span style={{ fontSize: 10, fontWeight: 600, background: '#F59E0B20', border: '1px solid #F59E0B44', color: '#F59E0B', borderRadius: 99, padding: '0px 5px', flexShrink: 0 }}>No login</span>}
+                          </div>
+                          {!isParticipant && <div style={{ fontSize: 11, color: '#484f58', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>}
+                        </div>
+                        {isAdmin && (
+                          <RoleDropdown
+                            value={memberRole}
+                            onChange={role => {
+                              if (isParticipant || role === 'participant') return;
+                              updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
+                            }}
+                            disabled={isParticipant}
+                            hideParticipant={!isParticipant}
+                          />
+                        )}
+                        {isAdmin && (
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            {isInactive ? (
+                              <button
+                                title="Reactivate member"
+                                onClick={() => unarchiveMember.mutate(m.id)}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
+                                onMouseEnter={e => (e.currentTarget.style.color = '#1A97A2')}
+                                onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
+                              >
+                                <RefreshCw size={13} />
+                              </button>
+                            ) : (
+                              <button
+                                title="Inactivate member"
+                                onClick={() => archiveMember.mutate(m.id)}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
+                                onMouseEnter={e => (e.currentTarget.style.color = '#F59E0B')}
+                                onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
+                              >
+                                <UserMinus size={13} />
+                              </button>
+                            )}
+                            <button
+                              title="Remove from team"
+                              onClick={() => deleteMember.mutate(m.id)}
+                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
+                              onMouseEnter={e => (e.currentTarget.style.color = '#EF4444')}
+                              onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
+                            >
+                              <Minus size={13} />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
+
+              {/* Pending invitations */}
+              {isAdmin && invites.length > 0 && (
+                <div>
+                  <label style={labelStyle}>Pending invitations ({invites.length})</label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    {invites.map(inv => (
+                      <div key={inv.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)' }}>
+                        <div style={{ width: 24, height: 24, borderRadius: '50%', border: '1.5px dashed #30363d', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          <Mail size={11} color="#484f58" />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, color: '#8b949e', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.email}</div>
+                          <div style={{ fontSize: 11, color: '#484f58' }}>
+                            Sent {new Date(inv.createdAt).toLocaleDateString()} · expires {new Date(inv.expiresAt).toLocaleDateString()}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => revokeInvite.mutate(inv.id)}
+                          style={{ fontSize: 11, color: '#EF4444', background: '#EF444414', border: '1px solid #EF444444', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit' }}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Invite link */}
+              {isAdmin && (
+                <div>
+                  <label style={labelStyle}>
+                    <Link2 size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Invite link
+                  </label>
+                  {inviteLink?.token ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <input
+                          readOnly
+                          value={`${window.location.origin}/register?token=${inviteLink.token}`}
+                          style={{ ...inputStyle, color: '#8b949e', flex: 1 }}
+                          onClick={e => (e.target as HTMLInputElement).select()}
+                        />
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(`${window.location.origin}/register?token=${inviteLink.token!}`);
+                            setCopyLinkLabel('copied');
+                            if (copyTimer.current) clearTimeout(copyTimer.current);
+                            copyTimer.current = setTimeout(() => setCopyLinkLabel('copy'), 2000);
+                          }}
+                          style={{
+                            background: copyLinkLabel === 'copied' ? '#1A97A222' : '#2d333b',
+                            border: `1px solid ${copyLinkLabel === 'copied' ? '#1A97A244' : '#30363d'}`,
+                            color: copyLinkLabel === 'copied' ? '#1A97A2' : '#8b949e',
+                            borderRadius: 7, padding: '0 14px', cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontFamily: 'inherit',
+                            transition: 'all 0.15s', flexShrink: 0,
+                          }}
+                        >
+                          {copyLinkLabel === 'copied' ? <Check size={12} /> : <Copy size={12} />}
+                          {copyLinkLabel === 'copied' ? 'Copied!' : 'Copy link'}
+                        </button>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <span style={{ fontSize: 11, color: '#484f58', flex: 1, lineHeight: 1.5 }}>
+                          Anyone with this link can join the team as a member.
+                        </span>
+                        <button
+                          onClick={() => createInviteLink.mutate()}
+                          style={{ fontSize: 11, color: '#8b949e', background: 'none', border: '1px solid #30363d', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
+                        >
+                          <RefreshCw size={11} /> Regenerate
+                        </button>
+                        <button
+                          onClick={() => revokeInviteLink.mutate()}
+                          style={{ fontSize: 11, color: '#EF4444', background: 'none', border: '1px solid #EF444444', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: 12, color: '#484f58' }}>No invite link — generate one to share a reusable join URL.</span>
+                      <button
+                        onClick={() => createInviteLink.mutate()}
+                        style={{ fontSize: 12, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                      >
+                        Generate
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

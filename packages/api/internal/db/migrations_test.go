@@ -58,6 +58,20 @@ func TestMigrate_Idempotent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, colCount, "column teams.%q should exist", col)
 	}
+
+	// Verify member management columns added by migration 009.
+	m009Columns := []struct{ table, col string }{
+		{"team_members", "archived_at"},
+		{"users", "archived_at"},
+		{"teams", "invite_link_token"},
+	}
+	for _, tc := range m009Columns {
+		var colCount int
+		err := database.Get(&colCount,
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, tc.table, tc.col)
+		require.NoError(t, err)
+		assert.Equal(t, 1, colCount, "column %q.%q should exist after migration 009", tc.table, tc.col)
+	}
 }
 
 // TestMigrate_006_007_ColorConversion verifies the two-step color conversion:

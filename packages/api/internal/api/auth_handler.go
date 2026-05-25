@@ -52,21 +52,29 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var invite *models.Invite
+	var inviteLinkTeamID string // non-empty when a reusable invite link was used
 	if count > 0 {
 		if req.InviteToken == nil || *req.InviteToken == "" {
 			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
 			return
 		}
+		// Try as a one-time invite first.
 		inv, err := s.invites.GetValid(*req.InviteToken)
 		if err != nil {
-			writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
-			return
+			// Not a valid one-time invite — check if it's a reusable invite link token.
+			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
+			if linkErr != nil {
+				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
+				return
+			}
+			inviteLinkTeamID = team.ID
+		} else {
+			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
+				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
+				return
+			}
+			invite = inv
 		}
-		if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
-			writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
-			return
-		}
-		invite = inv
 	}
 
 	hash, err := auth.HashPassword(req.Password)
@@ -106,6 +114,18 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := s.teams.AddMember(member); err != nil {
 			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
+		}
+	} else if inviteLinkTeamID != "" {
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   inviteLinkTeamID,
+			UserID:   &userID,
+			Role:     "member",
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
 		}
 	}
 
@@ -150,6 +170,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	if user.ArchivedAt != nil {
+		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
 		return
 	}
 

@@ -21,12 +21,14 @@ import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/u
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
 import { useMyTeams, useTeamTimelines, useTeamActivitySync, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities'
 import TeamModal from '@/components/TeamModal'
+import MemberModal from '@/components/MemberModal'
 import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
 
 type ApiActivity = components['schemas']['Activity']
 type ApiTeam = components['schemas']['Team']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
 
 const DROPDOWN_BTN: React.CSSProperties = {
   display: 'flex',
@@ -112,6 +114,9 @@ function DashboardShell() {
   const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
   const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
   const unarchiveTeam = useUnarchiveTeam()
+
+  // Member modal state
+  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
 
   // Fetch all teams including archived for the sidebar's archived section.
   const { data: allTeams = [] } = useMyTeams(true)
@@ -244,6 +249,8 @@ function DashboardShell() {
         onNewTeam={() => { setEditingTeam(null); setTeamModalMode('new'); }}
         onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
         onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
+        members={teamMembers.length > 0 ? teamMembers : undefined}
+        onEditMember={m => setEditingMember(m)}
       />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
@@ -419,8 +426,20 @@ function DashboardShell() {
         <TeamModal
           mode={teamModalMode}
           team={editingTeam ?? undefined}
+          isAdmin={canEditTeam}
           onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
           onTeamCreated={created => setActiveTeamId(created.id)}
+        />
+      )}
+
+      {/* Member modal — edit a team member */}
+      {editingMember && (
+        <MemberModal
+          teamId={teamId}
+          memberId={editingMember.id}
+          isAdmin={canEditTeam}
+          isSuperadmin={Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)}
+          onClose={() => setEditingMember(null)}
         />
       )}
     </div>

@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -82,4 +83,56 @@ func (r *UserRepo) Count() (int, error) {
 		return 0, fmt.Errorf("counting users: %w", err)
 	}
 	return count, nil
+}
+
+// SearchByNameOrEmail returns up to 20 users whose display_name or email
+// contains the query (case-insensitive). Archived users are excluded.
+func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
+	var users []*models.User
+	like := "%" + q + "%"
+	err := r.db.Select(&users, `
+		SELECT * FROM users
+		WHERE archived_at IS NULL
+		  AND (display_name LIKE ? OR email LIKE ?)
+		ORDER BY display_name ASC
+		LIMIT 20
+	`, like, like)
+	if err != nil {
+		return nil, fmt.Errorf("searching users: %w", err)
+	}
+	return users, nil
+}
+
+// SetSuperadmin sets or clears the is_superadmin flag on a user.
+func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		isSuperadmin, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting superadmin: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
+func (r *UserRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		at, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting user archived: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a user row. The caller must verify the user is deletable
+// (no active activities, single team membership) before calling this.
+func (r *UserRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting user: %w", err)
+	}
+	return nil
 }

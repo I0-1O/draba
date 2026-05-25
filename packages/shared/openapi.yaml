@@ -97,7 +97,7 @@ components:
           nullable: true
         role:
           type: string
-          enum: [owner, admin, member]
+          enum: [admin, member]
         color:
           type: string
           nullable: true
@@ -109,6 +109,11 @@ components:
         joinedAt:
           type: string
           format: date-time
+        archivedAt:
+          type: string
+          nullable: true
+          format: date-time
+          description: Non-null when the member is inactivated.
 
     TeamMemberWithUser:
       allOf:
@@ -124,6 +129,45 @@ components:
             avatarUrl:
               type: string
               nullable: true
+
+    MemberStats:
+      type: object
+      required: [activeTimelines, archivedTimelines, pastDue, running, upcoming, unscheduled, archivedActivities]
+      properties:
+        activeTimelines:
+          type: integer
+        archivedTimelines:
+          type: integer
+        pastDue:
+          type: integer
+          description: Activities with end_at in the past, not archived.
+        running:
+          type: integer
+          description: Activities currently in progress (start_at ≤ now ≤ end_at), not archived.
+        upcoming:
+          type: integer
+          description: Activities with start_at in the future, not archived.
+        unscheduled:
+          type: integer
+          description: Activities with no start or end date, not archived.
+        archivedActivities:
+          type: integer
+
+    MemberDetail:
+      allOf:
+        - $ref: "#/components/schemas/TeamMemberWithUser"
+        - type: object
+          required: [stats, teams, deletable]
+          properties:
+            stats:
+              $ref: "#/components/schemas/MemberStats"
+            teams:
+              type: array
+              items:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+            deletable:
+              type: boolean
+              description: True when the member can be hard-deleted (no active activities, single team).
 
     Invite:
       type: object
@@ -152,6 +196,15 @@ components:
         createdAt:
           type: string
           format: date-time
+
+    InviteLink:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          nullable: true
+          description: The current invite link token, or null if none is set.
 
     Activity:
       type: object
@@ -965,6 +1018,27 @@ paths:
           $ref: "#/components/responses/InternalError"
 
   /teams/{id}/invites:
+    get:
+      operationId: listInvites
+      summary: List pending invites for a team (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Array of pending invites.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Invite"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       operationId: createInvite
       summary: Create a team invite
@@ -1003,6 +1077,83 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /teams/{id}/invites/{inviteId}:
+    delete:
+      operationId: revokeInvite
+      summary: Revoke a pending invite (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: inviteId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Invite revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/invite-link:
+    get:
+      operationId: getInviteLink
+      summary: Get the current reusable invite link token (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Current invite link token (null if none is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteLink"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: createInviteLink
+      summary: Generate or regenerate the reusable invite link (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: New invite link token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteLink"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: revokeInviteLink
+      summary: Revoke the reusable invite link (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "204":
+          description: Invite link revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /teams/{id}/members:
     get:
       operationId: listTeamMembers
@@ -1023,6 +1174,400 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: addMember
+      summary: Add an existing registered user to a team (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId:
+                  type: string
+                role:
+                  type: string
+                  enum: [admin, member]
+                  default: member
+      responses:
+        "201":
+          description: Member added.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: User is already a member.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/members/{memberId}:
+    get:
+      operationId: getMember
+      summary: Get a team member with computed stats
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Member detail with stats.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemberDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      operationId: updateMember
+      summary: Update a team member's display name, identity, or role
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayName:
+                  type: string
+                  nullable: true
+                color:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
+                role:
+                  type: string
+                  enum: [admin, member]
+      responses:
+        "200":
+          description: Updated member.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot demote the last admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: deleteMember
+      summary: Remove a member from a team (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Member removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot remove the last admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/members/{memberId}/archive:
+    post:
+      operationId: archiveMember
+      summary: Inactivate a team member (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Inactivated member.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot inactivate the last admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/members/{memberId}/unarchive:
+    post:
+      operationId: unarchiveMember
+      summary: Reactivate an inactivated team member (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Reactivated member.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/participants:
+    post:
+      operationId: createParticipant
+      summary: Create a login-less participant (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                color:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
+      responses:
+        "201":
+          description: Participant created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/search:
+    get:
+      operationId: searchUsers
+      summary: Search users by name or email
+      description: Returns up to 20 matching non-archived users. Query must be at least 2 characters.
+      tags: [users]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+      responses:
+        "200":
+          description: Matching users.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/{id}/promote:
+    post:
+      operationId: promoteUser
+      summary: Grant superadmin status to a user (superadmin only)
+      tags: [users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/{id}/archive:
+    post:
+      operationId: archiveUser
+      summary: Inactivate a user account (superadmin only)
+      tags: [users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Inactivated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/{id}/unarchive:
+    post:
+      operationId: unarchiveUser
+      summary: Reactivate an inactivated user account (superadmin only)
+      tags: [users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Reactivated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/{id}:
+    delete:
+      operationId: deleteUser
+      summary: Hard-delete a user (superadmin only)
+      description: Only permitted when the user has no active activities and belongs to a single team.
+      tags: [users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: User deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: User cannot be deleted (multi-team or has active activities).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "500":
           $ref: "#/components/responses/InternalError"
 

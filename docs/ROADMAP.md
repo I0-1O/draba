@@ -35,7 +35,7 @@ This document organizes development into discrete phases with effort estimates a
 | 9.5 | [Rename Event → Activity (The Great Rename)](#phase-95--rename-event--activity-the-great-rename) | M — 1–2 days | ✅ |
 | 9.6 | [Identity System (Color + Icon)](#phase-96--identity-system-color--icon) | M — 2–3 days | 🔄 |
 | 10.1.1 | [Teams — CRUD & Management](#phase-1011--teams--crud--management) | M — 2 days | 🔄 |
-| 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | ⬜ |
+| 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
 | 10.4 | [Profile, Tokens & Admin Settings (Web)](#phase-104--profile-tokens--admin-settings-web) | S — 1 day | ⬜ |
@@ -569,7 +569,7 @@ Teams are the outermost data scope — everything else (timelines, activities, m
 ---
 
 ### Phase 10.1.2 — Members — Management & Editing
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** 🔄 In Progress — 2026-05-25, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
 
 Fills in the Members tab of the Team Modal and adds the standalone Member Edit Modal. Covers the full member lifecycle: add, edit, role changes, inactivation, removal, participant management, and both email invites and reusable invite links.
 

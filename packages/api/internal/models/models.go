@@ -53,47 +53,77 @@ type TeamMemberWithUser struct {
 
 // User is an authenticated account. PasswordHash is omitted from JSON
 // to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users.
 type User struct {
-	ID           string    `db:"id"             json:"id"`
-	Email        string    `db:"email"          json:"email"`
-	PasswordHash string    `db:"password_hash"  json:"-"`
-	DisplayName  string    `db:"display_name"   json:"displayName"`
-	AvatarURL    *string   `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	IsSuperadmin bool      `db:"is_superadmin"  json:"isSuperadmin"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash string     `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
 }
 
 // Team is a workspace that groups users and their scheduled work. Color and
 // Icon are identity fields added in migration 006; both are nullable until
 // explicitly set by an admin. Description, Notes, and ArchivedAt are added in
 // migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
 type Team struct {
-	ID          string     `db:"id"          json:"id"`
-	Name        string     `db:"name"        json:"name"`
-	Slug        string     `db:"slug"        json:"slug"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
 }
 
 // TeamMember is the join row that puts a person in a Team. UserID is nil
 // for login-less Participants; DisplayName is populated for them instead.
 // Role is the team-level role: "admin" or "member". Color and Icon are
 // identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
 type TeamMember struct {
-	ID          string    `db:"id"           json:"id"`
-	TeamID      string    `db:"team_id"      json:"teamId"`
-	UserID      *string   `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string   `db:"display_name" json:"displayName,omitempty"`
-	Role        string    `db:"role"         json:"role"`
-	Color       *string   `db:"color"        json:"color,omitempty"`
-	Icon        *string   `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time `db:"joined_at"    json:"joinedAt"`
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+}
+
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
+}
+
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats     MemberStats          `json:"stats"`
+	Teams     []TeamMemberWithUser `json:"teams"`
+	Deletable bool                 `json:"deletable"`
 }
 
 // Timeline is a named date range over a team's events. It is not a data

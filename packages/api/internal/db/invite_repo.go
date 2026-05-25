@@ -55,3 +55,40 @@ func (r *InviteRepo) MarkAccepted(id string) error {
 	}
 	return nil
 }
+
+// ListByTeam returns all pending (not yet accepted, not expired) invites for a
+// team, ordered by creation date descending so the newest invite is first.
+func (r *InviteRepo) ListByTeam(teamID string) ([]*models.Invite, error) {
+	var invites []*models.Invite
+	err := r.db.Select(&invites, `
+		SELECT * FROM invites
+		WHERE team_id = ? AND accepted_at IS NULL
+		ORDER BY created_at DESC
+	`, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("listing invites: %w", err)
+	}
+	return invites, nil
+}
+
+// DeleteByID hard-deletes an invite row. Used by admins to revoke a pending
+// invite before it is accepted.
+func (r *InviteRepo) DeleteByID(id string) error {
+	_, err := r.db.Exec(`DELETE FROM invites WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting invite: %w", err)
+	}
+	return nil
+}
+
+// GetByToken fetches an invite by its token field regardless of expiry or
+// accepted status. Used for invite-link validation where the caller needs to
+// check freshness itself.
+func (r *InviteRepo) GetByToken(token string) (*models.Invite, error) {
+	var inv models.Invite
+	err := r.db.Get(&inv, `SELECT * FROM invites WHERE token = ?`, token)
+	if err != nil {
+		return nil, fmt.Errorf("getting invite by token: %w", err)
+	}
+	return &inv, nil
+}

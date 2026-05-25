@@ -2,6 +2,44 @@
 
 ---
 
+## 2026-05-25 — Phase 10.1.2: Members — Management & Editing
+
+Full member lifecycle: add, edit, roles, participants, invites, reusable invite links, inactivation, and superadmin actions. All automated checks pass; manual UI verification on Docker still needed.
+
+**Schema (migration 009):**
+- `team_members.archived_at` — member inactivation (soft-delete pattern)
+- `users.archived_at` — account-level inactivation; login rejected when set
+- `teams.invite_link_token` — reusable join-link token (partial unique index on non-NULL rows, since SQLite can't ADD UNIQUE column via ALTER TABLE)
+
+**API — 17 new endpoints:**
+- Member CRUD: `GET/POST /teams/:id/members`, `PATCH/DELETE /teams/:id/members/:memberId`, archive/unarchive
+- Participant CRUD: `POST /teams/:id/participants`
+- Invites: `GET /teams/:id/invites`, `DELETE /teams/:id/invites/:inviteId`
+- Invite links: `GET/POST/DELETE /teams/:id/invite-link`
+- User search: `GET /users/search?q=`
+- Superadmin: `POST /users/:id/promote`, `POST /users/:id/archive`, `POST /users/:id/unarchive`, `DELETE /users/:id`
+- Auth: login now rejects archived users with `ACCOUNT_INACTIVE`; register now accepts reusable invite link tokens alongside one-time tokens
+
+**Member stats:** computed per-request from `activity_assignments JOIN activities` — past due, running, upcoming, archived counts; plus active/archived timeline counts from `timeline_access`.
+
+**Deletable rule:** zero active activities (past due + running + upcoming = 0) AND single team membership.
+
+**Web:**
+- `useMemberManagement.ts` — 14 new TanStack Query hooks
+- `RoleDropdown.tsx` — portal-rendered role picker (Admin/Member/Participant with colors + descriptions)
+- `MemberModal.tsx` — 560px portal modal with stats chips, teams list, superadmin actions with 3 confirmation dialogs
+- `TeamModal.tsx` Members tab — search/add, participant form, member list with role dropdown, pending invites, invite link
+- `Sidebar.tsx` — real member data wired; `MemberSidebarRow` with gear icon on hover
+- `DashboardPage.tsx` — wires MemberModal, passes members + handler to Sidebar
+
+**What needs manual verification on Docker:**
+- Add user (search + add), invite by email, create participant, change roles, remove member
+- Generate invite link, copy URL, register new account via that link
+- MemberModal stats correct; admin actions (promote, inactivate, delete) fire correct dialogs
+- Archived users cannot log in; reactivation restores login
+
+---
+
 ## 2026-05-25 — Phase 10.1.1 post-/test-phase fixes
 
 Six issues found during /test-phase 10.1.1 review and UX testing.
