@@ -121,6 +121,9 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
 
   const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending
 
+  // detail is guaranteed non-null here (early return above handles loading/undefined).
+  // Non-null assertions in callbacks are safe because they only fire when the
+  // rendered modal is interactive, which requires detail to be loaded.
   function handleSave() {
     const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
     if (displayName !== null) patch.displayName = displayName
@@ -129,23 +132,23 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
   }
 
   function handlePromote() {
-    if (!detail.userId) return
-    promoteUser.mutate(detail.userId, { onSuccess: () => setConfirm(null) })
+    if (!detail!.userId) return
+    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
   }
 
   function handleInactivate() {
-    if (!detail.userId) return
-    archiveUser.mutate(detail.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+    if (!detail!.userId) return
+    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
   }
 
   function handleReactivate() {
-    if (!detail.userId) return
-    unarchiveUser.mutate(detail.userId, { onSuccess: onClose })
+    if (!detail!.userId) return
+    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
   }
 
   function handleDelete() {
-    if (!detail.userId) return
-    deleteUser.mutate(detail.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+    if (!detail!.userId) return
+    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
   }
 
   const memberColor = effectiveIdentity.color
@@ -204,7 +207,6 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
                   identity={effectiveIdentity}
                   name={effectiveName}
                   shape="circle"
-                  size={40}
                   onChange={setIdentity}
                 />
               </div>

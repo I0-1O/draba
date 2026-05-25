@@ -482,7 +482,6 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
                           identity={participantIdentity}
                           name={participantName}
                           shape="circle"
-                          size={32}
                           onChange={setParticipantIdentity}
                         />
                         <input
