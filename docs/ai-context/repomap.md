@@ -269,6 +269,781 @@ README.md
 
 # Files
 
+## File: .claude/commands/new-feature.md
+````markdown
+Read docs/REQUIREMENTS.md and docs/TASKS.md.
+Identify the next unstarted task.
+Before writing code, outline your plan and which files you'll create or modify.
+Follow the patterns in docs/CONVENTIONS.md.
+After implementation, run tests and lint.
+````
+
+## File: .claude/commands/review.md
+````markdown
+Review the current git diff.
+Check for: convention violations (see docs/CONVENTIONS.md), missing tests, type safety issues, and error handling gaps.
+Summarize findings and suggest fixes.
+````
+
+## File: docs/design/preview/colors-brand.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }
+  .swatch { width: 120px; }
+  .block { height: 72px; border-radius: var(--radius-lg); margin-bottom: 8px; }
+  .label { font-size: 11px; font-weight: 600; color: var(--foreground); }
+  .hex { font-size: 11px; color: var(--muted-foreground); font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+<div class="swatch"><div class="block" style="background:#288C9B"></div><div class="label">Teal</div><div class="hex">#288C9B</div></div>
+<div class="swatch"><div class="block" style="background:#F29E4C"></div><div class="label">Amber</div><div class="hex">#F29E4C</div></div>
+<div class="swatch"><div class="block" style="background:#5BC0DE"></div><div class="label">Sky Blue</div><div class="hex">#5BC0DE</div></div>
+<div class="swatch"><div class="block" style="background:#343A40"></div><div class="label">Charcoal</div><div class="hex">#343A40</div></div>
+<div class="swatch"><div class="block" style="background:#F8F9FA; border: 1px solid #e2e5e9"></div><div class="label">Off-White</div><div class="hex">#F8F9FA</div></div>
+</body>
+</html>
+````
+
+## File: docs/design/preview/colors-member.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; gap: 8px; flex-wrap: wrap; }
+  .member { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .avatar { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: white; font-family: var(--font-sans); }
+  .name { font-size: 10px; color: var(--muted-foreground); font-family: var(--font-sans); }
+</style>
+</head>
+<body>
+  <div class="member"><div class="avatar" style="background:#288C9B">T</div><div class="name">Teal</div></div>
+  <div class="member"><div class="avatar" style="background:#F29E4C">A</div><div class="name">Amber</div></div>
+  <div class="member"><div class="avatar" style="background:#5BC0DE">S</div><div class="name">Sky</div></div>
+  <div class="member"><div class="avatar" style="background:#2ECC71">E</div><div class="name">Emerald</div></div>
+  <div class="member"><div class="avatar" style="background:#9B59B6">V</div><div class="name">Violet</div></div>
+  <div class="member"><div class="avatar" style="background:#E74C3C">R</div><div class="name">Rose</div></div>
+  <div class="member"><div class="avatar" style="background:#5C6BC0">I</div><div class="name">Indigo</div></div>
+  <div class="member"><div class="avatar" style="background:#8BC34A; color: #333">L</div><div class="name">Lime</div></div>
+</body>
+</html>
+````
+
+## File: docs/design/preview/colors-semantic.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; gap: 10px; flex-wrap: wrap; }
+  .chip { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--card); }
+  .dot { width: 28px; height: 28px; border-radius: var(--radius-md); flex-shrink: 0; }
+  .info .name { font-size: 11px; font-weight: 600; color: var(--foreground); }
+  .info .role { font-size: 10px; color: var(--muted-foreground); font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+  <div class="chip"><div class="dot" style="background:var(--primary)"></div><div class="info"><div class="name">primary</div><div class="role">actions · links · focus</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--secondary)"></div><div class="info"><div class="name">secondary</div><div class="role">highlights · badges</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--accent)"></div><div class="info"><div class="name">accent</div><div class="role">CTAs · hover</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--muted)"></div><div class="info"><div class="name">muted</div><div class="role">subtle backgrounds</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--destructive)"></div><div class="info"><div class="name">destructive</div><div class="role">errors · delete</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--success)"></div><div class="info"><div class="name">success</div><div class="role">confirmations</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--warning)"></div><div class="info"><div class="name">warning</div><div class="role">caution states</div></div></div>
+  <div class="chip"><div class="dot" style="background:var(--border); border: 1px solid #ccc"></div><div class="info"><div class="name">border</div><div class="role">dividers · outlines</div></div></div>
+</body>
+</html>
+````
+
+## File: docs/design/preview/components-badges.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 14px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); width: 80px; flex-shrink: 0; font-family: var(--font-sans); }
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; font-family: var(--font-sans); }
+  .badge-primary { background: hsl(188 59% 90%); color: hsl(188 59% 28%); }
+  .badge-amber   { background: hsl(30 87% 92%); color: hsl(30 65% 35%); }
+  .badge-success { background: hsl(145 63% 88%); color: hsl(145 63% 25%); }
+  .badge-muted   { background: var(--muted); color: var(--muted-foreground); }
+  .badge-destructive { background: hsl(0 72% 92%); color: hsl(0 72% 38%); }
+  .status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; font-family: var(--font-sans); color: var(--foreground); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .avatar { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: white; font-family: var(--font-sans); }
+  .avatar-group { display: flex; }
+  .avatar-group .avatar { margin-left: -8px; border: 2px solid var(--background); }
+  .avatar-group .avatar:first-child { margin-left: 0; }
+</style>
+</head>
+<body>
+  <div class="row"><div class="label">Badges</div>
+    <span class="badge badge-primary">In progress</span>
+    <span class="badge badge-amber">Planned</span>
+    <span class="badge badge-success">Done</span>
+    <span class="badge badge-muted">Draft</span>
+    <span class="badge badge-destructive">Blocked</span>
+  </div>
+  <div class="row"><div class="label">Status</div>
+    <span class="status"><span class="dot" style="background:#2ECC71"></span>On track</span>
+    <span class="status"><span class="dot" style="background:#F29E4C"></span>At risk</span>
+    <span class="status"><span class="dot" style="background:#E74C3C"></span>Blocked</span>
+    <span class="status"><span class="dot" style="background:var(--muted-foreground)"></span>Not started</span>
+  </div>
+  <div class="row"><div class="label">Avatars</div>
+    <div class="avatar" style="background:#288C9B">LK</div>
+    <div class="avatar" style="background:#F29E4C">JM</div>
+    <div class="avatar" style="background:#9B59B6">BR</div>
+    <div style="width:16px"></div>
+    <div class="avatar-group">
+      <div class="avatar" style="background:#288C9B">LK</div>
+      <div class="avatar" style="background:#F29E4C">JM</div>
+      <div class="avatar" style="background:#9B59B6">BR</div>
+      <div class="avatar" style="background:var(--muted); color:var(--muted-foreground)">+4</div>
+    </div>
+  </div>
+</body>
+</html>
+````
+
+## File: docs/design/preview/components-buttons.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); width: 80px; flex-shrink: 0; font-family: var(--font-sans); }
+  button { font-family: var(--font-sans); font-size: 13px; font-weight: 600; padding: 7px 16px; border-radius: var(--radius-md); border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: opacity 0.15s, transform 0.1s; }
+  button:active { transform: scale(0.98); }
+  .btn-primary   { background: var(--primary); color: var(--primary-foreground); }
+  .btn-primary:hover { opacity: 0.9; }
+  .btn-secondary { background: var(--secondary); color: var(--secondary-foreground); }
+  .btn-secondary:hover { opacity: 0.88; }
+  .btn-outline   { background: transparent; color: var(--foreground); border: 1px solid var(--border); }
+  .btn-outline:hover { background: var(--muted); }
+  .btn-ghost     { background: transparent; color: var(--foreground); }
+  .btn-ghost:hover { background: var(--muted); }
+  .btn-destructive { background: var(--destructive); color: var(--destructive-foreground); }
+  .btn-destructive:hover { opacity: 0.88; }
+  .btn-sm { font-size: 12px; padding: 5px 12px; }
+  .btn-lg { font-size: 15px; padding: 10px 22px; }
+  .btn-disabled { opacity: 0.45; cursor: not-allowed; }
+</style>
+</head>
+<body>
+  <div class="row"><div class="label">Primary</div><button class="btn-primary">Add event</button><button class="btn-primary btn-sm">Add event</button><button class="btn-primary btn-lg">Add event</button></div>
+  <div class="row"><div class="label">Secondary</div><button class="btn-secondary">Share timeline</button></div>
+  <div class="row"><div class="label">Outline</div><button class="btn-outline">Export</button><button class="btn-outline btn-sm">Cancel</button></div>
+  <div class="row"><div class="label">Ghost</div><button class="btn-ghost">View all</button></div>
+  <div class="row"><div class="label">Destructive</div><button class="btn-destructive">Delete event</button></div>
+  <div class="row"><div class="label">Disabled</div><button class="btn-primary btn-disabled" disabled>Add event</button><button class="btn-outline btn-disabled" disabled>Export</button></div>
+</body>
+</html>
+````
+
+## File: docs/design/preview/components-cards.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); padding: 14px 16px; width: 200px; font-family: var(--font-sans); }
+  .card-title { font-size: 13px; font-weight: 600; color: var(--foreground); margin-bottom: 4px; }
+  .card-meta  { font-size: 11px; color: var(--muted-foreground); margin-bottom: 10px; }
+  .card-body  { font-size: 12px; color: var(--foreground); line-height: 1.5; }
+  .kanban-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); padding: 10px 12px; width: 180px; }
+  .kc-title { font-size: 12px; font-weight: 600; color: var(--foreground); margin-bottom: 6px; }
+  .kc-row { display: flex; align-items: center; justify-content: space-between; }
+  .badge { display: inline-flex; padding: 2px 7px; border-radius: 9999px; font-size: 10px; font-weight: 600; background: hsl(188 59% 90%); color: hsl(188 59% 28%); }
+  .avatar { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: white; }
+  .panel { background: var(--card); border-left: 1px solid var(--border); padding: 16px; width: 180px; box-shadow: var(--shadow-md); }
+  .panel-title { font-size: 13px; font-weight: 700; color: var(--foreground); margin-bottom: 12px; }
+  .panel-field { margin-bottom: 10px; }
+  .field-label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 3px; }
+  .field-val { font-size: 12px; color: var(--foreground); }
+</style>
+</head>
+<body>
+  <!-- Standard card -->
+  <div>
+    <div style="font-size:10px;font-weight:600;color:var(--muted-foreground);margin-bottom:6px;font-family:var(--font-sans)">Card</div>
+    <div class="card">
+      <div class="card-title">Q3 Marketing Campaign</div>
+      <div class="card-meta">Lindsay K. · Apr 28 – May 15</div>
+      <div class="card-body">Brand refresh assets and launch plan for summer push.</div>
+    </div>
+  </div>
+  <!-- Kanban card -->
+  <div>
+    <div style="font-size:10px;font-weight:600;color:var(--muted-foreground);margin-bottom:6px;font-family:var(--font-sans)">Kanban card</div>
+    <div class="kanban-card">
+      <div style="width:3px;height:3px;border-radius:50%;background:#288C9B;margin-bottom:6px"></div>
+      <div class="kc-title">Campaign assets</div>
+      <div class="kc-row">
+        <span class="badge">In progress</span>
+        <div class="avatar" style="background:#288C9B">LK</div>
+      </div>
+    </div>
+  </div>
+  <!-- Event detail panel -->
+  <div>
+    <div style="font-size:10px;font-weight:600;color:var(--muted-foreground);margin-bottom:6px;font-family:var(--font-sans)">Event panel</div>
+    <div class="panel">
+      <div class="panel-title">Campaign assets</div>
+      <div class="panel-field"><div class="field-label">Assigned</div><div class="field-val">Lindsay K.</div></div>
+      <div class="panel-field"><div class="field-label">Dates</div><div class="field-val">Apr 28 – May 15</div></div>
+      <div class="panel-field"><div class="field-label">Status</div><div class="field-val">In progress</div></div>
+      <div class="panel-field"><div class="field-label">Notes</div><div class="field-val" style="color:var(--muted-foreground)">No notes yet</div></div>
+    </div>
+  </div>
+</body>
+</html>
+````
+
+## File: docs/design/preview/components-inputs.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); width: 80px; flex-shrink: 0; font-family: var(--font-sans); }
+  input, select { font-family: var(--font-sans); font-size: 13px; padding: 7px 10px; border-radius: var(--radius-md); border: 1px solid var(--input); background: var(--card); color: var(--foreground); outline: none; width: 200px; }
+  input::placeholder { color: var(--muted-foreground); }
+  input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px hsl(188 59% 38% / 0.2); }
+  input.error { border-color: var(--destructive); }
+  input.disabled { opacity: 0.5; cursor: not-allowed; background: var(--muted); }
+  .helper { font-size: 11px; color: var(--muted-foreground); font-family: var(--font-sans); }
+  .helper.err { color: var(--destructive); }
+</style>
+</head>
+<body>
+  <div class="row"><div class="label">Default</div><input type="text" placeholder="Event title"></div>
+  <div class="row"><div class="label">Filled</div><input type="text" value="Q3 Campaign"></div>
+  <div class="row"><div class="label">Focus</div><input type="text" value="Q3 Campaign" style="border-color:var(--primary);box-shadow:0 0 0 2px hsl(188 59% 38% / 0.2)"></div>
+  <div class="row"><div class="label">Error</div>
+    <div style="display:flex;flex-direction:column;gap:3px">
+      <input type="text" value="" class="error" placeholder="Required">
+      <span class="helper err">Title is required</span>
+    </div>
+  </div>
+  <div class="row"><div class="label">Disabled</div><input type="text" value="Read only" class="disabled" disabled></div>
+  <div class="row"><div class="label">Select</div>
+    <select>
+      <option>Planned</option>
+      <option selected>In progress</option>
+      <option>Done</option>
+    </select>
+  </div>
+</body>
+</html>
+````
+
+## File: docs/design/preview/components-timeline.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); font-family: var(--font-sans); }
+  .timeline { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-sm); }
+  .tl-header { display: grid; grid-template-columns: 120px repeat(10, 1fr); border-bottom: 1px solid var(--border); }
+  .tl-header-cell { padding: 6px 8px; font-size: 10px; font-weight: 600; color: var(--muted-foreground); border-right: 1px solid var(--border); text-align: center; }
+  .tl-header-cell:first-child { text-align: left; }
+  .tl-row { display: grid; grid-template-columns: 120px repeat(10, 1fr); border-bottom: 1px solid var(--border); min-height: 44px; position: relative; }
+  .tl-row:last-child { border-bottom: none; }
+  .tl-person { padding: 0 10px; display: flex; align-items: center; gap: 7px; border-right: 1px solid var(--border); }
+  .avatar { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: white; flex-shrink: 0; }
+  .person-name { font-size: 12px; font-weight: 600; color: var(--foreground); }
+  .tl-cell { border-right: 1px solid var(--border); position: relative; }
+  .tl-cell:last-child { border-right: none; }
+  .block { position: absolute; top: 8px; bottom: 8px; border-radius: 4px; display: flex; align-items: center; padding: 0 8px; font-size: 10px; font-weight: 600; color: white; overflow: hidden; white-space: nowrap; box-shadow: var(--shadow-sm); cursor: pointer; transition: opacity 0.15s; }
+  .block:hover { opacity: 0.88; }
+  .today-line { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--secondary); z-index: 5; }
+  .tl-lane { position: relative; grid-column: 2 / -1; display: grid; grid-template-columns: repeat(10, 1fr); }
+</style>
+</head>
+<body>
+  <div class="timeline">
+    <div class="tl-header">
+      <div class="tl-header-cell">Team</div>
+      <div class="tl-header-cell">Apr 28</div>
+      <div class="tl-header-cell">Apr 29</div>
+      <div class="tl-header-cell">Apr 30</div>
+      <div class="tl-header-cell">May 1</div>
+      <div class="tl-header-cell">May 2</div>
+      <div class="tl-header-cell">May 5</div>
+      <div class="tl-header-cell">May 6</div>
+      <div class="tl-header-cell">May 7</div>
+      <div class="tl-header-cell">May 8</div>
+      <div class="tl-header-cell">May 9</div>
+    </div>
+    <!-- Lindsay -->
+    <div class="tl-row">
+      <div class="tl-person"><div class="avatar" style="background:#288C9B">LK</div><span class="person-name">Lindsay</span></div>
+      <div class="tl-lane" style="position:relative">
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell" style="border-right:none"></div>
+        <div class="block" style="background:#288C9B; left: 0%; width: 65%">Campaign launch</div>
+      </div>
+    </div>
+    <!-- Jen -->
+    <div class="tl-row">
+      <div class="tl-person"><div class="avatar" style="background:#F29E4C">JM</div><span class="person-name">Jen</span></div>
+      <div class="tl-lane" style="position:relative">
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell" style="border-right:none"></div>
+        <div class="block" style="background:#F29E4C; color: #333; left: 40%; width: 50%">Project Y</div>
+      </div>
+    </div>
+    <!-- Brian -->
+    <div class="tl-row">
+      <div class="tl-person"><div class="avatar" style="background:#9B59B6">BR</div><span class="person-name">Brian</span></div>
+      <div class="tl-lane" style="position:relative">
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
+        <div class="tl-cell"></div><div class="tl-cell" style="border-right:none"></div>
+        <div class="block" style="background:#9B59B6; left: 0%; width: 20%">Task A</div>
+        <div class="block" style="background:#9B59B6; left: 55%; width: 40%">Task B</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+````
+
+## File: docs/design/preview/logo-variants.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600&display=swap">
+<style>
+  body { margin: 0; padding: 16px 20px; background: #F8F9FA; font-family: 'Open Sans', sans-serif; }
+  .grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; }
+  .variant { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+  .bg { width: 100%; aspect-ratio: 1; border-radius: 8px; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .bg svg { width: 100%; height: 100%; }
+  .name { font-size: 9px; font-weight: 600; color: #343A40; text-align: center; line-height: 1.3; word-break: break-all; }
+  .desc { font-size: 8px; color: #6C7A8A; text-align: center; }
+</style>
+</head>
+<body>
+<div class="grid">
+
+  <div class="variant">
+    <div class="bg" style="background:#F8F9FA;border:1px solid #E2E6EA;">
+      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+
+<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g id="Main-Icon" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Main Icon" transform="matrix(1,0,0,1,300,300)">
+        <g transform="matrix(1.75446,0,0,1.75446,-123.155,-207.401)">
+            <g transform="matrix(1,0,0,1,0.659356,0)">
+                <path d="M131.868,240.659L131.868,210.347C131.868,195.781 143.693,183.956 158.259,183.956L324.379,183.956C338.944,183.956 350.769,195.781 350.769,210.347L350.769,240.659L131.868,240.659Z" style="fill:rgb(26,151,162);"></path>
+            </g>
+            <path d="M185.644,177.705L185.644,205.725C185.644,209.358 182.694,212.308 179.061,212.308C175.428,212.308 172.478,209.358 172.478,205.725L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705Z" style="fill:rgb(241,123,43);"></path>
+            <g transform="matrix(1,0,0,1,123.522,0)">
+                <path d="M185.644,177.705L185.644,205.725C185.644,209.358 182.694,212.308 179.061,212.308C175.428,212.308 172.478,209.358 172.478,205.725L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705Z" style="fill:rgb(241,123,43);"></path>
+            </g>
+            <g transform="matrix(1,0,0,1,0.659356,0)">
+                <path d="M350.769,248.571L350.769,365.258C350.769,379.823 338.944,391.648 324.379,391.648L158.259,391.648C143.693,391.648 131.868,379.823 131.868,365.258L131.868,248.571L350.769,248.571Z" style="fill:rgb(230,231,230);"></path>
+            </g>
+        </g>
+        <g>
+            <g transform="matrix(1.75446,0,0,1.75446,-136.169,-207.401)">
+                <g transform="matrix(1,0,0,1,-3.66171,-161.207)">
+                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(24,150,166);"></path>
+                </g>
+                <g transform="matrix(1,0,0,1,208.004,-161.207)">
+                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(24,150,166);"></path>
+                </g>
+                <g transform="matrix(1.0064,0,0,1,-1.42799,0.630854)">
+                    <path d="M307.661,288.636L124.641,288.636L124.641,281.913L183.342,281.913L183.342,281.744C185.193,281.744 186.697,280.231 186.697,278.368C186.697,276.505 185.193,274.992 183.342,274.992L183.342,274.823L124.641,274.823L124.641,268.1L307.661,268.1C305.221,270.818 303.735,274.42 303.735,278.368C303.735,282.316 305.221,285.918 307.661,288.636ZM209.443,275.161C207.592,275.161 206.089,276.674 206.089,278.537C206.089,280.4 207.592,281.913 209.443,281.913C211.294,281.913 212.797,280.4 212.797,278.537C212.797,276.674 211.294,275.161 209.443,275.161ZM196.807,274.992C194.956,274.992 193.453,276.505 193.453,278.368C193.453,280.231 194.956,281.744 196.807,281.744C198.658,281.744 200.161,280.231 200.161,278.368C200.161,276.505 198.658,274.992 196.807,274.992ZM222.079,275.161C220.228,275.161 218.725,276.674 218.725,278.537C218.725,280.4 220.228,281.913 222.079,281.913C223.93,281.913 225.433,280.4 225.433,278.537C225.433,276.674 223.93,275.161 222.079,275.161Z" style="fill:rgb(24,150,166);"></path>
+                </g>
+            </g>
+            <g transform="matrix(1.75446,0,0,1.75446,-108.122,-66.7362)">
+                <g transform="matrix(1,0,0,1,-3.66171,-161.207)">
+                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(26,143,157);"></path>
+                </g>
+                <g transform="matrix(1,0,0,1,208.004,-161.207)">
+                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(26,143,157);"></path>
+                </g>
+                <g transform="matrix(1.0064,0,0,1,-1.42799,0.630854)">
+                    <path d="M307.661,288.636L124.641,288.636L124.641,281.913L183.342,281.913L183.342,281.744C185.193,281.744 186.697,280.231 186.697,278.368C186.697,276.505 185.193,274.992 183.342,274.992L183.342,274.823L124.641,274.823L124.641,268.1L307.661,268.1C305.221,270.818 303.735,274.42 303.735,278.368C303.735,282.316 305.221,285.918 307.661,288.636ZM209.443,275.161C207.592,275.161 206.089,276.674 206.089,278.537C206.089,280.4 207.592,281.913 209.443,281.913C211.294,281.913 212.797,280.4 212.797,278.537C212.797,276.674 211.294,275.161 209.443,275.161ZM196.807,274.992C194.956,274.992 193.453,276.505 193.453,278.368C193.453,280.231 194.956,281.744 196.807,281.744C198.658,281.744 200.161,280.231 200.161,278.368C200.161,276.505 198.658,274.992 196.807,274.992ZM222.079,275.161C220.228,275.161 218.725,276.674 218.725,278.537C218.725,280.4 220.228,281.913 222.079,281.913C223.93,281.913 225.433,280.4 225.433,278.537C225.433,276.674 223.93,275.161 222.079,275.161Z" style="fill:rgb(26,143,157);"></path>
+                </g>
+            </g>
+            <g transform="matrix(-1.75446,-2.14859e-16,2.14859e-16,-1.75446,736.169,841.914)">
+                <g transform="matrix(1,0,0,1,-3.66171,-161.207)">
+                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(241,123,43);"></path>
+                </g>
+                <g transform="matrix(1,0,0,1,208.004,-161.207)">
+                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(241,123,43);"></path>
+                </g>
+                <g transform="matrix(1.0064,0,0,1,-1.42799,0.630854)">
+                    <path d="M307.661,288.636L124.641,288.636L124.641,281.913L183.342,281.913L183.342,281.744C185.193,281.744 186.697,280.231 186.697,278.368C186.697,276.505 185.193,274.992 183.342,274.992L183.342,274.823L124.641,274.823L124.641,268.1L307.661,268.1C305.221,270.818 303.735,274.42 303.735,278.368C303.735,282.316 305.221,285.918 307.661,288.636ZM209.443,275.161C207.592,275.161 206.089,276.674 206.089,278.537C206.089,280.4 207.592,281.913 209.443,281.913C211.294,281.913 212.797,280.4 212.797,278.537C212.797,276.674 211.294,275.161 209.443,275.161ZM196.807,274.992C194.956,274.992 193.453,276.505 193.453,278.368C193.453,280.231 194.956,281.744 196.807,281.744C198.658,281.744 200.161,280.231 200.161,278.368C200.161,276.505 198.658,274.992 196.807,274.992ZM222.079,275.161C220.228,275.161 218.725,276.674 218.725,278.537C218.725,280.4 220.228,281.913 222.079,281.913C223.93,281.913 225.433,280.4 225.433,278.537C225.433,276.674 223.93,275.161 222.079,275.161Z" style="fill:rgb(241,123,43);"></path>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>
+    </div>
+    <div class="name">icon-color</div>
+    <div class="desc">white / off-white bg</div>
+  </div>
+
+  <div class="variant">
+    <div class="bg" style="background:#F8F9FA;border:1px solid #E2E6EA;">
+      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+
+<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g id="Just-Black" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Just Black" transform="matrix(1.75446,0,0,1.75446,176.845,92.599)">
+        <path d="M132.527,289.267L117.826,289.267C115.02,292.375 110.96,294.329 106.447,294.329C97.987,294.329 91.118,287.46 91.118,278.999C91.118,270.538 97.987,263.669 106.447,263.669C110.96,263.669 115.02,265.623 117.826,268.731L132.527,268.731L132.527,275.454L121.365,275.454C121.634,276.592 121.777,277.779 121.777,278.999C121.777,280.219 121.634,281.406 121.365,282.544L132.527,282.544L132.527,289.267ZM132.527,268.731L132.527,248.571L351.429,248.571L351.429,308.819L181.595,308.819C184.05,311.537 185.546,315.139 185.546,319.087C185.546,323.035 184.05,326.637 181.595,329.355L351.429,329.355L351.429,365.258C351.429,379.823 339.603,391.648 325.038,391.648L158.918,391.648C146.067,391.648 135.35,382.443 133.004,370.273C133.284,370.007 133.553,369.73 133.812,369.443L316.769,369.443C314.314,366.724 312.818,363.123 312.818,359.175C312.818,355.227 314.314,351.625 316.769,348.906L133.812,348.906C133.409,348.46 132.98,348.037 132.527,347.641L132.527,289.267L300.783,289.267C298.328,286.549 296.832,282.947 296.832,278.999C296.832,275.051 298.328,271.449 300.783,268.731L132.527,268.731ZM351.429,308.819L364.552,308.819C367.358,305.711 371.418,303.757 375.93,303.757C384.391,303.757 391.26,310.626 391.26,319.087C391.26,327.548 384.391,334.417 375.93,334.417C371.418,334.417 367.358,332.463 364.552,329.355L351.429,329.355L351.429,322.631L361.013,322.631C360.743,321.494 360.601,320.307 360.601,319.087C360.601,317.867 360.743,316.68 361.013,315.542L351.429,315.542L351.429,308.819ZM133.004,370.273C130.253,372.894 126.53,374.504 122.434,374.504C113.973,374.504 107.104,367.635 107.104,359.175C107.104,350.714 113.973,343.845 122.434,343.845C126.298,343.845 129.83,345.278 132.527,347.641L132.527,365.258C132.527,366.972 132.691,368.649 133.004,370.273ZM132.527,282.544L132.527,275.454L175.669,275.454L175.669,275.623C177.532,275.623 179.045,277.136 179.045,278.999C179.045,280.862 177.532,282.375 175.669,282.375L175.669,282.544L132.527,282.544ZM351.429,315.542L351.429,322.631L306.709,322.631L306.709,322.463C304.845,322.463 303.333,320.95 303.333,319.087C303.333,317.224 304.845,315.711 306.709,315.711L306.709,315.542L351.429,315.542ZM267.724,322.294C265.861,322.294 264.348,320.781 264.348,318.918C264.348,317.055 265.861,315.542 267.724,315.542C269.587,315.542 271.1,317.055 271.1,318.918C271.1,320.781 269.587,322.294 267.724,322.294ZM280.441,322.294C278.578,322.294 277.065,320.781 277.065,318.918C277.065,317.055 278.578,315.542 280.441,315.542C282.304,315.542 283.817,317.055 283.817,318.918C283.817,320.781 282.304,322.294 280.441,322.294ZM293.158,322.463C291.295,322.463 289.782,320.95 289.782,319.087C289.782,317.224 291.295,315.711 293.158,315.711C295.021,315.711 296.534,317.224 296.534,319.087C296.534,320.95 295.021,322.463 293.158,322.463ZM375.93,326.99C380.292,326.99 383.833,323.449 383.833,319.087C383.833,314.725 380.292,311.184 375.93,311.184C371.569,311.184 368.027,314.725 368.027,319.087C368.027,323.449 371.569,326.99 375.93,326.99ZM164.265,334.417C172.726,334.417 179.595,327.548 179.595,319.087C179.595,310.626 172.726,303.757 164.265,303.757C155.804,303.757 148.935,310.626 148.935,319.087C148.935,327.548 155.804,334.417 164.265,334.417ZM164.265,326.99C159.903,326.99 156.362,323.449 156.362,319.087C156.362,314.725 159.903,311.184 164.265,311.184C168.627,311.184 172.168,314.725 172.168,319.087C172.168,323.449 168.627,326.99 164.265,326.99ZM334.099,343.845C325.638,343.845 318.769,350.714 318.769,359.175C318.769,367.635 325.638,374.504 334.099,374.504C342.56,374.504 349.429,367.635 349.429,359.175C349.429,350.714 342.56,343.845 334.099,343.845ZM334.099,351.272C338.461,351.272 342.002,354.813 342.002,359.175C342.002,363.536 338.461,367.078 334.099,367.078C329.737,367.078 326.196,363.536 326.196,359.175C326.196,354.813 329.737,351.272 334.099,351.272ZM318.113,263.669C309.652,263.669 302.783,270.538 302.783,278.999C302.783,287.46 309.652,294.329 318.113,294.329C326.573,294.329 333.442,287.46 333.442,278.999C333.442,270.538 326.573,263.669 318.113,263.669ZM318.113,271.096C322.474,271.096 326.016,274.637 326.016,278.999C326.016,283.361 322.474,286.902 318.113,286.902C313.751,286.902 310.21,283.361 310.21,278.999C310.21,274.637 313.751,271.096 318.113,271.096ZM217.923,355.968C219.786,355.968 221.299,357.48 221.299,359.344C221.299,361.207 219.786,362.719 217.923,362.719C216.06,362.719 214.547,361.207 214.547,359.344C214.547,357.48 216.06,355.968 217.923,355.968ZM205.206,355.799C207.069,355.799 208.582,357.312 208.582,359.175C208.582,361.038 207.069,362.551 205.206,362.551C203.343,362.551 201.83,361.038 201.83,359.175C201.83,357.312 203.343,355.799 205.206,355.799ZM230.64,355.968C232.503,355.968 234.016,357.48 234.016,359.344C234.016,361.207 232.503,362.719 230.64,362.719C228.777,362.719 227.264,361.207 227.264,359.344C227.264,357.48 228.777,355.968 230.64,355.968ZM137.351,355.63L191.655,355.63L191.655,355.799C193.518,355.799 195.031,357.312 195.031,359.175C195.031,361.038 193.518,362.551 191.655,362.551L191.655,362.719L137.351,362.719C137.62,361.581 137.763,360.395 137.763,359.175C137.763,357.955 137.62,356.768 137.351,355.63ZM106.447,271.096C102.086,271.096 98.545,274.637 98.545,278.999C98.545,283.361 102.086,286.902 106.447,286.902C110.809,286.902 114.35,283.361 114.35,278.999C114.35,274.637 110.809,271.096 106.447,271.096ZM122.434,351.272C118.072,351.272 114.531,354.813 114.531,359.175C114.531,363.536 118.072,367.078 122.434,367.078C126.795,367.078 130.336,363.536 130.336,359.175C130.336,354.813 126.795,351.272 122.434,351.272ZM189.22,275.623C191.083,275.623 192.596,277.136 192.596,278.999C192.596,280.862 191.083,282.375 189.22,282.375C187.357,282.375 185.844,280.862 185.844,278.999C185.844,277.136 187.357,275.623 189.22,275.623ZM201.937,275.792C203.8,275.792 205.313,277.305 205.313,279.168C205.313,281.031 203.8,282.544 201.937,282.544C200.074,282.544 198.561,281.031 198.561,279.168C198.561,277.305 200.074,275.792 201.937,275.792ZM214.654,275.792C216.517,275.792 218.03,277.305 218.03,279.168C218.03,281.031 216.517,282.544 214.654,282.544C212.791,282.544 211.278,281.031 211.278,279.168C211.278,277.305 212.791,275.792 214.654,275.792ZM309.166,183.956L325.038,183.956C339.603,183.956 351.429,195.781 351.429,210.347L351.429,240.659L132.527,240.659L132.527,210.347C132.527,195.781 144.353,183.956 158.918,183.956L172.478,183.956L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705L185.644,183.956L296,183.956L296,177.705C296,174.072 298.95,171.123 302.583,171.123C306.216,171.123 309.166,174.072 309.166,177.705L309.166,183.956Z"></path>
+    </g>
+</svg>
+    </div>
+    <div class="name">icon-black</div>
+    <div class="desc">white / off-white bg</div>
+  </div>
+
+  <div class="variant">
+    <div class="bg" style="background:#F8F9FA;border:1px solid #E2E6EA;">
+      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+
+<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g id="Just-teal" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Just teal" transform="matrix(1.75446,0,0,1.75446,176.845,92.599)">
+        <path d="M132.527,289.267L117.826,289.267C115.02,292.375 110.96,294.329 106.447,294.329C97.987,294.329 91.118,287.46 91.118,278.999C91.118,270.538 97.987,263.669 106.447,263.669C110.96,263.669 115.02,265.623 117.826,268.731L132.527,268.731L132.527,275.454L121.365,275.454C121.634,276.592 121.777,277.779 121.777,278.999C121.777,280.219 121.634,281.406 121.365,282.544L132.527,282.544L132.527,289.267ZM132.527,268.731L132.527,248.571L351.429,248.571L351.429,308.819L181.595,308.819C184.05,311.537 185.546,315.139 185.546,319.087C185.546,323.035 184.05,326.637 181.595,329.355L351.429,329.355L351.429,365.258C351.429,379.823 339.603,391.648 325.038,391.648L158.918,391.648C146.067,391.648 135.35,382.443 133.004,370.273C133.284,370.007 133.553,369.73 133.812,369.443L316.769,369.443C314.314,366.724 312.818,363.123 312.818,359.175C312.818,355.227 314.314,351.625 316.769,348.906L133.812,348.906C133.409,348.46 132.98,348.037 132.527,347.641L132.527,289.267L300.783,289.267C298.328,286.549 296.832,282.947 296.832,278.999C296.832,275.051 298.328,271.449 300.783,268.731L132.527,268.731ZM351.429,308.819L364.552,308.819C367.358,305.711 371.418,303.757 375.93,303.757C384.391,303.757 391.26,310.626 391.26,319.087C391.26,327.548 384.391,334.417 375.93,334.417C371.418,334.417 367.358,332.463 364.552,329.355L351.429,329.355L351.429,322.631L361.013,322.631C360.743,321.494 360.601,320.307 360.601,319.087C360.601,317.867 360.743,316.68 361.013,315.542L351.429,315.542L351.429,308.819ZM133.004,370.273C130.253,372.894 126.53,374.504 122.434,374.504C113.973,374.504 107.104,367.635 107.104,359.175C107.104,350.714 113.973,343.845 122.434,343.845C126.298,343.845 129.83,345.278 132.527,347.641L132.527,365.258C132.527,366.972 132.691,368.649 133.004,370.273ZM132.527,282.544L132.527,275.454L175.669,275.454L175.669,275.623C177.532,275.623 179.045,277.136 179.045,278.999C179.045,280.862 177.532,282.375 175.669,282.375L175.669,282.544L132.527,282.544ZM351.429,315.542L351.429,322.631L306.709,322.631L306.709,322.463C304.845,322.463 303.333,320.95 303.333,319.087C303.333,317.224 304.845,315.711 306.709,315.711L306.709,315.542L351.429,315.542ZM267.724,322.294C265.861,322.294 264.348,320.781 264.348,318.918C264.348,317.055 265.861,315.542 267.724,315.542C269.587,315.542 271.1,317.055 271.1,318.918C271.1,320.781 269.587,322.294 267.724,322.294ZM280.441,322.294C278.578,322.294 277.065,320.781 277.065,318.918C277.065,317.055 278.578,315.542 280.441,315.542C282.304,315.542 283.817,317.055 283.817,318.918C283.817,320.781 282.304,322.294 280.441,322.294ZM293.158,322.463C291.295,322.463 289.782,320.95 289.782,319.087C289.782,317.224 291.295,315.711 293.158,315.711C295.021,315.711 296.534,317.224 296.534,319.087C296.534,320.95 295.021,322.463 293.158,322.463ZM375.93,326.99C380.292,326.99 383.833,323.449 383.833,319.087C383.833,314.725 380.292,311.184 375.93,311.184C371.569,311.184 368.027,314.725 368.027,319.087C368.027,323.449 371.569,326.99 375.93,326.99ZM164.265,334.417C172.726,334.417 179.595,327.548 179.595,319.087C179.595,310.626 172.726,303.757 164.265,303.757C155.804,303.757 148.935,310.626 148.935,319.087C148.935,327.548 155.804,334.417 164.265,334.417ZM164.265,326.99C159.903,326.99 156.362,323.449 156.362,319.087C156.362,314.725 159.903,311.184 164.265,311.184C168.627,311.184 172.168,314.725 172.168,319.087C172.168,323.449 168.627,326.99 164.265,326.99ZM334.099,343.845C325.638,343.845 318.769,350.714 318.769,359.175C318.769,367.635 325.638,374.504 334.099,374.504C342.56,374.504 349.429,367.635 349.429,359.175C349.429,350.714 342.56,343.845 334.099,343.845ZM334.099,351.272C338.461,351.272 342.002,354.813 342.002,359.175C342.002,363.536 338.461,367.078 334.099,367.078C329.737,367.078 326.196,363.536 326.196,359.175C326.196,354.813 329.737,351.272 334.099,351.272ZM318.113,263.669C309.652,263.669 302.783,270.538 302.783,278.999C302.783,287.46 309.652,294.329 318.113,294.329C326.573,294.329 333.442,287.46 333.442,278.999C333.442,270.538 326.573,263.669 318.113,263.669ZM318.113,271.096C322.474,271.096 326.016,274.637 326.016,278.999C326.016,283.361 322.474,286.902 318.113,286.902C313.751,286.902 310.21,283.361 310.21,278.999C310.21,274.637 313.751,271.096 318.113,271.096ZM217.923,355.968C219.786,355.968 221.299,357.48 221.299,359.344C221.299,361.207 219.786,362.719 217.923,362.719C216.06,362.719 214.547,361.207 214.547,359.344C214.547,357.48 216.06,355.968 217.923,355.968ZM205.206,355.799C207.069,355.799 208.582,357.312 208.582,359.175C208.582,361.038 207.069,362.551 205.206,362.551C203.343,362.551 201.83,361.038 201.83,359.175C201.83,357.312 203.343,355.799 205.206,355.799ZM230.64,355.968C232.503,355.968 234.016,357.48 234.016,359.344C234.016,361.207 232.503,362.719 230.64,362.719C228.777,362.719 227.264,361.207 227.264,359.344C227.264,357.48 228.777,355.968 230.64,355.968ZM137.351,355.63L191.655,355.63L191.655,355.799C193.518,355.799 195.031,357.312 195.031,359.175C195.031,361.038 193.518,362.551 191.655,362.551L191.655,362.719L137.351,362.719C137.62,361.581 137.763,360.395 137.763,359.175C137.763,357.955 137.62,356.768 137.351,355.63ZM106.447,271.096C102.086,271.096 98.545,274.637 98.545,278.999C98.545,283.361 102.086,286.902 106.447,286.902C110.809,286.902 114.35,283.361 114.35,278.999C114.35,274.637 110.809,271.096 106.447,271.096ZM122.434,351.272C118.072,351.272 114.531,354.813 114.531,359.175C114.531,363.536 118.072,367.078 122.434,367.078C126.795,367.078 130.336,363.536 130.336,359.175C130.336,354.813 126.795,351.272 122.434,351.272ZM189.22,275.623C191.083,275.623 192.596,277.136 192.596,278.999C192.596,280.862 191.083,282.375 189.22,282.375C187.357,282.375 185.844,280.862 185.844,278.999C185.844,277.136 187.357,275.623 189.22,275.623ZM201.937,275.792C203.8,275.792 205.313,277.305 205.313,279.168C205.313,281.031 203.8,282.544 201.937,282.544C200.074,282.544 198.561,281.031 198.561,279.168C198.561,277.305 200.074,275.792 201.937,275.792ZM214.654,275.792C216.517,275.792 218.03,277.305 218.03,279.168C218.03,281.031 216.517,282.544 214.654,282.544C212.791,282.544 211.278,281.031 211.278,279.168C211.278,277.305 212.791,275.792 214.654,275.792ZM309.166,183.956L325.038,183.956C339.603,183.956 351.429,195.781 351.429,210.347L351.429,240.659L132.527,240.659L132.527,210.347C132.527,195.781 144.353,183.956 158.918,183.956L172.478,183.956L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705L185.644,183.956L296,183.956L296,177.705C296,174.072 298.95,171.123 302.583,171.123C306.216,171.123 309.166,174.072 309.166,177.705L309.166,183.956Z" style="fill:rgb(26,151,162);"></path>
+    </g>
+</svg>
+    </div>
+    <div class="name">icon-teal</div>
+    <div class="desc">white / off-white bg</div>
+  </div>
+
+  <div class="variant">
+    <div class="bg" style="background:#F8F9FA;border:1px solid #E2E6EA;">
+      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+
+<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g id="Just-orange" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Just orange" transform="matrix(1.75446,0,0,1.75446,176.845,92.599)">
+        <path d="M132.527,289.267L117.826,289.267C115.02,292.375 110.96,294.329 106.447,294.329C97.987,294.329 91.118,287.46 91.118,278.999C91.118,270.538 97.987,263.669 106.447,263.669C110.96,263.669 115.02,265.623 117.826,268.731L132.527,268.731L132.527,275.454L121.365,275.454C121.634,276.592 121.777,277.779 121.777,278.999C121.777,280.219 121.634,281.406 121.365,282.544L132.527,282.544L132.527,289.267ZM132.527,268.731L132.527,248.571L351.429,248.571L351.429,308.819L181.595,308.819C184.05,311.537 185.546,315.139 185.546,319.087C185.546,323.035 184.05,326.637 181.595,329.355L351.429,329.355L351.429,365.258C351.429,379.823 339.603,391.648 325.038,391.648L158.918,391.648C146.067,391.648 135.35,382.443 133.004,370.273C133.284,370.007 133.553,369.73 133.812,369.443L316.769,369.443C314.314,366.724 312.818,363.123 312.818,359.175C312.818,355.227 314.314,351.625 316.769,348.906L133.812,348.906C133.409,348.46 132.98,348.037 132.527,347.641L132.527,289.267L300.783,289.267C298.328,286.549 296.832,282.947 296.832,278.999C296.832,275.051 298.328,271.449 300.783,268.731L132.527,268.731ZM351.429,308.819L364.552,308.819C367.358,305.711 371.418,303.757 375.93,303.757C384.391,303.757 391.26,310.626 391.26,319.087C391.26,327.548 384.391,334.417 375.93,334.417C371.418,334.417 367.358,332.463 364.552,329.355L351.429,329.355L351.429,322.631L361.013,322.631C360.743,321.494 360.601,320.307 360.601,319.087C360.601,317.867 360.743,316.68 361.013,315.542L351.429,315.542L351.429,308.819ZM133.004,370.273C130.253,372.894 126.53,374.504 122.434,374.504C113.973,374.504 107.104,367.635 107.104,359.175C107.104,350.714 113.973,343.845 122.434,343.845C126.298,343.845 129.83,345.278 132.527,347.641L132.527,365.258C132.527,366.972 132.691,368.649 133.004,370.273ZM132.527,282.544L132.527,275.454L175.669,275.454L175.669,275.623C177.532,275.623 179.045,277.136 179.045,278.999C179.045,280.862 177.532,282.375 175.669,282.375L175.669,282.544L132.527,282.544ZM351.429,315.542L351.429,322.631L306.709,322.631L306.709,322.463C304.845,322.463 303.333,320.95 303.333,319.087C303.333,317.224 304.845,315.711 306.709,315.711L306.709,315.542L351.429,315.542ZM267.724,322.294C265.861,322.294 264.348,320.781 264.348,318.918C264.348,317.055 265.861,315.542 267.724,315.542C269.587,315.542 271.1,317.055 271.1,318.918C271.1,320.781 269.587,322.294 267.724,322.294ZM280.441,322.294C278.578,322.294 277.065,320.781 277.065,318.918C277.065,317.055 278.578,315.542 280.441,315.542C282.304,315.542 283.817,317.055 283.817,318.918C283.817,320.781 282.304,322.294 280.441,322.294ZM293.158,322.463C291.295,322.463 289.782,320.95 289.782,319.087C289.782,317.224 291.295,315.711 293.158,315.711C295.021,315.711 296.534,317.224 296.534,319.087C296.534,320.95 295.021,322.463 293.158,322.463ZM375.93,326.99C380.292,326.99 383.833,323.449 383.833,319.087C383.833,314.725 380.292,311.184 375.93,311.184C371.569,311.184 368.027,314.725 368.027,319.087C368.027,323.449 371.569,326.99 375.93,326.99ZM164.265,334.417C172.726,334.417 179.595,327.548 179.595,319.087C179.595,310.626 172.726,303.757 164.265,303.757C155.804,303.757 148.935,310.626 148.935,319.087C148.935,327.548 155.804,334.417 164.265,334.417ZM164.265,326.99C159.903,326.99 156.362,323.449 156.362,319.087C156.362,314.725 159.903,311.184 164.265,311.184C168.627,311.184 172.168,314.725 172.168,319.087C172.168,323.449 168.627,326.99 164.265,326.99ZM334.099,343.845C325.638,343.845 318.769,350.714 318.769,359.175C318.769,367.635 325.638,374.504 334.099,374.504C342.56,374.504 349.429,367.635 349.429,359.175C349.429,350.714 342.56,343.845 334.099,343.845ZM334.099,351.272C338.461,351.272 342.002,354.813 342.002,359.175C342.002,363.536 338.461,367.078 334.099,367.078C329.737,367.078 326.196,363.536 326.196,359.175C326.196,354.813 329.737,351.272 334.099,351.272ZM318.113,263.669C309.652,263.669 302.783,270.538 302.783,278.999C302.783,287.46 309.652,294.329 318.113,294.329C326.573,294.329 333.442,287.46 333.442,278.999C333.442,270.538 326.573,263.669 318.113,263.669ZM318.113,271.096C322.474,271.096 326.016,274.637 326.016,278.999C326.016,283.361 322.474,286.902 318.113,286.902C313.751,286.902 310.21,283.361 310.21,278.999C310.21,274.637 313.751,271.096 318.113,271.096ZM217.923,355.968C219.786,355.968 221.299,357.48 221.299,359.344C221.299,361.207 219.786,362.719 217.923,362.719C216.06,362.719 214.547,361.207 214.547,359.344C214.547,357.48 216.06,355.968 217.923,355.968ZM205.206,355.799C207.069,355.799 208.582,357.312 208.582,359.175C208.582,361.038 207.069,362.551 205.206,362.551C203.343,362.551 201.83,361.038 201.83,359.175C201.83,357.312 203.343,355.799 205.206,355.799ZM230.64,355.968C232.503,355.968 234.016,357.48 234.016,359.344C234.016,361.207 232.503,362.719 230.64,362.719C228.777,362.719 227.264,361.207 227.264,359.344C227.264,357.48 228.777,355.968 230.64,355.968ZM137.351,355.63L191.655,355.63L191.655,355.799C193.518,355.799 195.031,357.312 195.031,359.175C195.031,361.038 193.518,362.551 191.655,362.551L191.655,362.719L137.351,362.719C137.62,361.581 137.763,360.395 137.763,359.175C137.763,357.955 137.62,356.768 137.351,355.63ZM106.447,271.096C102.086,271.096 98.545,274.637 98.545,278.999C98.545,283.361 102.086,286.902 106.447,286.902C110.809,286.902 114.35,283.361 114.35,278.999C114.35,274.637 110.809,271.096 106.447,271.096ZM122.434,351.272C118.072,351.272 114.531,354.813 114.531,359.175C114.531,363.536 118.072,367.078 122.434,367.078C126.795,367.078 130.336,363.536 130.336,359.175C130.336,354.813 126.795,351.272 122.434,351.272ZM189.22,275.623C191.083,275.623 192.596,277.136 192.596,278.999C192.596,280.862 191.083,282.375 189.22,282.375C187.357,282.375 185.844,280.862 185.844,278.999C185.844,277.136 187.357,275.623 189.22,275.623ZM201.937,275.792C203.8,275.792 205.313,277.305 205.313,279.168C205.313,281.031 203.8,282.544 201.937,282.544C200.074,282.544 198.561,281.031 198.561,279.168C198.561,277.305 200.074,275.792 201.937,275.792ZM214.654,275.792C216.517,275.792 218.03,277.305 218.03,279.168C218.03,281.031 216.517,282.544 214.654,282.544C212.791,282.544 211.278,281.031 211.278,279.168C211.278,277.305 212.791,275.792 214.654,275.792ZM309.166,183.956L325.038,183.956C339.603,183.956 351.429,195.781 351.429,210.347L351.429,240.659L132.527,240.659L132.527,210.347C132.527,195.781 144.353,183.956 158.918,183.956L172.478,183.956L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705L185.644,183.956L296,183.956L296,177.705C296,174.072 298.95,171.123 302.583,171.123C306.216,171.123 309.166,174.072 309.166,177.705L309.166,183.956Z" style="fill:rgb(241,123,43);"></path>
+    </g>
+</svg>
+    </div>
+    <div class="name">icon-orange</div>
+    <div class="desc">white / off-white bg</div>
+  </div>
+
+  <div class="variant">
+    <div class="bg" style="background:#1C2128;">
+      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+
+<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g id="White-on-black-circle" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="White on black circle">
+        <circle cx="600" cy="600" r="389.67"></circle>
+        <g id="Just-Black" www.serif.com:id="Just Black" transform="matrix(1.75446,0,0,1.75446,176.845,92.599)">
+            <path d="M132.527,289.267L117.826,289.267C115.02,292.375 110.96,294.329 106.447,294.329C97.987,294.329 91.118,287.46 91.118,278.999C91.118,270.538 97.987,263.669 106.447,263.669C110.96,263.669 115.02,265.623 117.826,268.731L132.527,268.731L132.527,275.454L121.365,275.454C121.634,276.592 121.777,277.779 121.777,278.999C121.777,280.219 121.634,281.406 121.365,282.544L132.527,282.544L132.527,289.267ZM132.527,268.731L132.527,248.571L351.429,248.571L351.429,308.819L181.595,308.819C184.05,311.537 185.546,315.139 185.546,319.087C185.546,323.035 184.05,326.637 181.595,329.355L351.429,329.355L351.429,365.258C351.429,379.823 339.603,391.648 325.038,391.648L158.918,391.648C146.067,391.648 135.35,382.443 133.004,370.273C133.284,370.007 133.553,369.73 133.812,369.443L316.769,369.443C314.314,366.724 312.818,363.123 312.818,359.175C312.818,355.227 314.314,351.625 316.769,348.906L133.812,348.906C133.409,348.46 132.98,348.037 132.527,347.641L132.527,289.267L300.783,289.267C298.328,286.549 296.832,282.947 296.832,278.999C296.832,275.051 298.328,271.449 300.783,268.731L132.527,268.731ZM351.429,308.819L364.552,308.819C367.358,305.711 371.418,303.757 375.93,303.757C384.391,303.757 391.26,310.626 391.26,319.087C391.26,327.548 384.391,334.417 375.93,334.417C371.418,334.417 367.358,332.463 364.552,329.355L351.429,329.355L351.429,322.631L361.013,322.631C360.743,321.494 360.601,320.307 360.601,319.087C360.601,317.867 360.743,316.68 361.013,315.542L351.429,315.542L351.429,308.819ZM133.004,370.273C130.253,372.894 126.53,374.504 122.434,374.504C113.973,374.504 107.104,367.635 107.104,359.175C107.104,350.714 113.973,343.845 122.434,343.845C126.298,343.845 129.83,345.278 132.527,347.641L132.527,365.258C132.527,366.972 132.691,368.649 133.004,370.273ZM132.527,282.544L132.527,275.454L175.669,275.454L175.669,275.623C177.532,275.623 179.045,277.136 179.045,278.999C179.045,280.862 177.532,282.375 175.669,282.375L175.669,282.544L132.527,282.544ZM351.429,315.542L351.429,322.631L306.709,322.631L306.709,322.463C304.845,322.463 303.333,320.95 303.333,319.087C303.333,317.224 304.845,315.711 306.709,315.711L306.709,315.542L351.429,315.542ZM267.724,322.294C265.861,322.294 264.348,320.781 264.348,318.918C264.348,317.055 265.861,315.542 267.724,315.542C269.587,315.542 271.1,317.055 271.1,318.918C271.1,320.781 269.587,322.294 267.724,322.294ZM280.441,322.294C278.578,322.294 277.065,320.781 277.065,318.918C277.065,317.055 278.578,315.542 280.441,315.542C282.304,315.542 283.817,317.055 283.817,318.918C283.817,320.781 282.304,322.294 280.441,322.294ZM293.158,322.463C291.295,322.463 289.782,320.95 289.782,319.087C289.782,317.224 291.295,315.711 293.158,315.711C295.021,315.711 296.534,317.224 296.534,319.087C296.534,320.95 295.021,322.463 293.158,322.463ZM375.93,326.99C380.292,326.99 383.833,323.449 383.833,319.087C383.833,314.725 380.292,311.184 375.93,311.184C371.569,311.184 368.027,314.725 368.027,319.087C368.027,323.449 371.569,326.99 375.93,326.99ZM164.265,334.417C172.726,334.417 179.595,327.548 179.595,319.087C179.595,310.626 172.726,303.757 164.265,303.757C155.804,303.757 148.935,310.626 148.935,319.087C148.935,327.548 155.804,334.417 164.265,334.417ZM164.265,326.99C159.903,326.99 156.362,323.449 156.362,319.087C156.362,314.725 159.903,311.184 164.265,311.184C168.627,311.184 172.168,314.725 172.168,319.087C172.168,323.449 168.627,326.99 164.265,326.99ZM334.099,343.845C325.638,343.845 318.769,350.714 318.769,359.175C318.769,367.635 325.638,374.504 334.099,374.504C342.56,374.504 349.429,367.635 349.429,359.175C349.429,350.714 342.56,343.845 334.099,343.845ZM334.099,351.272C338.461,351.272 342.002,354.813 342.002,359.175C342.002,363.536 338.461,367.078 334.099,367.078C329.737,367.078 326.196,363.536 326.196,359.175C326.196,354.813 329.737,351.272 334.099,351.272ZM318.113,263.669C309.652,263.669 302.783,270.538 302.783,278.999C302.783,287.46 309.652,294.329 318.113,294.329C326.573,294.329 333.442,287.46 333.442,278.999C333.442,270.538 326.573,263.669 318.113,263.669ZM318.113,271.096C322.474,271.096 326.016,274.637 326.016,278.999C326.016,283.361 322.474,286.902 318.113,286.902C313.751,286.902 310.21,283.361 310.21,278.999C310.21,274.637 313.751,271.096 318.113,271.096ZM217.923,355.968C219.786,355.968 221.299,357.48 221.299,359.344C221.299,361.207 219.786,362.719 217.923,362.719C216.06,362.719 214.547,361.207 214.547,359.344C214.547,357.48 216.06,355.968 217.923,355.968ZM205.206,355.799C207.069,355.799 208.582,357.312 208.582,359.175C208.582,361.038 207.069,362.551 205.206,362.551C203.343,362.551 201.83,361.038 201.83,359.175C201.83,357.312 203.343,355.799 205.206,355.799ZM230.64,355.968C232.503,355.968 234.016,357.48 234.016,359.344C234.016,361.207 232.503,362.719 230.64,362.719C228.777,362.719 227.264,361.207 227.264,359.344C227.264,357.48 228.777,355.968 230.64,355.968ZM137.351,355.63L191.655,355.63L191.655,355.799C193.518,355.799 195.031,357.312 195.031,359.175C195.031,361.038 193.518,362.551 191.655,362.551L191.655,362.719L137.351,362.719C137.62,361.581 137.763,360.395 137.763,359.175C137.763,357.955 137.62,356.768 137.351,355.63ZM106.447,271.096C102.086,271.096 98.545,274.637 98.545,278.999C98.545,283.361 102.086,286.902 106.447,286.902C110.809,286.902 114.35,283.361 114.35,278.999C114.35,274.637 110.809,271.096 106.447,271.096ZM122.434,351.272C118.072,351.272 114.531,354.813 114.531,359.175C114.531,363.536 118.072,367.078 122.434,367.078C126.795,367.078 130.336,363.536 130.336,359.175C130.336,354.813 126.795,351.272 122.434,351.272ZM189.22,275.623C191.083,275.623 192.596,277.136 192.596,278.999C192.596,280.862 191.083,282.375 189.22,282.375C187.357,282.375 185.844,280.862 185.844,278.999C185.844,277.136 187.357,275.623 189.22,275.623ZM201.937,275.792C203.8,275.792 205.313,277.305 205.313,279.168C205.313,281.031 203.8,282.544 201.937,282.544C200.074,282.544 198.561,281.031 198.561,279.168C198.561,277.305 200.074,275.792 201.937,275.792ZM214.654,275.792C216.517,275.792 218.03,277.305 218.03,279.168C218.03,281.031 216.517,282.544 214.654,282.544C212.791,282.544 211.278,281.031 211.278,279.168C211.278,277.305 212.791,275.792 214.654,275.792ZM309.166,183.956L325.038,183.956C339.603,183.956 351.429,195.781 351.429,210.347L351.429,240.659L132.527,240.659L132.527,210.347C132.527,195.781 144.353,183.956 158.918,183.956L172.478,183.956L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705L185.644,183.956L296,183.956L296,177.705C296,174.072 298.95,171.123 302.583,171.123C306.216,171.123 309.166,174.072 309.166,177.705L309.166,183.956Z" style="fill:white;"></path>
+        </g>
+    </g>
+</svg>
+    </div>
+    <div class="name">white-on-black-circle</div>
+    <div class="desc">any background</div>
+  </div>
+
+  <div class="variant">
+    <div class="bg" style="background:#F8F9FA;border:1px solid #E2E6EA;">
+      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+
+<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g id="Transparent-on-black-circle" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Transparent on black circle">
+        <path d="M600,210.33C815.065,210.33 989.67,384.935 989.67,600C989.67,815.065 815.065,989.67 600,989.67C384.935,989.67 210.33,815.065 210.33,600C210.33,384.935 384.935,210.33 600,210.33ZM719.262,415.342L719.262,404.375C719.262,398.001 714.087,392.826 707.713,392.826C701.339,392.826 696.164,398.001 696.164,404.375L696.164,415.342L502.549,415.342L502.549,404.375C502.549,398.001 497.374,392.826 491,392.826C484.625,392.826 479.45,398.001 479.45,404.375L479.45,415.342L455.66,415.342C430.105,415.342 409.358,436.088 409.358,461.643L409.358,514.825L793.411,514.825L793.411,461.643C793.411,436.088 772.664,415.342 747.109,415.342L719.262,415.342ZM409.358,600.105L409.358,588.309L389.774,588.309C390.247,586.313 390.497,584.23 390.497,582.09C390.497,579.95 390.247,577.868 389.774,575.871L409.358,575.871L409.358,564.075L383.565,564.075C378.642,558.623 371.519,555.195 363.602,555.195C348.758,555.195 336.707,567.246 336.707,582.09C336.707,596.934 348.758,608.985 363.602,608.985C371.519,608.985 378.642,605.557 383.565,600.105L409.358,600.105ZM409.358,564.075L704.555,564.075C700.248,568.845 697.623,575.163 697.623,582.09C697.623,589.017 700.248,595.336 704.555,600.105L409.358,600.105L409.358,702.519C410.152,703.215 410.905,703.956 411.612,704.74L732.602,704.74C728.295,709.509 725.67,715.828 725.67,722.755C725.67,729.682 728.295,736.001 732.602,740.77L411.612,740.77C411.158,741.273 410.685,741.759 410.195,742.226C414.31,763.579 433.114,779.728 455.66,779.728L747.109,779.728C772.664,779.728 793.411,758.982 793.411,733.427L793.411,670.438L495.445,670.438C499.752,665.668 502.377,659.349 502.377,652.423C502.377,645.496 499.752,639.177 495.445,634.407L793.411,634.407L793.411,528.706L409.358,528.706L409.358,564.075ZM793.411,634.407L793.411,646.204L810.226,646.204C809.753,648.2 809.503,650.282 809.503,652.423C809.503,654.563 809.753,656.645 810.226,658.641L793.411,658.641L793.411,670.438L816.435,670.438C821.358,675.89 828.481,679.318 836.398,679.318C851.242,679.318 863.293,667.266 863.293,652.423C863.293,637.579 851.242,625.527 836.398,625.527C828.481,625.527 821.358,628.956 816.435,634.407L793.411,634.407ZM410.195,742.226C409.646,739.377 409.358,736.435 409.358,733.427L409.358,702.519C404.626,698.374 398.429,695.86 391.649,695.86C376.805,695.86 364.754,707.911 364.754,722.755C364.754,737.599 376.805,749.65 391.649,749.65C398.836,749.65 405.368,746.825 410.195,742.226ZM409.358,575.871L409.358,588.309L485.049,588.309L485.049,588.013C488.317,588.013 490.971,585.359 490.971,582.09C490.971,578.821 488.317,576.167 485.049,576.167L485.049,575.871L409.358,575.871ZM793.411,658.641L793.411,646.204L714.951,646.204L714.951,646.5C711.683,646.5 709.029,649.154 709.029,652.423C709.029,655.691 711.683,658.345 714.951,658.345L714.951,658.641L793.411,658.641ZM553.445,576.464C550.176,576.464 547.522,579.117 547.522,582.386C547.522,585.655 550.176,588.309 553.445,588.309C556.714,588.309 559.368,585.655 559.368,582.386C559.368,579.117 556.714,576.464 553.445,576.464ZM531.134,576.464C527.865,576.464 525.211,579.117 525.211,582.386C525.211,585.655 527.865,588.309 531.134,588.309C534.403,588.309 537.057,585.655 537.057,582.386C537.057,579.117 534.403,576.464 531.134,576.464ZM508.823,576.167C505.554,576.167 502.9,578.821 502.9,582.09C502.9,585.359 505.554,588.013 508.823,588.013C512.092,588.013 514.746,585.359 514.746,582.09C514.746,578.821 512.092,576.167 508.823,576.167ZM363.602,568.225C371.255,568.225 377.467,574.438 377.467,582.09C377.467,589.743 371.255,595.955 363.602,595.955C355.95,595.955 349.737,589.743 349.737,582.09C349.737,574.438 355.95,568.225 363.602,568.225ZM646.555,658.049C649.824,658.049 652.478,655.395 652.478,652.126C652.478,648.858 649.824,646.204 646.555,646.204C643.286,646.204 640.632,648.858 640.632,652.126C640.632,655.395 643.286,658.049 646.555,658.049ZM691.177,658.345C694.446,658.345 697.1,655.691 697.1,652.423C697.1,649.154 694.446,646.5 691.177,646.5C687.908,646.5 685.254,649.154 685.254,652.423C685.254,655.691 687.908,658.345 691.177,658.345ZM668.866,658.049C672.135,658.049 674.789,655.395 674.789,652.126C674.789,648.858 672.135,646.204 668.866,646.204C665.597,646.204 662.943,648.858 662.943,652.126C662.943,655.395 665.597,658.049 668.866,658.049ZM836.398,666.288C828.745,666.288 822.533,660.075 822.533,652.423C822.533,644.77 828.745,638.557 836.398,638.557C844.05,638.557 850.263,644.77 850.263,652.423C850.263,660.075 844.05,666.288 836.398,666.288ZM391.649,708.89C399.302,708.89 405.514,715.103 405.514,722.755C405.514,730.407 399.302,736.62 391.649,736.62C383.997,736.62 377.784,730.407 377.784,722.755C377.784,715.103 383.997,708.89 391.649,708.89ZM763.006,695.86C777.85,695.86 789.902,707.911 789.902,722.755C789.902,737.599 777.85,749.65 763.006,749.65C748.163,749.65 736.111,737.599 736.111,722.755C736.111,707.911 748.163,695.86 763.006,695.86ZM763.006,708.89C755.354,708.89 749.141,715.103 749.141,722.755C749.141,730.407 755.354,736.62 763.006,736.62C770.659,736.62 776.872,730.407 776.872,722.755C776.872,715.103 770.659,708.89 763.006,708.89ZM465.041,679.318C450.197,679.318 438.145,667.266 438.145,652.423C438.145,637.579 450.197,625.527 465.041,625.527C479.884,625.527 491.936,637.579 491.936,652.423C491.936,667.266 479.884,679.318 465.041,679.318ZM465.041,666.288C472.693,666.288 478.906,660.075 478.906,652.423C478.906,644.77 472.693,638.557 465.041,638.557C457.388,638.557 451.175,644.77 451.175,652.423C451.175,660.075 457.388,666.288 465.041,666.288ZM734.959,555.195C749.803,555.195 761.855,567.246 761.855,582.09C761.855,596.934 749.803,608.985 734.959,608.985C720.116,608.985 708.064,596.934 708.064,582.09C708.064,567.246 720.116,555.195 734.959,555.195ZM734.959,568.225C727.307,568.225 721.094,574.438 721.094,582.09C721.094,589.743 727.307,595.955 734.959,595.955C742.612,595.955 748.825,589.743 748.825,582.09C748.825,574.438 742.612,568.225 734.959,568.225ZM417.821,716.536C418.294,718.533 418.544,720.615 418.544,722.755C418.544,724.895 418.294,726.977 417.821,728.974L513.096,728.974L513.096,728.678C516.364,728.678 519.018,726.024 519.018,722.755C519.018,719.486 516.364,716.832 513.096,716.832L513.096,716.536L417.821,716.536ZM536.87,716.832C533.601,716.832 530.947,719.486 530.947,722.755C530.947,726.024 533.601,728.678 536.87,728.678C540.139,728.678 542.793,726.024 542.793,722.755C542.793,719.486 540.139,716.832 536.87,716.832ZM559.181,717.128C555.912,717.128 553.258,719.782 553.258,723.051C553.258,726.32 555.912,728.974 559.181,728.974C562.45,728.974 565.104,726.32 565.104,723.051C565.104,719.782 562.45,717.128 559.181,717.128ZM581.492,717.128C578.223,717.128 575.569,719.782 575.569,723.051C575.569,726.32 578.223,728.974 581.492,728.974C584.761,728.974 587.415,726.32 587.415,723.051C587.415,719.782 584.761,717.128 581.492,717.128Z"></path>
+    </g>
+</svg>
+    </div>
+    <div class="name">knockout-black</div>
+    <div class="desc">light or dark bg</div>
+  </div>
+
+  <div class="variant">
+    <div class="bg" style="background:#288C9B;">
+      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+
+<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g id="Transparent-on-orange-circle" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Transparent on orange circle">
+        <path d="M600,210.33C815.065,210.33 989.67,384.935 989.67,600C989.67,815.065 815.065,989.67 600,989.67C384.935,989.67 210.33,815.065 210.33,600C210.33,384.935 384.935,210.33 600,210.33ZM719.262,415.342L719.262,404.375C719.262,398.001 714.087,392.826 707.713,392.826C701.339,392.826 696.164,398.001 696.164,404.375L696.164,415.342L502.549,415.342L502.549,404.375C502.549,398.001 497.374,392.826 491,392.826C484.625,392.826 479.45,398.001 479.45,404.375L479.45,415.342L455.66,415.342C430.105,415.342 409.358,436.088 409.358,461.643L409.358,514.825L793.411,514.825L793.411,461.643C793.411,436.088 772.664,415.342 747.109,415.342L719.262,415.342ZM409.358,600.105L409.358,588.309L389.774,588.309C390.247,586.313 390.497,584.23 390.497,582.09C390.497,579.95 390.247,577.868 389.774,575.871L409.358,575.871L409.358,564.075L383.565,564.075C378.642,558.623 371.519,555.195 363.602,555.195C348.758,555.195 336.707,567.246 336.707,582.09C336.707,596.934 348.758,608.985 363.602,608.985C371.519,608.985 378.642,605.557 383.565,600.105L409.358,600.105ZM409.358,564.075L704.555,564.075C700.248,568.845 697.623,575.163 697.623,582.09C697.623,589.017 700.248,595.336 704.555,600.105L409.358,600.105L409.358,702.519C410.152,703.215 410.905,703.956 411.612,704.74L732.602,704.74C728.295,709.509 725.67,715.828 725.67,722.755C725.67,729.682 728.295,736.001 732.602,740.77L411.612,740.77C411.158,741.273 410.685,741.759 410.195,742.226C414.31,763.579 433.114,779.728 455.66,779.728L747.109,779.728C772.664,779.728 793.411,758.982 793.411,733.427L793.411,670.438L495.445,670.438C499.752,665.668 502.377,659.349 502.377,652.423C502.377,645.496 499.752,639.177 495.445,634.407L793.411,634.407L793.411,528.706L409.358,528.706L409.358,564.075ZM793.411,634.407L793.411,646.204L810.226,646.204C809.753,648.2 809.503,650.282 809.503,652.423C809.503,654.563 809.753,656.645 810.226,658.641L793.411,658.641L793.411,670.438L816.435,670.438C821.358,675.89 828.481,679.318 836.398,679.318C851.242,679.318 863.293,667.266 863.293,652.423C863.293,637.579 851.242,625.527 836.398,625.527C828.481,625.527 821.358,628.956 816.435,634.407L793.411,634.407ZM410.195,742.226C409.646,739.377 409.358,736.435 409.358,733.427L409.358,702.519C404.626,698.374 398.429,695.86 391.649,695.86C376.805,695.86 364.754,707.911 364.754,722.755C364.754,737.599 376.805,749.65 391.649,749.65C398.836,749.65 405.368,746.825 410.195,742.226ZM409.358,575.871L409.358,588.309L485.049,588.309L485.049,588.013C488.317,588.013 490.971,585.359 490.971,582.09C490.971,578.821 488.317,576.167 485.049,576.167L485.049,575.871L409.358,575.871ZM793.411,658.641L793.411,646.204L714.951,646.204L714.951,646.5C711.683,646.5 709.029,649.154 709.029,652.423C709.029,655.691 711.683,658.345 714.951,658.345L714.951,658.641L793.411,658.641ZM553.445,576.464C550.176,576.464 547.522,579.117 547.522,582.386C547.522,585.655 550.176,588.309 553.445,588.309C556.714,588.309 559.368,585.655 559.368,582.386C559.368,579.117 556.714,576.464 553.445,576.464ZM531.134,576.464C527.865,576.464 525.211,579.117 525.211,582.386C525.211,585.655 527.865,588.309 531.134,588.309C534.403,588.309 537.057,585.655 537.057,582.386C537.057,579.117 534.403,576.464 531.134,576.464ZM508.823,576.167C505.554,576.167 502.9,578.821 502.9,582.09C502.9,585.359 505.554,588.013 508.823,588.013C512.092,588.013 514.746,585.359 514.746,582.09C514.746,578.821 512.092,576.167 508.823,576.167ZM363.602,568.225C371.255,568.225 377.467,574.438 377.467,582.09C377.467,589.743 371.255,595.955 363.602,595.955C355.95,595.955 349.737,589.743 349.737,582.09C349.737,574.438 355.95,568.225 363.602,568.225ZM646.555,658.049C649.824,658.049 652.478,655.395 652.478,652.126C652.478,648.858 649.824,646.204 646.555,646.204C643.286,646.204 640.632,648.858 640.632,652.126C640.632,655.395 643.286,658.049 646.555,658.049ZM691.177,658.345C694.446,658.345 697.1,655.691 697.1,652.423C697.1,649.154 694.446,646.5 691.177,646.5C687.908,646.5 685.254,649.154 685.254,652.423C685.254,655.691 687.908,658.345 691.177,658.345ZM668.866,658.049C672.135,658.049 674.789,655.395 674.789,652.126C674.789,648.858 672.135,646.204 668.866,646.204C665.597,646.204 662.943,648.858 662.943,652.126C662.943,655.395 665.597,658.049 668.866,658.049ZM836.398,666.288C828.745,666.288 822.533,660.075 822.533,652.423C822.533,644.77 828.745,638.557 836.398,638.557C844.05,638.557 850.263,644.77 850.263,652.423C850.263,660.075 844.05,666.288 836.398,666.288ZM391.649,708.89C399.302,708.89 405.514,715.103 405.514,722.755C405.514,730.407 399.302,736.62 391.649,736.62C383.997,736.62 377.784,730.407 377.784,722.755C377.784,715.103 383.997,708.89 391.649,708.89ZM763.006,695.86C777.85,695.86 789.902,707.911 789.902,722.755C789.902,737.599 777.85,749.65 763.006,749.65C748.163,749.65 736.111,737.599 736.111,722.755C736.111,707.911 748.163,695.86 763.006,695.86ZM763.006,708.89C755.354,708.89 749.141,715.103 749.141,722.755C749.141,730.407 755.354,736.62 763.006,736.62C770.659,736.62 776.872,730.407 776.872,722.755C776.872,715.103 770.659,708.89 763.006,708.89ZM465.041,679.318C450.197,679.318 438.145,667.266 438.145,652.423C438.145,637.579 450.197,625.527 465.041,625.527C479.884,625.527 491.936,637.579 491.936,652.423C491.936,667.266 479.884,679.318 465.041,679.318ZM465.041,666.288C472.693,666.288 478.906,660.075 478.906,652.423C478.906,644.77 472.693,638.557 465.041,638.557C457.388,638.557 451.175,644.77 451.175,652.423C451.175,660.075 457.388,666.288 465.041,666.288ZM734.959,555.195C749.803,555.195 761.855,567.246 761.855,582.09C761.855,596.934 749.803,608.985 734.959,608.985C720.116,608.985 708.064,596.934 708.064,582.09C708.064,567.246 720.116,555.195 734.959,555.195ZM734.959,568.225C727.307,568.225 721.094,574.438 721.094,582.09C721.094,589.743 727.307,595.955 734.959,595.955C742.612,595.955 748.825,589.743 748.825,582.09C748.825,574.438 742.612,568.225 734.959,568.225ZM417.821,716.536C418.294,718.533 418.544,720.615 418.544,722.755C418.544,724.895 418.294,726.977 417.821,728.974L513.096,728.974L513.096,728.678C516.364,728.678 519.018,726.024 519.018,722.755C519.018,719.486 516.364,716.832 513.096,716.832L513.096,716.536L417.821,716.536ZM536.87,716.832C533.601,716.832 530.947,719.486 530.947,722.755C530.947,726.024 533.601,728.678 536.87,728.678C540.139,728.678 542.793,726.024 542.793,722.755C542.793,719.486 540.139,716.832 536.87,716.832ZM559.181,717.128C555.912,717.128 553.258,719.782 553.258,723.051C553.258,726.32 555.912,728.974 559.181,728.974C562.45,728.974 565.104,726.32 565.104,723.051C565.104,719.782 562.45,717.128 559.181,717.128ZM581.492,717.128C578.223,717.128 575.569,719.782 575.569,723.051C575.569,726.32 578.223,728.974 581.492,728.974C584.761,728.974 587.415,726.32 587.415,723.051C587.415,719.782 584.761,717.128 581.492,717.128Z" style="fill:rgb(241,123,43);"></path>
+    </g>
+</svg>
+    </div>
+    <div class="name">knockout-orange</div>
+    <div class="desc">on teal bg</div>
+  </div>
+
+  <div class="variant">
+    <div class="bg" style="background:#343A40;">
+      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+
+<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g id="Transparent-on-teal-circle" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Transparent on teal circle">
+        <path d="M600,210.33C815.065,210.33 989.67,384.935 989.67,600C989.67,815.065 815.065,989.67 600,989.67C384.935,989.67 210.33,815.065 210.33,600C210.33,384.935 384.935,210.33 600,210.33ZM719.262,415.342L719.262,404.375C719.262,398.001 714.087,392.826 707.713,392.826C701.339,392.826 696.164,398.001 696.164,404.375L696.164,415.342L502.549,415.342L502.549,404.375C502.549,398.001 497.374,392.826 491,392.826C484.625,392.826 479.45,398.001 479.45,404.375L479.45,415.342L455.66,415.342C430.105,415.342 409.358,436.088 409.358,461.643L409.358,514.825L793.411,514.825L793.411,461.643C793.411,436.088 772.664,415.342 747.109,415.342L719.262,415.342ZM409.358,600.105L409.358,588.309L389.774,588.309C390.247,586.313 390.497,584.23 390.497,582.09C390.497,579.95 390.247,577.868 389.774,575.871L409.358,575.871L409.358,564.075L383.565,564.075C378.642,558.623 371.519,555.195 363.602,555.195C348.758,555.195 336.707,567.246 336.707,582.09C336.707,596.934 348.758,608.985 363.602,608.985C371.519,608.985 378.642,605.557 383.565,600.105L409.358,600.105ZM409.358,564.075L704.555,564.075C700.248,568.845 697.623,575.163 697.623,582.09C697.623,589.017 700.248,595.336 704.555,600.105L409.358,600.105L409.358,702.519C410.152,703.215 410.905,703.956 411.612,704.74L732.602,704.74C728.295,709.509 725.67,715.828 725.67,722.755C725.67,729.682 728.295,736.001 732.602,740.77L411.612,740.77C411.158,741.273 410.685,741.759 410.195,742.226C414.31,763.579 433.114,779.728 455.66,779.728L747.109,779.728C772.664,779.728 793.411,758.982 793.411,733.427L793.411,670.438L495.445,670.438C499.752,665.668 502.377,659.349 502.377,652.423C502.377,645.496 499.752,639.177 495.445,634.407L793.411,634.407L793.411,528.706L409.358,528.706L409.358,564.075ZM793.411,634.407L793.411,646.204L810.226,646.204C809.753,648.2 809.503,650.282 809.503,652.423C809.503,654.563 809.753,656.645 810.226,658.641L793.411,658.641L793.411,670.438L816.435,670.438C821.358,675.89 828.481,679.318 836.398,679.318C851.242,679.318 863.293,667.266 863.293,652.423C863.293,637.579 851.242,625.527 836.398,625.527C828.481,625.527 821.358,628.956 816.435,634.407L793.411,634.407ZM410.195,742.226C409.646,739.377 409.358,736.435 409.358,733.427L409.358,702.519C404.626,698.374 398.429,695.86 391.649,695.86C376.805,695.86 364.754,707.911 364.754,722.755C364.754,737.599 376.805,749.65 391.649,749.65C398.836,749.65 405.368,746.825 410.195,742.226ZM409.358,575.871L409.358,588.309L485.049,588.309L485.049,588.013C488.317,588.013 490.971,585.359 490.971,582.09C490.971,578.821 488.317,576.167 485.049,576.167L485.049,575.871L409.358,575.871ZM793.411,658.641L793.411,646.204L714.951,646.204L714.951,646.5C711.683,646.5 709.029,649.154 709.029,652.423C709.029,655.691 711.683,658.345 714.951,658.345L714.951,658.641L793.411,658.641ZM553.445,576.464C550.176,576.464 547.522,579.117 547.522,582.386C547.522,585.655 550.176,588.309 553.445,588.309C556.714,588.309 559.368,585.655 559.368,582.386C559.368,579.117 556.714,576.464 553.445,576.464ZM531.134,576.464C527.865,576.464 525.211,579.117 525.211,582.386C525.211,585.655 527.865,588.309 531.134,588.309C534.403,588.309 537.057,585.655 537.057,582.386C537.057,579.117 534.403,576.464 531.134,576.464ZM508.823,576.167C505.554,576.167 502.9,578.821 502.9,582.09C502.9,585.359 505.554,588.013 508.823,588.013C512.092,588.013 514.746,585.359 514.746,582.09C514.746,578.821 512.092,576.167 508.823,576.167ZM363.602,568.225C371.255,568.225 377.467,574.438 377.467,582.09C377.467,589.743 371.255,595.955 363.602,595.955C355.95,595.955 349.737,589.743 349.737,582.09C349.737,574.438 355.95,568.225 363.602,568.225ZM646.555,658.049C649.824,658.049 652.478,655.395 652.478,652.126C652.478,648.858 649.824,646.204 646.555,646.204C643.286,646.204 640.632,648.858 640.632,652.126C640.632,655.395 643.286,658.049 646.555,658.049ZM691.177,658.345C694.446,658.345 697.1,655.691 697.1,652.423C697.1,649.154 694.446,646.5 691.177,646.5C687.908,646.5 685.254,649.154 685.254,652.423C685.254,655.691 687.908,658.345 691.177,658.345ZM668.866,658.049C672.135,658.049 674.789,655.395 674.789,652.126C674.789,648.858 672.135,646.204 668.866,646.204C665.597,646.204 662.943,648.858 662.943,652.126C662.943,655.395 665.597,658.049 668.866,658.049ZM836.398,666.288C828.745,666.288 822.533,660.075 822.533,652.423C822.533,644.77 828.745,638.557 836.398,638.557C844.05,638.557 850.263,644.77 850.263,652.423C850.263,660.075 844.05,666.288 836.398,666.288ZM391.649,708.89C399.302,708.89 405.514,715.103 405.514,722.755C405.514,730.407 399.302,736.62 391.649,736.62C383.997,736.62 377.784,730.407 377.784,722.755C377.784,715.103 383.997,708.89 391.649,708.89ZM763.006,695.86C777.85,695.86 789.902,707.911 789.902,722.755C789.902,737.599 777.85,749.65 763.006,749.65C748.163,749.65 736.111,737.599 736.111,722.755C736.111,707.911 748.163,695.86 763.006,695.86ZM763.006,708.89C755.354,708.89 749.141,715.103 749.141,722.755C749.141,730.407 755.354,736.62 763.006,736.62C770.659,736.62 776.872,730.407 776.872,722.755C776.872,715.103 770.659,708.89 763.006,708.89ZM465.041,679.318C450.197,679.318 438.145,667.266 438.145,652.423C438.145,637.579 450.197,625.527 465.041,625.527C479.884,625.527 491.936,637.579 491.936,652.423C491.936,667.266 479.884,679.318 465.041,679.318ZM465.041,666.288C472.693,666.288 478.906,660.075 478.906,652.423C478.906,644.77 472.693,638.557 465.041,638.557C457.388,638.557 451.175,644.77 451.175,652.423C451.175,660.075 457.388,666.288 465.041,666.288ZM734.959,555.195C749.803,555.195 761.855,567.246 761.855,582.09C761.855,596.934 749.803,608.985 734.959,608.985C720.116,608.985 708.064,596.934 708.064,582.09C708.064,567.246 720.116,555.195 734.959,555.195ZM734.959,568.225C727.307,568.225 721.094,574.438 721.094,582.09C721.094,589.743 727.307,595.955 734.959,595.955C742.612,595.955 748.825,589.743 748.825,582.09C748.825,574.438 742.612,568.225 734.959,568.225ZM417.821,716.536C418.294,718.533 418.544,720.615 418.544,722.755C418.544,724.895 418.294,726.977 417.821,728.974L513.096,728.974L513.096,728.678C516.364,728.678 519.018,726.024 519.018,722.755C519.018,719.486 516.364,716.832 513.096,716.832L513.096,716.536L417.821,716.536ZM536.87,716.832C533.601,716.832 530.947,719.486 530.947,722.755C530.947,726.024 533.601,728.678 536.87,728.678C540.139,728.678 542.793,726.024 542.793,722.755C542.793,719.486 540.139,716.832 536.87,716.832ZM559.181,717.128C555.912,717.128 553.258,719.782 553.258,723.051C553.258,726.32 555.912,728.974 559.181,728.974C562.45,728.974 565.104,726.32 565.104,723.051C565.104,719.782 562.45,717.128 559.181,717.128ZM581.492,717.128C578.223,717.128 575.569,719.782 575.569,723.051C575.569,726.32 578.223,728.974 581.492,728.974C584.761,728.974 587.415,726.32 587.415,723.051C587.415,719.782 584.761,717.128 581.492,717.128Z" style="fill:rgb(26,151,162);"></path>
+    </g>
+</svg>
+    </div>
+    <div class="name">knockout-teal</div>
+    <div class="desc">on dark bg</div>
+  </div>
+</div>
+</body>
+</html>
+````
+
+## File: docs/design/preview/spacing-tokens.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 14px; }
+  .section { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; font-family: var(--font-sans); }
+  /* Spacing bars */
+  .bar-row { display: flex; align-items: center; gap: 8px; }
+  .bar { background: var(--primary); height: 10px; border-radius: 2px; opacity: 0.7; }
+  .bar-label { font-size: 10px; font-family: var(--font-mono); color: var(--muted-foreground); width: 60px; }
+  /* Radius */
+  .rbox { background: var(--muted); border: 1px solid var(--border); width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; }
+  .rbox-label { font-size: 10px; color: var(--muted-foreground); text-align: center; font-family: var(--font-mono); }
+  /* Shadow */
+  .sbox { background: var(--card); width: 56px; height: 36px; border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; }
+  .sbox-label { font-size: 10px; color: var(--muted-foreground); text-align: center; font-family: var(--font-mono); }
+  .col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+</style>
+</head>
+<body>
+  <div>
+    <div class="label">Spacing Scale</div>
+    <div class="section" style="flex-direction:column; gap:4px;">
+      <div class="bar-row"><span class="bar-label">4px / 1</span><div class="bar" style="width:4px"></div></div>
+      <div class="bar-row"><span class="bar-label">8px / 2</span><div class="bar" style="width:8px"></div></div>
+      <div class="bar-row"><span class="bar-label">12px / 3</span><div class="bar" style="width:12px"></div></div>
+      <div class="bar-row"><span class="bar-label">16px / 4</span><div class="bar" style="width:16px"></div></div>
+      <div class="bar-row"><span class="bar-label">24px / 6</span><div class="bar" style="width:24px"></div></div>
+      <div class="bar-row"><span class="bar-label">32px / 8</span><div class="bar" style="width:32px"></div></div>
+    </div>
+  </div>
+  <div>
+    <div class="label">Border Radius</div>
+    <div class="section">
+      <div class="col"><div class="rbox" style="border-radius:4px"></div><div class="rbox-label">4px<br>sm</div></div>
+      <div class="col"><div class="rbox" style="border-radius:6px"></div><div class="rbox-label">6px<br>md</div></div>
+      <div class="col"><div class="rbox" style="border-radius:8px"></div><div class="rbox-label">8px<br>lg</div></div>
+      <div class="col"><div class="rbox" style="border-radius:12px"></div><div class="rbox-label">12px<br>xl</div></div>
+      <div class="col"><div class="rbox" style="border-radius:9999px"></div><div class="rbox-label">full</div></div>
+    </div>
+  </div>
+  <div>
+    <div class="label">Elevation / Shadow</div>
+    <div class="section">
+      <div class="col"><div class="sbox" style="box-shadow:var(--shadow-sm)"></div><div class="rbox-label">sm<br>cards</div></div>
+      <div class="col"><div class="sbox" style="box-shadow:var(--shadow-md)"></div><div class="rbox-label">md<br>popovers</div></div>
+      <div class="col"><div class="sbox" style="box-shadow:var(--shadow-lg)"></div><div class="rbox-label">lg<br>modals</div></div>
+    </div>
+  </div>
+</body>
+</html>
+````
+
+## File: docs/design/preview/type-scale.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px 24px; background: var(--background); display: flex; flex-direction: column; gap: 6px; }
+  .row { display: flex; align-items: baseline; gap: 16px; }
+  .meta { width: 140px; flex-shrink: 0; font-size: 10px; color: var(--muted-foreground); font-family: var(--font-mono); }
+  .specimen { color: var(--foreground); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+</style>
+</head>
+<body>
+  <div class="row"><div class="meta">24px · 700</div><div class="specimen" style="font-size:24px;font-weight:700;line-height:1.25">Page heading</div></div>
+  <div class="row"><div class="meta">18px · 600</div><div class="specimen" style="font-size:18px;font-weight:600;line-height:1.25">Section heading</div></div>
+  <div class="row"><div class="meta">16px · 600</div><div class="specimen" style="font-size:16px;font-weight:600">Card / panel title</div></div>
+  <div class="row"><div class="meta">14px · 400</div><div class="specimen" style="font-size:14px;font-weight:400">Body text — readable and calm</div></div>
+  <div class="row"><div class="meta">12px · 400</div><div class="specimen" style="font-size:12px;font-weight:400;color:var(--muted-foreground)">Caption / metadata</div></div>
+  <div class="row"><div class="meta">12px · 600</div><div class="specimen" style="font-size:12px;font-weight:600">Badge · Tag · Timeline block label</div></div>
+</body>
+</html>
+````
+
+## File: docs/design/preview/type-weights.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 20px 24px; background: var(--background); display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; align-items: baseline; gap: 16px; }
+  .meta { width: 120px; flex-shrink: 0; font-size: 10px; color: var(--muted-foreground); font-family: var(--font-mono); }
+  .specimen { font-size: 18px; color: var(--foreground); font-family: var(--font-sans); }
+  .sub { font-size: 11px; color: var(--muted-foreground); margin-top: 1px; }
+</style>
+</head>
+<body>
+  <div class="row"><div class="meta">300 · Light</div><div><div class="specimen" style="font-weight:300">Open Sans Light</div><div class="sub">Subtle labels, secondary captions</div></div></div>
+  <div class="row"><div class="meta">400 · Regular</div><div><div class="specimen" style="font-weight:400">Open Sans Regular</div><div class="sub">Body text, descriptions, inputs</div></div></div>
+  <div class="row"><div class="meta">600 · SemiBold</div><div><div class="specimen" style="font-weight:600">Open Sans SemiBold</div><div class="sub">Headings, nav items, labels</div></div></div>
+  <div class="row"><div class="meta">700 · Bold</div><div><div class="specimen" style="font-weight:700">Open Sans Bold</div><div class="sub">Page titles, primary headings</div></div></div>
+</body>
+</html>
+````
+
+## File: packages/api/.air.toml
+````toml
+root = "."
+tmp_dir = "tmp"
+
+[build]
+cmd = "go build -o ./tmp/draba ./cmd/draba"
+bin = "tmp/draba"
+include_ext = ["go"]
+exclude_dir = ["tmp", "vendor"]
+delay = 1000
+
+[log]
+time = false
+
+[misc]
+clean_on_exit = true
+````
+
+## File: packages/web/src/main.tsx
+````typescript
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App'
+import './index.css'
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+)
+````
+
+## File: packages/web/src/vite-env.d.ts
+````typescript
+/// <reference types="vite/client" />
+````
+
+## File: packages/web/Dockerfile
+````
+FROM node:22-alpine
+RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /app
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/web/package.json packages/web/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install --frozen-lockfile
+COPY packages/web packages/web
+COPY packages/shared packages/shared
+WORKDIR /app/packages/web
+EXPOSE 5173
+CMD ["pnpm", "dev", "--host"]
+````
+
+## File: packages/web/index.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>draba</title>
+    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+````
+
+## File: packages/web/tsconfig.json
+````json
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}
+````
+
+## File: packages/web/tsconfig.node.json
+````json
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true
+  },
+  "include": ["vite.config.ts"]
+}
+````
+
 ## File: LICENSE
 ````
 Apache License
@@ -474,13 +1249,27 @@ Apache License
    limitations under the License.
 ````
 
-## File: .claude/commands/new-feature.md
+## File: pnpm-workspace.yaml
+````yaml
+packages:
+  - "packages/*"
+````
+
+## File: .claude/commands/build-phase.md
 ````markdown
-Read docs/REQUIREMENTS.md and docs/TASKS.md.
-Identify the next unstarted task.
-Before writing code, outline your plan and which files you'll create or modify.
-Follow the patterns in docs/CONVENTIONS.md.
-After implementation, run tests and lint.
+Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or "Phase 1").
+
+1. Read the phase's scope and exit criteria from ROADMAP.md.
+2. Find the corresponding tasks in docs/TASKS.md.
+3. Read any referenced docs (ARCHITECTURE.md, CONVENTIONS.md, REQUIREMENTS.md) relevant to this phase before writing any code.
+4. Update the phase status in ROADMAP.md from ⬜ to 🔄 before starting work.
+5. Implement every task in the phase's scope, following CONVENTIONS.md throughout.
+6. After implementation: run `golangci-lint run` (Go) and/or `pnpm --filter web lint` (web), run tests, and verify every exit criterion from ROADMAP.md is met. Suggest running `/test-phase <N>` and `/review-phase <N>` to fan the verification out across subagents in parallel.
+7. Check off completed items in TASKS.md.
+8. Update the phase status in ROADMAP.md:
+   - If all exit criteria pass: ✅ Done, add the completion date.
+   - If any exit criterion fails or needs manual verification: mark 🔄 In Progress and add a note listing what still needs review.
+9. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
 ````
 
 ## File: .claude/commands/review-phase.md
@@ -504,13 +1293,6 @@ Run the diff review for the phase specified in $ARGUMENTS (e.g. "2" or "Phase 2"
 4. Merge findings into a single report grouped by severity (blockers first). Drop empty severity groups.
 
 5. Print the report to the user. If there are blockers, recommend they be addressed before flipping the phase status to ✅. Do not modify source code, do not commit, do not flip ROADMAP status.
-````
-
-## File: .claude/commands/review.md
-````markdown
-Review the current git diff.
-Check for: convention violations (see docs/CONVENTIONS.md), missing tests, type safety issues, and error handling gaps.
-Summarize findings and suggest fixes.
 ````
 
 ## File: .claude/commands/test-phase.md
@@ -550,6 +1332,46 @@ Run the automated test suite for the phase specified in $ARGUMENTS (e.g. "2" or 
    ```
 
 7. Report the table back to the user. Do not modify any source code.
+````
+
+## File: .github/workflows/docker-publish.yml
+````yaml
+name: Publish Docker Image
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  publish:
+    name: Build & Push to Docker Hub
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/api/Dockerfile
+          target: prod
+          push: true
+          tags: |
+            mewcus/draba:latest
+            mewcus/draba:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 ````
 
 ## File: docs/design/assets/Icon Color Picker.html
@@ -3781,652 +4603,345 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </html>
 ````
 
-## File: docs/design/preview/colors-brand.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="../colors_and_type.css">
-<style>
-  body { margin: 0; padding: 20px; background: var(--background); display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }
-  .swatch { width: 120px; }
-  .block { height: 72px; border-radius: var(--radius-lg); margin-bottom: 8px; }
-  .label { font-size: 11px; font-weight: 600; color: var(--foreground); }
-  .hex { font-size: 11px; color: var(--muted-foreground); font-family: var(--font-mono); }
-</style>
-</head>
-<body>
-<div class="swatch"><div class="block" style="background:#288C9B"></div><div class="label">Teal</div><div class="hex">#288C9B</div></div>
-<div class="swatch"><div class="block" style="background:#F29E4C"></div><div class="label">Amber</div><div class="hex">#F29E4C</div></div>
-<div class="swatch"><div class="block" style="background:#5BC0DE"></div><div class="label">Sky Blue</div><div class="hex">#5BC0DE</div></div>
-<div class="swatch"><div class="block" style="background:#343A40"></div><div class="label">Charcoal</div><div class="hex">#343A40</div></div>
-<div class="swatch"><div class="block" style="background:#F8F9FA; border: 1px solid #e2e5e9"></div><div class="label">Off-White</div><div class="hex">#F8F9FA</div></div>
-</body>
-</html>
-````
+## File: docs/design/DESIGN_SYSTEM.md
+````markdown
+# Design System
 
-## File: docs/design/preview/colors-member.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="../colors_and_type.css">
-<style>
-  body { margin: 0; padding: 20px; background: var(--background); display: flex; gap: 8px; flex-wrap: wrap; }
-  .member { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-  .avatar { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: white; font-family: var(--font-sans); }
-  .name { font-size: 10px; color: var(--muted-foreground); font-family: var(--font-sans); }
-</style>
-</head>
-<body>
-  <div class="member"><div class="avatar" style="background:#288C9B">T</div><div class="name">Teal</div></div>
-  <div class="member"><div class="avatar" style="background:#F29E4C">A</div><div class="name">Amber</div></div>
-  <div class="member"><div class="avatar" style="background:#5BC0DE">S</div><div class="name">Sky</div></div>
-  <div class="member"><div class="avatar" style="background:#2ECC71">E</div><div class="name">Emerald</div></div>
-  <div class="member"><div class="avatar" style="background:#9B59B6">V</div><div class="name">Violet</div></div>
-  <div class="member"><div class="avatar" style="background:#E74C3C">R</div><div class="name">Rose</div></div>
-  <div class="member"><div class="avatar" style="background:#5C6BC0">I</div><div class="name">Indigo</div></div>
-  <div class="member"><div class="avatar" style="background:#8BC34A; color: #333">L</div><div class="name">Lime</div></div>
-</body>
-</html>
-````
+## Foundation
+- **Component library:** shadcn/ui (copy-paste — components live in `packages/web/src/components/ui/`)
+- **Styling:** Tailwind CSS v4
+- **Theming:** CSS custom properties (HSL channel values) in `packages/web/src/index.css`
+- **Dark mode:** class-based — `dark` class on `<html>` element
 
-## File: docs/design/preview/colors-semantic.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="../colors_and_type.css">
-<style>
-  body { margin: 0; padding: 20px; background: var(--background); display: flex; gap: 10px; flex-wrap: wrap; }
-  .chip { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--card); }
-  .dot { width: 28px; height: 28px; border-radius: var(--radius-md); flex-shrink: 0; }
-  .info .name { font-size: 11px; font-weight: 600; color: var(--foreground); }
-  .info .role { font-size: 10px; color: var(--muted-foreground); font-family: var(--font-mono); }
-</style>
-</head>
-<body>
-  <div class="chip"><div class="dot" style="background:var(--primary)"></div><div class="info"><div class="name">primary</div><div class="role">actions · links · focus</div></div></div>
-  <div class="chip"><div class="dot" style="background:var(--secondary)"></div><div class="info"><div class="name">secondary</div><div class="role">highlights · badges</div></div></div>
-  <div class="chip"><div class="dot" style="background:var(--accent)"></div><div class="info"><div class="name">accent</div><div class="role">CTAs · hover</div></div></div>
-  <div class="chip"><div class="dot" style="background:var(--muted)"></div><div class="info"><div class="name">muted</div><div class="role">subtle backgrounds</div></div></div>
-  <div class="chip"><div class="dot" style="background:var(--destructive)"></div><div class="info"><div class="name">destructive</div><div class="role">errors · delete</div></div></div>
-  <div class="chip"><div class="dot" style="background:var(--success)"></div><div class="info"><div class="name">success</div><div class="role">confirmations</div></div></div>
-  <div class="chip"><div class="dot" style="background:var(--warning)"></div><div class="info"><div class="name">warning</div><div class="role">caution states</div></div></div>
-  <div class="chip"><div class="dot" style="background:var(--border); border: 1px solid #ccc"></div><div class="info"><div class="name">border</div><div class="role">dividers · outlines</div></div></div>
-</body>
-</html>
-````
+shadcn stores colors as bare HSL channels (no `hsl()` wrapper), e.g. `--primary: 188 59% 38%`. Tailwind then references them as `hsl(var(--primary))`. All token values below follow this convention.
 
-## File: docs/design/preview/components-badges.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="../colors_and_type.css">
-<style>
-  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 14px; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); width: 80px; flex-shrink: 0; font-family: var(--font-sans); }
-  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; font-family: var(--font-sans); }
-  .badge-primary { background: hsl(188 59% 90%); color: hsl(188 59% 28%); }
-  .badge-amber   { background: hsl(30 87% 92%); color: hsl(30 65% 35%); }
-  .badge-success { background: hsl(145 63% 88%); color: hsl(145 63% 25%); }
-  .badge-muted   { background: var(--muted); color: var(--muted-foreground); }
-  .badge-destructive { background: hsl(0 72% 92%); color: hsl(0 72% 38%); }
-  .status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; font-family: var(--font-sans); color: var(--foreground); }
-  .dot { width: 8px; height: 8px; border-radius: 50%; }
-  .avatar { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: white; font-family: var(--font-sans); }
-  .avatar-group { display: flex; }
-  .avatar-group .avatar { margin-left: -8px; border: 2px solid var(--background); }
-  .avatar-group .avatar:first-child { margin-left: 0; }
-</style>
-</head>
-<body>
-  <div class="row"><div class="label">Badges</div>
-    <span class="badge badge-primary">In progress</span>
-    <span class="badge badge-amber">Planned</span>
-    <span class="badge badge-success">Done</span>
-    <span class="badge badge-muted">Draft</span>
-    <span class="badge badge-destructive">Blocked</span>
-  </div>
-  <div class="row"><div class="label">Status</div>
-    <span class="status"><span class="dot" style="background:#2ECC71"></span>On track</span>
-    <span class="status"><span class="dot" style="background:#F29E4C"></span>At risk</span>
-    <span class="status"><span class="dot" style="background:#E74C3C"></span>Blocked</span>
-    <span class="status"><span class="dot" style="background:var(--muted-foreground)"></span>Not started</span>
-  </div>
-  <div class="row"><div class="label">Avatars</div>
-    <div class="avatar" style="background:#288C9B">LK</div>
-    <div class="avatar" style="background:#F29E4C">JM</div>
-    <div class="avatar" style="background:#9B59B6">BR</div>
-    <div style="width:16px"></div>
-    <div class="avatar-group">
-      <div class="avatar" style="background:#288C9B">LK</div>
-      <div class="avatar" style="background:#F29E4C">JM</div>
-      <div class="avatar" style="background:#9B59B6">BR</div>
-      <div class="avatar" style="background:var(--muted); color:var(--muted-foreground)">+4</div>
-    </div>
-  </div>
-</body>
-</html>
-````
+---
 
-## File: docs/design/preview/components-buttons.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="../colors_and_type.css">
-<style>
-  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 12px; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); width: 80px; flex-shrink: 0; font-family: var(--font-sans); }
-  button { font-family: var(--font-sans); font-size: 13px; font-weight: 600; padding: 7px 16px; border-radius: var(--radius-md); border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: opacity 0.15s, transform 0.1s; }
-  button:active { transform: scale(0.98); }
-  .btn-primary   { background: var(--primary); color: var(--primary-foreground); }
-  .btn-primary:hover { opacity: 0.9; }
-  .btn-secondary { background: var(--secondary); color: var(--secondary-foreground); }
-  .btn-secondary:hover { opacity: 0.88; }
-  .btn-outline   { background: transparent; color: var(--foreground); border: 1px solid var(--border); }
-  .btn-outline:hover { background: var(--muted); }
-  .btn-ghost     { background: transparent; color: var(--foreground); }
-  .btn-ghost:hover { background: var(--muted); }
-  .btn-destructive { background: var(--destructive); color: var(--destructive-foreground); }
-  .btn-destructive:hover { opacity: 0.88; }
-  .btn-sm { font-size: 12px; padding: 5px 12px; }
-  .btn-lg { font-size: 15px; padding: 10px 22px; }
-  .btn-disabled { opacity: 0.45; cursor: not-allowed; }
-</style>
-</head>
-<body>
-  <div class="row"><div class="label">Primary</div><button class="btn-primary">Add event</button><button class="btn-primary btn-sm">Add event</button><button class="btn-primary btn-lg">Add event</button></div>
-  <div class="row"><div class="label">Secondary</div><button class="btn-secondary">Share timeline</button></div>
-  <div class="row"><div class="label">Outline</div><button class="btn-outline">Export</button><button class="btn-outline btn-sm">Cancel</button></div>
-  <div class="row"><div class="label">Ghost</div><button class="btn-ghost">View all</button></div>
-  <div class="row"><div class="label">Destructive</div><button class="btn-destructive">Delete event</button></div>
-  <div class="row"><div class="label">Disabled</div><button class="btn-primary btn-disabled" disabled>Add event</button><button class="btn-outline btn-disabled" disabled>Export</button></div>
-</body>
-</html>
-````
+## Logo
 
-## File: docs/design/preview/components-cards.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="../colors_and_type.css">
-<style>
-  body { margin: 0; padding: 20px; background: var(--background); display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); padding: 14px 16px; width: 200px; font-family: var(--font-sans); }
-  .card-title { font-size: 13px; font-weight: 600; color: var(--foreground); margin-bottom: 4px; }
-  .card-meta  { font-size: 11px; color: var(--muted-foreground); margin-bottom: 10px; }
-  .card-body  { font-size: 12px; color: var(--foreground); line-height: 1.5; }
-  .kanban-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); padding: 10px 12px; width: 180px; }
-  .kc-title { font-size: 12px; font-weight: 600; color: var(--foreground); margin-bottom: 6px; }
-  .kc-row { display: flex; align-items: center; justify-content: space-between; }
-  .badge { display: inline-flex; padding: 2px 7px; border-radius: 9999px; font-size: 10px; font-weight: 600; background: hsl(188 59% 90%); color: hsl(188 59% 28%); }
-  .avatar { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: white; }
-  .panel { background: var(--card); border-left: 1px solid var(--border); padding: 16px; width: 180px; box-shadow: var(--shadow-md); }
-  .panel-title { font-size: 13px; font-weight: 700; color: var(--foreground); margin-bottom: 12px; }
-  .panel-field { margin-bottom: 10px; }
-  .field-label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 3px; }
-  .field-val { font-size: 12px; color: var(--foreground); }
-</style>
-</head>
-<body>
-  <!-- Standard card -->
-  <div>
-    <div style="font-size:10px;font-weight:600;color:var(--muted-foreground);margin-bottom:6px;font-family:var(--font-sans)">Card</div>
-    <div class="card">
-      <div class="card-title">Q3 Marketing Campaign</div>
-      <div class="card-meta">Lindsay K. · Apr 28 – May 15</div>
-      <div class="card-body">Brand refresh assets and launch plan for summer push.</div>
-    </div>
-  </div>
-  <!-- Kanban card -->
-  <div>
-    <div style="font-size:10px;font-weight:600;color:var(--muted-foreground);margin-bottom:6px;font-family:var(--font-sans)">Kanban card</div>
-    <div class="kanban-card">
-      <div style="width:3px;height:3px;border-radius:50%;background:#288C9B;margin-bottom:6px"></div>
-      <div class="kc-title">Campaign assets</div>
-      <div class="kc-row">
-        <span class="badge">In progress</span>
-        <div class="avatar" style="background:#288C9B">LK</div>
-      </div>
-    </div>
-  </div>
-  <!-- Event detail panel -->
-  <div>
-    <div style="font-size:10px;font-weight:600;color:var(--muted-foreground);margin-bottom:6px;font-family:var(--font-sans)">Event panel</div>
-    <div class="panel">
-      <div class="panel-title">Campaign assets</div>
-      <div class="panel-field"><div class="field-label">Assigned</div><div class="field-val">Lindsay K.</div></div>
-      <div class="panel-field"><div class="field-label">Dates</div><div class="field-val">Apr 28 – May 15</div></div>
-      <div class="panel-field"><div class="field-label">Status</div><div class="field-val">In progress</div></div>
-      <div class="panel-field"><div class="field-label">Notes</div><div class="field-val" style="color:var(--muted-foreground)">No notes yet</div></div>
-    </div>
-  </div>
-</body>
-</html>
-````
+All variants are in `docs/design/assets/logo/`.
 
-## File: docs/design/preview/components-inputs.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="../colors_and_type.css">
-<style>
-  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 10px; }
-  .row { display: flex; gap: 8px; align-items: center; }
-  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); width: 80px; flex-shrink: 0; font-family: var(--font-sans); }
-  input, select { font-family: var(--font-sans); font-size: 13px; padding: 7px 10px; border-radius: var(--radius-md); border: 1px solid var(--input); background: var(--card); color: var(--foreground); outline: none; width: 200px; }
-  input::placeholder { color: var(--muted-foreground); }
-  input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px hsl(188 59% 38% / 0.2); }
-  input.error { border-color: var(--destructive); }
-  input.disabled { opacity: 0.5; cursor: not-allowed; background: var(--muted); }
-  .helper { font-size: 11px; color: var(--muted-foreground); font-family: var(--font-sans); }
-  .helper.err { color: var(--destructive); }
-</style>
-</head>
-<body>
-  <div class="row"><div class="label">Default</div><input type="text" placeholder="Event title"></div>
-  <div class="row"><div class="label">Filled</div><input type="text" value="Q3 Campaign"></div>
-  <div class="row"><div class="label">Focus</div><input type="text" value="Q3 Campaign" style="border-color:var(--primary);box-shadow:0 0 0 2px hsl(188 59% 38% / 0.2)"></div>
-  <div class="row"><div class="label">Error</div>
-    <div style="display:flex;flex-direction:column;gap:3px">
-      <input type="text" value="" class="error" placeholder="Required">
-      <span class="helper err">Title is required</span>
-    </div>
-  </div>
-  <div class="row"><div class="label">Disabled</div><input type="text" value="Read only" class="disabled" disabled></div>
-  <div class="row"><div class="label">Select</div>
-    <select>
-      <option>Planned</option>
-      <option selected>In progress</option>
-      <option>Done</option>
-    </select>
-  </div>
-</body>
-</html>
-````
+### Variants
 
-## File: docs/design/preview/components-timeline.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="../colors_and_type.css">
-<style>
-  body { margin: 0; padding: 20px; background: var(--background); font-family: var(--font-sans); }
-  .timeline { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-sm); }
-  .tl-header { display: grid; grid-template-columns: 120px repeat(10, 1fr); border-bottom: 1px solid var(--border); }
-  .tl-header-cell { padding: 6px 8px; font-size: 10px; font-weight: 600; color: var(--muted-foreground); border-right: 1px solid var(--border); text-align: center; }
-  .tl-header-cell:first-child { text-align: left; }
-  .tl-row { display: grid; grid-template-columns: 120px repeat(10, 1fr); border-bottom: 1px solid var(--border); min-height: 44px; position: relative; }
-  .tl-row:last-child { border-bottom: none; }
-  .tl-person { padding: 0 10px; display: flex; align-items: center; gap: 7px; border-right: 1px solid var(--border); }
-  .avatar { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: white; flex-shrink: 0; }
-  .person-name { font-size: 12px; font-weight: 600; color: var(--foreground); }
-  .tl-cell { border-right: 1px solid var(--border); position: relative; }
-  .tl-cell:last-child { border-right: none; }
-  .block { position: absolute; top: 8px; bottom: 8px; border-radius: 4px; display: flex; align-items: center; padding: 0 8px; font-size: 10px; font-weight: 600; color: white; overflow: hidden; white-space: nowrap; box-shadow: var(--shadow-sm); cursor: pointer; transition: opacity 0.15s; }
-  .block:hover { opacity: 0.88; }
-  .today-line { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--secondary); z-index: 5; }
-  .tl-lane { position: relative; grid-column: 2 / -1; display: grid; grid-template-columns: repeat(10, 1fr); }
-</style>
-</head>
-<body>
-  <div class="timeline">
-    <div class="tl-header">
-      <div class="tl-header-cell">Team</div>
-      <div class="tl-header-cell">Apr 28</div>
-      <div class="tl-header-cell">Apr 29</div>
-      <div class="tl-header-cell">Apr 30</div>
-      <div class="tl-header-cell">May 1</div>
-      <div class="tl-header-cell">May 2</div>
-      <div class="tl-header-cell">May 5</div>
-      <div class="tl-header-cell">May 6</div>
-      <div class="tl-header-cell">May 7</div>
-      <div class="tl-header-cell">May 8</div>
-      <div class="tl-header-cell">May 9</div>
-    </div>
-    <!-- Lindsay -->
-    <div class="tl-row">
-      <div class="tl-person"><div class="avatar" style="background:#288C9B">LK</div><span class="person-name">Lindsay</span></div>
-      <div class="tl-lane" style="position:relative">
-        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
-        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
-        <div class="tl-cell"></div><div class="tl-cell" style="border-right:none"></div>
-        <div class="block" style="background:#288C9B; left: 0%; width: 65%">Campaign launch</div>
-      </div>
-    </div>
-    <!-- Jen -->
-    <div class="tl-row">
-      <div class="tl-person"><div class="avatar" style="background:#F29E4C">JM</div><span class="person-name">Jen</span></div>
-      <div class="tl-lane" style="position:relative">
-        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
-        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
-        <div class="tl-cell"></div><div class="tl-cell" style="border-right:none"></div>
-        <div class="block" style="background:#F29E4C; color: #333; left: 40%; width: 50%">Project Y</div>
-      </div>
-    </div>
-    <!-- Brian -->
-    <div class="tl-row">
-      <div class="tl-person"><div class="avatar" style="background:#9B59B6">BR</div><span class="person-name">Brian</span></div>
-      <div class="tl-lane" style="position:relative">
-        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
-        <div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div><div class="tl-cell"></div>
-        <div class="tl-cell"></div><div class="tl-cell" style="border-right:none"></div>
-        <div class="block" style="background:#9B59B6; left: 0%; width: 20%">Task A</div>
-        <div class="block" style="background:#9B59B6; left: 55%; width: 40%">Task B</div>
-      </div>
-    </div>
-  </div>
-</body>
-</html>
-````
+| File | Description |
+|------|-------------|
+| `icon-color.svg` | Full color — teal header, orange pegs, light gray body. Use on white/off-white only. |
+| `icon-black.svg` | Solid black icon, no background. |
+| `icon-orange.svg` | Solid orange (`#F17B2B`) icon, no background. |
+| `icon-teal.svg` | Solid teal (`#1A97A2`) icon, no background. |
+| `icon-white-on-black-circle.svg` | White icon on filled black circle. Works on any background. |
+| `icon-knockout-black-circle.svg` | Black-filled circle with icon knocked out (transparent). Page/background color shows through the icon shape. |
+| `icon-knockout-orange-circle.svg` | Orange-filled circle with icon knocked out. |
+| `icon-knockout-teal-circle.svg` | Teal-filled circle with icon knocked out. |
 
-## File: docs/design/preview/logo-variants.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600&display=swap">
-<style>
-  body { margin: 0; padding: 16px 20px; background: #F8F9FA; font-family: 'Open Sans', sans-serif; }
-  .grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; }
-  .variant { display: flex; flex-direction: column; align-items: center; gap: 5px; }
-  .bg { width: 100%; aspect-ratio: 1; border-radius: 8px; display: flex; align-items: center; justify-content: center; padding: 16px; }
-  .bg svg { width: 100%; height: 100%; }
-  .name { font-size: 9px; font-weight: 600; color: #343A40; text-align: center; line-height: 1.3; word-break: break-all; }
-  .desc { font-size: 8px; color: #6C7A8A; text-align: center; }
-</style>
-</head>
-<body>
-<div class="grid">
+### Usage by background
 
-  <div class="variant">
-    <div class="bg" style="background:#F8F9FA;border:1px solid #E2E6EA;">
-      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+| Background | Recommended variants |
+|------------|---------------------|
+| White / off-white | `icon-color`, `icon-black`, `icon-teal`, `icon-knockout-black-circle`, `icon-knockout-orange-circle`, `icon-knockout-teal-circle` |
+| Teal (`#288C9B`) | `icon-black`, `icon-orange`, `icon-knockout-black-circle`, `icon-knockout-orange-circle` |
+| Dark / charcoal | `icon-white-on-black-circle`, `icon-orange`, `icon-knockout-orange-circle`, `icon-knockout-teal-circle` |
+| Any | `icon-white-on-black-circle` |
 
-<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
-    <g id="Main-Icon" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Main Icon" transform="matrix(1,0,0,1,300,300)">
-        <g transform="matrix(1.75446,0,0,1.75446,-123.155,-207.401)">
-            <g transform="matrix(1,0,0,1,0.659356,0)">
-                <path d="M131.868,240.659L131.868,210.347C131.868,195.781 143.693,183.956 158.259,183.956L324.379,183.956C338.944,183.956 350.769,195.781 350.769,210.347L350.769,240.659L131.868,240.659Z" style="fill:rgb(26,151,162);"></path>
-            </g>
-            <path d="M185.644,177.705L185.644,205.725C185.644,209.358 182.694,212.308 179.061,212.308C175.428,212.308 172.478,209.358 172.478,205.725L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705Z" style="fill:rgb(241,123,43);"></path>
-            <g transform="matrix(1,0,0,1,123.522,0)">
-                <path d="M185.644,177.705L185.644,205.725C185.644,209.358 182.694,212.308 179.061,212.308C175.428,212.308 172.478,209.358 172.478,205.725L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705Z" style="fill:rgb(241,123,43);"></path>
-            </g>
-            <g transform="matrix(1,0,0,1,0.659356,0)">
-                <path d="M350.769,248.571L350.769,365.258C350.769,379.823 338.944,391.648 324.379,391.648L158.259,391.648C143.693,391.648 131.868,379.823 131.868,365.258L131.868,248.571L350.769,248.571Z" style="fill:rgb(230,231,230);"></path>
-            </g>
-        </g>
-        <g>
-            <g transform="matrix(1.75446,0,0,1.75446,-136.169,-207.401)">
-                <g transform="matrix(1,0,0,1,-3.66171,-161.207)">
-                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(24,150,166);"></path>
-                </g>
-                <g transform="matrix(1,0,0,1,208.004,-161.207)">
-                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(24,150,166);"></path>
-                </g>
-                <g transform="matrix(1.0064,0,0,1,-1.42799,0.630854)">
-                    <path d="M307.661,288.636L124.641,288.636L124.641,281.913L183.342,281.913L183.342,281.744C185.193,281.744 186.697,280.231 186.697,278.368C186.697,276.505 185.193,274.992 183.342,274.992L183.342,274.823L124.641,274.823L124.641,268.1L307.661,268.1C305.221,270.818 303.735,274.42 303.735,278.368C303.735,282.316 305.221,285.918 307.661,288.636ZM209.443,275.161C207.592,275.161 206.089,276.674 206.089,278.537C206.089,280.4 207.592,281.913 209.443,281.913C211.294,281.913 212.797,280.4 212.797,278.537C212.797,276.674 211.294,275.161 209.443,275.161ZM196.807,274.992C194.956,274.992 193.453,276.505 193.453,278.368C193.453,280.231 194.956,281.744 196.807,281.744C198.658,281.744 200.161,280.231 200.161,278.368C200.161,276.505 198.658,274.992 196.807,274.992ZM222.079,275.161C220.228,275.161 218.725,276.674 218.725,278.537C218.725,280.4 220.228,281.913 222.079,281.913C223.93,281.913 225.433,280.4 225.433,278.537C225.433,276.674 223.93,275.161 222.079,275.161Z" style="fill:rgb(24,150,166);"></path>
-                </g>
-            </g>
-            <g transform="matrix(1.75446,0,0,1.75446,-108.122,-66.7362)">
-                <g transform="matrix(1,0,0,1,-3.66171,-161.207)">
-                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(26,143,157);"></path>
-                </g>
-                <g transform="matrix(1,0,0,1,208.004,-161.207)">
-                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(26,143,157);"></path>
-                </g>
-                <g transform="matrix(1.0064,0,0,1,-1.42799,0.630854)">
-                    <path d="M307.661,288.636L124.641,288.636L124.641,281.913L183.342,281.913L183.342,281.744C185.193,281.744 186.697,280.231 186.697,278.368C186.697,276.505 185.193,274.992 183.342,274.992L183.342,274.823L124.641,274.823L124.641,268.1L307.661,268.1C305.221,270.818 303.735,274.42 303.735,278.368C303.735,282.316 305.221,285.918 307.661,288.636ZM209.443,275.161C207.592,275.161 206.089,276.674 206.089,278.537C206.089,280.4 207.592,281.913 209.443,281.913C211.294,281.913 212.797,280.4 212.797,278.537C212.797,276.674 211.294,275.161 209.443,275.161ZM196.807,274.992C194.956,274.992 193.453,276.505 193.453,278.368C193.453,280.231 194.956,281.744 196.807,281.744C198.658,281.744 200.161,280.231 200.161,278.368C200.161,276.505 198.658,274.992 196.807,274.992ZM222.079,275.161C220.228,275.161 218.725,276.674 218.725,278.537C218.725,280.4 220.228,281.913 222.079,281.913C223.93,281.913 225.433,280.4 225.433,278.537C225.433,276.674 223.93,275.161 222.079,275.161Z" style="fill:rgb(26,143,157);"></path>
-                </g>
-            </g>
-            <g transform="matrix(-1.75446,-2.14859e-16,2.14859e-16,-1.75446,736.169,841.914)">
-                <g transform="matrix(1,0,0,1,-3.66171,-161.207)">
-                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(241,123,43);"></path>
-                </g>
-                <g transform="matrix(1,0,0,1,208.004,-161.207)">
-                    <path d="M117.527,424.876C125.987,424.876 132.856,431.745 132.856,440.206C132.856,448.667 125.987,455.536 117.527,455.536C109.066,455.536 102.197,448.667 102.197,440.206C102.197,431.745 109.066,424.876 117.527,424.876ZM117.527,432.303C113.165,432.303 109.624,435.844 109.624,440.206C109.624,444.568 113.165,448.109 117.527,448.109C121.888,448.109 125.43,444.568 125.43,440.206C125.43,435.844 121.888,432.303 117.527,432.303Z" style="fill:rgb(241,123,43);"></path>
-                </g>
-                <g transform="matrix(1.0064,0,0,1,-1.42799,0.630854)">
-                    <path d="M307.661,288.636L124.641,288.636L124.641,281.913L183.342,281.913L183.342,281.744C185.193,281.744 186.697,280.231 186.697,278.368C186.697,276.505 185.193,274.992 183.342,274.992L183.342,274.823L124.641,274.823L124.641,268.1L307.661,268.1C305.221,270.818 303.735,274.42 303.735,278.368C303.735,282.316 305.221,285.918 307.661,288.636ZM209.443,275.161C207.592,275.161 206.089,276.674 206.089,278.537C206.089,280.4 207.592,281.913 209.443,281.913C211.294,281.913 212.797,280.4 212.797,278.537C212.797,276.674 211.294,275.161 209.443,275.161ZM196.807,274.992C194.956,274.992 193.453,276.505 193.453,278.368C193.453,280.231 194.956,281.744 196.807,281.744C198.658,281.744 200.161,280.231 200.161,278.368C200.161,276.505 198.658,274.992 196.807,274.992ZM222.079,275.161C220.228,275.161 218.725,276.674 218.725,278.537C218.725,280.4 220.228,281.913 222.079,281.913C223.93,281.913 225.433,280.4 225.433,278.537C225.433,276.674 223.93,275.161 222.079,275.161Z" style="fill:rgb(241,123,43);"></path>
-                </g>
-            </g>
-        </g>
-    </g>
-</svg>
-    </div>
-    <div class="name">icon-color</div>
-    <div class="desc">white / off-white bg</div>
-  </div>
+> Teal column confirmed 2026-04-29. Other columns are best-guess — verify during implementation.
 
-  <div class="variant">
-    <div class="bg" style="background:#F8F9FA;border:1px solid #E2E6EA;">
-      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+---
 
-<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
-    <g id="Just-Black" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Just Black" transform="matrix(1.75446,0,0,1.75446,176.845,92.599)">
-        <path d="M132.527,289.267L117.826,289.267C115.02,292.375 110.96,294.329 106.447,294.329C97.987,294.329 91.118,287.46 91.118,278.999C91.118,270.538 97.987,263.669 106.447,263.669C110.96,263.669 115.02,265.623 117.826,268.731L132.527,268.731L132.527,275.454L121.365,275.454C121.634,276.592 121.777,277.779 121.777,278.999C121.777,280.219 121.634,281.406 121.365,282.544L132.527,282.544L132.527,289.267ZM132.527,268.731L132.527,248.571L351.429,248.571L351.429,308.819L181.595,308.819C184.05,311.537 185.546,315.139 185.546,319.087C185.546,323.035 184.05,326.637 181.595,329.355L351.429,329.355L351.429,365.258C351.429,379.823 339.603,391.648 325.038,391.648L158.918,391.648C146.067,391.648 135.35,382.443 133.004,370.273C133.284,370.007 133.553,369.73 133.812,369.443L316.769,369.443C314.314,366.724 312.818,363.123 312.818,359.175C312.818,355.227 314.314,351.625 316.769,348.906L133.812,348.906C133.409,348.46 132.98,348.037 132.527,347.641L132.527,289.267L300.783,289.267C298.328,286.549 296.832,282.947 296.832,278.999C296.832,275.051 298.328,271.449 300.783,268.731L132.527,268.731ZM351.429,308.819L364.552,308.819C367.358,305.711 371.418,303.757 375.93,303.757C384.391,303.757 391.26,310.626 391.26,319.087C391.26,327.548 384.391,334.417 375.93,334.417C371.418,334.417 367.358,332.463 364.552,329.355L351.429,329.355L351.429,322.631L361.013,322.631C360.743,321.494 360.601,320.307 360.601,319.087C360.601,317.867 360.743,316.68 361.013,315.542L351.429,315.542L351.429,308.819ZM133.004,370.273C130.253,372.894 126.53,374.504 122.434,374.504C113.973,374.504 107.104,367.635 107.104,359.175C107.104,350.714 113.973,343.845 122.434,343.845C126.298,343.845 129.83,345.278 132.527,347.641L132.527,365.258C132.527,366.972 132.691,368.649 133.004,370.273ZM132.527,282.544L132.527,275.454L175.669,275.454L175.669,275.623C177.532,275.623 179.045,277.136 179.045,278.999C179.045,280.862 177.532,282.375 175.669,282.375L175.669,282.544L132.527,282.544ZM351.429,315.542L351.429,322.631L306.709,322.631L306.709,322.463C304.845,322.463 303.333,320.95 303.333,319.087C303.333,317.224 304.845,315.711 306.709,315.711L306.709,315.542L351.429,315.542ZM267.724,322.294C265.861,322.294 264.348,320.781 264.348,318.918C264.348,317.055 265.861,315.542 267.724,315.542C269.587,315.542 271.1,317.055 271.1,318.918C271.1,320.781 269.587,322.294 267.724,322.294ZM280.441,322.294C278.578,322.294 277.065,320.781 277.065,318.918C277.065,317.055 278.578,315.542 280.441,315.542C282.304,315.542 283.817,317.055 283.817,318.918C283.817,320.781 282.304,322.294 280.441,322.294ZM293.158,322.463C291.295,322.463 289.782,320.95 289.782,319.087C289.782,317.224 291.295,315.711 293.158,315.711C295.021,315.711 296.534,317.224 296.534,319.087C296.534,320.95 295.021,322.463 293.158,322.463ZM375.93,326.99C380.292,326.99 383.833,323.449 383.833,319.087C383.833,314.725 380.292,311.184 375.93,311.184C371.569,311.184 368.027,314.725 368.027,319.087C368.027,323.449 371.569,326.99 375.93,326.99ZM164.265,334.417C172.726,334.417 179.595,327.548 179.595,319.087C179.595,310.626 172.726,303.757 164.265,303.757C155.804,303.757 148.935,310.626 148.935,319.087C148.935,327.548 155.804,334.417 164.265,334.417ZM164.265,326.99C159.903,326.99 156.362,323.449 156.362,319.087C156.362,314.725 159.903,311.184 164.265,311.184C168.627,311.184 172.168,314.725 172.168,319.087C172.168,323.449 168.627,326.99 164.265,326.99ZM334.099,343.845C325.638,343.845 318.769,350.714 318.769,359.175C318.769,367.635 325.638,374.504 334.099,374.504C342.56,374.504 349.429,367.635 349.429,359.175C349.429,350.714 342.56,343.845 334.099,343.845ZM334.099,351.272C338.461,351.272 342.002,354.813 342.002,359.175C342.002,363.536 338.461,367.078 334.099,367.078C329.737,367.078 326.196,363.536 326.196,359.175C326.196,354.813 329.737,351.272 334.099,351.272ZM318.113,263.669C309.652,263.669 302.783,270.538 302.783,278.999C302.783,287.46 309.652,294.329 318.113,294.329C326.573,294.329 333.442,287.46 333.442,278.999C333.442,270.538 326.573,263.669 318.113,263.669ZM318.113,271.096C322.474,271.096 326.016,274.637 326.016,278.999C326.016,283.361 322.474,286.902 318.113,286.902C313.751,286.902 310.21,283.361 310.21,278.999C310.21,274.637 313.751,271.096 318.113,271.096ZM217.923,355.968C219.786,355.968 221.299,357.48 221.299,359.344C221.299,361.207 219.786,362.719 217.923,362.719C216.06,362.719 214.547,361.207 214.547,359.344C214.547,357.48 216.06,355.968 217.923,355.968ZM205.206,355.799C207.069,355.799 208.582,357.312 208.582,359.175C208.582,361.038 207.069,362.551 205.206,362.551C203.343,362.551 201.83,361.038 201.83,359.175C201.83,357.312 203.343,355.799 205.206,355.799ZM230.64,355.968C232.503,355.968 234.016,357.48 234.016,359.344C234.016,361.207 232.503,362.719 230.64,362.719C228.777,362.719 227.264,361.207 227.264,359.344C227.264,357.48 228.777,355.968 230.64,355.968ZM137.351,355.63L191.655,355.63L191.655,355.799C193.518,355.799 195.031,357.312 195.031,359.175C195.031,361.038 193.518,362.551 191.655,362.551L191.655,362.719L137.351,362.719C137.62,361.581 137.763,360.395 137.763,359.175C137.763,357.955 137.62,356.768 137.351,355.63ZM106.447,271.096C102.086,271.096 98.545,274.637 98.545,278.999C98.545,283.361 102.086,286.902 106.447,286.902C110.809,286.902 114.35,283.361 114.35,278.999C114.35,274.637 110.809,271.096 106.447,271.096ZM122.434,351.272C118.072,351.272 114.531,354.813 114.531,359.175C114.531,363.536 118.072,367.078 122.434,367.078C126.795,367.078 130.336,363.536 130.336,359.175C130.336,354.813 126.795,351.272 122.434,351.272ZM189.22,275.623C191.083,275.623 192.596,277.136 192.596,278.999C192.596,280.862 191.083,282.375 189.22,282.375C187.357,282.375 185.844,280.862 185.844,278.999C185.844,277.136 187.357,275.623 189.22,275.623ZM201.937,275.792C203.8,275.792 205.313,277.305 205.313,279.168C205.313,281.031 203.8,282.544 201.937,282.544C200.074,282.544 198.561,281.031 198.561,279.168C198.561,277.305 200.074,275.792 201.937,275.792ZM214.654,275.792C216.517,275.792 218.03,277.305 218.03,279.168C218.03,281.031 216.517,282.544 214.654,282.544C212.791,282.544 211.278,281.031 211.278,279.168C211.278,277.305 212.791,275.792 214.654,275.792ZM309.166,183.956L325.038,183.956C339.603,183.956 351.429,195.781 351.429,210.347L351.429,240.659L132.527,240.659L132.527,210.347C132.527,195.781 144.353,183.956 158.918,183.956L172.478,183.956L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705L185.644,183.956L296,183.956L296,177.705C296,174.072 298.95,171.123 302.583,171.123C306.216,171.123 309.166,174.072 309.166,177.705L309.166,183.956Z"></path>
-    </g>
-</svg>
-    </div>
-    <div class="name">icon-black</div>
-    <div class="desc">white / off-white bg</div>
-  </div>
+## Color Palette
 
-  <div class="variant">
-    <div class="bg" style="background:#F8F9FA;border:1px solid #E2E6EA;">
-      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+### Brand Colors (Source)
 
-<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
-    <g id="Just-teal" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Just teal" transform="matrix(1.75446,0,0,1.75446,176.845,92.599)">
-        <path d="M132.527,289.267L117.826,289.267C115.02,292.375 110.96,294.329 106.447,294.329C97.987,294.329 91.118,287.46 91.118,278.999C91.118,270.538 97.987,263.669 106.447,263.669C110.96,263.669 115.02,265.623 117.826,268.731L132.527,268.731L132.527,275.454L121.365,275.454C121.634,276.592 121.777,277.779 121.777,278.999C121.777,280.219 121.634,281.406 121.365,282.544L132.527,282.544L132.527,289.267ZM132.527,268.731L132.527,248.571L351.429,248.571L351.429,308.819L181.595,308.819C184.05,311.537 185.546,315.139 185.546,319.087C185.546,323.035 184.05,326.637 181.595,329.355L351.429,329.355L351.429,365.258C351.429,379.823 339.603,391.648 325.038,391.648L158.918,391.648C146.067,391.648 135.35,382.443 133.004,370.273C133.284,370.007 133.553,369.73 133.812,369.443L316.769,369.443C314.314,366.724 312.818,363.123 312.818,359.175C312.818,355.227 314.314,351.625 316.769,348.906L133.812,348.906C133.409,348.46 132.98,348.037 132.527,347.641L132.527,289.267L300.783,289.267C298.328,286.549 296.832,282.947 296.832,278.999C296.832,275.051 298.328,271.449 300.783,268.731L132.527,268.731ZM351.429,308.819L364.552,308.819C367.358,305.711 371.418,303.757 375.93,303.757C384.391,303.757 391.26,310.626 391.26,319.087C391.26,327.548 384.391,334.417 375.93,334.417C371.418,334.417 367.358,332.463 364.552,329.355L351.429,329.355L351.429,322.631L361.013,322.631C360.743,321.494 360.601,320.307 360.601,319.087C360.601,317.867 360.743,316.68 361.013,315.542L351.429,315.542L351.429,308.819ZM133.004,370.273C130.253,372.894 126.53,374.504 122.434,374.504C113.973,374.504 107.104,367.635 107.104,359.175C107.104,350.714 113.973,343.845 122.434,343.845C126.298,343.845 129.83,345.278 132.527,347.641L132.527,365.258C132.527,366.972 132.691,368.649 133.004,370.273ZM132.527,282.544L132.527,275.454L175.669,275.454L175.669,275.623C177.532,275.623 179.045,277.136 179.045,278.999C179.045,280.862 177.532,282.375 175.669,282.375L175.669,282.544L132.527,282.544ZM351.429,315.542L351.429,322.631L306.709,322.631L306.709,322.463C304.845,322.463 303.333,320.95 303.333,319.087C303.333,317.224 304.845,315.711 306.709,315.711L306.709,315.542L351.429,315.542ZM267.724,322.294C265.861,322.294 264.348,320.781 264.348,318.918C264.348,317.055 265.861,315.542 267.724,315.542C269.587,315.542 271.1,317.055 271.1,318.918C271.1,320.781 269.587,322.294 267.724,322.294ZM280.441,322.294C278.578,322.294 277.065,320.781 277.065,318.918C277.065,317.055 278.578,315.542 280.441,315.542C282.304,315.542 283.817,317.055 283.817,318.918C283.817,320.781 282.304,322.294 280.441,322.294ZM293.158,322.463C291.295,322.463 289.782,320.95 289.782,319.087C289.782,317.224 291.295,315.711 293.158,315.711C295.021,315.711 296.534,317.224 296.534,319.087C296.534,320.95 295.021,322.463 293.158,322.463ZM375.93,326.99C380.292,326.99 383.833,323.449 383.833,319.087C383.833,314.725 380.292,311.184 375.93,311.184C371.569,311.184 368.027,314.725 368.027,319.087C368.027,323.449 371.569,326.99 375.93,326.99ZM164.265,334.417C172.726,334.417 179.595,327.548 179.595,319.087C179.595,310.626 172.726,303.757 164.265,303.757C155.804,303.757 148.935,310.626 148.935,319.087C148.935,327.548 155.804,334.417 164.265,334.417ZM164.265,326.99C159.903,326.99 156.362,323.449 156.362,319.087C156.362,314.725 159.903,311.184 164.265,311.184C168.627,311.184 172.168,314.725 172.168,319.087C172.168,323.449 168.627,326.99 164.265,326.99ZM334.099,343.845C325.638,343.845 318.769,350.714 318.769,359.175C318.769,367.635 325.638,374.504 334.099,374.504C342.56,374.504 349.429,367.635 349.429,359.175C349.429,350.714 342.56,343.845 334.099,343.845ZM334.099,351.272C338.461,351.272 342.002,354.813 342.002,359.175C342.002,363.536 338.461,367.078 334.099,367.078C329.737,367.078 326.196,363.536 326.196,359.175C326.196,354.813 329.737,351.272 334.099,351.272ZM318.113,263.669C309.652,263.669 302.783,270.538 302.783,278.999C302.783,287.46 309.652,294.329 318.113,294.329C326.573,294.329 333.442,287.46 333.442,278.999C333.442,270.538 326.573,263.669 318.113,263.669ZM318.113,271.096C322.474,271.096 326.016,274.637 326.016,278.999C326.016,283.361 322.474,286.902 318.113,286.902C313.751,286.902 310.21,283.361 310.21,278.999C310.21,274.637 313.751,271.096 318.113,271.096ZM217.923,355.968C219.786,355.968 221.299,357.48 221.299,359.344C221.299,361.207 219.786,362.719 217.923,362.719C216.06,362.719 214.547,361.207 214.547,359.344C214.547,357.48 216.06,355.968 217.923,355.968ZM205.206,355.799C207.069,355.799 208.582,357.312 208.582,359.175C208.582,361.038 207.069,362.551 205.206,362.551C203.343,362.551 201.83,361.038 201.83,359.175C201.83,357.312 203.343,355.799 205.206,355.799ZM230.64,355.968C232.503,355.968 234.016,357.48 234.016,359.344C234.016,361.207 232.503,362.719 230.64,362.719C228.777,362.719 227.264,361.207 227.264,359.344C227.264,357.48 228.777,355.968 230.64,355.968ZM137.351,355.63L191.655,355.63L191.655,355.799C193.518,355.799 195.031,357.312 195.031,359.175C195.031,361.038 193.518,362.551 191.655,362.551L191.655,362.719L137.351,362.719C137.62,361.581 137.763,360.395 137.763,359.175C137.763,357.955 137.62,356.768 137.351,355.63ZM106.447,271.096C102.086,271.096 98.545,274.637 98.545,278.999C98.545,283.361 102.086,286.902 106.447,286.902C110.809,286.902 114.35,283.361 114.35,278.999C114.35,274.637 110.809,271.096 106.447,271.096ZM122.434,351.272C118.072,351.272 114.531,354.813 114.531,359.175C114.531,363.536 118.072,367.078 122.434,367.078C126.795,367.078 130.336,363.536 130.336,359.175C130.336,354.813 126.795,351.272 122.434,351.272ZM189.22,275.623C191.083,275.623 192.596,277.136 192.596,278.999C192.596,280.862 191.083,282.375 189.22,282.375C187.357,282.375 185.844,280.862 185.844,278.999C185.844,277.136 187.357,275.623 189.22,275.623ZM201.937,275.792C203.8,275.792 205.313,277.305 205.313,279.168C205.313,281.031 203.8,282.544 201.937,282.544C200.074,282.544 198.561,281.031 198.561,279.168C198.561,277.305 200.074,275.792 201.937,275.792ZM214.654,275.792C216.517,275.792 218.03,277.305 218.03,279.168C218.03,281.031 216.517,282.544 214.654,282.544C212.791,282.544 211.278,281.031 211.278,279.168C211.278,277.305 212.791,275.792 214.654,275.792ZM309.166,183.956L325.038,183.956C339.603,183.956 351.429,195.781 351.429,210.347L351.429,240.659L132.527,240.659L132.527,210.347C132.527,195.781 144.353,183.956 158.918,183.956L172.478,183.956L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705L185.644,183.956L296,183.956L296,177.705C296,174.072 298.95,171.123 302.583,171.123C306.216,171.123 309.166,174.072 309.166,177.705L309.166,183.956Z" style="fill:rgb(26,151,162);"></path>
-    </g>
-</svg>
-    </div>
-    <div class="name">icon-teal</div>
-    <div class="desc">white / off-white bg</div>
-  </div>
+| Name | Hex | HSL | Role |
+|------|-----|-----|------|
+| Teal | `#288C9B` | `188 59% 38%` | Primary — actions, active states, links |
+| Amber | `#F29E4C` | `30 87% 62%` | Secondary — highlights, energy, badges |
+| Charcoal | `#343A40` | `210 10% 23%` | Text, dark backgrounds |
+| Off-White | `#F8F9FA` | `210 17% 98%` | Page background, light surfaces |
+| Sky Blue | `#5BC0DE` | `194 67% 61%` | Accent — CTAs, hover highlights |
 
-  <div class="variant">
-    <div class="bg" style="background:#F8F9FA;border:1px solid #E2E6EA;">
-      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+---
 
-<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
-    <g id="Just-orange" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Just orange" transform="matrix(1.75446,0,0,1.75446,176.845,92.599)">
-        <path d="M132.527,289.267L117.826,289.267C115.02,292.375 110.96,294.329 106.447,294.329C97.987,294.329 91.118,287.46 91.118,278.999C91.118,270.538 97.987,263.669 106.447,263.669C110.96,263.669 115.02,265.623 117.826,268.731L132.527,268.731L132.527,275.454L121.365,275.454C121.634,276.592 121.777,277.779 121.777,278.999C121.777,280.219 121.634,281.406 121.365,282.544L132.527,282.544L132.527,289.267ZM132.527,268.731L132.527,248.571L351.429,248.571L351.429,308.819L181.595,308.819C184.05,311.537 185.546,315.139 185.546,319.087C185.546,323.035 184.05,326.637 181.595,329.355L351.429,329.355L351.429,365.258C351.429,379.823 339.603,391.648 325.038,391.648L158.918,391.648C146.067,391.648 135.35,382.443 133.004,370.273C133.284,370.007 133.553,369.73 133.812,369.443L316.769,369.443C314.314,366.724 312.818,363.123 312.818,359.175C312.818,355.227 314.314,351.625 316.769,348.906L133.812,348.906C133.409,348.46 132.98,348.037 132.527,347.641L132.527,289.267L300.783,289.267C298.328,286.549 296.832,282.947 296.832,278.999C296.832,275.051 298.328,271.449 300.783,268.731L132.527,268.731ZM351.429,308.819L364.552,308.819C367.358,305.711 371.418,303.757 375.93,303.757C384.391,303.757 391.26,310.626 391.26,319.087C391.26,327.548 384.391,334.417 375.93,334.417C371.418,334.417 367.358,332.463 364.552,329.355L351.429,329.355L351.429,322.631L361.013,322.631C360.743,321.494 360.601,320.307 360.601,319.087C360.601,317.867 360.743,316.68 361.013,315.542L351.429,315.542L351.429,308.819ZM133.004,370.273C130.253,372.894 126.53,374.504 122.434,374.504C113.973,374.504 107.104,367.635 107.104,359.175C107.104,350.714 113.973,343.845 122.434,343.845C126.298,343.845 129.83,345.278 132.527,347.641L132.527,365.258C132.527,366.972 132.691,368.649 133.004,370.273ZM132.527,282.544L132.527,275.454L175.669,275.454L175.669,275.623C177.532,275.623 179.045,277.136 179.045,278.999C179.045,280.862 177.532,282.375 175.669,282.375L175.669,282.544L132.527,282.544ZM351.429,315.542L351.429,322.631L306.709,322.631L306.709,322.463C304.845,322.463 303.333,320.95 303.333,319.087C303.333,317.224 304.845,315.711 306.709,315.711L306.709,315.542L351.429,315.542ZM267.724,322.294C265.861,322.294 264.348,320.781 264.348,318.918C264.348,317.055 265.861,315.542 267.724,315.542C269.587,315.542 271.1,317.055 271.1,318.918C271.1,320.781 269.587,322.294 267.724,322.294ZM280.441,322.294C278.578,322.294 277.065,320.781 277.065,318.918C277.065,317.055 278.578,315.542 280.441,315.542C282.304,315.542 283.817,317.055 283.817,318.918C283.817,320.781 282.304,322.294 280.441,322.294ZM293.158,322.463C291.295,322.463 289.782,320.95 289.782,319.087C289.782,317.224 291.295,315.711 293.158,315.711C295.021,315.711 296.534,317.224 296.534,319.087C296.534,320.95 295.021,322.463 293.158,322.463ZM375.93,326.99C380.292,326.99 383.833,323.449 383.833,319.087C383.833,314.725 380.292,311.184 375.93,311.184C371.569,311.184 368.027,314.725 368.027,319.087C368.027,323.449 371.569,326.99 375.93,326.99ZM164.265,334.417C172.726,334.417 179.595,327.548 179.595,319.087C179.595,310.626 172.726,303.757 164.265,303.757C155.804,303.757 148.935,310.626 148.935,319.087C148.935,327.548 155.804,334.417 164.265,334.417ZM164.265,326.99C159.903,326.99 156.362,323.449 156.362,319.087C156.362,314.725 159.903,311.184 164.265,311.184C168.627,311.184 172.168,314.725 172.168,319.087C172.168,323.449 168.627,326.99 164.265,326.99ZM334.099,343.845C325.638,343.845 318.769,350.714 318.769,359.175C318.769,367.635 325.638,374.504 334.099,374.504C342.56,374.504 349.429,367.635 349.429,359.175C349.429,350.714 342.56,343.845 334.099,343.845ZM334.099,351.272C338.461,351.272 342.002,354.813 342.002,359.175C342.002,363.536 338.461,367.078 334.099,367.078C329.737,367.078 326.196,363.536 326.196,359.175C326.196,354.813 329.737,351.272 334.099,351.272ZM318.113,263.669C309.652,263.669 302.783,270.538 302.783,278.999C302.783,287.46 309.652,294.329 318.113,294.329C326.573,294.329 333.442,287.46 333.442,278.999C333.442,270.538 326.573,263.669 318.113,263.669ZM318.113,271.096C322.474,271.096 326.016,274.637 326.016,278.999C326.016,283.361 322.474,286.902 318.113,286.902C313.751,286.902 310.21,283.361 310.21,278.999C310.21,274.637 313.751,271.096 318.113,271.096ZM217.923,355.968C219.786,355.968 221.299,357.48 221.299,359.344C221.299,361.207 219.786,362.719 217.923,362.719C216.06,362.719 214.547,361.207 214.547,359.344C214.547,357.48 216.06,355.968 217.923,355.968ZM205.206,355.799C207.069,355.799 208.582,357.312 208.582,359.175C208.582,361.038 207.069,362.551 205.206,362.551C203.343,362.551 201.83,361.038 201.83,359.175C201.83,357.312 203.343,355.799 205.206,355.799ZM230.64,355.968C232.503,355.968 234.016,357.48 234.016,359.344C234.016,361.207 232.503,362.719 230.64,362.719C228.777,362.719 227.264,361.207 227.264,359.344C227.264,357.48 228.777,355.968 230.64,355.968ZM137.351,355.63L191.655,355.63L191.655,355.799C193.518,355.799 195.031,357.312 195.031,359.175C195.031,361.038 193.518,362.551 191.655,362.551L191.655,362.719L137.351,362.719C137.62,361.581 137.763,360.395 137.763,359.175C137.763,357.955 137.62,356.768 137.351,355.63ZM106.447,271.096C102.086,271.096 98.545,274.637 98.545,278.999C98.545,283.361 102.086,286.902 106.447,286.902C110.809,286.902 114.35,283.361 114.35,278.999C114.35,274.637 110.809,271.096 106.447,271.096ZM122.434,351.272C118.072,351.272 114.531,354.813 114.531,359.175C114.531,363.536 118.072,367.078 122.434,367.078C126.795,367.078 130.336,363.536 130.336,359.175C130.336,354.813 126.795,351.272 122.434,351.272ZM189.22,275.623C191.083,275.623 192.596,277.136 192.596,278.999C192.596,280.862 191.083,282.375 189.22,282.375C187.357,282.375 185.844,280.862 185.844,278.999C185.844,277.136 187.357,275.623 189.22,275.623ZM201.937,275.792C203.8,275.792 205.313,277.305 205.313,279.168C205.313,281.031 203.8,282.544 201.937,282.544C200.074,282.544 198.561,281.031 198.561,279.168C198.561,277.305 200.074,275.792 201.937,275.792ZM214.654,275.792C216.517,275.792 218.03,277.305 218.03,279.168C218.03,281.031 216.517,282.544 214.654,282.544C212.791,282.544 211.278,281.031 211.278,279.168C211.278,277.305 212.791,275.792 214.654,275.792ZM309.166,183.956L325.038,183.956C339.603,183.956 351.429,195.781 351.429,210.347L351.429,240.659L132.527,240.659L132.527,210.347C132.527,195.781 144.353,183.956 158.918,183.956L172.478,183.956L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705L185.644,183.956L296,183.956L296,177.705C296,174.072 298.95,171.123 302.583,171.123C306.216,171.123 309.166,174.072 309.166,177.705L309.166,183.956Z" style="fill:rgb(241,123,43);"></path>
-    </g>
-</svg>
-    </div>
-    <div class="name">icon-orange</div>
-    <div class="desc">white / off-white bg</div>
-  </div>
+## CSS Tokens
 
-  <div class="variant">
-    <div class="bg" style="background:#1C2128;">
-      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+Copy this into `packages/web/src/index.css` after `shadcn init`:
 
-<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
-    <g id="White-on-black-circle" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="White on black circle">
-        <circle cx="600" cy="600" r="389.67"></circle>
-        <g id="Just-Black" www.serif.com:id="Just Black" transform="matrix(1.75446,0,0,1.75446,176.845,92.599)">
-            <path d="M132.527,289.267L117.826,289.267C115.02,292.375 110.96,294.329 106.447,294.329C97.987,294.329 91.118,287.46 91.118,278.999C91.118,270.538 97.987,263.669 106.447,263.669C110.96,263.669 115.02,265.623 117.826,268.731L132.527,268.731L132.527,275.454L121.365,275.454C121.634,276.592 121.777,277.779 121.777,278.999C121.777,280.219 121.634,281.406 121.365,282.544L132.527,282.544L132.527,289.267ZM132.527,268.731L132.527,248.571L351.429,248.571L351.429,308.819L181.595,308.819C184.05,311.537 185.546,315.139 185.546,319.087C185.546,323.035 184.05,326.637 181.595,329.355L351.429,329.355L351.429,365.258C351.429,379.823 339.603,391.648 325.038,391.648L158.918,391.648C146.067,391.648 135.35,382.443 133.004,370.273C133.284,370.007 133.553,369.73 133.812,369.443L316.769,369.443C314.314,366.724 312.818,363.123 312.818,359.175C312.818,355.227 314.314,351.625 316.769,348.906L133.812,348.906C133.409,348.46 132.98,348.037 132.527,347.641L132.527,289.267L300.783,289.267C298.328,286.549 296.832,282.947 296.832,278.999C296.832,275.051 298.328,271.449 300.783,268.731L132.527,268.731ZM351.429,308.819L364.552,308.819C367.358,305.711 371.418,303.757 375.93,303.757C384.391,303.757 391.26,310.626 391.26,319.087C391.26,327.548 384.391,334.417 375.93,334.417C371.418,334.417 367.358,332.463 364.552,329.355L351.429,329.355L351.429,322.631L361.013,322.631C360.743,321.494 360.601,320.307 360.601,319.087C360.601,317.867 360.743,316.68 361.013,315.542L351.429,315.542L351.429,308.819ZM133.004,370.273C130.253,372.894 126.53,374.504 122.434,374.504C113.973,374.504 107.104,367.635 107.104,359.175C107.104,350.714 113.973,343.845 122.434,343.845C126.298,343.845 129.83,345.278 132.527,347.641L132.527,365.258C132.527,366.972 132.691,368.649 133.004,370.273ZM132.527,282.544L132.527,275.454L175.669,275.454L175.669,275.623C177.532,275.623 179.045,277.136 179.045,278.999C179.045,280.862 177.532,282.375 175.669,282.375L175.669,282.544L132.527,282.544ZM351.429,315.542L351.429,322.631L306.709,322.631L306.709,322.463C304.845,322.463 303.333,320.95 303.333,319.087C303.333,317.224 304.845,315.711 306.709,315.711L306.709,315.542L351.429,315.542ZM267.724,322.294C265.861,322.294 264.348,320.781 264.348,318.918C264.348,317.055 265.861,315.542 267.724,315.542C269.587,315.542 271.1,317.055 271.1,318.918C271.1,320.781 269.587,322.294 267.724,322.294ZM280.441,322.294C278.578,322.294 277.065,320.781 277.065,318.918C277.065,317.055 278.578,315.542 280.441,315.542C282.304,315.542 283.817,317.055 283.817,318.918C283.817,320.781 282.304,322.294 280.441,322.294ZM293.158,322.463C291.295,322.463 289.782,320.95 289.782,319.087C289.782,317.224 291.295,315.711 293.158,315.711C295.021,315.711 296.534,317.224 296.534,319.087C296.534,320.95 295.021,322.463 293.158,322.463ZM375.93,326.99C380.292,326.99 383.833,323.449 383.833,319.087C383.833,314.725 380.292,311.184 375.93,311.184C371.569,311.184 368.027,314.725 368.027,319.087C368.027,323.449 371.569,326.99 375.93,326.99ZM164.265,334.417C172.726,334.417 179.595,327.548 179.595,319.087C179.595,310.626 172.726,303.757 164.265,303.757C155.804,303.757 148.935,310.626 148.935,319.087C148.935,327.548 155.804,334.417 164.265,334.417ZM164.265,326.99C159.903,326.99 156.362,323.449 156.362,319.087C156.362,314.725 159.903,311.184 164.265,311.184C168.627,311.184 172.168,314.725 172.168,319.087C172.168,323.449 168.627,326.99 164.265,326.99ZM334.099,343.845C325.638,343.845 318.769,350.714 318.769,359.175C318.769,367.635 325.638,374.504 334.099,374.504C342.56,374.504 349.429,367.635 349.429,359.175C349.429,350.714 342.56,343.845 334.099,343.845ZM334.099,351.272C338.461,351.272 342.002,354.813 342.002,359.175C342.002,363.536 338.461,367.078 334.099,367.078C329.737,367.078 326.196,363.536 326.196,359.175C326.196,354.813 329.737,351.272 334.099,351.272ZM318.113,263.669C309.652,263.669 302.783,270.538 302.783,278.999C302.783,287.46 309.652,294.329 318.113,294.329C326.573,294.329 333.442,287.46 333.442,278.999C333.442,270.538 326.573,263.669 318.113,263.669ZM318.113,271.096C322.474,271.096 326.016,274.637 326.016,278.999C326.016,283.361 322.474,286.902 318.113,286.902C313.751,286.902 310.21,283.361 310.21,278.999C310.21,274.637 313.751,271.096 318.113,271.096ZM217.923,355.968C219.786,355.968 221.299,357.48 221.299,359.344C221.299,361.207 219.786,362.719 217.923,362.719C216.06,362.719 214.547,361.207 214.547,359.344C214.547,357.48 216.06,355.968 217.923,355.968ZM205.206,355.799C207.069,355.799 208.582,357.312 208.582,359.175C208.582,361.038 207.069,362.551 205.206,362.551C203.343,362.551 201.83,361.038 201.83,359.175C201.83,357.312 203.343,355.799 205.206,355.799ZM230.64,355.968C232.503,355.968 234.016,357.48 234.016,359.344C234.016,361.207 232.503,362.719 230.64,362.719C228.777,362.719 227.264,361.207 227.264,359.344C227.264,357.48 228.777,355.968 230.64,355.968ZM137.351,355.63L191.655,355.63L191.655,355.799C193.518,355.799 195.031,357.312 195.031,359.175C195.031,361.038 193.518,362.551 191.655,362.551L191.655,362.719L137.351,362.719C137.62,361.581 137.763,360.395 137.763,359.175C137.763,357.955 137.62,356.768 137.351,355.63ZM106.447,271.096C102.086,271.096 98.545,274.637 98.545,278.999C98.545,283.361 102.086,286.902 106.447,286.902C110.809,286.902 114.35,283.361 114.35,278.999C114.35,274.637 110.809,271.096 106.447,271.096ZM122.434,351.272C118.072,351.272 114.531,354.813 114.531,359.175C114.531,363.536 118.072,367.078 122.434,367.078C126.795,367.078 130.336,363.536 130.336,359.175C130.336,354.813 126.795,351.272 122.434,351.272ZM189.22,275.623C191.083,275.623 192.596,277.136 192.596,278.999C192.596,280.862 191.083,282.375 189.22,282.375C187.357,282.375 185.844,280.862 185.844,278.999C185.844,277.136 187.357,275.623 189.22,275.623ZM201.937,275.792C203.8,275.792 205.313,277.305 205.313,279.168C205.313,281.031 203.8,282.544 201.937,282.544C200.074,282.544 198.561,281.031 198.561,279.168C198.561,277.305 200.074,275.792 201.937,275.792ZM214.654,275.792C216.517,275.792 218.03,277.305 218.03,279.168C218.03,281.031 216.517,282.544 214.654,282.544C212.791,282.544 211.278,281.031 211.278,279.168C211.278,277.305 212.791,275.792 214.654,275.792ZM309.166,183.956L325.038,183.956C339.603,183.956 351.429,195.781 351.429,210.347L351.429,240.659L132.527,240.659L132.527,210.347C132.527,195.781 144.353,183.956 158.918,183.956L172.478,183.956L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705L185.644,183.956L296,183.956L296,177.705C296,174.072 298.95,171.123 302.583,171.123C306.216,171.123 309.166,174.072 309.166,177.705L309.166,183.956Z" style="fill:white;"></path>
-        </g>
-    </g>
-</svg>
-    </div>
-    <div class="name">white-on-black-circle</div>
-    <div class="desc">any background</div>
-  </div>
+```css
+@layer base {
+  :root {
+    --background:             210 17% 98%;   /* #F8F9FA — page background */
+    --foreground:             210 10% 23%;   /* #343A40 — default text */
 
-  <div class="variant">
-    <div class="bg" style="background:#F8F9FA;border:1px solid #E2E6EA;">
-      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+    --card:                   0 0% 100%;     /* white — card/panel surface */
+    --card-foreground:        210 10% 23%;
 
-<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
-    <g id="Transparent-on-black-circle" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Transparent on black circle">
-        <path d="M600,210.33C815.065,210.33 989.67,384.935 989.67,600C989.67,815.065 815.065,989.67 600,989.67C384.935,989.67 210.33,815.065 210.33,600C210.33,384.935 384.935,210.33 600,210.33ZM719.262,415.342L719.262,404.375C719.262,398.001 714.087,392.826 707.713,392.826C701.339,392.826 696.164,398.001 696.164,404.375L696.164,415.342L502.549,415.342L502.549,404.375C502.549,398.001 497.374,392.826 491,392.826C484.625,392.826 479.45,398.001 479.45,404.375L479.45,415.342L455.66,415.342C430.105,415.342 409.358,436.088 409.358,461.643L409.358,514.825L793.411,514.825L793.411,461.643C793.411,436.088 772.664,415.342 747.109,415.342L719.262,415.342ZM409.358,600.105L409.358,588.309L389.774,588.309C390.247,586.313 390.497,584.23 390.497,582.09C390.497,579.95 390.247,577.868 389.774,575.871L409.358,575.871L409.358,564.075L383.565,564.075C378.642,558.623 371.519,555.195 363.602,555.195C348.758,555.195 336.707,567.246 336.707,582.09C336.707,596.934 348.758,608.985 363.602,608.985C371.519,608.985 378.642,605.557 383.565,600.105L409.358,600.105ZM409.358,564.075L704.555,564.075C700.248,568.845 697.623,575.163 697.623,582.09C697.623,589.017 700.248,595.336 704.555,600.105L409.358,600.105L409.358,702.519C410.152,703.215 410.905,703.956 411.612,704.74L732.602,704.74C728.295,709.509 725.67,715.828 725.67,722.755C725.67,729.682 728.295,736.001 732.602,740.77L411.612,740.77C411.158,741.273 410.685,741.759 410.195,742.226C414.31,763.579 433.114,779.728 455.66,779.728L747.109,779.728C772.664,779.728 793.411,758.982 793.411,733.427L793.411,670.438L495.445,670.438C499.752,665.668 502.377,659.349 502.377,652.423C502.377,645.496 499.752,639.177 495.445,634.407L793.411,634.407L793.411,528.706L409.358,528.706L409.358,564.075ZM793.411,634.407L793.411,646.204L810.226,646.204C809.753,648.2 809.503,650.282 809.503,652.423C809.503,654.563 809.753,656.645 810.226,658.641L793.411,658.641L793.411,670.438L816.435,670.438C821.358,675.89 828.481,679.318 836.398,679.318C851.242,679.318 863.293,667.266 863.293,652.423C863.293,637.579 851.242,625.527 836.398,625.527C828.481,625.527 821.358,628.956 816.435,634.407L793.411,634.407ZM410.195,742.226C409.646,739.377 409.358,736.435 409.358,733.427L409.358,702.519C404.626,698.374 398.429,695.86 391.649,695.86C376.805,695.86 364.754,707.911 364.754,722.755C364.754,737.599 376.805,749.65 391.649,749.65C398.836,749.65 405.368,746.825 410.195,742.226ZM409.358,575.871L409.358,588.309L485.049,588.309L485.049,588.013C488.317,588.013 490.971,585.359 490.971,582.09C490.971,578.821 488.317,576.167 485.049,576.167L485.049,575.871L409.358,575.871ZM793.411,658.641L793.411,646.204L714.951,646.204L714.951,646.5C711.683,646.5 709.029,649.154 709.029,652.423C709.029,655.691 711.683,658.345 714.951,658.345L714.951,658.641L793.411,658.641ZM553.445,576.464C550.176,576.464 547.522,579.117 547.522,582.386C547.522,585.655 550.176,588.309 553.445,588.309C556.714,588.309 559.368,585.655 559.368,582.386C559.368,579.117 556.714,576.464 553.445,576.464ZM531.134,576.464C527.865,576.464 525.211,579.117 525.211,582.386C525.211,585.655 527.865,588.309 531.134,588.309C534.403,588.309 537.057,585.655 537.057,582.386C537.057,579.117 534.403,576.464 531.134,576.464ZM508.823,576.167C505.554,576.167 502.9,578.821 502.9,582.09C502.9,585.359 505.554,588.013 508.823,588.013C512.092,588.013 514.746,585.359 514.746,582.09C514.746,578.821 512.092,576.167 508.823,576.167ZM363.602,568.225C371.255,568.225 377.467,574.438 377.467,582.09C377.467,589.743 371.255,595.955 363.602,595.955C355.95,595.955 349.737,589.743 349.737,582.09C349.737,574.438 355.95,568.225 363.602,568.225ZM646.555,658.049C649.824,658.049 652.478,655.395 652.478,652.126C652.478,648.858 649.824,646.204 646.555,646.204C643.286,646.204 640.632,648.858 640.632,652.126C640.632,655.395 643.286,658.049 646.555,658.049ZM691.177,658.345C694.446,658.345 697.1,655.691 697.1,652.423C697.1,649.154 694.446,646.5 691.177,646.5C687.908,646.5 685.254,649.154 685.254,652.423C685.254,655.691 687.908,658.345 691.177,658.345ZM668.866,658.049C672.135,658.049 674.789,655.395 674.789,652.126C674.789,648.858 672.135,646.204 668.866,646.204C665.597,646.204 662.943,648.858 662.943,652.126C662.943,655.395 665.597,658.049 668.866,658.049ZM836.398,666.288C828.745,666.288 822.533,660.075 822.533,652.423C822.533,644.77 828.745,638.557 836.398,638.557C844.05,638.557 850.263,644.77 850.263,652.423C850.263,660.075 844.05,666.288 836.398,666.288ZM391.649,708.89C399.302,708.89 405.514,715.103 405.514,722.755C405.514,730.407 399.302,736.62 391.649,736.62C383.997,736.62 377.784,730.407 377.784,722.755C377.784,715.103 383.997,708.89 391.649,708.89ZM763.006,695.86C777.85,695.86 789.902,707.911 789.902,722.755C789.902,737.599 777.85,749.65 763.006,749.65C748.163,749.65 736.111,737.599 736.111,722.755C736.111,707.911 748.163,695.86 763.006,695.86ZM763.006,708.89C755.354,708.89 749.141,715.103 749.141,722.755C749.141,730.407 755.354,736.62 763.006,736.62C770.659,736.62 776.872,730.407 776.872,722.755C776.872,715.103 770.659,708.89 763.006,708.89ZM465.041,679.318C450.197,679.318 438.145,667.266 438.145,652.423C438.145,637.579 450.197,625.527 465.041,625.527C479.884,625.527 491.936,637.579 491.936,652.423C491.936,667.266 479.884,679.318 465.041,679.318ZM465.041,666.288C472.693,666.288 478.906,660.075 478.906,652.423C478.906,644.77 472.693,638.557 465.041,638.557C457.388,638.557 451.175,644.77 451.175,652.423C451.175,660.075 457.388,666.288 465.041,666.288ZM734.959,555.195C749.803,555.195 761.855,567.246 761.855,582.09C761.855,596.934 749.803,608.985 734.959,608.985C720.116,608.985 708.064,596.934 708.064,582.09C708.064,567.246 720.116,555.195 734.959,555.195ZM734.959,568.225C727.307,568.225 721.094,574.438 721.094,582.09C721.094,589.743 727.307,595.955 734.959,595.955C742.612,595.955 748.825,589.743 748.825,582.09C748.825,574.438 742.612,568.225 734.959,568.225ZM417.821,716.536C418.294,718.533 418.544,720.615 418.544,722.755C418.544,724.895 418.294,726.977 417.821,728.974L513.096,728.974L513.096,728.678C516.364,728.678 519.018,726.024 519.018,722.755C519.018,719.486 516.364,716.832 513.096,716.832L513.096,716.536L417.821,716.536ZM536.87,716.832C533.601,716.832 530.947,719.486 530.947,722.755C530.947,726.024 533.601,728.678 536.87,728.678C540.139,728.678 542.793,726.024 542.793,722.755C542.793,719.486 540.139,716.832 536.87,716.832ZM559.181,717.128C555.912,717.128 553.258,719.782 553.258,723.051C553.258,726.32 555.912,728.974 559.181,728.974C562.45,728.974 565.104,726.32 565.104,723.051C565.104,719.782 562.45,717.128 559.181,717.128ZM581.492,717.128C578.223,717.128 575.569,719.782 575.569,723.051C575.569,726.32 578.223,728.974 581.492,728.974C584.761,728.974 587.415,726.32 587.415,723.051C587.415,719.782 584.761,717.128 581.492,717.128Z"></path>
-    </g>
-</svg>
-    </div>
-    <div class="name">knockout-black</div>
-    <div class="desc">light or dark bg</div>
-  </div>
+    --popover:                0 0% 100%;
+    --popover-foreground:     210 10% 23%;
 
-  <div class="variant">
-    <div class="bg" style="background:#288C9B;">
-      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+    --primary:                188 59% 38%;   /* #288C9B — teal */
+    --primary-foreground:     0 0% 100%;     /* white text on teal */
 
-<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
-    <g id="Transparent-on-orange-circle" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Transparent on orange circle">
-        <path d="M600,210.33C815.065,210.33 989.67,384.935 989.67,600C989.67,815.065 815.065,989.67 600,989.67C384.935,989.67 210.33,815.065 210.33,600C210.33,384.935 384.935,210.33 600,210.33ZM719.262,415.342L719.262,404.375C719.262,398.001 714.087,392.826 707.713,392.826C701.339,392.826 696.164,398.001 696.164,404.375L696.164,415.342L502.549,415.342L502.549,404.375C502.549,398.001 497.374,392.826 491,392.826C484.625,392.826 479.45,398.001 479.45,404.375L479.45,415.342L455.66,415.342C430.105,415.342 409.358,436.088 409.358,461.643L409.358,514.825L793.411,514.825L793.411,461.643C793.411,436.088 772.664,415.342 747.109,415.342L719.262,415.342ZM409.358,600.105L409.358,588.309L389.774,588.309C390.247,586.313 390.497,584.23 390.497,582.09C390.497,579.95 390.247,577.868 389.774,575.871L409.358,575.871L409.358,564.075L383.565,564.075C378.642,558.623 371.519,555.195 363.602,555.195C348.758,555.195 336.707,567.246 336.707,582.09C336.707,596.934 348.758,608.985 363.602,608.985C371.519,608.985 378.642,605.557 383.565,600.105L409.358,600.105ZM409.358,564.075L704.555,564.075C700.248,568.845 697.623,575.163 697.623,582.09C697.623,589.017 700.248,595.336 704.555,600.105L409.358,600.105L409.358,702.519C410.152,703.215 410.905,703.956 411.612,704.74L732.602,704.74C728.295,709.509 725.67,715.828 725.67,722.755C725.67,729.682 728.295,736.001 732.602,740.77L411.612,740.77C411.158,741.273 410.685,741.759 410.195,742.226C414.31,763.579 433.114,779.728 455.66,779.728L747.109,779.728C772.664,779.728 793.411,758.982 793.411,733.427L793.411,670.438L495.445,670.438C499.752,665.668 502.377,659.349 502.377,652.423C502.377,645.496 499.752,639.177 495.445,634.407L793.411,634.407L793.411,528.706L409.358,528.706L409.358,564.075ZM793.411,634.407L793.411,646.204L810.226,646.204C809.753,648.2 809.503,650.282 809.503,652.423C809.503,654.563 809.753,656.645 810.226,658.641L793.411,658.641L793.411,670.438L816.435,670.438C821.358,675.89 828.481,679.318 836.398,679.318C851.242,679.318 863.293,667.266 863.293,652.423C863.293,637.579 851.242,625.527 836.398,625.527C828.481,625.527 821.358,628.956 816.435,634.407L793.411,634.407ZM410.195,742.226C409.646,739.377 409.358,736.435 409.358,733.427L409.358,702.519C404.626,698.374 398.429,695.86 391.649,695.86C376.805,695.86 364.754,707.911 364.754,722.755C364.754,737.599 376.805,749.65 391.649,749.65C398.836,749.65 405.368,746.825 410.195,742.226ZM409.358,575.871L409.358,588.309L485.049,588.309L485.049,588.013C488.317,588.013 490.971,585.359 490.971,582.09C490.971,578.821 488.317,576.167 485.049,576.167L485.049,575.871L409.358,575.871ZM793.411,658.641L793.411,646.204L714.951,646.204L714.951,646.5C711.683,646.5 709.029,649.154 709.029,652.423C709.029,655.691 711.683,658.345 714.951,658.345L714.951,658.641L793.411,658.641ZM553.445,576.464C550.176,576.464 547.522,579.117 547.522,582.386C547.522,585.655 550.176,588.309 553.445,588.309C556.714,588.309 559.368,585.655 559.368,582.386C559.368,579.117 556.714,576.464 553.445,576.464ZM531.134,576.464C527.865,576.464 525.211,579.117 525.211,582.386C525.211,585.655 527.865,588.309 531.134,588.309C534.403,588.309 537.057,585.655 537.057,582.386C537.057,579.117 534.403,576.464 531.134,576.464ZM508.823,576.167C505.554,576.167 502.9,578.821 502.9,582.09C502.9,585.359 505.554,588.013 508.823,588.013C512.092,588.013 514.746,585.359 514.746,582.09C514.746,578.821 512.092,576.167 508.823,576.167ZM363.602,568.225C371.255,568.225 377.467,574.438 377.467,582.09C377.467,589.743 371.255,595.955 363.602,595.955C355.95,595.955 349.737,589.743 349.737,582.09C349.737,574.438 355.95,568.225 363.602,568.225ZM646.555,658.049C649.824,658.049 652.478,655.395 652.478,652.126C652.478,648.858 649.824,646.204 646.555,646.204C643.286,646.204 640.632,648.858 640.632,652.126C640.632,655.395 643.286,658.049 646.555,658.049ZM691.177,658.345C694.446,658.345 697.1,655.691 697.1,652.423C697.1,649.154 694.446,646.5 691.177,646.5C687.908,646.5 685.254,649.154 685.254,652.423C685.254,655.691 687.908,658.345 691.177,658.345ZM668.866,658.049C672.135,658.049 674.789,655.395 674.789,652.126C674.789,648.858 672.135,646.204 668.866,646.204C665.597,646.204 662.943,648.858 662.943,652.126C662.943,655.395 665.597,658.049 668.866,658.049ZM836.398,666.288C828.745,666.288 822.533,660.075 822.533,652.423C822.533,644.77 828.745,638.557 836.398,638.557C844.05,638.557 850.263,644.77 850.263,652.423C850.263,660.075 844.05,666.288 836.398,666.288ZM391.649,708.89C399.302,708.89 405.514,715.103 405.514,722.755C405.514,730.407 399.302,736.62 391.649,736.62C383.997,736.62 377.784,730.407 377.784,722.755C377.784,715.103 383.997,708.89 391.649,708.89ZM763.006,695.86C777.85,695.86 789.902,707.911 789.902,722.755C789.902,737.599 777.85,749.65 763.006,749.65C748.163,749.65 736.111,737.599 736.111,722.755C736.111,707.911 748.163,695.86 763.006,695.86ZM763.006,708.89C755.354,708.89 749.141,715.103 749.141,722.755C749.141,730.407 755.354,736.62 763.006,736.62C770.659,736.62 776.872,730.407 776.872,722.755C776.872,715.103 770.659,708.89 763.006,708.89ZM465.041,679.318C450.197,679.318 438.145,667.266 438.145,652.423C438.145,637.579 450.197,625.527 465.041,625.527C479.884,625.527 491.936,637.579 491.936,652.423C491.936,667.266 479.884,679.318 465.041,679.318ZM465.041,666.288C472.693,666.288 478.906,660.075 478.906,652.423C478.906,644.77 472.693,638.557 465.041,638.557C457.388,638.557 451.175,644.77 451.175,652.423C451.175,660.075 457.388,666.288 465.041,666.288ZM734.959,555.195C749.803,555.195 761.855,567.246 761.855,582.09C761.855,596.934 749.803,608.985 734.959,608.985C720.116,608.985 708.064,596.934 708.064,582.09C708.064,567.246 720.116,555.195 734.959,555.195ZM734.959,568.225C727.307,568.225 721.094,574.438 721.094,582.09C721.094,589.743 727.307,595.955 734.959,595.955C742.612,595.955 748.825,589.743 748.825,582.09C748.825,574.438 742.612,568.225 734.959,568.225ZM417.821,716.536C418.294,718.533 418.544,720.615 418.544,722.755C418.544,724.895 418.294,726.977 417.821,728.974L513.096,728.974L513.096,728.678C516.364,728.678 519.018,726.024 519.018,722.755C519.018,719.486 516.364,716.832 513.096,716.832L513.096,716.536L417.821,716.536ZM536.87,716.832C533.601,716.832 530.947,719.486 530.947,722.755C530.947,726.024 533.601,728.678 536.87,728.678C540.139,728.678 542.793,726.024 542.793,722.755C542.793,719.486 540.139,716.832 536.87,716.832ZM559.181,717.128C555.912,717.128 553.258,719.782 553.258,723.051C553.258,726.32 555.912,728.974 559.181,728.974C562.45,728.974 565.104,726.32 565.104,723.051C565.104,719.782 562.45,717.128 559.181,717.128ZM581.492,717.128C578.223,717.128 575.569,719.782 575.569,723.051C575.569,726.32 578.223,728.974 581.492,728.974C584.761,728.974 587.415,726.32 587.415,723.051C587.415,719.782 584.761,717.128 581.492,717.128Z" style="fill:rgb(241,123,43);"></path>
-    </g>
-</svg>
-    </div>
-    <div class="name">knockout-orange</div>
-    <div class="desc">on teal bg</div>
-  </div>
+    --secondary:              30 87% 62%;    /* #F29E4C — amber */
+    --secondary-foreground:   210 10% 23%;   /* charcoal text on amber */
 
-  <div class="variant">
-    <div class="bg" style="background:#343A40;">
-      <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+    --muted:                  210 14% 93%;   /* light gray — subtle backgrounds */
+    --muted-foreground:       210 10% 45%;   /* mid-gray — captions, placeholders */
 
-<svg width="100%" height="100%" viewBox="0 0 1200 1200" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
-    <g id="Transparent-on-teal-circle" xmlns:www.serif.com="http://www.serif.com/" xmlns:www.serif.com="http://www.serif.com/" www.serif.com:id="Transparent on teal circle">
-        <path d="M600,210.33C815.065,210.33 989.67,384.935 989.67,600C989.67,815.065 815.065,989.67 600,989.67C384.935,989.67 210.33,815.065 210.33,600C210.33,384.935 384.935,210.33 600,210.33ZM719.262,415.342L719.262,404.375C719.262,398.001 714.087,392.826 707.713,392.826C701.339,392.826 696.164,398.001 696.164,404.375L696.164,415.342L502.549,415.342L502.549,404.375C502.549,398.001 497.374,392.826 491,392.826C484.625,392.826 479.45,398.001 479.45,404.375L479.45,415.342L455.66,415.342C430.105,415.342 409.358,436.088 409.358,461.643L409.358,514.825L793.411,514.825L793.411,461.643C793.411,436.088 772.664,415.342 747.109,415.342L719.262,415.342ZM409.358,600.105L409.358,588.309L389.774,588.309C390.247,586.313 390.497,584.23 390.497,582.09C390.497,579.95 390.247,577.868 389.774,575.871L409.358,575.871L409.358,564.075L383.565,564.075C378.642,558.623 371.519,555.195 363.602,555.195C348.758,555.195 336.707,567.246 336.707,582.09C336.707,596.934 348.758,608.985 363.602,608.985C371.519,608.985 378.642,605.557 383.565,600.105L409.358,600.105ZM409.358,564.075L704.555,564.075C700.248,568.845 697.623,575.163 697.623,582.09C697.623,589.017 700.248,595.336 704.555,600.105L409.358,600.105L409.358,702.519C410.152,703.215 410.905,703.956 411.612,704.74L732.602,704.74C728.295,709.509 725.67,715.828 725.67,722.755C725.67,729.682 728.295,736.001 732.602,740.77L411.612,740.77C411.158,741.273 410.685,741.759 410.195,742.226C414.31,763.579 433.114,779.728 455.66,779.728L747.109,779.728C772.664,779.728 793.411,758.982 793.411,733.427L793.411,670.438L495.445,670.438C499.752,665.668 502.377,659.349 502.377,652.423C502.377,645.496 499.752,639.177 495.445,634.407L793.411,634.407L793.411,528.706L409.358,528.706L409.358,564.075ZM793.411,634.407L793.411,646.204L810.226,646.204C809.753,648.2 809.503,650.282 809.503,652.423C809.503,654.563 809.753,656.645 810.226,658.641L793.411,658.641L793.411,670.438L816.435,670.438C821.358,675.89 828.481,679.318 836.398,679.318C851.242,679.318 863.293,667.266 863.293,652.423C863.293,637.579 851.242,625.527 836.398,625.527C828.481,625.527 821.358,628.956 816.435,634.407L793.411,634.407ZM410.195,742.226C409.646,739.377 409.358,736.435 409.358,733.427L409.358,702.519C404.626,698.374 398.429,695.86 391.649,695.86C376.805,695.86 364.754,707.911 364.754,722.755C364.754,737.599 376.805,749.65 391.649,749.65C398.836,749.65 405.368,746.825 410.195,742.226ZM409.358,575.871L409.358,588.309L485.049,588.309L485.049,588.013C488.317,588.013 490.971,585.359 490.971,582.09C490.971,578.821 488.317,576.167 485.049,576.167L485.049,575.871L409.358,575.871ZM793.411,658.641L793.411,646.204L714.951,646.204L714.951,646.5C711.683,646.5 709.029,649.154 709.029,652.423C709.029,655.691 711.683,658.345 714.951,658.345L714.951,658.641L793.411,658.641ZM553.445,576.464C550.176,576.464 547.522,579.117 547.522,582.386C547.522,585.655 550.176,588.309 553.445,588.309C556.714,588.309 559.368,585.655 559.368,582.386C559.368,579.117 556.714,576.464 553.445,576.464ZM531.134,576.464C527.865,576.464 525.211,579.117 525.211,582.386C525.211,585.655 527.865,588.309 531.134,588.309C534.403,588.309 537.057,585.655 537.057,582.386C537.057,579.117 534.403,576.464 531.134,576.464ZM508.823,576.167C505.554,576.167 502.9,578.821 502.9,582.09C502.9,585.359 505.554,588.013 508.823,588.013C512.092,588.013 514.746,585.359 514.746,582.09C514.746,578.821 512.092,576.167 508.823,576.167ZM363.602,568.225C371.255,568.225 377.467,574.438 377.467,582.09C377.467,589.743 371.255,595.955 363.602,595.955C355.95,595.955 349.737,589.743 349.737,582.09C349.737,574.438 355.95,568.225 363.602,568.225ZM646.555,658.049C649.824,658.049 652.478,655.395 652.478,652.126C652.478,648.858 649.824,646.204 646.555,646.204C643.286,646.204 640.632,648.858 640.632,652.126C640.632,655.395 643.286,658.049 646.555,658.049ZM691.177,658.345C694.446,658.345 697.1,655.691 697.1,652.423C697.1,649.154 694.446,646.5 691.177,646.5C687.908,646.5 685.254,649.154 685.254,652.423C685.254,655.691 687.908,658.345 691.177,658.345ZM668.866,658.049C672.135,658.049 674.789,655.395 674.789,652.126C674.789,648.858 672.135,646.204 668.866,646.204C665.597,646.204 662.943,648.858 662.943,652.126C662.943,655.395 665.597,658.049 668.866,658.049ZM836.398,666.288C828.745,666.288 822.533,660.075 822.533,652.423C822.533,644.77 828.745,638.557 836.398,638.557C844.05,638.557 850.263,644.77 850.263,652.423C850.263,660.075 844.05,666.288 836.398,666.288ZM391.649,708.89C399.302,708.89 405.514,715.103 405.514,722.755C405.514,730.407 399.302,736.62 391.649,736.62C383.997,736.62 377.784,730.407 377.784,722.755C377.784,715.103 383.997,708.89 391.649,708.89ZM763.006,695.86C777.85,695.86 789.902,707.911 789.902,722.755C789.902,737.599 777.85,749.65 763.006,749.65C748.163,749.65 736.111,737.599 736.111,722.755C736.111,707.911 748.163,695.86 763.006,695.86ZM763.006,708.89C755.354,708.89 749.141,715.103 749.141,722.755C749.141,730.407 755.354,736.62 763.006,736.62C770.659,736.62 776.872,730.407 776.872,722.755C776.872,715.103 770.659,708.89 763.006,708.89ZM465.041,679.318C450.197,679.318 438.145,667.266 438.145,652.423C438.145,637.579 450.197,625.527 465.041,625.527C479.884,625.527 491.936,637.579 491.936,652.423C491.936,667.266 479.884,679.318 465.041,679.318ZM465.041,666.288C472.693,666.288 478.906,660.075 478.906,652.423C478.906,644.77 472.693,638.557 465.041,638.557C457.388,638.557 451.175,644.77 451.175,652.423C451.175,660.075 457.388,666.288 465.041,666.288ZM734.959,555.195C749.803,555.195 761.855,567.246 761.855,582.09C761.855,596.934 749.803,608.985 734.959,608.985C720.116,608.985 708.064,596.934 708.064,582.09C708.064,567.246 720.116,555.195 734.959,555.195ZM734.959,568.225C727.307,568.225 721.094,574.438 721.094,582.09C721.094,589.743 727.307,595.955 734.959,595.955C742.612,595.955 748.825,589.743 748.825,582.09C748.825,574.438 742.612,568.225 734.959,568.225ZM417.821,716.536C418.294,718.533 418.544,720.615 418.544,722.755C418.544,724.895 418.294,726.977 417.821,728.974L513.096,728.974L513.096,728.678C516.364,728.678 519.018,726.024 519.018,722.755C519.018,719.486 516.364,716.832 513.096,716.832L513.096,716.536L417.821,716.536ZM536.87,716.832C533.601,716.832 530.947,719.486 530.947,722.755C530.947,726.024 533.601,728.678 536.87,728.678C540.139,728.678 542.793,726.024 542.793,722.755C542.793,719.486 540.139,716.832 536.87,716.832ZM559.181,717.128C555.912,717.128 553.258,719.782 553.258,723.051C553.258,726.32 555.912,728.974 559.181,728.974C562.45,728.974 565.104,726.32 565.104,723.051C565.104,719.782 562.45,717.128 559.181,717.128ZM581.492,717.128C578.223,717.128 575.569,719.782 575.569,723.051C575.569,726.32 578.223,728.974 581.492,728.974C584.761,728.974 587.415,726.32 587.415,723.051C587.415,719.782 584.761,717.128 581.492,717.128Z" style="fill:rgb(26,151,162);"></path>
-    </g>
-</svg>
-    </div>
-    <div class="name">knockout-teal</div>
-    <div class="desc">on dark bg</div>
-  </div>
-</div>
-</body>
-</html>
-````
+    --accent:                 194 67% 61%;   /* #5BC0DE — sky blue */
+    --accent-foreground:      210 10% 23%;
 
-## File: docs/design/preview/spacing-tokens.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="../colors_and_type.css">
-<style>
-  body { margin: 0; padding: 20px; background: var(--background); display: flex; flex-direction: column; gap: 14px; }
-  .section { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
-  .label { font-size: 10px; font-weight: 600; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; font-family: var(--font-sans); }
-  /* Spacing bars */
-  .bar-row { display: flex; align-items: center; gap: 8px; }
-  .bar { background: var(--primary); height: 10px; border-radius: 2px; opacity: 0.7; }
-  .bar-label { font-size: 10px; font-family: var(--font-mono); color: var(--muted-foreground); width: 60px; }
-  /* Radius */
-  .rbox { background: var(--muted); border: 1px solid var(--border); width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; }
-  .rbox-label { font-size: 10px; color: var(--muted-foreground); text-align: center; font-family: var(--font-mono); }
-  /* Shadow */
-  .sbox { background: var(--card); width: 56px; height: 36px; border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; }
-  .sbox-label { font-size: 10px; color: var(--muted-foreground); text-align: center; font-family: var(--font-mono); }
-  .col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-</style>
-</head>
-<body>
-  <div>
-    <div class="label">Spacing Scale</div>
-    <div class="section" style="flex-direction:column; gap:4px;">
-      <div class="bar-row"><span class="bar-label">4px / 1</span><div class="bar" style="width:4px"></div></div>
-      <div class="bar-row"><span class="bar-label">8px / 2</span><div class="bar" style="width:8px"></div></div>
-      <div class="bar-row"><span class="bar-label">12px / 3</span><div class="bar" style="width:12px"></div></div>
-      <div class="bar-row"><span class="bar-label">16px / 4</span><div class="bar" style="width:16px"></div></div>
-      <div class="bar-row"><span class="bar-label">24px / 6</span><div class="bar" style="width:24px"></div></div>
-      <div class="bar-row"><span class="bar-label">32px / 8</span><div class="bar" style="width:32px"></div></div>
-    </div>
-  </div>
-  <div>
-    <div class="label">Border Radius</div>
-    <div class="section">
-      <div class="col"><div class="rbox" style="border-radius:4px"></div><div class="rbox-label">4px<br>sm</div></div>
-      <div class="col"><div class="rbox" style="border-radius:6px"></div><div class="rbox-label">6px<br>md</div></div>
-      <div class="col"><div class="rbox" style="border-radius:8px"></div><div class="rbox-label">8px<br>lg</div></div>
-      <div class="col"><div class="rbox" style="border-radius:12px"></div><div class="rbox-label">12px<br>xl</div></div>
-      <div class="col"><div class="rbox" style="border-radius:9999px"></div><div class="rbox-label">full</div></div>
-    </div>
-  </div>
-  <div>
-    <div class="label">Elevation / Shadow</div>
-    <div class="section">
-      <div class="col"><div class="sbox" style="box-shadow:var(--shadow-sm)"></div><div class="rbox-label">sm<br>cards</div></div>
-      <div class="col"><div class="sbox" style="box-shadow:var(--shadow-md)"></div><div class="rbox-label">md<br>popovers</div></div>
-      <div class="col"><div class="sbox" style="box-shadow:var(--shadow-lg)"></div><div class="rbox-label">lg<br>modals</div></div>
-    </div>
-  </div>
-</body>
-</html>
-````
+    --destructive:            0 72% 51%;     /* red — delete, errors */
+    --destructive-foreground: 0 0% 100%;
 
-## File: docs/design/preview/type-scale.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="../colors_and_type.css">
-<style>
-  body { margin: 0; padding: 20px 24px; background: var(--background); display: flex; flex-direction: column; gap: 6px; }
-  .row { display: flex; align-items: baseline; gap: 16px; }
-  .meta { width: 140px; flex-shrink: 0; font-size: 10px; color: var(--muted-foreground); font-family: var(--font-mono); }
-  .specimen { color: var(--foreground); }
-  hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
-</style>
-</head>
-<body>
-  <div class="row"><div class="meta">24px · 700</div><div class="specimen" style="font-size:24px;font-weight:700;line-height:1.25">Page heading</div></div>
-  <div class="row"><div class="meta">18px · 600</div><div class="specimen" style="font-size:18px;font-weight:600;line-height:1.25">Section heading</div></div>
-  <div class="row"><div class="meta">16px · 600</div><div class="specimen" style="font-size:16px;font-weight:600">Card / panel title</div></div>
-  <div class="row"><div class="meta">14px · 400</div><div class="specimen" style="font-size:14px;font-weight:400">Body text — readable and calm</div></div>
-  <div class="row"><div class="meta">12px · 400</div><div class="specimen" style="font-size:12px;font-weight:400;color:var(--muted-foreground)">Caption / metadata</div></div>
-  <div class="row"><div class="meta">12px · 600</div><div class="specimen" style="font-size:12px;font-weight:600">Badge · Tag · Timeline block label</div></div>
-</body>
-</html>
-````
+    --success:                145 63% 42%;   /* green — confirmations */
+    --success-foreground:     0 0% 100%;
 
-## File: docs/design/preview/type-weights.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<link rel="stylesheet" href="../colors_and_type.css">
-<style>
-  body { margin: 0; padding: 20px 24px; background: var(--background); display: flex; flex-direction: column; gap: 10px; }
-  .row { display: flex; align-items: baseline; gap: 16px; }
-  .meta { width: 120px; flex-shrink: 0; font-size: 10px; color: var(--muted-foreground); font-family: var(--font-mono); }
-  .specimen { font-size: 18px; color: var(--foreground); font-family: var(--font-sans); }
-  .sub { font-size: 11px; color: var(--muted-foreground); margin-top: 1px; }
-</style>
-</head>
-<body>
-  <div class="row"><div class="meta">300 · Light</div><div><div class="specimen" style="font-weight:300">Open Sans Light</div><div class="sub">Subtle labels, secondary captions</div></div></div>
-  <div class="row"><div class="meta">400 · Regular</div><div><div class="specimen" style="font-weight:400">Open Sans Regular</div><div class="sub">Body text, descriptions, inputs</div></div></div>
-  <div class="row"><div class="meta">600 · SemiBold</div><div><div class="specimen" style="font-weight:600">Open Sans SemiBold</div><div class="sub">Headings, nav items, labels</div></div></div>
-  <div class="row"><div class="meta">700 · Bold</div><div><div class="specimen" style="font-weight:700">Open Sans Bold</div><div class="sub">Page titles, primary headings</div></div></div>
-</body>
-</html>
+    --warning:                38 92% 50%;    /* yellow-orange — caution */
+    --warning-foreground:     210 10% 23%;
+
+    --border:                 210 14% 89%;
+    --input:                  210 14% 89%;
+    --ring:                   188 59% 38%;   /* teal focus ring */
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background:             210 15% 11%;   /* deep charcoal — page background */
+    --foreground:             210 17% 93%;   /* near-white — default text */
+
+    --card:                   210 15% 15%;   /* slightly lighter than background */
+    --card-foreground:        210 17% 93%;
+
+    --popover:                210 15% 15%;
+    --popover-foreground:     210 17% 93%;
+
+    --primary:                188 55% 52%;   /* teal — lightened to pop on dark */
+    --primary-foreground:     210 15% 10%;   /* very dark text on bright teal */
+
+    --secondary:              30 80% 60%;    /* amber — slightly muted in dark */
+    --secondary-foreground:   210 15% 10%;
+
+    --muted:                  210 15% 20%;
+    --muted-foreground:       210 15% 58%;
+
+    --accent:                 194 60% 55%;   /* sky blue — muted slightly for dark */
+    --accent-foreground:      210 15% 10%;
+
+    --destructive:            0 63% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success:                145 55% 40%;
+    --success-foreground:     0 0% 100%;
+
+    --warning:                38 85% 55%;
+    --warning-foreground:     210 15% 10%;
+
+    --border:                 210 15% 22%;
+    --input:                  210 15% 22%;
+    --ring:                   188 55% 52%;
+  }
+}
+```
+
+---
+
+## Identity Color Palette (Phase 9.6+)
+
+Every major entity (Activity, Timeline, Team, Team Member) carries an **Identity** — a color + icon pair. Colors are stored as IDs (e.g. `"teal"`), not hex values. The `Badge` component resolves an ID to its hex for rendering.
+
+> Full spec: [`docs/design/IDENTITY_SYSTEM.md`](IDENTITY_SYSTEM.md).
+> Component API: `src/components/identity/`.
+
+16 colors, all ≥3:1 contrast ratio against both light and dark backgrounds with white text overlay:
+
+| ID | Name | Hex | Notes |
+|----|------|-----|-------|
+| `teal` | Teal | `#288C9B` | Brand primary |
+| `cyan` | Cyan | `#06B6D4` | |
+| `blue` | Blue | `#3B82F6` | |
+| `indigo` | Indigo | `#6366F1` | |
+| `violet` | Violet | `#8B5CF6` | |
+| `purple` | Purple | `#A855F7` | |
+| `pink` | Pink | `#EC4899` | |
+| `rose` | Rose | `#F43F5E` | |
+| `red` | Red | `#EF4444` | |
+| `orange` | Orange | `#F97316` | |
+| `amber` | Amber | `#F59E0B` | |
+| `yellow` | Yellow | `#EAB308` | |
+| `lime` | Lime | `#84CC16` | |
+| `green` | Green | `#22C55E` | |
+| `slate` | Slate | `#64748B` | Neutral cool |
+| `stone` | Stone | `#78716C` | Neutral warm |
+
+---
+
+## Typography
+
+### Font Family
+**Open Sans** — humanist sans-serif; clean, readable, professional.
+
+```css
+/* packages/web/src/index.css */
+/* Option A: Self-hosted (recommended for self-hosted product — no Google dependency) */
+/* Download from fonts.google.com and place in packages/web/public/fonts/ */
+@font-face {
+  font-family: 'Open Sans';
+  src: url('/fonts/OpenSans-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+/* Repeat for weights 300, 600, 700 */
+
+/* Option B: Google Fonts CDN (simpler, requires internet) */
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap');
+
+/* Apply via Tailwind config */
+--font-sans: 'Open Sans', ui-sans-serif, system-ui, sans-serif;
+```
+
+> Recommendation: self-host the font. draba is a self-hosted product — loading a Google font defeats the point for privacy-conscious users.
+
+### Weights in Use
+| Weight | Class | Use |
+|--------|-------|-----|
+| 300 Light | `font-light` | Subtle labels, secondary captions |
+| 400 Regular | `font-normal` | Body text, descriptions, form inputs |
+| 600 SemiBold | `font-semibold` | Headings, important labels, nav items |
+| 700 Bold | `font-bold` | Page titles, primary headings, emphasis |
+
+### Type Scale
+| Use | Tailwind | Size | Weight |
+|-----|----------|------|--------|
+| Page heading | `text-2xl font-bold` | 24px | 700 |
+| Section heading | `text-lg font-semibold` | 18px | 600 |
+| Card / panel title | `text-base font-semibold` | 16px | 600 |
+| Body text | `text-sm font-normal` | 14px | 400 |
+| Caption / metadata | `text-xs font-normal` | 12px | 400 |
+| Tag / badge label | `text-xs font-semibold` | 12px | 600 |
+| Timeline block label | `text-xs font-semibold` | 12px | 600 |
+
+### Color on Typography
+- Default body text: `text-foreground` (charcoal / off-white in dark mode)
+- Secondary / metadata: `text-muted-foreground`
+- Links and interactive: `text-primary` (teal)
+- Destructive / error: `text-destructive`
+- Headings: `text-foreground` — rely on weight and size, not color, for hierarchy
+
+---
+
+## Spacing
+
+Tailwind's 4px base grid throughout.
+
+| Context | Tailwind | px |
+|---------|----------|-----|
+| Tight inline gaps (icon + label) | `gap-1.5` | 6px |
+| Component internal padding (compact) | `p-2` | 8px |
+| Component internal padding (standard) | `p-3` or `p-4` | 12–16px |
+| Between related elements | `gap-3` | 12px |
+| Between sections | `gap-6` | 24px |
+| Page-level horizontal margins | `px-6` | 24px |
+| Page-level vertical padding | `py-8` | 32px |
+| Timeline lane height | TBD during implementation | — |
+| Event block vertical padding | TBD during implementation | — |
+
+---
+
+## Border Radius
+
+Base `--radius: 0.5rem` (8px). shadcn derives sm/md/lg/xl from this.
+
+| Element | Class | Notes |
+|---------|-------|-------|
+| Buttons, inputs | `rounded-md` (6px) | shadcn default |
+| Cards, panels, dialogs | `rounded-lg` (8px) | shadcn default |
+| Event blocks on timeline | `rounded-md` | Pill-ish but not fully rounded |
+| Kanban cards | `rounded-md` | |
+| Badges, tags | `rounded-full` | Fully rounded for compact labels |
+| Avatars | `rounded-full` | |
+
+---
+
+## Shadows
+
+Keep shadows subtle — the UI should feel clean and flat, not heavily layered.
+
+| Use | Class |
+|-----|-------|
+| Cards, panels | `shadow-sm` |
+| Popovers, dropdowns | `shadow-md` |
+| Modals / dialogs | `shadow-lg` |
+| Timeline blocks | `shadow-sm` |
+| No elevation | `shadow-none` |
+
+---
+
+## Icons
+
+- **Library:** `lucide-react` (shadcn's default peer dependency — already installed)
+- **Sizes:** `size-4` (16px) inline with text; `size-5` (20px) standalone/buttons; `size-6` (24px) feature/section icons
+- **Color:** inherit from text color by default (`currentColor`)
+- **Event block icons:** emoji or Lucide subset — TBD during event detail implementation
+- **Stroke width:** Lucide default (1.5) — do not override unless a specific component calls for it
+
+---
+
+## Dark Mode
+
+- Supported from day one via shadcn's class-based system
+- Toggle stored in `localStorage`; respects `prefers-color-scheme` on first visit
+- Implementation: `next-themes` or a simple custom hook — TBD during web scaffold
+- All semantic tokens have dark overrides in `index.css` (defined above)
+- Member colors are fixed hex values — test contrast on both `--background` values before finalizing
+
+---
+
+## shadcn Components
+
+Install via:
+```bash
+pnpm dlx shadcn@latest add <component>
+```
+
+| Component | Used for | Status |
+|-----------|---------|--------|
+| button | Actions, CTAs | — |
+| input | Form fields | — |
+| dialog | Confirmations, destructive warnings | — |
+| sheet | Event detail slide-in panel | — |
+| popover | Date pickers, color pickers, tooltips | — |
+| calendar | Date range picker in event detail | — |
+| select | Status dropdown, view switcher | — |
+| badge | Tags on event cards and blocks | — |
+| avatar | Team member display | — |
+| tooltip | Block hover info, truncated labels | — |
+| sonner | Toast notifications (replaces toast) | — |
+| dropdown-menu | Context menus, action menus | — |
+| separator | Visual dividers | — |
+| skeleton | Loading placeholders | — |
+| switch | Toggle settings (dark mode, visibility) | — |
+| tabs | Settings pages, secondary navigation | — |
+
+> Mark status as **added** when installed. Add new rows as new components are needed.
+
+---
+
+## Custom Components (Not from shadcn)
+
+Built from scratch with Tailwind — no shadcn equivalent:
+
+| Component | Notes |
+|-----------|-------|
+| `TimelineGrid` | Core horizontal timeline canvas; handles pan and zoom |
+| `TimelineBlock` | Individual event block; drag to move/resize |
+| `TimelineLane` | Person row in the timeline |
+| `KanbanBoard` | Status columns + event card layout |
+| `KanbanCard` | Event card in Kanban view; color = member color |
+| `CalendarGrid` | Weekly/daily/monthly calendar layout |
+| `MemberColorDot` | Small circular color indicator for assignees |
+| `ViewSwitcher` | Timeline / Calendar / List / Kanban toggle |
+| `ConnectionStatusDot` | WebSocket live connection indicator |
 ````
 
 ## File: docs/design/IDENTITY_SYSTEM.md
@@ -4691,6 +5206,157 @@ This table needs a major overhaul to support login-less participants.
 
 ---
 *Note: The previous work session also included partial implementations for "External Connectors" (inbound webhooks for Asana, Jira). Those features are distinct from the RBAC refactor and will be tracked as a separate architectural update.*
+````
+
+## File: docs/design/UX_PATTERNS.md
+````markdown
+# UX Patterns
+
+## Core Mental Model
+The product answers one question: **"Who is working on what, and when?"**
+
+Everything in the UI should reinforce the **Person + Time Range + Work** model. If a UI element doesn't serve that model, it probably doesn't belong in v1.
+
+---
+
+## Primary View: Gantt Chart
+
+The Gantt chart is the heart of the product. Layout:
+
+```
+          Apr 28   May 1    May 5    May 10   May 15
+──────────────────────────────────────────────────────
+● Campaign X              [════════════] [LK]
+● Project Y                       [══════] [JD]
+● Task A      [══]                         [BR]
+● Task B                        [════════] [BR]
+──────────────────────────────────────────────────────
+```
+
+- **Rows** = events, one bar per event
+- **Left column** — event color dot, title, member avatar(s) (all assignees, stacked)
+- **Bar** — spans the event's start/end dates
+- **Color** is tied to the event (user-set)
+- Clicking a bar or the row label opens the event detail panel (slide-in right panel)
+- Clicking an empty area of the time grid starts block creation
+
+### Timeline Sub-Toolbar
+A thin toolbar between the top bar and the grid provides:
+
+| Control | Options | Notes |
+|---------|---------|-------|
+| **Zoom** | ± buttons | Steps through column widths: 40 → 60 → 80 → 120 → 160 px/day |
+| **Group by** | None, Member, Parent event | See grouping rules below |
+| **Sort by** | Start date, End date, Title A–Z | Applied within each group |
+| **Export** | CSV / Excel | Exports the visible date range (Phase 13) |
+
+### Grouping Rules
+
+**Group by None (default)**
+Flat list of all events, sorted by the active sort key.
+
+**Group by Member**
+One section header per assigned member, in team-member order. Events appear under their primary assignee (first in `assignedMemberIds`). Unassigned events appear in an "Unassigned" section at the bottom.
+
+**Group by Parent Event**
+Root events (no `parentEventId`) appear as top-level rows. Child events are indented beneath their parent. Children whose parent falls outside the current date range appear at the bottom with extra indentation as orphans.
+
+### Timeline Navigation
+- Scroll horizontally to move through time
+- Zoom in/out via sub-toolbar buttons (day column width)
+- "Today" marker — vertical line + highlighted column
+
+### Block Interactions
+- **Click** a bar or row label — opens event detail panel
+- **Drag** a bar left/right — shifts start and end dates
+- **Drag bar edges** — resize (change start or end date independently)
+- **Drag on empty grid area** — opens "new event" form pre-filled with the clicked date
+- All drag interactions optimistically update the UI and sync in real-time to other viewers
+
+---
+
+## Navigation
+- Primary nav: left sidebar (collapsible on smaller screens)
+  - Team selector (if user is on multiple teams)
+  - Timeline list for the active team
+  - Settings (team admin only)
+- No top nav bar — maximize horizontal timeline space
+- Mobile: sidebar becomes a bottom sheet or hamburger menu (TBD — PWA is post-v1)
+
+---
+
+## Event Detail Panel
+Opens when a block is clicked. Slide-in from the right, does not cover the timeline.
+
+Fields shown:
+- Title (editable inline)
+- Assigned people (add/remove)
+- Date range (date pickers)
+- Status (dropdown: planned / in progress / done)
+- Percent complete (slider or number input)
+- Tags (multi-select)
+- Icon (emoji picker or icon set — TBD)
+- Color (color swatch picker)
+- Notes/Description (rich text or markdown — TBD)
+- Parent event (optional — searchable dropdown of other team events)
+
+Close by clicking outside the panel or pressing Escape.
+
+---
+
+## Loading States
+- Timeline blocks: render the grid and empty lanes immediately; populate blocks as data loads (skeleton shimmer on block placeholders)
+- Event detail panel: optimistic — show the panel with stale data immediately, confirm with server response
+- Real-time updates: blocks animate in/out smoothly when changes arrive via WebSocket; no jarring full-page refreshes
+
+---
+
+## Error States
+- **Form validation:** inline, shown on blur or submit — not on every keystroke
+- **Network errors:** toast notification (bottom right), auto-dismiss after 5s, with a "retry" option for mutations
+- **WebSocket disconnect:** subtle connection status indicator in the corner; automatically reconnects, notifies user if offline for > 10s
+- **Empty state (no events in range):** light message in the lane area ("Nothing scheduled — drag to add a block")
+
+---
+
+## Sharing Flow
+- "Share" button in the timeline header
+- Shows the shareable link with a one-click copy button
+- Toggle: Public (anyone with link) vs Restricted (specific people)
+- For restricted: add/remove users from the access list inline in the share dialog
+- Public link viewers see the timeline read-only with no login prompt
+- Share dialog also shows the iCal feed URL for calendar app subscription
+
+---
+
+## Real-Time Collaboration
+- No presence avatars in v1 (keep it simple)
+- Changes from other users animate smoothly into the timeline
+- If two users edit the same block simultaneously, last write wins (server timestamp); no conflict UI in v1
+- Connection status indicator (small dot — green connected, yellow reconnecting, red offline)
+
+---
+
+## Responsive Behavior
+- Primary target: desktop browser (1200px+)
+- Timeline degrades gracefully to ~768px (tablet landscape)
+- Below 768px: show a simplified list view as fallback (the drag-and-drop timeline is not usable on small touch screens)
+- PWA / mobile native: parking lot for post-v1
+
+---
+
+## Accessibility
+- All interactive elements keyboard-navigable (Tab, Enter, Arrow keys for timeline navigation)
+- Block creation via keyboard (focus a lane, press Enter to open "new event" form)
+- WCAG AA color contrast minimum
+- Screen reader labels for timeline lanes and event blocks
+- Focus management: when event detail panel opens, focus moves to the first editable field
+
+---
+
+## Platform-Specific Notes
+- Web only for v1
+- Public share links must work without JavaScript for basic read-only rendering (SEO + email preview compatibility) — TBD on feasibility with React
 ````
 
 ## File: docs/GreatEventToActivity.md
@@ -7483,23 +8149,52 @@ import "embed"
 var FS embed.FS
 ````
 
-## File: packages/api/.air.toml
-````toml
-root = "."
-tmp_dir = "tmp"
+## File: packages/shared/CLAUDE.md
+````markdown
+# packages/shared
 
-[build]
-cmd = "go build -o ./tmp/draba ./cmd/draba"
-bin = "tmp/draba"
-include_ext = ["go"]
-exclude_dir = ["tmp", "vendor"]
-delay = 1000
+The API contract layer. Contains the OpenAPI specification and generated TypeScript types.
 
-[log]
-time = false
+## Contents
+- `openapi.yaml` — the OpenAPI 3.x specification for the draba REST API. This is the single source of truth for the API shape.
+- `src/` — TypeScript types generated from `openapi.yaml` (generated, do not edit by hand)
 
-[misc]
-clean_on_exit = true
+## Generating Types
+```bash
+pnpm --filter shared generate
+```
+This runs `openapi-typescript` against `openapi.yaml` and writes to `src/index.ts`.
+
+## Usage in packages/web
+```ts
+import type { Activity, Team, Timeline } from '@draba/shared'
+```
+
+## Important
+- Do not hand-edit files in `src/` — they are generated and will be overwritten
+- When adding or changing an API endpoint, update `openapi.yaml` first, then regenerate types
+- The Go structs in `packages/api/internal/models/` should mirror the OpenAPI schemas
+````
+
+## File: packages/shared/package.json
+````json
+{
+  "name": "@draba/shared",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "generate": "openapi-typescript ./openapi.yaml -o ./src/index.ts",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.6.1",
+    "typescript": "~5.8.0"
+  }
+}
 ````
 
 ## File: packages/shared/tsconfig.json
@@ -8797,814 +9492,6 @@ export function cn(...inputs: ClassValue[]) {
 }
 ````
 
-## File: packages/web/src/pages/settings/AdminPage.tsx
-````typescript
-/**
- * /settings/admin — Superadmin-only: SMTP, instance settings, user management.
- */
-
-import { useState, useEffect } from 'react'
-import {
-  useAdminSMTP,
-  useSaveSMTP,
-  useTestSMTP,
-  useDeleteSMTP,
-  useAdminSettings,
-  usePatchAdminSettings,
-  useAdminUsers,
-} from '@/hooks/useSettings'
-import type { components } from '@draba/shared'
-import { ApiError } from '@/lib/api'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/identity/Badge'
-import { Eye, EyeOff, AlertTriangle } from 'lucide-react'
-
-type SMTPConfig = components['schemas']['SMTPConfig']
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-const selectStyle: React.CSSProperties = {
-  background: '#161b22',
-  border: '1px solid #30363d',
-  borderRadius: 6,
-  color: '#e6edf3',
-  padding: '8px 12px',
-  fontSize: 13,
-  cursor: 'pointer',
-}
-
-// ── SMTP section ──────────────────────────────────────────────────────────────
-
-function SMTPSection() {
-  const { data } = useAdminSMTP()
-  const saveSMTP = useSaveSMTP()
-  const testSMTP = useTestSMTP()
-  const deleteSMTP = useDeleteSMTP()
-
-  const [host, setHost] = useState('')
-  const [port, setPort] = useState('587')
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [fromName, setFromName] = useState('')
-  const [fromEmail, setFromEmail] = useState('')
-  const [encryption, setEncryption] = useState<'none' | 'tls' | 'starttls'>('starttls')
-  const [showPw, setShowPw] = useState(false)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-  const [testState, setTestState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
-
-  useEffect(() => {
-    const cfg = data?.smtp
-    if (cfg) {
-      setHost(cfg.host ?? '')
-      setPort(String(cfg.port ?? 587))
-      setUsername(cfg.username ?? '')
-      setFromName(cfg.fromName ?? '')
-      setFromEmail(cfg.fromEmail ?? '')
-      setEncryption((cfg.encryption as 'none' | 'tls' | 'starttls') ?? 'starttls')
-    }
-  }, [data])
-
-  function buildConfig(): SMTPConfig {
-    return { host, port: parseInt(port, 10), username, password, fromName, fromEmail, encryption }
-  }
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await saveSMTP.mutateAsync(buildConfig())
-      setFeedback({ type: 'success', msg: 'SMTP settings saved and validated.' })
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to save SMTP settings.'
-      setFeedback({ type: 'error', msg })
-    }
-  }
-
-  async function handleTest() {
-    setTestState('sending')
-    try {
-      const res = await testSMTP.mutateAsync(buildConfig())
-      setTestState('sent')
-      setFeedback({ type: 'success', msg: `Test email sent to ${res.to}` })
-    } catch (err) {
-      setTestState('failed')
-      const msg = err instanceof ApiError ? err.message : 'SMTP test failed.'
-      setFeedback({ type: 'error', msg })
-    }
-    setTimeout(() => setTestState('idle'), 3000)
-  }
-
-  async function handleDelete() {
-    await deleteSMTP.mutateAsync()
-    setHost(''); setPort('587'); setUsername(''); setPassword('')
-    setFromName(''); setFromEmail(''); setEncryption('starttls')
-    setFeedback({ type: 'success', msg: 'SMTP configuration cleared.' })
-  }
-
-  return (
-    <div style={sectionStyle}>
-      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-        Email / SMTP
-      </h3>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>SMTP host</Label>
-          <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
-        </div>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Port</Label>
-          <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
-        </div>
-      </div>
-
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Username</Label>
-        <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" style={{ maxWidth: 360 }} />
-      </div>
-
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Password</Label>
-        <div style={{ position: 'relative', maxWidth: 360 }}>
-          <Input
-            type={showPw ? 'text' : 'password'}
-            value={password}
-            onChange={e => setPassword(e.target.value)}
-            placeholder="••••••••"
-          />
-          <button
-            onClick={() => setShowPw(v => !v)}
-            style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer' }}
-          >
-            {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
-          </button>
-        </div>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>From name</Label>
-          <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
-        </div>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>From email</Label>
-          <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
-        </div>
-      </div>
-
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Encryption</Label>
-        <select
-          value={encryption}
-          onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
-          style={{ ...selectStyle, maxWidth: 200 }}
-        >
-          <option value="none">None</option>
-          <option value="tls">TLS</option>
-          <option value="starttls">STARTTLS</option>
-        </select>
-      </div>
-
-      {feedback && (
-        <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
-          {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
-        </Button>
-        <Button variant="outline" onClick={handleTest} disabled={testSMTP.isPending || !host}>
-          {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
-        </Button>
-        {data?.smtp && (
-          <Button variant="ghost" style={{ color: '#f85149' }} onClick={handleDelete}>
-            Clear config
-          </Button>
-        )}
-      </div>
-      <p style={{ fontSize: 12, color: '#8b949e', marginTop: 12 }}>
-        When SMTP is not configured, password resets and email invitations are unavailable.
-      </p>
-    </div>
-  )
-}
-
-// ── Instance defaults section ─────────────────────────────────────────────────
-
-function InstanceSection() {
-  const { data } = useAdminSettings()
-  const patch = usePatchAdminSettings()
-
-  const settings = data?.settings ?? {}
-  const [regPolicy, setRegPolicy] = useState('invite_only')
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [instanceName, setInstanceName] = useState('')
-  const [feedback, setFeedback] = useState<string | null>(null)
-
-  useEffect(() => {
-    setRegPolicy(settings.registration_policy || 'invite_only')
-    setTimezone(settings.default_timezone || 'UTC')
-    setDateFormat(settings.default_date_format || 'MMM D, YYYY')
-    setWeekStart(settings.default_week_start || 'monday')
-    setInstanceName(settings.instance_name || '')
-  }, [JSON.stringify(settings)])
-
-  async function handleSave() {
-    setFeedback(null)
-    await patch.mutateAsync({
-      registration_policy: regPolicy,
-      default_timezone: timezone,
-      default_date_format: dateFormat,
-      default_week_start: weekStart,
-      instance_name: instanceName,
-    })
-    setFeedback('Settings saved.')
-    setTimeout(() => setFeedback(null), 2000)
-  }
-
-  return (
-    <div style={sectionStyle}>
-      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-        Instance defaults
-      </h3>
-
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Instance name</Label>
-        <Input
-          value={instanceName}
-          onChange={e => setInstanceName(e.target.value)}
-          placeholder="draba"
-          style={{ maxWidth: 320 }}
-        />
-        <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>Shown in the browser tab title and login page.</p>
-      </div>
-
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Registration policy</Label>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {[
-            { v: 'invite_only', label: 'Invite only' },
-            { v: 'open', label: 'Open registration' },
-          ].map(({ v, label }) => (
-            <button
-              key={v}
-              onClick={() => setRegPolicy(v)}
-              style={{
-                padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
-                borderColor: regPolicy === v ? '#58a6ff' : '#30363d',
-                background: regPolicy === v ? 'rgba(88,166,255,0.1)' : '#161b22',
-                color: regPolicy === v ? '#58a6ff' : '#8b949e',
-                cursor: 'pointer',
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Default timezone</Label>
-        <select value={timezone} onChange={e => setTimezone(e.target.value)} style={{ ...selectStyle, maxWidth: 280 }}>
-          {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-            'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
-            <option key={tz} value={tz}>{tz}</option>
-          ))}
-        </select>
-      </div>
-
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Default week starts on</Label>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {(['monday', 'sunday'] as const).map(d => (
-            <button
-              key={d}
-              onClick={() => setWeekStart(d)}
-              style={{
-                padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
-                borderColor: weekStart === d ? '#58a6ff' : '#30363d',
-                background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
-                color: weekStart === d ? '#58a6ff' : '#8b949e',
-                cursor: 'pointer', textTransform: 'capitalize',
-              }}
-            >
-              {d}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {feedback && <p style={{ fontSize: 13, color: '#3fb950', marginBottom: 12 }}>{feedback}</p>}
-      <Button onClick={handleSave} disabled={patch.isPending}>
-        {patch.isPending ? 'Saving…' : 'Save defaults'}
-      </Button>
-    </div>
-  )
-}
-
-// ── Users section ─────────────────────────────────────────────────────────────
-
-function UsersSection() {
-  const [orphanedOnly, setOrphanedOnly] = useState(false)
-  const [search, setSearch] = useState('')
-  const { data: allData } = useAdminUsers(false)
-  const { data: orphanData } = useAdminUsers(true)
-
-  const allUsers = allData?.users ?? []
-  const orphanedCount = orphanData?.users.length ?? 0
-  const displayed = (orphanedOnly ? orphanData?.users ?? [] : allUsers)
-    .filter(u => {
-      if (!search) return true
-      const q = search.toLowerCase()
-      return u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
-    })
-
-  return (
-    <div style={sectionStyle}>
-      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-        Users
-      </h3>
-
-      {orphanedCount > 0 && !orphanedOnly && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 10,
-          padding: '10px 14px', marginBottom: 16,
-          background: 'rgba(210,153,34,0.1)', border: '1px solid rgba(210,153,34,0.3)',
-          borderRadius: 8,
-        }}>
-          <AlertTriangle size={16} style={{ color: '#d2993a', flexShrink: 0 }} />
-          <span style={{ fontSize: 13, color: '#d2993a' }}>
-            {orphanedCount} user{orphanedCount > 1 ? 's' : ''} with no team memberships.
-          </span>
-          <button
-            onClick={() => setOrphanedOnly(true)}
-            style={{ marginLeft: 'auto', fontSize: 12, color: '#d2993a', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
-          >
-            View
-          </button>
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
-        <Input
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          placeholder="Search by name or email…"
-          style={{ maxWidth: 300 }}
-        />
-        <div style={{ display: 'flex', gap: 4 }}>
-          {[
-            { label: `All (${allUsers.length})`, v: false },
-            { label: `Orphaned (${orphanedCount})`, v: true },
-          ].map(({ label, v }) => (
-            <button
-              key={String(v)}
-              onClick={() => setOrphanedOnly(v)}
-              style={{
-                padding: '6px 12px', borderRadius: 6, fontSize: 12, border: '1px solid',
-                borderColor: orphanedOnly === v ? '#58a6ff' : '#30363d',
-                background: orphanedOnly === v ? 'rgba(88,166,255,0.1)' : '#161b22',
-                color: orphanedOnly === v ? '#58a6ff' : '#8b949e',
-                cursor: 'pointer',
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {displayed.length === 0 ? (
-        <p style={{ fontSize: 13, color: '#8b949e' }}>No users found.</p>
-      ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr>
-              {['User', 'Email', 'Teams', 'Status'].map(h => (
-                <th key={h} style={{ textAlign: 'left', fontSize: 11, color: '#8b949e', fontWeight: 600, padding: '0 8px 10px', letterSpacing: '0.4px' }}>
-                  {h.toUpperCase()}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {displayed.map(u => (
-              <tr key={u.id} style={{ borderTop: '1px solid #21262d' }}>
-                <td style={{ padding: '10px 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <Badge color={u.color ?? undefined} icon={u.icon ?? undefined} size={28} shape="circle" />
-                  <span style={{ fontSize: 13, color: '#e6edf3' }}>{u.displayName}</span>
-                  {u.isSuperadmin && (
-                    <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'rgba(88,166,255,0.15)', color: '#58a6ff' }}>
-                      superadmin
-                    </span>
-                  )}
-                </td>
-                <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.email}</td>
-                <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.teamCount}</td>
-                <td style={{ padding: '10px 8px' }}>
-                  {u.archivedAt ? (
-                    <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(248,81,73,0.15)', color: '#f85149' }}>
-                      Inactive
-                    </span>
-                  ) : (
-                    <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(63,185,80,0.15)', color: '#3fb950' }}>
-                      Active
-                    </span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
-  )
-}
-
-// ── Main page ─────────────────────────────────────────────────────────────────
-
-export default function AdminPage() {
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Administration</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Superadmin controls for SMTP, registration policy, and user management.
-      </p>
-      <SMTPSection />
-      <InstanceSection />
-      <UsersSection />
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * View consumption (Gantt date format, week start, etc.) is deferred to Phase 10.4.
- */
-
-import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-const selectStyle: React.CSSProperties = {
-  background: '#161b22',
-  border: '1px solid #30363d',
-  borderRadius: 6,
-  color: '#e6edf3',
-  padding: '8px 12px',
-  fontSize: 13,
-  maxWidth: 320,
-  cursor: 'pointer',
-}
-
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
-
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
-
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-
-  const [theme, setTheme] = useState('system')
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [feedback, setFeedback] = useState<string | null>(null)
-
-  useEffect(() => {
-    setTheme((prefMap['theme'] as string | undefined) ?? 'system')
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-  }, [JSON.stringify(prefMap)])
-
-  async function save(key: string, value: string) {
-    setFeedback(null)
-    await upsert.mutateAsync({ key, value })
-    setFeedback('Saved.')
-    setTimeout(() => setFeedback(null), 2000)
-  }
-
-  function handleThemeChange(value: string) {
-    setTheme(value)
-    // Apply immediately to the document.
-    const html = document.documentElement
-    if (value === 'dark') {
-      html.classList.add('dark')
-    } else if (value === 'light') {
-      html.classList.remove('dark')
-    } else {
-      if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-        html.classList.add('dark')
-      } else {
-        html.classList.remove('dark')
-      }
-    }
-    void save('theme', value)
-  }
-
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Preferences</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Regional and appearance settings. View consumption (Gantt date format, etc.) is enabled in a future phase.
-      </p>
-
-      {/* Appearance */}
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-          Appearance
-        </h3>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Theme</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {(['light', 'dark', 'system'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  fontSize: 13,
-                  border: '1px solid',
-                  borderColor: theme === t ? '#58a6ff' : '#30363d',
-                  background: theme === t ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: theme === t ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer',
-                  textTransform: 'capitalize',
-                }}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Regional */}
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-          Regional
-        </h3>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Timezone</Label>
-          <select
-            value={timezone}
-            onChange={e => { setTimezone(e.target.value); void save('timezone', e.target.value) }}
-            style={selectStyle}
-          >
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Date format</Label>
-          <select
-            value={dateFormat}
-            onChange={e => { setDateFormat(e.target.value); void save('date_format', e.target.value) }}
-            style={selectStyle}
-          >
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Week starts on</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => { setWeekStart(d); void save('week_start', d) }}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  fontSize: 13,
-                  border: '1px solid',
-                  borderColor: weekStart === d ? '#58a6ff' : '#30363d',
-                  background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: weekStart === d ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer',
-                  textTransform: 'capitalize',
-                }}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {feedback && (
-        <p style={{ fontSize: 13, color: '#3fb950', marginTop: -8, marginBottom: 8 }}>{feedback}</p>
-      )}
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/ProfilePage.tsx
-````typescript
-/**
- * /settings/profile — Display name, identity (color + icon), and read-only email.
- */
-
-import { useState, useEffect } from 'react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useUpdateProfile } from '@/hooks/useSettings'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import { ApiError } from '@/lib/api'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-export default function ProfilePage() {
-  const { user } = useAuth()
-  const updateProfile = useUpdateProfile()
-
-  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
-  const [color, setColor] = useState<string | null>(user?.color ?? null)
-  const [icon, setIcon] = useState<string | null>(user?.icon ?? null)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    if (user) {
-      setDisplayName(user.displayName)
-      setColor(user.color ?? null)
-      setIcon(user.icon ?? null)
-    }
-  }, [user])
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await updateProfile.mutateAsync({ displayName, color, icon })
-      setFeedback({ type: 'success', msg: 'Profile updated.' })
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
-      setFeedback({ type: 'error', msg })
-    }
-  }
-
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Profile</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Changes to your name and identity propagate across all your team memberships.
-      </p>
-
-      <div style={sectionStyle}>
-        {/* Identity preview */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24 }}>
-          <Badge color={color ?? undefined} icon={icon ?? undefined} size={48} shape="circle" />
-          <div>
-            <div style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>
-              {displayName || 'Your Name'}
-            </div>
-            <div style={{ fontSize: 12, color: '#8b949e', marginTop: 2 }}>
-              Identity preview — shown in sidebar and Gantt
-            </div>
-          </div>
-        </div>
-
-        {/* Identity picker */}
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Color & Icon</Label>
-          <IdentityWidget
-            color={color ?? undefined}
-            icon={icon ?? undefined}
-            shape="circle"
-            onChange={(c, i) => { setColor(c ?? null); setIcon(i ?? null) }}
-          />
-        </div>
-
-        {/* Display name */}
-        <div style={fieldStyle}>
-          <Label htmlFor="displayName" style={{ color: '#e6edf3' }}>Display name</Label>
-          <Input
-            id="displayName"
-            value={displayName}
-            onChange={e => setDisplayName(e.target.value)}
-            placeholder="Your name"
-            style={{ maxWidth: 360 }}
-          />
-        </div>
-
-        {/* Email (read-only) */}
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Email</Label>
-          <Input
-            value={user?.email ?? ''}
-            disabled
-            style={{ maxWidth: 360, opacity: 0.6 }}
-          />
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
-            Email changes are not yet supported.
-          </p>
-        </div>
-
-        {feedback && (
-          <p style={{
-            fontSize: 13,
-            color: feedback.type === 'success' ? '#3fb950' : '#f85149',
-            marginBottom: 12,
-          }}>
-            {feedback.msg}
-          </p>
-        )}
-
-        <Button
-          onClick={handleSave}
-          disabled={updateProfile.isPending || !displayName.trim()}
-        >
-          {updateProfile.isPending ? 'Saving…' : 'Save profile'}
-        </Button>
-      </div>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/pages/settings/SecurityPage.tsx
 ````typescript
 /**
@@ -10256,25 +10143,6 @@ export default function ResetPasswordPage() {
 }
 ````
 
-## File: packages/web/src/main.tsx
-````typescript
-import React from 'react'
-import ReactDOM from 'react-dom/client'
-import App from './App'
-import './index.css'
-
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-)
-````
-
-## File: packages/web/src/vite-env.d.ts
-````typescript
-/// <reference types="vite/client" />
-````
-
 ## File: packages/web/components.json
 ````json
 {
@@ -10295,79 +10163,6 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     "lib": "@/lib",
     "hooks": "@/hooks"
   }
-}
-````
-
-## File: packages/web/Dockerfile
-````
-FROM node:22-alpine
-RUN corepack enable && corepack prepare pnpm@latest --activate
-WORKDIR /app
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/web/package.json packages/web/
-COPY packages/shared/package.json packages/shared/
-RUN pnpm install --frozen-lockfile
-COPY packages/web packages/web
-COPY packages/shared packages/shared
-WORKDIR /app/packages/web
-EXPOSE 5173
-CMD ["pnpm", "dev", "--host"]
-````
-
-## File: packages/web/index.html
-````html
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>draba</title>
-    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap" rel="stylesheet" />
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>
-````
-
-## File: packages/web/tsconfig.json
-````json
-{
-  "files": [],
-  "references": [
-    { "path": "./tsconfig.app.json" },
-    { "path": "./tsconfig.node.json" }
-  ]
-}
-````
-
-## File: packages/web/tsconfig.node.json
-````json
-{
-  "compilerOptions": {
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
-    "target": "ES2022",
-    "lib": ["ES2023"],
-    "module": "ESNext",
-    "skipLibCheck": true,
-
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "noEmit": true,
-
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true
-  },
-  "include": ["vite.config.ts"]
 }
 ````
 
@@ -10790,10 +10585,66 @@ JSX — extract to a variable or sub-component instead.
 - [ ] `pnpm --filter web lint` and `pnpm --filter web build` pass.
 ````
 
-## File: pnpm-workspace.yaml
+## File: .golangci.yml
 ````yaml
-packages:
-  - "packages/*"
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - gofmt
+    - goimports
+    - gocritic
+    - revive
+    - misspell
+    - nolintlint
+
+linters-settings:
+  goimports:
+    local-prefixes: github.com/I0-1O/draba
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+  nolintlint:
+    require-explanation: true
+    require-specific: true
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+````
+
+## File: package.json
+````json
+{
+  "name": "draba",
+  "private": true,
+  "packageManager": "pnpm@10.33.2",
+  "scripts": {
+    "generate": "pnpm --filter shared generate",
+    "build": "pnpm -r run build",
+    "lint": "pnpm -r run lint",
+    "test": "pnpm -r run test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}
 ````
 
 ## File: README.md
@@ -10851,172 +10702,205 @@ services:
 [MIT License](LICENSE)
 ````
 
-## File: .claude/commands/build-phase.md
-````markdown
-Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or "Phase 1").
+## File: .github/workflows/ci.yml
+````yaml
+name: CI
 
-1. Read the phase's scope and exit criteria from ROADMAP.md.
-2. Find the corresponding tasks in docs/TASKS.md.
-3. Read any referenced docs (ARCHITECTURE.md, CONVENTIONS.md, REQUIREMENTS.md) relevant to this phase before writing any code.
-4. Update the phase status in ROADMAP.md from ⬜ to 🔄 before starting work.
-5. Implement every task in the phase's scope, following CONVENTIONS.md throughout.
-6. After implementation: run `golangci-lint run` (Go) and/or `pnpm --filter web lint` (web), run tests, and verify every exit criterion from ROADMAP.md is met. Suggest running `/test-phase <N>` and `/review-phase <N>` to fan the verification out across subagents in parallel.
-7. Check off completed items in TASKS.md.
-8. Update the phase status in ROADMAP.md:
-   - If all exit criteria pass: ✅ Done, add the completion date.
-   - If any exit criterion fails or needs manual verification: mark 🔄 In Progress and add a note listing what still needs review.
-9. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  api:
+    name: API (Go)
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    defaults:
+      run:
+        working-directory: packages/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -race -count=1
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: packages/api
+          args: --config ../../.golangci.yml
+          skip-cache: true
+
+  web:
+    name: Web (React)
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm --filter @draba/web build
 ````
 
-## File: docs/design/UX_PATTERNS.md
+## File: docs/CONVENTIONS.md
 ````markdown
-# UX Patterns
+# Conventions
 
-## Core Mental Model
-The product answers one question: **"Who is working on what, and when?"**
+## Go (packages/api)
 
-Everything in the UI should reinforce the **Person + Time Range + Work** model. If a UI element doesn't serve that model, it probably doesn't belong in v1.
+### Formatting and Linting
+- Formatter: `gofmt` / `goimports` (run on save)
+- Linter: `golangci-lint` — run before every commit
+- No `//nolint` comments without an explanation
+
+### Project Layout
+- Follow [standard Go project layout](https://github.com/golang-standards/project-layout)
+- `cmd/draba/` — entry point only; wires dependencies, starts server
+- `internal/` — all application code; not importable outside the module
+- No `pkg/` unless a package is genuinely intended to be used by external consumers
+
+### Naming
+- Packages: short, lowercase, no underscores (`auth`, `models`, `caldav`)
+- Files: lowercase, underscores for multi-word (`event_handler.go`, not `eventHandler.go`)
+- Exported types: PascalCase; unexported: camelCase
+- Interfaces: describe behavior, not implementation (`EventRepository`, not `EventStore`)
+
+### Error Handling
+- Always handle errors explicitly — no `_` discards on errors that matter
+- Wrap errors with context: `fmt.Errorf("creating event: %w", err)`
+- Return errors to callers; handlers convert them to HTTP responses at the boundary
+- No panics in handler or business logic code
+
+### Testing
+- Framework: standard library + `testify`
+- Co-locate tests with source: `event_handler_test.go` next to `event_handler.go`
+- Integration tests hit a real SQLite database — no mocking the DB layer
+- Naming: `TestCreateEvent_AssignsMultipleUsers`, `TestCalDAVSync_UpdatesExistingEvent`
+
+### Logging
+- Use `log/slog` package-level functions (`slog.Debug`, `slog.Info`, `slog.Warn`, `slog.Error`) — never `fmt.Println` or `log.Printf`
+- Level is controlled by the `DRABA_LOG_LEVEL` env var; default is `info`
+- All output goes to stdout — Docker captures it in `docker logs`
+- **Debug:** HTTP request/response details, WebSocket lifecycle (connect, subscribe, disconnect), internal routing
+- **Info:** startup and shutdown events only
+- **Warn:** unexpected but recoverable conditions (e.g. abnormal WS close)
+- **Error:** failures that impair a request or abort startup; always include `"err", err` as a structured arg
+- Use structured key-value args, not formatted strings: `slog.Info("db: opened", "dsn", dsn)` not `slog.Info(fmt.Sprintf(...))`
+
+### API Handlers
+- Handlers are thin: validate input, call service, return response
+- **Requests & Responses:** Always use the structs generated by `oapi-codegen` for request/response payloads. Do not define anonymous inline structs for bodies.
+- No business logic in handlers — all logic lives in `internal/` service packages
+- No direct DB access from handlers — always go through the repository layer
 
 ---
 
-## Primary View: Gantt Chart
+## React (packages/web)
 
-The Gantt chart is the heart of the product. Layout:
+### Language
+- TypeScript strict mode — no `any`, no type assertions without a comment explaining why
+- All types for API responses come from generated types in `packages/shared/` — do not hand-write API types
 
+### Components
+- Functional components only — no class components
+- One component per file; file name matches component name (`TimelineView.tsx`)
+- Files: PascalCase for components, camelCase for hooks and utilities
+- Co-locate styles, tests, and types with the component when practical
+
+### State Management
+- TanStack Query (`@tanstack/react-query`) for all server state (fetching, caching, mutations)
+- Local UI state: React `useState` / `useReducer`
+- Global UI state (theme, current user, WebSocket connection): Context or Zustand — TBD when needed
+- No Redux
+
+### Hooks
+- Custom hooks prefixed with `use` (`useTimeline`, `useWebSocket`)
+- Extract logic from components early — components should read almost like markup
+
+### Naming
+- Components: PascalCase (`TimelineBlock`, `TeamMemberList`)
+- Hooks: camelCase with `use` prefix (`useEventDrag`, `useTeam`)
+- Event handlers: `handleX` prefix (`handleBlockDrop`, `handleInviteSubmit`)
+
+### Testing
+- Framework: Vitest + React Testing Library
+- Test behavior, not implementation — query by role/label, not by class
+- e2e: Playwright for critical paths (TBD)
+
+---
+
+## API Design
+
+### REST
+- Resource naming: plural nouns (`/events`, `/teams`, `/timelines`)
+- Hierarchical where it makes sense: `GET /teams/:teamId/events`
+- HTTP methods as intended: GET reads, POST creates, PATCH partial update, DELETE removes
+- Responses always include the full updated resource on create/update
+- Errors: `{ "error": { "code": "INVITE_EXPIRED", "message": "..." } }`
+
+### WebSocket
+- Connect at `/ws?token=<jwt>`
+- Client sends: `{ "type": "subscribe", "teamId": "..." }`
+- Server sends: `{ "type": "event.updated", "payload": { ... } }`
+- Server sends a heartbeat `{ "type": "ping" }` every 30s; client must pong
+
+---
+
+## Git
+
+### Branch Naming
+- `feat/short-description` — new feature
+- `fix/short-description` — bug fix
+- `chore/short-description` — tooling, deps, non-feature work
+- `docs/short-description` — documentation only
+
+### Commit Format
+Conventional commits:
 ```
-          Apr 28   May 1    May 5    May 10   May 15
-──────────────────────────────────────────────────────
-● Campaign X              [════════════] [LK]
-● Project Y                       [══════] [JD]
-● Task A      [══]                         [BR]
-● Task B                        [════════] [BR]
-──────────────────────────────────────────────────────
+feat: add CalDAV sync for iOS calendar
+fix: prevent duplicate event_assignments on upsert
+chore: upgrade golangci-lint to v1.57
+docs: document WebSocket message protocol
 ```
 
-- **Rows** = events, one bar per event
-- **Left column** — event color dot, title, member avatar(s) (all assignees, stacked)
-- **Bar** — spans the event's start/end dates
-- **Color** is tied to the event (user-set)
-- Clicking a bar or the row label opens the event detail panel (slide-in right panel)
-- Clicking an empty area of the time grid starts block creation
-
-### Timeline Sub-Toolbar
-A thin toolbar between the top bar and the grid provides:
-
-| Control | Options | Notes |
-|---------|---------|-------|
-| **Zoom** | ± buttons | Steps through column widths: 40 → 60 → 80 → 120 → 160 px/day |
-| **Group by** | None, Member, Parent event | See grouping rules below |
-| **Sort by** | Start date, End date, Title A–Z | Applied within each group |
-| **Export** | CSV / Excel | Exports the visible date range (Phase 13) |
-
-### Grouping Rules
-
-**Group by None (default)**
-Flat list of all events, sorted by the active sort key.
-
-**Group by Member**
-One section header per assigned member, in team-member order. Events appear under their primary assignee (first in `assignedMemberIds`). Unassigned events appear in an "Unassigned" section at the bottom.
-
-**Group by Parent Event**
-Root events (no `parentEventId`) appear as top-level rows. Child events are indented beneath their parent. Children whose parent falls outside the current date range appear at the bottom with extra indentation as orphans.
-
-### Timeline Navigation
-- Scroll horizontally to move through time
-- Zoom in/out via sub-toolbar buttons (day column width)
-- "Today" marker — vertical line + highlighted column
-
-### Block Interactions
-- **Click** a bar or row label — opens event detail panel
-- **Drag** a bar left/right — shifts start and end dates
-- **Drag bar edges** — resize (change start or end date independently)
-- **Drag on empty grid area** — opens "new event" form pre-filled with the clicked date
-- All drag interactions optimistically update the UI and sync in real-time to other viewers
+### Pull Requests
+- Each PR references a task from `docs/TASKS.md`
+- PRs should be small and focused — one logical change
+- All CI checks must pass before merge
 
 ---
 
-## Navigation
-- Primary nav: left sidebar (collapsible on smaller screens)
-  - Team selector (if user is on multiple teams)
-  - Timeline list for the active team
-  - Settings (team admin only)
-- No top nav bar — maximize horizontal timeline space
-- Mobile: sidebar becomes a bottom sheet or hamburger menu (TBD — PWA is post-v1)
-
----
-
-## Event Detail Panel
-Opens when a block is clicked. Slide-in from the right, does not cover the timeline.
-
-Fields shown:
-- Title (editable inline)
-- Assigned people (add/remove)
-- Date range (date pickers)
-- Status (dropdown: planned / in progress / done)
-- Percent complete (slider or number input)
-- Tags (multi-select)
-- Icon (emoji picker or icon set — TBD)
-- Color (color swatch picker)
-- Notes/Description (rich text or markdown — TBD)
-- Parent event (optional — searchable dropdown of other team events)
-
-Close by clicking outside the panel or pressing Escape.
-
----
-
-## Loading States
-- Timeline blocks: render the grid and empty lanes immediately; populate blocks as data loads (skeleton shimmer on block placeholders)
-- Event detail panel: optimistic — show the panel with stale data immediately, confirm with server response
-- Real-time updates: blocks animate in/out smoothly when changes arrive via WebSocket; no jarring full-page refreshes
-
----
-
-## Error States
-- **Form validation:** inline, shown on blur or submit — not on every keystroke
-- **Network errors:** toast notification (bottom right), auto-dismiss after 5s, with a "retry" option for mutations
-- **WebSocket disconnect:** subtle connection status indicator in the corner; automatically reconnects, notifies user if offline for > 10s
-- **Empty state (no events in range):** light message in the lane area ("Nothing scheduled — drag to add a block")
-
----
-
-## Sharing Flow
-- "Share" button in the timeline header
-- Shows the shareable link with a one-click copy button
-- Toggle: Public (anyone with link) vs Restricted (specific people)
-- For restricted: add/remove users from the access list inline in the share dialog
-- Public link viewers see the timeline read-only with no login prompt
-- Share dialog also shows the iCal feed URL for calendar app subscription
-
----
-
-## Real-Time Collaboration
-- No presence avatars in v1 (keep it simple)
-- Changes from other users animate smoothly into the timeline
-- If two users edit the same block simultaneously, last write wins (server timestamp); no conflict UI in v1
-- Connection status indicator (small dot — green connected, yellow reconnecting, red offline)
-
----
-
-## Responsive Behavior
-- Primary target: desktop browser (1200px+)
-- Timeline degrades gracefully to ~768px (tablet landscape)
-- Below 768px: show a simplified list view as fallback (the drag-and-drop timeline is not usable on small touch screens)
-- PWA / mobile native: parking lot for post-v1
-
----
-
-## Accessibility
-- All interactive elements keyboard-navigable (Tab, Enter, Arrow keys for timeline navigation)
-- Block creation via keyboard (focus a lane, press Enter to open "new event" form)
-- WCAG AA color contrast minimum
-- Screen reader labels for timeline lanes and event blocks
-- Focus management: when event detail panel opens, focus moves to the first editable field
-
----
-
-## Platform-Specific Notes
-- Web only for v1
-- Public share links must work without JavaScript for basic read-only rendering (SEO + email preview compatibility) — TBD on feasibility with React
+## Anti-Patterns to Avoid
+- No business logic in HTTP handlers or React components — logic belongs in services and hooks
+- No direct database access outside of `internal/db/` repository packages
+- No `console.log` in committed React code — use a logger or remove before commit
+- No god components over ~300 lines — split early
+- No hand-written TypeScript types that duplicate the OpenAPI-generated types
+- No `any` in TypeScript without a `// reason:` comment
 ````
 
 ## File: docs/TESTING.md
@@ -11953,52 +11837,56 @@ func (t Tier) String() string {
 }
 ````
 
-## File: packages/shared/CLAUDE.md
+## File: packages/api/CLAUDE.md
 ````markdown
-# packages/shared
+# packages/api
 
-The API contract layer. Contains the OpenAPI specification and generated TypeScript types.
+This is the draba API server. Go, REST + WebSocket, with a built-in CalDAV server.
 
-## Contents
-- `openapi.yaml` — the OpenAPI 3.x specification for the draba REST API. This is the single source of truth for the API shape.
-- `src/` — TypeScript types generated from `openapi.yaml` (generated, do not edit by hand)
+## Entry Points
+- `cmd/draba/main.go` — wires dependencies, starts HTTP server
+- `migrations/` — SQL migration files, run automatically on startup
 
-## Generating Types
+## Key Internal Packages
+- `internal/api/` — HTTP handlers and routing (thin — no business logic)
+- `internal/auth/` — JWT, invite tokens, password hashing
+- `internal/caldav/` — built-in CalDAV server implementation
+- `internal/calendar/` — Google Calendar OAuth + sync; CalDAV outbound sync
+- `internal/db/` — repository layer; adapters for SQLite, MySQL, Postgres
+- `internal/events/` — internal event bus (pub/sub for state changes)
+- `internal/models/` — domain types shared across packages
+- `internal/ws/` — WebSocket hub and broadcaster
+
+## Run
 ```bash
-pnpm --filter shared generate
-```
-This runs `openapi-typescript` against `openapi.yaml` and writes to `src/index.ts`.
-
-## Usage in packages/web
-```ts
-import type { Activity, Team, Timeline } from '@draba/shared'
+go run ./cmd/draba
 ```
 
-## Important
-- Do not hand-edit files in `src/` — they are generated and will be overwritten
-- When adding or changing an API endpoint, update `openapi.yaml` first, then regenerate types
-- The Go structs in `packages/api/internal/models/` should mirror the OpenAPI schemas
-````
+## Test
+```bash
+go test ./...
+```
 
-## File: packages/shared/package.json
-````json
-{
-  "name": "@draba/shared",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
-  },
-  "scripts": {
-    "generate": "openapi-typescript ./openapi.yaml -o ./src/index.ts",
-    "lint": "tsc --noEmit"
-  },
-  "devDependencies": {
-    "openapi-typescript": "^7.6.1",
-    "typescript": "~5.8.0"
-  }
-}
+## Lint
+```bash
+golangci-lint run
+```
+
+## Environment Variables
+```
+DRABA_DB_DRIVER=sqlite          # sqlite | mysql | postgres
+DRABA_DB_DSN=./draba.db         # file path for SQLite, connection string for others
+DRABA_JWT_SECRET=               # required — random secret for signing JWTs
+DRABA_PORT=8080                 # default 8080
+DRABA_LOG_LEVEL=info            # debug | info | warn | error (default info; set debug in docker-compose for dev)
+DRABA_GOOGLE_CLIENT_ID=         # required for Google Calendar sync
+DRABA_GOOGLE_CLIENT_SECRET=     # required for Google Calendar sync
+DRABA_BASE_URL=                 # public URL of the server (used for OAuth callbacks, CalDAV URLs)
+```
+
+## Conventions
+See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
+See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
 ````
 
 ## File: packages/web/src/components/identity/Badge.tsx
@@ -13360,6 +13248,816 @@ export function matchEvents(
 }
 ````
 
+## File: packages/web/src/pages/settings/AdminPage.tsx
+````typescript
+/**
+ * /settings/admin — Superadmin-only: SMTP, instance settings, user management.
+ */
+
+import { useState, useEffect } from 'react'
+import {
+  useAdminSMTP,
+  useSaveSMTP,
+  useTestSMTP,
+  useDeleteSMTP,
+  useAdminSettings,
+  usePatchAdminSettings,
+  useAdminUsers,
+} from '@/hooks/useSettings'
+import type { components } from '@draba/shared'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { Eye, EyeOff, AlertTriangle } from 'lucide-react'
+
+type SMTPConfig = components['schemas']['SMTPConfig']
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  marginBottom: 16,
+}
+
+const selectStyle: React.CSSProperties = {
+  background: '#161b22',
+  border: '1px solid #30363d',
+  borderRadius: 6,
+  color: '#e6edf3',
+  padding: '8px 12px',
+  fontSize: 13,
+  cursor: 'pointer',
+}
+
+// ── SMTP section ──────────────────────────────────────────────────────────────
+
+function SMTPSection() {
+  const { data } = useAdminSMTP()
+  const saveSMTP = useSaveSMTP()
+  const testSMTP = useTestSMTP()
+  const deleteSMTP = useDeleteSMTP()
+
+  const [host, setHost] = useState('')
+  const [port, setPort] = useState('587')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [fromName, setFromName] = useState('')
+  const [fromEmail, setFromEmail] = useState('')
+  const [encryption, setEncryption] = useState<'none' | 'tls' | 'starttls'>('starttls')
+  const [showPw, setShowPw] = useState(false)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [testState, setTestState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
+
+  useEffect(() => {
+    const cfg = data?.smtp
+    if (cfg) {
+      setHost(cfg.host ?? '')
+      setPort(String(cfg.port ?? 587))
+      setUsername(cfg.username ?? '')
+      setFromName(cfg.fromName ?? '')
+      setFromEmail(cfg.fromEmail ?? '')
+      setEncryption((cfg.encryption as 'none' | 'tls' | 'starttls') ?? 'starttls')
+    }
+  }, [data])
+
+  function buildConfig(): SMTPConfig {
+    return { host, port: parseInt(port, 10), username, password, fromName, fromEmail, encryption }
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await saveSMTP.mutateAsync(buildConfig())
+      setFeedback({ type: 'success', msg: 'SMTP settings saved and validated.' })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to save SMTP settings.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  async function handleTest() {
+    setTestState('sending')
+    try {
+      const res = await testSMTP.mutateAsync(buildConfig())
+      setTestState('sent')
+      setFeedback({ type: 'success', msg: `Test email sent to ${res.to}` })
+    } catch (err) {
+      setTestState('failed')
+      const msg = err instanceof ApiError ? err.message : 'SMTP test failed.'
+      setFeedback({ type: 'error', msg })
+    }
+    setTimeout(() => setTestState('idle'), 3000)
+  }
+
+  async function handleDelete() {
+    await deleteSMTP.mutateAsync()
+    setHost(''); setPort('587'); setUsername(''); setPassword('')
+    setFromName(''); setFromEmail(''); setEncryption('starttls')
+    setFeedback({ type: 'success', msg: 'SMTP configuration cleared.' })
+  }
+
+  return (
+    <div style={sectionStyle}>
+      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+        Email / SMTP
+      </h3>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>SMTP host</Label>
+          <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
+        </div>
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Port</Label>
+          <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
+        </div>
+      </div>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Username</Label>
+        <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" style={{ maxWidth: 360 }} />
+      </div>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Password</Label>
+        <div style={{ position: 'relative', maxWidth: 360 }}>
+          <Input
+            type={showPw ? 'text' : 'password'}
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="••••••••"
+          />
+          <button
+            onClick={() => setShowPw(v => !v)}
+            style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer' }}
+          >
+            {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>From name</Label>
+          <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
+        </div>
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>From email</Label>
+          <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
+        </div>
+      </div>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Encryption</Label>
+        <select
+          value={encryption}
+          onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
+          style={{ ...selectStyle, maxWidth: 200 }}
+        >
+          <option value="none">None</option>
+          <option value="tls">TLS</option>
+          <option value="starttls">STARTTLS</option>
+        </select>
+      </div>
+
+      {feedback && (
+        <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
+          {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
+        </Button>
+        <Button variant="outline" onClick={handleTest} disabled={testSMTP.isPending || !host}>
+          {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
+        </Button>
+        {data?.smtp && (
+          <Button variant="ghost" style={{ color: '#f85149' }} onClick={handleDelete}>
+            Clear config
+          </Button>
+        )}
+      </div>
+      <p style={{ fontSize: 12, color: '#8b949e', marginTop: 12 }}>
+        When SMTP is not configured, password resets and email invitations are unavailable.
+      </p>
+    </div>
+  )
+}
+
+// ── Instance defaults section ─────────────────────────────────────────────────
+
+function InstanceSection() {
+  const { data } = useAdminSettings()
+  const patch = usePatchAdminSettings()
+
+  const settings = data?.settings ?? {}
+  const [regPolicy, setRegPolicy] = useState('invite_only')
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [instanceName, setInstanceName] = useState('')
+  const [feedback, setFeedback] = useState<string | null>(null)
+
+  useEffect(() => {
+    setRegPolicy(settings.registration_policy || 'invite_only')
+    setTimezone(settings.default_timezone || 'UTC')
+    setDateFormat(settings.default_date_format || 'MMM D, YYYY')
+    setWeekStart(settings.default_week_start || 'monday')
+    setInstanceName(settings.instance_name || '')
+  }, [JSON.stringify(settings)])
+
+  async function handleSave() {
+    setFeedback(null)
+    await patch.mutateAsync({
+      registration_policy: regPolicy,
+      default_timezone: timezone,
+      default_date_format: dateFormat,
+      default_week_start: weekStart,
+      instance_name: instanceName,
+    })
+    setFeedback('Settings saved.')
+    setTimeout(() => setFeedback(null), 2000)
+  }
+
+  return (
+    <div style={sectionStyle}>
+      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+        Instance defaults
+      </h3>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Instance name</Label>
+        <Input
+          value={instanceName}
+          onChange={e => setInstanceName(e.target.value)}
+          placeholder="draba"
+          style={{ maxWidth: 320 }}
+        />
+        <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>Shown in the browser tab title and login page.</p>
+      </div>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Registration policy</Label>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {[
+            { v: 'invite_only', label: 'Invite only' },
+            { v: 'open', label: 'Open registration' },
+          ].map(({ v, label }) => (
+            <button
+              key={v}
+              onClick={() => setRegPolicy(v)}
+              style={{
+                padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
+                borderColor: regPolicy === v ? '#58a6ff' : '#30363d',
+                background: regPolicy === v ? 'rgba(88,166,255,0.1)' : '#161b22',
+                color: regPolicy === v ? '#58a6ff' : '#8b949e',
+                cursor: 'pointer',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Default timezone</Label>
+        <select value={timezone} onChange={e => setTimezone(e.target.value)} style={{ ...selectStyle, maxWidth: 280 }}>
+          {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+            'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
+            <option key={tz} value={tz}>{tz}</option>
+          ))}
+        </select>
+      </div>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Default week starts on</Label>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {(['monday', 'sunday'] as const).map(d => (
+            <button
+              key={d}
+              onClick={() => setWeekStart(d)}
+              style={{
+                padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
+                borderColor: weekStart === d ? '#58a6ff' : '#30363d',
+                background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
+                color: weekStart === d ? '#58a6ff' : '#8b949e',
+                cursor: 'pointer', textTransform: 'capitalize',
+              }}
+            >
+              {d}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {feedback && <p style={{ fontSize: 13, color: '#3fb950', marginBottom: 12 }}>{feedback}</p>}
+      <Button onClick={handleSave} disabled={patch.isPending}>
+        {patch.isPending ? 'Saving…' : 'Save defaults'}
+      </Button>
+    </div>
+  )
+}
+
+// ── Users section ─────────────────────────────────────────────────────────────
+
+function UsersSection() {
+  const [orphanedOnly, setOrphanedOnly] = useState(false)
+  const [search, setSearch] = useState('')
+  const { data: allData } = useAdminUsers(false)
+  const { data: orphanData } = useAdminUsers(true)
+
+  const allUsers = allData?.users ?? []
+  const orphanedCount = orphanData?.users.length ?? 0
+  const displayed = (orphanedOnly ? orphanData?.users ?? [] : allUsers)
+    .filter(u => {
+      if (!search) return true
+      const q = search.toLowerCase()
+      return u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
+    })
+
+  return (
+    <div style={sectionStyle}>
+      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+        Users
+      </h3>
+
+      {orphanedCount > 0 && !orphanedOnly && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '10px 14px', marginBottom: 16,
+          background: 'rgba(210,153,34,0.1)', border: '1px solid rgba(210,153,34,0.3)',
+          borderRadius: 8,
+        }}>
+          <AlertTriangle size={16} style={{ color: '#d2993a', flexShrink: 0 }} />
+          <span style={{ fontSize: 13, color: '#d2993a' }}>
+            {orphanedCount} user{orphanedCount > 1 ? 's' : ''} with no team memberships.
+          </span>
+          <button
+            onClick={() => setOrphanedOnly(true)}
+            style={{ marginLeft: 'auto', fontSize: 12, color: '#d2993a', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+          >
+            View
+          </button>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
+        <Input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search by name or email…"
+          style={{ maxWidth: 300 }}
+        />
+        <div style={{ display: 'flex', gap: 4 }}>
+          {[
+            { label: `All (${allUsers.length})`, v: false },
+            { label: `Orphaned (${orphanedCount})`, v: true },
+          ].map(({ label, v }) => (
+            <button
+              key={String(v)}
+              onClick={() => setOrphanedOnly(v)}
+              style={{
+                padding: '6px 12px', borderRadius: 6, fontSize: 12, border: '1px solid',
+                borderColor: orphanedOnly === v ? '#58a6ff' : '#30363d',
+                background: orphanedOnly === v ? 'rgba(88,166,255,0.1)' : '#161b22',
+                color: orphanedOnly === v ? '#58a6ff' : '#8b949e',
+                cursor: 'pointer',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {displayed.length === 0 ? (
+        <p style={{ fontSize: 13, color: '#8b949e' }}>No users found.</p>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              {['User', 'Email', 'Teams', 'Status'].map(h => (
+                <th key={h} style={{ textAlign: 'left', fontSize: 11, color: '#8b949e', fontWeight: 600, padding: '0 8px 10px', letterSpacing: '0.4px' }}>
+                  {h.toUpperCase()}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {displayed.map(u => (
+              <tr key={u.id} style={{ borderTop: '1px solid #21262d' }}>
+                <td style={{ padding: '10px 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Badge identity={{ color: u.color ?? '#288C9B', icon: u.icon ?? '__none__' } satisfies Identity} name={u.displayName} size={28} shape="circle" />
+                  <span style={{ fontSize: 13, color: '#e6edf3' }}>{u.displayName}</span>
+                  {u.isSuperadmin && (
+                    <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'rgba(88,166,255,0.15)', color: '#58a6ff' }}>
+                      superadmin
+                    </span>
+                  )}
+                </td>
+                <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.email}</td>
+                <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.teamCount}</td>
+                <td style={{ padding: '10px 8px' }}>
+                  {u.archivedAt ? (
+                    <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(248,81,73,0.15)', color: '#f85149' }}>
+                      Inactive
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(63,185,80,0.15)', color: '#3fb950' }}>
+                      Active
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
+
+export default function AdminPage() {
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Administration</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Superadmin controls for SMTP, registration policy, and user management.
+      </p>
+      <SMTPSection />
+      <InstanceSection />
+      <UsersSection />
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * View consumption (Gantt date format, week start, etc.) is deferred to Phase 10.4.
+ */
+
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Label } from '@/components/ui/label'
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  marginBottom: 16,
+}
+
+const selectStyle: React.CSSProperties = {
+  background: '#161b22',
+  border: '1px solid #30363d',
+  borderRadius: 6,
+  color: '#e6edf3',
+  padding: '8px 12px',
+  fontSize: 13,
+  maxWidth: 320,
+  cursor: 'pointer',
+}
+
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
+
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
+
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+
+  const [theme, setTheme] = useState('system')
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [feedback, setFeedback] = useState<string | null>(null)
+
+  useEffect(() => {
+    setTheme((prefMap['theme'] as string | undefined) ?? 'system')
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+  }, [JSON.stringify(prefMap)])
+
+  async function save(key: string, value: string) {
+    setFeedback(null)
+    await upsert.mutateAsync({ key, value })
+    setFeedback('Saved.')
+    setTimeout(() => setFeedback(null), 2000)
+  }
+
+  function handleThemeChange(value: string) {
+    setTheme(value)
+    // Apply immediately to the document.
+    const html = document.documentElement
+    if (value === 'dark') {
+      html.classList.add('dark')
+    } else if (value === 'light') {
+      html.classList.remove('dark')
+    } else {
+      if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        html.classList.add('dark')
+      } else {
+        html.classList.remove('dark')
+      }
+    }
+    void save('theme', value)
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Preferences</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Regional and appearance settings. View consumption (Gantt date format, etc.) is enabled in a future phase.
+      </p>
+
+      {/* Appearance */}
+      <div style={sectionStyle}>
+        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+          Appearance
+        </h3>
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Theme</Label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {(['light', 'dark', 'system'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  fontSize: 13,
+                  border: '1px solid',
+                  borderColor: theme === t ? '#58a6ff' : '#30363d',
+                  background: theme === t ? 'rgba(88,166,255,0.1)' : '#161b22',
+                  color: theme === t ? '#58a6ff' : '#8b949e',
+                  cursor: 'pointer',
+                  textTransform: 'capitalize',
+                }}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Regional */}
+      <div style={sectionStyle}>
+        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+          Regional
+        </h3>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Timezone</Label>
+          <select
+            value={timezone}
+            onChange={e => { setTimezone(e.target.value); void save('timezone', e.target.value) }}
+            style={selectStyle}
+          >
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Date format</Label>
+          <select
+            value={dateFormat}
+            onChange={e => { setDateFormat(e.target.value); void save('date_format', e.target.value) }}
+            style={selectStyle}
+          >
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Week starts on</Label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => { setWeekStart(d); void save('week_start', d) }}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  fontSize: 13,
+                  border: '1px solid',
+                  borderColor: weekStart === d ? '#58a6ff' : '#30363d',
+                  background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
+                  color: weekStart === d ? '#58a6ff' : '#8b949e',
+                  cursor: 'pointer',
+                  textTransform: 'capitalize',
+                }}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {feedback && (
+        <p style={{ fontSize: 13, color: '#3fb950', marginTop: -8, marginBottom: 8 }}>{feedback}</p>
+      )}
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/ProfilePage.tsx
+````typescript
+/**
+ * /settings/profile — Display name, identity (color + icon), and read-only email.
+ */
+
+import { useState, useEffect } from 'react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useUpdateProfile } from '@/hooks/useSettings'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  marginBottom: 16,
+}
+
+export default function ProfilePage() {
+  const { user } = useAuth()
+  const updateProfile = useUpdateProfile()
+
+  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: user?.color ?? '#288C9B',
+    icon: user?.icon ?? '__none__',
+  })
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    if (user) {
+      setDisplayName(user.displayName)
+      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
+    }
+  }, [user])
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
+      setFeedback({ type: 'success', msg: 'Profile updated.' })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Profile</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Changes to your name and identity propagate across all your team memberships.
+      </p>
+
+      <div style={sectionStyle}>
+        {/* Identity preview */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24 }}>
+          <Badge identity={identity} name={displayName} size={48} shape="circle" />
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>
+              {displayName || 'Your Name'}
+            </div>
+            <div style={{ fontSize: 12, color: '#8b949e', marginTop: 2 }}>
+              Identity preview — shown in sidebar and Gantt
+            </div>
+          </div>
+        </div>
+
+        {/* Identity picker */}
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Color & Icon</Label>
+          <IdentityWidget
+            identity={identity}
+            name={displayName}
+            shape="circle"
+            onChange={(next) => setIdentity(next)}
+          />
+        </div>
+
+        {/* Display name */}
+        <div style={fieldStyle}>
+          <Label htmlFor="displayName" style={{ color: '#e6edf3' }}>Display name</Label>
+          <Input
+            id="displayName"
+            value={displayName}
+            onChange={e => setDisplayName(e.target.value)}
+            placeholder="Your name"
+            style={{ maxWidth: 360 }}
+          />
+        </div>
+
+        {/* Email (read-only) */}
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Email</Label>
+          <Input
+            value={user?.email ?? ''}
+            disabled
+            style={{ maxWidth: 360, opacity: 0.6 }}
+          />
+          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
+            Email changes are not yet supported.
+          </p>
+        </div>
+
+        {feedback && (
+          <p style={{
+            fontSize: 13,
+            color: feedback.type === 'success' ? '#3fb950' : '#f85149',
+            marginBottom: 12,
+          }}>
+            {feedback.msg}
+          </p>
+        )}
+
+        <Button
+          onClick={handleSave}
+          disabled={updateProfile.isPending || !displayName.trim()}
+        >
+          {updateProfile.isPending ? 'Saving…' : 'Save profile'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/pages/RegisterPage.tsx
 ````typescript
 import { useState } from 'react'
@@ -13520,122 +14218,6 @@ export default function RegisterPage() {
 }
 ````
 
-## File: packages/web/src/pages/SettingsPage.tsx
-````typescript
-/**
- * SettingsPage — shell with left-nav and nested sub-routes.
- *
- * Phase 10.1.1: initial shell + Teams link.
- * Phase 10.1.3: full settings experience — Profile, Security, Preferences,
- * API Tokens, and Admin (superadmin only).
- */
-
-import { Link, useLocation, Outlet, Navigate } from 'react-router-dom'
-import { ArrowLeft, User, Shield as ShieldIcon, Settings, Key, Users, Lock } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useNavigate } from 'react-router-dom'
-import ProfilePage from '@/pages/settings/ProfilePage'
-import SecurityPage from '@/pages/settings/SecurityPage'
-import PreferencesPage from '@/pages/settings/PreferencesPage'
-import TokensPage from '@/pages/settings/TokensPage'
-import AdminPage from '@/pages/settings/AdminPage'
-import { Routes, Route } from 'react-router-dom'
-
-const navLinkStyle = (active: boolean): React.CSSProperties => ({
-  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
-  borderRadius: 7, fontSize: 13, color: active ? '#e6edf3' : '#8b949e',
-  background: active ? '#2d333b' : 'none', textDecoration: 'none',
-  cursor: 'pointer', border: 'none', width: '100%', fontFamily: 'inherit',
-  fontWeight: active ? 500 : 400,
-})
-
-export default function SettingsPage() {
-  const { user } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const path = location.pathname
-
-  function isActive(prefix: string) {
-    return path === prefix || path.startsWith(prefix + '/')
-  }
-
-  return (
-    <div style={{ display: 'flex', minHeight: '100vh', background: '#0d1117', color: '#e6edf3', fontFamily: 'var(--font-sans, Inter, sans-serif)' }}>
-      {/* Left nav */}
-      <div style={{ width: 220, borderRight: '1px solid #30363d', padding: '16px 12px', display: 'flex', flexDirection: 'column', gap: 2, flexShrink: 0 }}>
-        <button
-          onClick={() => navigate('/')}
-          style={{ ...navLinkStyle(false), marginBottom: 12, color: '#8b949e' }}
-        >
-          <ArrowLeft size={14} />
-          Back to app
-        </button>
-
-        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 4 }}>
-          Account
-        </div>
-
-        <Link to="/settings/profile" style={navLinkStyle(isActive('/settings/profile'))}>
-          <User size={14} /> Profile
-        </Link>
-        <Link to="/settings/security" style={navLinkStyle(isActive('/settings/security'))}>
-          <Lock size={14} /> Security
-        </Link>
-        <Link to="/settings/preferences" style={navLinkStyle(isActive('/settings/preferences'))}>
-          <Settings size={14} /> Preferences
-        </Link>
-        <Link to="/settings/tokens" style={navLinkStyle(isActive('/settings/tokens'))}>
-          <Key size={14} /> API Tokens
-        </Link>
-
-        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
-          Teams
-        </div>
-        <Link to="/settings/teams" style={navLinkStyle(isActive('/settings/teams'))}>
-          <Users size={14} /> Manage teams
-        </Link>
-
-        {user?.isSuperadmin && (
-          <>
-            <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
-              Administration
-            </div>
-            <Link to="/settings/admin" style={navLinkStyle(isActive('/settings/admin'))}>
-              <ShieldIcon size={14} /> Admin
-            </Link>
-          </>
-        )}
-      </div>
-
-      {/* Content area */}
-      <div style={{ flex: 1, padding: '32px 40px', maxWidth: 800, minWidth: 0 }}>
-        <Routes>
-          <Route path="profile" element={<ProfilePage />} />
-          <Route path="security" element={<SecurityPage />} />
-          <Route path="preferences" element={<PreferencesPage />} />
-          <Route path="tokens" element={<TokensPage />} />
-          <Route path="admin/*" element={user?.isSuperadmin ? <AdminPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="teams" element={<TeamsPlaceholder />} />
-          <Route index element={<Navigate to="/settings/profile" replace />} />
-          <Route path="*" element={<Navigate to="/settings/profile" replace />} />
-        </Routes>
-      </div>
-    </div>
-  )
-}
-
-function TeamsPlaceholder() {
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Manage Teams</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Use the team picker in the main app to create or edit teams.
-      </p>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/types/api.ts
 ````typescript
 /**
@@ -13662,45 +14244,375 @@ export type RefreshResponse = Schemas["RefreshResponse"];
 export type ApiError = Schemas["ApiError"];
 ````
 
-## File: .golangci.yml
-````yaml
-run:
-  timeout: 5m
+## File: packages/web/src/index.css
+````css
+@import "tailwindcss";
 
-linters:
-  enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - ineffassign
-    - gofmt
-    - goimports
-    - gocritic
-    - revive
-    - misspell
-    - nolintlint
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
 
-linters-settings:
-  goimports:
-    local-prefixes: github.com/I0-1O/draba
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-  revive:
-    rules:
-      - name: exported
-        severity: warning
-  nolintlint:
-    require-explanation: true
-    require-specific: true
+/*
+ * Draba Design System — Colors & Typography
+ * Single source of truth for CSS custom properties.
+ */
 
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
+/* ─── Base Tokens ───────────────────────────────────────────────────────────── */
+:root {
+  /* Brand palette */
+  --color-teal:       #288C9B;
+  --color-teal-light: #5BC0DE;
+  --color-amber:      #F29E4C;
+  --color-charcoal:   #343A40;
+  --color-off-white:  #F8F9FA;
+
+  /* Identity palette — 16 colors; mirrors IDENTITY_COLORS in identity-constants.ts */
+  --identity-teal:    #288C9B;
+  --identity-cyan:    #06B6D4;
+  --identity-blue:    #3B82F6;
+  --identity-indigo:  #6366F1;
+  --identity-violet:  #8B5CF6;
+  --identity-purple:  #A855F7;
+  --identity-pink:    #EC4899;
+  --identity-rose:    #F43F5E;
+  --identity-red:     #EF4444;
+  --identity-orange:  #F97316;
+  --identity-amber:   #F59E0B;
+  --identity-yellow:  #EAB308;
+  --identity-lime:    #84CC16;
+  --identity-green:   #22C55E;
+  --identity-slate:   #64748B;
+  --identity-stone:   #78716C;
+
+  /* ── Semantic light-mode tokens (shadcn HSL convention) ── */
+  --background:             hsl(210 17% 98%);   /* #F8F9FA */
+  --foreground:             hsl(210 10% 23%);   /* #343A40 */
+
+  --card:                   hsl(0 0% 100%);
+  --card-foreground:        hsl(210 10% 23%);
+
+  --popover:                hsl(0 0% 100%);
+  --popover-foreground:     hsl(210 10% 23%);
+
+  --primary:                hsl(188 59% 38%);   /* #288C9B */
+  --primary-foreground:     hsl(0 0% 100%);
+
+  --secondary:              hsl(30 87% 62%);    /* #F29E4C */
+  --secondary-foreground:   hsl(210 10% 23%);
+
+  --muted:                  hsl(210 14% 93%);
+  --muted-foreground:       hsl(210 10% 45%);
+
+  --accent:                 hsl(194 67% 61%);   /* #5BC0DE */
+  --accent-foreground:      hsl(210 10% 23%);
+
+  --destructive:            hsl(0 72% 51%);
+  --destructive-foreground: hsl(0 0% 100%);
+
+  --success:                hsl(145 63% 42%);
+  --success-foreground:     hsl(0 0% 100%);
+
+  --warning:                hsl(38 92% 50%);
+  --warning-foreground:     hsl(210 10% 23%);
+
+  --border:                 hsl(210 14% 89%);
+  --input:                  hsl(210 14% 89%);
+  --ring:                   hsl(188 59% 38%);
+
+  /* ── Radius ── */
+  --radius:    8px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+
+  /* ── Shadows ── */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+  --shadow-md: 0 4px 8px -1px rgb(0 0 0 / 0.10), 0 2px 4px -1px rgb(0 0 0 / 0.06);
+  --shadow-lg: 0 10px 24px -3px rgb(0 0 0 / 0.12), 0 4px 8px -2px rgb(0 0 0 / 0.06);
+
+  /* ── Spacing scale (4px base grid) ── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ── Typography ── */
+  --font-sans: 'Open Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'Fira Code', monospace;
+
+  --font-weight-light:    300;
+  --font-weight-regular:  400;
+  --font-weight-semibold: 600;
+  --font-weight-bold:     700;
+
+  /* Type scale */
+  --text-xs:   12px;
+  --text-sm:   14px;
+  --text-base: 16px;
+  --text-lg:   18px;
+  --text-xl:   20px;
+  --text-2xl:  24px;
+  --text-3xl:  30px;
+
+  --leading-tight:   1.25;
+  --leading-normal:  1.5;
+  --leading-relaxed: 1.625;
+
+  /* ── Layout ── */
+  --sidebar-w: 220px;
+  --topbar-h:  52px;
+}
+
+/* ─── Dark Mode ─────────────────────────────────────────────────────────────── */
+.dark {
+  --background:             hsl(210 15% 11%);
+  --foreground:             hsl(210 17% 93%);
+
+  --card:                   hsl(210 15% 15%);
+  --card-foreground:        hsl(210 17% 93%);
+
+  --popover:                hsl(210 15% 15%);
+  --popover-foreground:     hsl(210 17% 93%);
+
+  --primary:                hsl(188 55% 52%);
+  --primary-foreground:     hsl(210 15% 10%);
+
+  --secondary:              hsl(30 80% 60%);
+  --secondary-foreground:   hsl(210 15% 10%);
+
+  --muted:                  hsl(210 15% 20%);
+  --muted-foreground:       hsl(210 15% 58%);
+
+  --accent:                 hsl(194 60% 55%);
+  --accent-foreground:      hsl(210 15% 10%);
+
+  --destructive:            hsl(0 63% 45%);
+  --destructive-foreground: hsl(0 0% 100%);
+
+  --success:                hsl(145 55% 40%);
+  --success-foreground:     hsl(0 0% 100%);
+
+  --warning:                hsl(38 85% 55%);
+  --warning-foreground:     hsl(210 15% 10%);
+
+  --border:                 hsl(210 15% 22%);
+  --input:                  hsl(210 15% 22%);
+  --ring:                   hsl(188 55% 52%);
+}
+
+/* ─── Base Element Styles ───────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--leading-normal);
+  color: var(--foreground);
+  background-color: var(--background);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  margin: 0;
+}
+
+h1 {
+  font-size: var(--text-2xl);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--leading-tight);
+  color: var(--foreground);
+  margin: 0;
+}
+
+h2 {
+  font-size: var(--text-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--leading-tight);
+  color: var(--foreground);
+  margin: 0;
+}
+
+h3 {
+  font-size: var(--text-base);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--leading-tight);
+  color: var(--foreground);
+  margin: 0;
+}
+
+p {
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--leading-relaxed);
+  color: var(--foreground);
+  margin: 0;
+}
+
+small {
+  font-size: var(--text-xs);
+  font-weight: var(--font-weight-regular);
+  color: var(--muted-foreground);
+}
+
+a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+code, pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+/* ─── Find (in-view) ─────────────────────────────────────────────────────── */
+
+@keyframes find-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px #F29E4C, 0 0 0 5px rgba(242, 158, 76, 0.4); }
+  50%       { box-shadow: 0 0 0 2px #F29E4C, 0 0 0 10px rgba(242, 158, 76, 0.65); }
+}
+
+/* Applied to the active (parked) Gantt event bar during a find session. */
+.find-active-bar {
+  animation: find-pulse 1.2s ease-in-out infinite;
+}
+
+/* Applied to a matching (non-active) Gantt event bar during a find session. */
+.find-match-bar {
+  box-shadow: 0 0 0 2px #F29E4C !important;
+}
+````
+
+## File: packages/web/CLAUDE.md
+````markdown
+# packages/web
+
+This is the draba web frontend. React + TypeScript + Vite.
+
+## Key Directories
+- `src/components/` — shared UI components
+- `src/pages/` — top-level route pages
+- `src/hooks/` — custom hooks (data fetching, WebSocket, drag-and-drop)
+- `src/lib/` — API client, utilities
+- `src/types/` — re-exports from generated types in `packages/shared/`
+
+## Run
+
+**Against local API (default):**
+```bash
+pnpm --filter web dev
+```
+Proxies `/api` and `/ws` to `http://localhost:8080`.
+
+**Against Docker (e.g. epcot.lan):**
+Create `packages/web/.env.local` (gitignored):
+```
+VITE_API_TARGET=http://epcot.lan:8081
+```
+Then run the same command. The dev server at `localhost:5173` transparently forwards all API and WebSocket traffic to the Docker container — no CORS config needed.
+
+## Build
+```bash
+pnpm --filter web build
+```
+
+## Test
+```bash
+pnpm --filter web test
+```
+
+## Lint
+```bash
+pnpm --filter web lint
+```
+
+## Key Dependencies (intended)
+- `@tanstack/react-query` — server state (fetching, caching, mutations)
+- `react-router-dom` — routing
+- `tailwindcss` — utility-first CSS
+- shadcn/ui components — live in `src/components/ui/` (copy-paste, not a runtime dep)
+- `openapi-typescript` generated types from `packages/shared/openapi.yaml`
+
+## shadcn/ui
+- Add components via CLI: `pnpm dlx shadcn@latest add <component>`
+- Components land in `src/components/ui/` — edit them freely, they're owned by the repo
+- Design tokens live in `src/index.css` as CSS custom properties (HSL values)
+- Dark mode: class-based (`dark` on `<html>`)
+
+## Conventions
+See `docs/CONVENTIONS.md` for React, TypeScript, and component patterns.
+See `skills/ts-comments.md` for comment conventions (file-level headers, TSDoc on exported declarations, when to add inline why-comments, mandatory comments on `any`/`as`/`@ts-expect-error`). Apply these whenever writing or editing TS/TSX.
+
+## Notes
+- In production, the built static files are embedded in the Go binary — no separate static server
+- All API types come from generated types in `packages/shared/` — do not hand-write API response types
+````
+
+## File: packages/web/tsconfig.app.json
+````json
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "paths": {
+      "@draba/shared": ["../shared/src/index.ts"],
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
+}
 ````
 
 ## File: .repomixignore
@@ -13723,129 +14635,68 @@ session-state.md
 *_test.go
 ````
 
-## File: package.json
-````json
-{
-  "name": "draba",
-  "private": true,
-  "packageManager": "pnpm@10.33.2",
-  "scripts": {
-    "generate": "pnpm --filter shared generate",
-    "build": "pnpm -r run build",
-    "lint": "pnpm -r run lint",
-    "test": "pnpm -r run test"
-  },
-  "engines": {
-    "node": ">=22"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
-  }
-}
-````
+## File: CLAUDE.md
+````markdown
+# draba
 
-## File: .github/workflows/ci.yml
-````yaml
-name: CI
+## Overview
+draba is a team coordination and planning tool for small-to-medium teams. It occupies the space between a shared calendar (too simple) and a full project management suite (too complex). The core mental model is **Person + Time Range + Work** — teams see who is working on what, at a glance, in a shared timeline view.
 
-on:
-  pull_request:
-    branches: [master]
-  push:
-    branches: [master]
+## Context Loading Protocol
 
-jobs:
-  api:
-    name: API (Go)
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    defaults:
-      run:
-        working-directory: packages/api
-    steps:
-      - uses: actions/checkout@v4
+**At the start of a session** — read `docs/ai-context/session-state.md` first. It is a short snapshot of current phase status, recent unfiled bug fixes, known open issues, and the recommended starting point. This replaces reading TASKS.md + log.md + ROADMAP.md from scratch.
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
+**Looking up a type, struct field, or component prop** — grep `docs/ai-context/repomap.md` for the symbol name instead of a full codebase search. Do not read the file wholesale; it is 1.3 MB and exceeds the Read tool's limit. Use targeted lookups only:
+```
+Grep("MemberDetail", "docs/ai-context/repomap.md", output_mode="content")
+```
 
-      - name: Build
-        run: go build ./...
+**Before writing code** — if the file in question is listed in the repomap directory structure, read it directly with the Read tool before editing. Do not infer signatures from memory.
 
-      - name: Vet
-        run: go vet ./...
+## Tech Stack
+- Backend: Go (single binary, self-hosted first)
+- Frontend: React (TypeScript) + shadcn/ui + Tailwind CSS
+- Database: SQLite (default), MySQL/MariaDB, Postgres (configurable)
+- Calendar sync: Google Calendar API, CalDAV (iOS/macOS) — Microsoft/Outlook is v2
+- Deployment: Docker (primary), direct binary install
+- Real-time: WebSockets
 
-      - name: Test
-        run: go test ./... -race -count=1
+## Key Principles
+- **Ruthlessly resist feature creep.** The product succeeds by doing one thing extremely well.
+- **API-first.** Every client (web, CLI, MCP) is a consumer of the same API.
+- **Event-driven.** Every state change emits an internal event. Calendar sync, WebSocket broadcast, and notifications are all event consumers.
+- **Self-hosted by default.** The product must run as a single Docker container with zero external dependencies.
+- **The app is the source of truth.** Calendars are read projections, not the data store.
+- **No paid dependencies without approval.**
 
-      - name: Lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          working-directory: packages/api
-          args: --config ../../.golangci.yml
-          skip-cache: true
+## Project Structure
+- `packages/api/` — Go API server (REST + WebSocket)
+- `packages/web/` — React web frontend
+- `packages/shared/` — OpenAPI spec + generated TypeScript types
+- `docs/` — Architecture, requirements, design, tasks
+- `skills/` — Reference docs for Claude (how to do things)
+- `.claude/commands/` — Reusable slash commands
 
-  web:
-    name: Web (React)
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    steps:
-      - uses: actions/checkout@v4
+## Working Agreements
+- Always run `golangci-lint run` before committing Go code
+- Always run `pnpm --filter web lint` before committing frontend code
+- Always run `pnpm --filter api test` after changes to the API
+- Read `docs/REQUIREMENTS.md` before starting new features
+- Read `docs/ARCHITECTURE.md` before making structural changes
+- Check `docs/TASKS.md` for current priorities
+- Check `docs/ROADMAP.md` to understand which phase we're in and what the exit criteria are
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - uses: pnpm/action-setup@v4
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build
-        run: pnpm --filter @draba/web build
-````
-
-## File: .github/workflows/docker-publish.yml
-````yaml
-name: Publish Docker Image
-
-on:
-  push:
-    branches: [master]
-
-jobs:
-  publish:
-    name: Build & Push to Docker Hub
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: packages/api/Dockerfile
-          target: prod
-          push: true
-          tags: |
-            mewcus/draba:latest
-            mewcus/draba:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+## References
+- [docs/ai-context/session-state.md](docs/ai-context/session-state.md) — **Read first.** Current phase status, recent fixes, open issues, next steps
+- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — What the app does
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — How the system is built
+- [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — Code style and patterns
+- [docs/TASKS.md](docs/TASKS.md) — Current backlog and priorities
+- [docs/ROADMAP.md](docs/ROADMAP.md) — Phased development timeline with effort estimates and exit criteria
+- [docs/design/DESIGN_SYSTEM.md](docs/design/DESIGN_SYSTEM.md) — Visual design tokens
+- [docs/design/UX_PATTERNS.md](docs/design/UX_PATTERNS.md) — Interaction patterns
+- [skills/go-comments.md](skills/go-comments.md) — Go comment conventions (package headers, exported doc comments, inline why-comments)
+- [skills/ts-comments.md](skills/ts-comments.md) — TypeScript/React comment conventions (file headers, TSDoc on exports, inline why-comments)
 ````
 
 ## File: .github/workflows/repomap.yml
@@ -13884,484 +14735,6 @@ jobs:
         with:
           commit_message: "chore: update automated AI repomap [skip ci]"
           file_pattern: docs/ai-context/repomap.md
-````
-
-## File: docs/design/DESIGN_SYSTEM.md
-````markdown
-# Design System
-
-## Foundation
-- **Component library:** shadcn/ui (copy-paste — components live in `packages/web/src/components/ui/`)
-- **Styling:** Tailwind CSS v4
-- **Theming:** CSS custom properties (HSL channel values) in `packages/web/src/index.css`
-- **Dark mode:** class-based — `dark` class on `<html>` element
-
-shadcn stores colors as bare HSL channels (no `hsl()` wrapper), e.g. `--primary: 188 59% 38%`. Tailwind then references them as `hsl(var(--primary))`. All token values below follow this convention.
-
----
-
-## Logo
-
-All variants are in `docs/design/assets/logo/`.
-
-### Variants
-
-| File | Description |
-|------|-------------|
-| `icon-color.svg` | Full color — teal header, orange pegs, light gray body. Use on white/off-white only. |
-| `icon-black.svg` | Solid black icon, no background. |
-| `icon-orange.svg` | Solid orange (`#F17B2B`) icon, no background. |
-| `icon-teal.svg` | Solid teal (`#1A97A2`) icon, no background. |
-| `icon-white-on-black-circle.svg` | White icon on filled black circle. Works on any background. |
-| `icon-knockout-black-circle.svg` | Black-filled circle with icon knocked out (transparent). Page/background color shows through the icon shape. |
-| `icon-knockout-orange-circle.svg` | Orange-filled circle with icon knocked out. |
-| `icon-knockout-teal-circle.svg` | Teal-filled circle with icon knocked out. |
-
-### Usage by background
-
-| Background | Recommended variants |
-|------------|---------------------|
-| White / off-white | `icon-color`, `icon-black`, `icon-teal`, `icon-knockout-black-circle`, `icon-knockout-orange-circle`, `icon-knockout-teal-circle` |
-| Teal (`#288C9B`) | `icon-black`, `icon-orange`, `icon-knockout-black-circle`, `icon-knockout-orange-circle` |
-| Dark / charcoal | `icon-white-on-black-circle`, `icon-orange`, `icon-knockout-orange-circle`, `icon-knockout-teal-circle` |
-| Any | `icon-white-on-black-circle` |
-
-> Teal column confirmed 2026-04-29. Other columns are best-guess — verify during implementation.
-
----
-
-## Color Palette
-
-### Brand Colors (Source)
-
-| Name | Hex | HSL | Role |
-|------|-----|-----|------|
-| Teal | `#288C9B` | `188 59% 38%` | Primary — actions, active states, links |
-| Amber | `#F29E4C` | `30 87% 62%` | Secondary — highlights, energy, badges |
-| Charcoal | `#343A40` | `210 10% 23%` | Text, dark backgrounds |
-| Off-White | `#F8F9FA` | `210 17% 98%` | Page background, light surfaces |
-| Sky Blue | `#5BC0DE` | `194 67% 61%` | Accent — CTAs, hover highlights |
-
----
-
-## CSS Tokens
-
-Copy this into `packages/web/src/index.css` after `shadcn init`:
-
-```css
-@layer base {
-  :root {
-    --background:             210 17% 98%;   /* #F8F9FA — page background */
-    --foreground:             210 10% 23%;   /* #343A40 — default text */
-
-    --card:                   0 0% 100%;     /* white — card/panel surface */
-    --card-foreground:        210 10% 23%;
-
-    --popover:                0 0% 100%;
-    --popover-foreground:     210 10% 23%;
-
-    --primary:                188 59% 38%;   /* #288C9B — teal */
-    --primary-foreground:     0 0% 100%;     /* white text on teal */
-
-    --secondary:              30 87% 62%;    /* #F29E4C — amber */
-    --secondary-foreground:   210 10% 23%;   /* charcoal text on amber */
-
-    --muted:                  210 14% 93%;   /* light gray — subtle backgrounds */
-    --muted-foreground:       210 10% 45%;   /* mid-gray — captions, placeholders */
-
-    --accent:                 194 67% 61%;   /* #5BC0DE — sky blue */
-    --accent-foreground:      210 10% 23%;
-
-    --destructive:            0 72% 51%;     /* red — delete, errors */
-    --destructive-foreground: 0 0% 100%;
-
-    --success:                145 63% 42%;   /* green — confirmations */
-    --success-foreground:     0 0% 100%;
-
-    --warning:                38 92% 50%;    /* yellow-orange — caution */
-    --warning-foreground:     210 10% 23%;
-
-    --border:                 210 14% 89%;
-    --input:                  210 14% 89%;
-    --ring:                   188 59% 38%;   /* teal focus ring */
-
-    --radius: 0.5rem;
-  }
-
-  .dark {
-    --background:             210 15% 11%;   /* deep charcoal — page background */
-    --foreground:             210 17% 93%;   /* near-white — default text */
-
-    --card:                   210 15% 15%;   /* slightly lighter than background */
-    --card-foreground:        210 17% 93%;
-
-    --popover:                210 15% 15%;
-    --popover-foreground:     210 17% 93%;
-
-    --primary:                188 55% 52%;   /* teal — lightened to pop on dark */
-    --primary-foreground:     210 15% 10%;   /* very dark text on bright teal */
-
-    --secondary:              30 80% 60%;    /* amber — slightly muted in dark */
-    --secondary-foreground:   210 15% 10%;
-
-    --muted:                  210 15% 20%;
-    --muted-foreground:       210 15% 58%;
-
-    --accent:                 194 60% 55%;   /* sky blue — muted slightly for dark */
-    --accent-foreground:      210 15% 10%;
-
-    --destructive:            0 63% 45%;
-    --destructive-foreground: 0 0% 100%;
-
-    --success:                145 55% 40%;
-    --success-foreground:     0 0% 100%;
-
-    --warning:                38 85% 55%;
-    --warning-foreground:     210 15% 10%;
-
-    --border:                 210 15% 22%;
-    --input:                  210 15% 22%;
-    --ring:                   188 55% 52%;
-  }
-}
-```
-
----
-
-## Identity Color Palette (Phase 9.6+)
-
-Every major entity (Activity, Timeline, Team, Team Member) carries an **Identity** — a color + icon pair. Colors are stored as IDs (e.g. `"teal"`), not hex values. The `Badge` component resolves an ID to its hex for rendering.
-
-> Full spec: [`docs/design/IDENTITY_SYSTEM.md`](IDENTITY_SYSTEM.md).
-> Component API: `src/components/identity/`.
-
-16 colors, all ≥3:1 contrast ratio against both light and dark backgrounds with white text overlay:
-
-| ID | Name | Hex | Notes |
-|----|------|-----|-------|
-| `teal` | Teal | `#288C9B` | Brand primary |
-| `cyan` | Cyan | `#06B6D4` | |
-| `blue` | Blue | `#3B82F6` | |
-| `indigo` | Indigo | `#6366F1` | |
-| `violet` | Violet | `#8B5CF6` | |
-| `purple` | Purple | `#A855F7` | |
-| `pink` | Pink | `#EC4899` | |
-| `rose` | Rose | `#F43F5E` | |
-| `red` | Red | `#EF4444` | |
-| `orange` | Orange | `#F97316` | |
-| `amber` | Amber | `#F59E0B` | |
-| `yellow` | Yellow | `#EAB308` | |
-| `lime` | Lime | `#84CC16` | |
-| `green` | Green | `#22C55E` | |
-| `slate` | Slate | `#64748B` | Neutral cool |
-| `stone` | Stone | `#78716C` | Neutral warm |
-
----
-
-## Typography
-
-### Font Family
-**Open Sans** — humanist sans-serif; clean, readable, professional.
-
-```css
-/* packages/web/src/index.css */
-/* Option A: Self-hosted (recommended for self-hosted product — no Google dependency) */
-/* Download from fonts.google.com and place in packages/web/public/fonts/ */
-@font-face {
-  font-family: 'Open Sans';
-  src: url('/fonts/OpenSans-Regular.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-/* Repeat for weights 300, 600, 700 */
-
-/* Option B: Google Fonts CDN (simpler, requires internet) */
-@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap');
-
-/* Apply via Tailwind config */
---font-sans: 'Open Sans', ui-sans-serif, system-ui, sans-serif;
-```
-
-> Recommendation: self-host the font. draba is a self-hosted product — loading a Google font defeats the point for privacy-conscious users.
-
-### Weights in Use
-| Weight | Class | Use |
-|--------|-------|-----|
-| 300 Light | `font-light` | Subtle labels, secondary captions |
-| 400 Regular | `font-normal` | Body text, descriptions, form inputs |
-| 600 SemiBold | `font-semibold` | Headings, important labels, nav items |
-| 700 Bold | `font-bold` | Page titles, primary headings, emphasis |
-
-### Type Scale
-| Use | Tailwind | Size | Weight |
-|-----|----------|------|--------|
-| Page heading | `text-2xl font-bold` | 24px | 700 |
-| Section heading | `text-lg font-semibold` | 18px | 600 |
-| Card / panel title | `text-base font-semibold` | 16px | 600 |
-| Body text | `text-sm font-normal` | 14px | 400 |
-| Caption / metadata | `text-xs font-normal` | 12px | 400 |
-| Tag / badge label | `text-xs font-semibold` | 12px | 600 |
-| Timeline block label | `text-xs font-semibold` | 12px | 600 |
-
-### Color on Typography
-- Default body text: `text-foreground` (charcoal / off-white in dark mode)
-- Secondary / metadata: `text-muted-foreground`
-- Links and interactive: `text-primary` (teal)
-- Destructive / error: `text-destructive`
-- Headings: `text-foreground` — rely on weight and size, not color, for hierarchy
-
----
-
-## Spacing
-
-Tailwind's 4px base grid throughout.
-
-| Context | Tailwind | px |
-|---------|----------|-----|
-| Tight inline gaps (icon + label) | `gap-1.5` | 6px |
-| Component internal padding (compact) | `p-2` | 8px |
-| Component internal padding (standard) | `p-3` or `p-4` | 12–16px |
-| Between related elements | `gap-3` | 12px |
-| Between sections | `gap-6` | 24px |
-| Page-level horizontal margins | `px-6` | 24px |
-| Page-level vertical padding | `py-8` | 32px |
-| Timeline lane height | TBD during implementation | — |
-| Event block vertical padding | TBD during implementation | — |
-
----
-
-## Border Radius
-
-Base `--radius: 0.5rem` (8px). shadcn derives sm/md/lg/xl from this.
-
-| Element | Class | Notes |
-|---------|-------|-------|
-| Buttons, inputs | `rounded-md` (6px) | shadcn default |
-| Cards, panels, dialogs | `rounded-lg` (8px) | shadcn default |
-| Event blocks on timeline | `rounded-md` | Pill-ish but not fully rounded |
-| Kanban cards | `rounded-md` | |
-| Badges, tags | `rounded-full` | Fully rounded for compact labels |
-| Avatars | `rounded-full` | |
-
----
-
-## Shadows
-
-Keep shadows subtle — the UI should feel clean and flat, not heavily layered.
-
-| Use | Class |
-|-----|-------|
-| Cards, panels | `shadow-sm` |
-| Popovers, dropdowns | `shadow-md` |
-| Modals / dialogs | `shadow-lg` |
-| Timeline blocks | `shadow-sm` |
-| No elevation | `shadow-none` |
-
----
-
-## Icons
-
-- **Library:** `lucide-react` (shadcn's default peer dependency — already installed)
-- **Sizes:** `size-4` (16px) inline with text; `size-5` (20px) standalone/buttons; `size-6` (24px) feature/section icons
-- **Color:** inherit from text color by default (`currentColor`)
-- **Event block icons:** emoji or Lucide subset — TBD during event detail implementation
-- **Stroke width:** Lucide default (1.5) — do not override unless a specific component calls for it
-
----
-
-## Dark Mode
-
-- Supported from day one via shadcn's class-based system
-- Toggle stored in `localStorage`; respects `prefers-color-scheme` on first visit
-- Implementation: `next-themes` or a simple custom hook — TBD during web scaffold
-- All semantic tokens have dark overrides in `index.css` (defined above)
-- Member colors are fixed hex values — test contrast on both `--background` values before finalizing
-
----
-
-## shadcn Components
-
-Install via:
-```bash
-pnpm dlx shadcn@latest add <component>
-```
-
-| Component | Used for | Status |
-|-----------|---------|--------|
-| button | Actions, CTAs | — |
-| input | Form fields | — |
-| dialog | Confirmations, destructive warnings | — |
-| sheet | Event detail slide-in panel | — |
-| popover | Date pickers, color pickers, tooltips | — |
-| calendar | Date range picker in event detail | — |
-| select | Status dropdown, view switcher | — |
-| badge | Tags on event cards and blocks | — |
-| avatar | Team member display | — |
-| tooltip | Block hover info, truncated labels | — |
-| sonner | Toast notifications (replaces toast) | — |
-| dropdown-menu | Context menus, action menus | — |
-| separator | Visual dividers | — |
-| skeleton | Loading placeholders | — |
-| switch | Toggle settings (dark mode, visibility) | — |
-| tabs | Settings pages, secondary navigation | — |
-
-> Mark status as **added** when installed. Add new rows as new components are needed.
-
----
-
-## Custom Components (Not from shadcn)
-
-Built from scratch with Tailwind — no shadcn equivalent:
-
-| Component | Notes |
-|-----------|-------|
-| `TimelineGrid` | Core horizontal timeline canvas; handles pan and zoom |
-| `TimelineBlock` | Individual event block; drag to move/resize |
-| `TimelineLane` | Person row in the timeline |
-| `KanbanBoard` | Status columns + event card layout |
-| `KanbanCard` | Event card in Kanban view; color = member color |
-| `CalendarGrid` | Weekly/daily/monthly calendar layout |
-| `MemberColorDot` | Small circular color indicator for assignees |
-| `ViewSwitcher` | Timeline / Calendar / List / Kanban toggle |
-| `ConnectionStatusDot` | WebSocket live connection indicator |
-````
-
-## File: docs/CONVENTIONS.md
-````markdown
-# Conventions
-
-## Go (packages/api)
-
-### Formatting and Linting
-- Formatter: `gofmt` / `goimports` (run on save)
-- Linter: `golangci-lint` — run before every commit
-- No `//nolint` comments without an explanation
-
-### Project Layout
-- Follow [standard Go project layout](https://github.com/golang-standards/project-layout)
-- `cmd/draba/` — entry point only; wires dependencies, starts server
-- `internal/` — all application code; not importable outside the module
-- No `pkg/` unless a package is genuinely intended to be used by external consumers
-
-### Naming
-- Packages: short, lowercase, no underscores (`auth`, `models`, `caldav`)
-- Files: lowercase, underscores for multi-word (`event_handler.go`, not `eventHandler.go`)
-- Exported types: PascalCase; unexported: camelCase
-- Interfaces: describe behavior, not implementation (`EventRepository`, not `EventStore`)
-
-### Error Handling
-- Always handle errors explicitly — no `_` discards on errors that matter
-- Wrap errors with context: `fmt.Errorf("creating event: %w", err)`
-- Return errors to callers; handlers convert them to HTTP responses at the boundary
-- No panics in handler or business logic code
-
-### Testing
-- Framework: standard library + `testify`
-- Co-locate tests with source: `event_handler_test.go` next to `event_handler.go`
-- Integration tests hit a real SQLite database — no mocking the DB layer
-- Naming: `TestCreateEvent_AssignsMultipleUsers`, `TestCalDAVSync_UpdatesExistingEvent`
-
-### Logging
-- Use `log/slog` package-level functions (`slog.Debug`, `slog.Info`, `slog.Warn`, `slog.Error`) — never `fmt.Println` or `log.Printf`
-- Level is controlled by the `DRABA_LOG_LEVEL` env var; default is `info`
-- All output goes to stdout — Docker captures it in `docker logs`
-- **Debug:** HTTP request/response details, WebSocket lifecycle (connect, subscribe, disconnect), internal routing
-- **Info:** startup and shutdown events only
-- **Warn:** unexpected but recoverable conditions (e.g. abnormal WS close)
-- **Error:** failures that impair a request or abort startup; always include `"err", err` as a structured arg
-- Use structured key-value args, not formatted strings: `slog.Info("db: opened", "dsn", dsn)` not `slog.Info(fmt.Sprintf(...))`
-
-### API Handlers
-- Handlers are thin: validate input, call service, return response
-- **Requests & Responses:** Always use the structs generated by `oapi-codegen` for request/response payloads. Do not define anonymous inline structs for bodies.
-- No business logic in handlers — all logic lives in `internal/` service packages
-- No direct DB access from handlers — always go through the repository layer
-
----
-
-## React (packages/web)
-
-### Language
-- TypeScript strict mode — no `any`, no type assertions without a comment explaining why
-- All types for API responses come from generated types in `packages/shared/` — do not hand-write API types
-
-### Components
-- Functional components only — no class components
-- One component per file; file name matches component name (`TimelineView.tsx`)
-- Files: PascalCase for components, camelCase for hooks and utilities
-- Co-locate styles, tests, and types with the component when practical
-
-### State Management
-- TanStack Query (`@tanstack/react-query`) for all server state (fetching, caching, mutations)
-- Local UI state: React `useState` / `useReducer`
-- Global UI state (theme, current user, WebSocket connection): Context or Zustand — TBD when needed
-- No Redux
-
-### Hooks
-- Custom hooks prefixed with `use` (`useTimeline`, `useWebSocket`)
-- Extract logic from components early — components should read almost like markup
-
-### Naming
-- Components: PascalCase (`TimelineBlock`, `TeamMemberList`)
-- Hooks: camelCase with `use` prefix (`useEventDrag`, `useTeam`)
-- Event handlers: `handleX` prefix (`handleBlockDrop`, `handleInviteSubmit`)
-
-### Testing
-- Framework: Vitest + React Testing Library
-- Test behavior, not implementation — query by role/label, not by class
-- e2e: Playwright for critical paths (TBD)
-
----
-
-## API Design
-
-### REST
-- Resource naming: plural nouns (`/events`, `/teams`, `/timelines`)
-- Hierarchical where it makes sense: `GET /teams/:teamId/events`
-- HTTP methods as intended: GET reads, POST creates, PATCH partial update, DELETE removes
-- Responses always include the full updated resource on create/update
-- Errors: `{ "error": { "code": "INVITE_EXPIRED", "message": "..." } }`
-
-### WebSocket
-- Connect at `/ws?token=<jwt>`
-- Client sends: `{ "type": "subscribe", "teamId": "..." }`
-- Server sends: `{ "type": "event.updated", "payload": { ... } }`
-- Server sends a heartbeat `{ "type": "ping" }` every 30s; client must pong
-
----
-
-## Git
-
-### Branch Naming
-- `feat/short-description` — new feature
-- `fix/short-description` — bug fix
-- `chore/short-description` — tooling, deps, non-feature work
-- `docs/short-description` — documentation only
-
-### Commit Format
-Conventional commits:
-```
-feat: add CalDAV sync for iOS calendar
-fix: prevent duplicate event_assignments on upsert
-chore: upgrade golangci-lint to v1.57
-docs: document WebSocket message protocol
-```
-
-### Pull Requests
-- Each PR references a task from `docs/TASKS.md`
-- PRs should be small and focused — one logical change
-- All CI checks must pass before merge
-
----
-
-## Anti-Patterns to Avoid
-- No business logic in HTTP handlers or React components — logic belongs in services and hooks
-- No direct database access outside of `internal/db/` repository packages
-- No `console.log` in committed React code — use a logger or remove before commit
-- No god components over ~300 lines — split early
-- No hand-written TypeScript types that duplicate the OpenAPI-generated types
-- No `any` in TypeScript without a `// reason:` comment
 ````
 
 ## File: packages/api/internal/api/helpers.go
@@ -14690,58 +15063,6 @@ func (r *TimelineRepo) RevokeAccess(timelineID, teamMemberID string) error {
 	}
 	return nil
 }
-````
-
-## File: packages/api/CLAUDE.md
-````markdown
-# packages/api
-
-This is the draba API server. Go, REST + WebSocket, with a built-in CalDAV server.
-
-## Entry Points
-- `cmd/draba/main.go` — wires dependencies, starts HTTP server
-- `migrations/` — SQL migration files, run automatically on startup
-
-## Key Internal Packages
-- `internal/api/` — HTTP handlers and routing (thin — no business logic)
-- `internal/auth/` — JWT, invite tokens, password hashing
-- `internal/caldav/` — built-in CalDAV server implementation
-- `internal/calendar/` — Google Calendar OAuth + sync; CalDAV outbound sync
-- `internal/db/` — repository layer; adapters for SQLite, MySQL, Postgres
-- `internal/events/` — internal event bus (pub/sub for state changes)
-- `internal/models/` — domain types shared across packages
-- `internal/ws/` — WebSocket hub and broadcaster
-
-## Run
-```bash
-go run ./cmd/draba
-```
-
-## Test
-```bash
-go test ./...
-```
-
-## Lint
-```bash
-golangci-lint run
-```
-
-## Environment Variables
-```
-DRABA_DB_DRIVER=sqlite          # sqlite | mysql | postgres
-DRABA_DB_DSN=./draba.db         # file path for SQLite, connection string for others
-DRABA_JWT_SECRET=               # required — random secret for signing JWTs
-DRABA_PORT=8080                 # default 8080
-DRABA_LOG_LEVEL=info            # debug | info | warn | error (default info; set debug in docker-compose for dev)
-DRABA_GOOGLE_CLIENT_ID=         # required for Google Calendar sync
-DRABA_GOOGLE_CLIENT_SECRET=     # required for Google Calendar sync
-DRABA_BASE_URL=                 # public URL of the server (used for OAuth callbacks, CalDAV URLs)
-```
-
-## Conventions
-See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
-See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
 ````
 
 ## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
@@ -15769,6 +16090,53 @@ export function autoFitGranularity(
 }
 ````
 
+## File: packages/web/src/components/MemberAvatar.tsx
+````typescript
+/**
+ * MemberAvatar — circular member badge using the identity system.
+ *
+ * Delegates to Badge internally so it inherits all identity rendering rules
+ * (name initials, Lucide icons, color resolution). The external prop API is
+ * unchanged so all existing call sites continue to work without modification.
+ */
+
+import { Badge } from './identity/Badge';
+import type { Member } from '../types';
+
+interface Props {
+  member: Member | undefined;
+  size?: number;
+  className?: string;
+}
+
+export default function MemberAvatar({ member, size = 28, className }: Props) {
+  if (!member) {
+    return (
+      <div
+        className={className}
+        style={{
+          width: size,
+          height: size,
+          borderRadius: '50%',
+          background: 'var(--muted)',
+          flexShrink: 0,
+        }}
+      />
+    );
+  }
+
+  return (
+    <Badge
+      identity={{ color: member.color, icon: '__name_words__' }}
+      name={member.name}
+      shape="circle"
+      size={size}
+      className={className}
+    />
+  );
+}
+````
+
 ## File: packages/web/src/contexts/AuthContext.tsx
 ````typescript
 /**
@@ -16309,6 +16677,122 @@ export default function LoginPage() {
 }
 ````
 
+## File: packages/web/src/pages/SettingsPage.tsx
+````typescript
+/**
+ * SettingsPage — shell with left-nav and nested sub-routes.
+ *
+ * Phase 10.1.1: initial shell + Teams link.
+ * Phase 10.1.3: full settings experience — Profile, Security, Preferences,
+ * API Tokens, and Admin (superadmin only).
+ */
+
+import { Link, useLocation, Navigate } from 'react-router-dom'
+import { ArrowLeft, User, Shield as ShieldIcon, Settings, Key, Users, Lock } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useNavigate } from 'react-router-dom'
+import ProfilePage from '@/pages/settings/ProfilePage'
+import SecurityPage from '@/pages/settings/SecurityPage'
+import PreferencesPage from '@/pages/settings/PreferencesPage'
+import TokensPage from '@/pages/settings/TokensPage'
+import AdminPage from '@/pages/settings/AdminPage'
+import { Routes, Route } from 'react-router-dom'
+
+const navLinkStyle = (active: boolean): React.CSSProperties => ({
+  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+  borderRadius: 7, fontSize: 13, color: active ? '#e6edf3' : '#8b949e',
+  background: active ? '#2d333b' : 'none', textDecoration: 'none',
+  cursor: 'pointer', border: 'none', width: '100%', fontFamily: 'inherit',
+  fontWeight: active ? 500 : 400,
+})
+
+export default function SettingsPage() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const path = location.pathname
+
+  function isActive(prefix: string) {
+    return path === prefix || path.startsWith(prefix + '/')
+  }
+
+  return (
+    <div style={{ display: 'flex', minHeight: '100vh', background: '#0d1117', color: '#e6edf3', fontFamily: 'var(--font-sans, Inter, sans-serif)' }}>
+      {/* Left nav */}
+      <div style={{ width: 220, borderRight: '1px solid #30363d', padding: '16px 12px', display: 'flex', flexDirection: 'column', gap: 2, flexShrink: 0 }}>
+        <button
+          onClick={() => navigate('/')}
+          style={{ ...navLinkStyle(false), marginBottom: 12, color: '#8b949e' }}
+        >
+          <ArrowLeft size={14} />
+          Back to app
+        </button>
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 4 }}>
+          Account
+        </div>
+
+        <Link to="/settings/profile" style={navLinkStyle(isActive('/settings/profile'))}>
+          <User size={14} /> Profile
+        </Link>
+        <Link to="/settings/security" style={navLinkStyle(isActive('/settings/security'))}>
+          <Lock size={14} /> Security
+        </Link>
+        <Link to="/settings/preferences" style={navLinkStyle(isActive('/settings/preferences'))}>
+          <Settings size={14} /> Preferences
+        </Link>
+        <Link to="/settings/tokens" style={navLinkStyle(isActive('/settings/tokens'))}>
+          <Key size={14} /> API Tokens
+        </Link>
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
+          Teams
+        </div>
+        <Link to="/settings/teams" style={navLinkStyle(isActive('/settings/teams'))}>
+          <Users size={14} /> Manage teams
+        </Link>
+
+        {user?.isSuperadmin && (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
+              Administration
+            </div>
+            <Link to="/settings/admin" style={navLinkStyle(isActive('/settings/admin'))}>
+              <ShieldIcon size={14} /> Admin
+            </Link>
+          </>
+        )}
+      </div>
+
+      {/* Content area */}
+      <div style={{ flex: 1, padding: '32px 40px', maxWidth: 800, minWidth: 0 }}>
+        <Routes>
+          <Route path="profile" element={<ProfilePage />} />
+          <Route path="security" element={<SecurityPage />} />
+          <Route path="preferences" element={<PreferencesPage />} />
+          <Route path="tokens" element={<TokensPage />} />
+          <Route path="admin/*" element={user?.isSuperadmin ? <AdminPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="teams" element={<TeamsPlaceholder />} />
+          <Route index element={<Navigate to="/settings/profile" replace />} />
+          <Route path="*" element={<Navigate to="/settings/profile" replace />} />
+        </Routes>
+      </div>
+    </div>
+  )
+}
+
+function TeamsPlaceholder() {
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Manage Teams</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Use the team picker in the main app to create or edit teams.
+      </p>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/pages/SetupPage.tsx
 ````typescript
 /**
@@ -16814,374 +17298,50 @@ export default function SetupPage() {
 }
 ````
 
-## File: packages/web/src/index.css
-````css
-@import "tailwindcss";
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-success: var(--success);
-  --color-success-foreground: var(--success-foreground);
-  --color-warning: var(--warning);
-  --color-warning-foreground: var(--warning-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-mono);
-}
-
-/*
- * Draba Design System — Colors & Typography
- * Single source of truth for CSS custom properties.
- */
-
-/* ─── Base Tokens ───────────────────────────────────────────────────────────── */
-:root {
-  /* Brand palette */
-  --color-teal:       #288C9B;
-  --color-teal-light: #5BC0DE;
-  --color-amber:      #F29E4C;
-  --color-charcoal:   #343A40;
-  --color-off-white:  #F8F9FA;
-
-  /* Identity palette — 16 colors; mirrors IDENTITY_COLORS in identity-constants.ts */
-  --identity-teal:    #288C9B;
-  --identity-cyan:    #06B6D4;
-  --identity-blue:    #3B82F6;
-  --identity-indigo:  #6366F1;
-  --identity-violet:  #8B5CF6;
-  --identity-purple:  #A855F7;
-  --identity-pink:    #EC4899;
-  --identity-rose:    #F43F5E;
-  --identity-red:     #EF4444;
-  --identity-orange:  #F97316;
-  --identity-amber:   #F59E0B;
-  --identity-yellow:  #EAB308;
-  --identity-lime:    #84CC16;
-  --identity-green:   #22C55E;
-  --identity-slate:   #64748B;
-  --identity-stone:   #78716C;
-
-  /* ── Semantic light-mode tokens (shadcn HSL convention) ── */
-  --background:             hsl(210 17% 98%);   /* #F8F9FA */
-  --foreground:             hsl(210 10% 23%);   /* #343A40 */
-
-  --card:                   hsl(0 0% 100%);
-  --card-foreground:        hsl(210 10% 23%);
-
-  --popover:                hsl(0 0% 100%);
-  --popover-foreground:     hsl(210 10% 23%);
-
-  --primary:                hsl(188 59% 38%);   /* #288C9B */
-  --primary-foreground:     hsl(0 0% 100%);
-
-  --secondary:              hsl(30 87% 62%);    /* #F29E4C */
-  --secondary-foreground:   hsl(210 10% 23%);
-
-  --muted:                  hsl(210 14% 93%);
-  --muted-foreground:       hsl(210 10% 45%);
-
-  --accent:                 hsl(194 67% 61%);   /* #5BC0DE */
-  --accent-foreground:      hsl(210 10% 23%);
-
-  --destructive:            hsl(0 72% 51%);
-  --destructive-foreground: hsl(0 0% 100%);
-
-  --success:                hsl(145 63% 42%);
-  --success-foreground:     hsl(0 0% 100%);
-
-  --warning:                hsl(38 92% 50%);
-  --warning-foreground:     hsl(210 10% 23%);
-
-  --border:                 hsl(210 14% 89%);
-  --input:                  hsl(210 14% 89%);
-  --ring:                   hsl(188 59% 38%);
-
-  /* ── Radius ── */
-  --radius:    8px;
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 12px;
-  --radius-full: 9999px;
-
-  /* ── Shadows ── */
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.06);
-  --shadow-md: 0 4px 8px -1px rgb(0 0 0 / 0.10), 0 2px 4px -1px rgb(0 0 0 / 0.06);
-  --shadow-lg: 0 10px 24px -3px rgb(0 0 0 / 0.12), 0 4px 8px -2px rgb(0 0 0 / 0.06);
-
-  /* ── Spacing scale (4px base grid) ── */
-  --space-1:  4px;
-  --space-2:  8px;
-  --space-3:  12px;
-  --space-4:  16px;
-  --space-5:  20px;
-  --space-6:  24px;
-  --space-8:  32px;
-  --space-10: 40px;
-  --space-12: 48px;
-
-  /* ── Typography ── */
-  --font-sans: 'Open Sans', ui-sans-serif, system-ui, sans-serif;
-  --font-mono: ui-monospace, 'SFMono-Regular', 'Fira Code', monospace;
-
-  --font-weight-light:    300;
-  --font-weight-regular:  400;
-  --font-weight-semibold: 600;
-  --font-weight-bold:     700;
-
-  /* Type scale */
-  --text-xs:   12px;
-  --text-sm:   14px;
-  --text-base: 16px;
-  --text-lg:   18px;
-  --text-xl:   20px;
-  --text-2xl:  24px;
-  --text-3xl:  30px;
-
-  --leading-tight:   1.25;
-  --leading-normal:  1.5;
-  --leading-relaxed: 1.625;
-
-  /* ── Layout ── */
-  --sidebar-w: 220px;
-  --topbar-h:  52px;
-}
-
-/* ─── Dark Mode ─────────────────────────────────────────────────────────────── */
-.dark {
-  --background:             hsl(210 15% 11%);
-  --foreground:             hsl(210 17% 93%);
-
-  --card:                   hsl(210 15% 15%);
-  --card-foreground:        hsl(210 17% 93%);
-
-  --popover:                hsl(210 15% 15%);
-  --popover-foreground:     hsl(210 17% 93%);
-
-  --primary:                hsl(188 55% 52%);
-  --primary-foreground:     hsl(210 15% 10%);
-
-  --secondary:              hsl(30 80% 60%);
-  --secondary-foreground:   hsl(210 15% 10%);
-
-  --muted:                  hsl(210 15% 20%);
-  --muted-foreground:       hsl(210 15% 58%);
-
-  --accent:                 hsl(194 60% 55%);
-  --accent-foreground:      hsl(210 15% 10%);
-
-  --destructive:            hsl(0 63% 45%);
-  --destructive-foreground: hsl(0 0% 100%);
-
-  --success:                hsl(145 55% 40%);
-  --success-foreground:     hsl(0 0% 100%);
-
-  --warning:                hsl(38 85% 55%);
-  --warning-foreground:     hsl(210 15% 10%);
-
-  --border:                 hsl(210 15% 22%);
-  --input:                  hsl(210 15% 22%);
-  --ring:                   hsl(188 55% 52%);
-}
-
-/* ─── Base Element Styles ───────────────────────────────────────────────────── */
-*, *::before, *::after {
-  box-sizing: border-box;
-}
-
-body {
-  font-family: var(--font-sans);
-  font-size: var(--text-sm);
-  font-weight: var(--font-weight-regular);
-  line-height: var(--leading-normal);
-  color: var(--foreground);
-  background-color: var(--background);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  margin: 0;
-}
-
-h1 {
-  font-size: var(--text-2xl);
-  font-weight: var(--font-weight-bold);
-  line-height: var(--leading-tight);
-  color: var(--foreground);
-  margin: 0;
-}
-
-h2 {
-  font-size: var(--text-lg);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--leading-tight);
-  color: var(--foreground);
-  margin: 0;
-}
-
-h3 {
-  font-size: var(--text-base);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--leading-tight);
-  color: var(--foreground);
-  margin: 0;
-}
-
-p {
-  font-size: var(--text-sm);
-  font-weight: var(--font-weight-regular);
-  line-height: var(--leading-relaxed);
-  color: var(--foreground);
-  margin: 0;
-}
-
-small {
-  font-size: var(--text-xs);
-  font-weight: var(--font-weight-regular);
-  color: var(--muted-foreground);
-}
-
-a {
-  color: var(--primary);
-  text-decoration: none;
-}
-
-a:hover {
-  text-decoration: underline;
-}
-
-code, pre {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-}
-
-/* ─── Find (in-view) ─────────────────────────────────────────────────────── */
-
-@keyframes find-pulse {
-  0%, 100% { box-shadow: 0 0 0 2px #F29E4C, 0 0 0 5px rgba(242, 158, 76, 0.4); }
-  50%       { box-shadow: 0 0 0 2px #F29E4C, 0 0 0 10px rgba(242, 158, 76, 0.65); }
-}
-
-/* Applied to the active (parked) Gantt event bar during a find session. */
-.find-active-bar {
-  animation: find-pulse 1.2s ease-in-out infinite;
-}
-
-/* Applied to a matching (non-active) Gantt event bar during a find session. */
-.find-match-bar {
-  box-shadow: 0 0 0 2px #F29E4C !important;
-}
-````
-
-## File: packages/web/CLAUDE.md
-````markdown
-# packages/web
-
-This is the draba web frontend. React + TypeScript + Vite.
-
-## Key Directories
-- `src/components/` — shared UI components
-- `src/pages/` — top-level route pages
-- `src/hooks/` — custom hooks (data fetching, WebSocket, drag-and-drop)
-- `src/lib/` — API client, utilities
-- `src/types/` — re-exports from generated types in `packages/shared/`
-
-## Run
-
-**Against local API (default):**
-```bash
-pnpm --filter web dev
-```
-Proxies `/api` and `/ws` to `http://localhost:8080`.
-
-**Against Docker (e.g. epcot.lan):**
-Create `packages/web/.env.local` (gitignored):
-```
-VITE_API_TARGET=http://epcot.lan:8081
-```
-Then run the same command. The dev server at `localhost:5173` transparently forwards all API and WebSocket traffic to the Docker container — no CORS config needed.
-
-## Build
-```bash
-pnpm --filter web build
-```
-
-## Test
-```bash
-pnpm --filter web test
-```
-
-## Lint
-```bash
-pnpm --filter web lint
-```
-
-## Key Dependencies (intended)
-- `@tanstack/react-query` — server state (fetching, caching, mutations)
-- `react-router-dom` — routing
-- `tailwindcss` — utility-first CSS
-- shadcn/ui components — live in `src/components/ui/` (copy-paste, not a runtime dep)
-- `openapi-typescript` generated types from `packages/shared/openapi.yaml`
-
-## shadcn/ui
-- Add components via CLI: `pnpm dlx shadcn@latest add <component>`
-- Components land in `src/components/ui/` — edit them freely, they're owned by the repo
-- Design tokens live in `src/index.css` as CSS custom properties (HSL values)
-- Dark mode: class-based (`dark` on `<html>`)
-
-## Conventions
-See `docs/CONVENTIONS.md` for React, TypeScript, and component patterns.
-See `skills/ts-comments.md` for comment conventions (file-level headers, TSDoc on exported declarations, when to add inline why-comments, mandatory comments on `any`/`as`/`@ts-expect-error`). Apply these whenever writing or editing TS/TSX.
-
-## Notes
-- In production, the built static files are embedded in the Go binary — no separate static server
-- All API types come from generated types in `packages/shared/` — do not hand-write API response types
-````
-
-## File: packages/web/tsconfig.app.json
+## File: packages/web/package.json
 ````json
 {
-  "compilerOptions": {
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
-    "target": "ES2020",
-    "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "skipLibCheck": true,
-
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "noEmit": true,
-    "jsx": "react-jsx",
-
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true,
-    "paths": {
-      "@draba/shared": ["../shared/src/index.ts"],
-      "@/*": ["./src/*"]
-    }
+  "name": "@draba/web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "tsc --noEmit",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
-  "include": ["src"]
+  "dependencies": {
+    "@draba/shared": "workspace:*",
+    "@radix-ui/react-label": "^2.1.8",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@tanstack/react-query": "^5.100.10",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.500.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.15.1",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^25.8.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.5.0",
+    "@vitest/ui": "^4.1.7",
+    "jsdom": "^29.1.1",
+    "tailwindcss": "^4.1.0",
+    "typescript": "~5.8.0",
+    "vite": "^6.3.0",
+    "vitest": "^4.1.7"
+  }
 }
 ````
 
@@ -17292,6 +17452,109 @@ docker start "$DRABA_CONTAINER" >/dev/null
 echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
 ````
 
+## File: .gitignore
+````
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.nuxt/
+.vite/
+
+# Environment variables — never commit secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime / OS
+.DS_Store
+Thumbs.db
+*.pem
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# TypeScript
+*.tsbuildinfo
+
+# Go
+packages/api/tmp/
+
+# Embedded web build artifacts — populated by Docker; not checked in
+packages/api/ui/static/*
+!packages/api/ui/static/.gitkeep
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Database
+*.db
+
+# Claude Code — personal/local settings only
+# (CLAUDE.md, skills/, and .claude/commands/ are committed — they're shared team context)
+.claude/settings.local.json
+.claude/todos
+.claude/launch.json
+.claude/mockups/
+GEMINI.md
+````
+
+## File: docker-compose.yml
+````yaml
+services:
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+      target: dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./packages/api:/app
+    environment:
+      - DRABA_PORT=8080
+      - DRABA_DB_DRIVER=sqlite
+      - DRABA_DB_DSN=./draba.db
+      - DRABA_JWT_SECRET=dev-secret-change-in-prod
+      - DRABA_LOG_LEVEL=debug
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./packages/web/src:/app/packages/web/src
+      - ./packages/web/public:/app/packages/web/public
+      - ./packages/web/index.html:/app/packages/web/index.html
+    environment:
+      - VITE_API_URL=http://api:8080
+    depends_on:
+      - api
+````
+
 ## File: packages/api/internal/events/bus.go
 ````go
 // Package events provides the in-process pub/sub bus. Every write operation
@@ -17380,53 +17643,6 @@ func (b *Bus) Publish(msg Message) {
 			// Slow subscriber — drop rather than block the publisher.
 		}
 	}
-}
-````
-
-## File: packages/web/src/components/MemberAvatar.tsx
-````typescript
-/**
- * MemberAvatar — circular member badge using the identity system.
- *
- * Delegates to Badge internally so it inherits all identity rendering rules
- * (name initials, Lucide icons, color resolution). The external prop API is
- * unchanged so all existing call sites continue to work without modification.
- */
-
-import { Badge } from './identity/Badge';
-import type { Member } from '../types';
-
-interface Props {
-  member: Member | undefined;
-  size?: number;
-  className?: string;
-}
-
-export default function MemberAvatar({ member, size = 28, className }: Props) {
-  if (!member) {
-    return (
-      <div
-        className={className}
-        style={{
-          width: size,
-          height: size,
-          borderRadius: '50%',
-          background: 'var(--muted)',
-          flexShrink: 0,
-        }}
-      />
-    );
-  }
-
-  return (
-    <Badge
-      identity={{ color: member.color, icon: '__name_words__' }}
-      name={member.name}
-      shape="circle"
-      size={size}
-      className={className}
-    />
-  );
 }
 ````
 
@@ -18202,150 +18418,283 @@ export function useDeleteActivity(teamId: string) {
 }
 ````
 
-## File: packages/web/package.json
-````json
-{
-  "name": "@draba/web",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "tsc --noEmit",
-    "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest"
+## File: packages/web/src/App.tsx
+````typescript
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AuthProvider } from '@/contexts/AuthContext'
+import ProtectedRoute from '@/components/ProtectedRoute'
+import LoginPage from '@/pages/LoginPage'
+import RegisterPage from '@/pages/RegisterPage'
+import DashboardPage from '@/pages/DashboardPage'
+import SetupPage from '@/pages/SetupPage'
+import SettingsPage from '@/pages/SettingsPage'
+import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
+import ResetPasswordPage from '@/pages/ResetPasswordPage'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
+    },
   },
-  "dependencies": {
-    "@draba/shared": "workspace:*",
-    "@radix-ui/react-label": "^2.1.8",
-    "@radix-ui/react-slot": "^1.2.4",
-    "@tanstack/react-query": "^5.100.10",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "lucide-react": "^0.500.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "react-router-dom": "^7.15.1",
-    "tailwind-merge": "^3.6.0"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.1.0",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^25.8.0",
-    "@types/react": "^19.1.0",
-    "@types/react-dom": "^19.1.0",
-    "@vitejs/plugin-react": "^4.5.0",
-    "@vitest/ui": "^4.1.7",
-    "jsdom": "^29.1.1",
-    "tailwindcss": "^4.1.0",
-    "typescript": "~5.8.0",
-    "vite": "^6.3.0",
-    "vitest": "^4.1.7"
-  }
+})
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <Routes>
+            {/* First-run setup — public, shown before any users exist */}
+            <Route path="/setup" element={<SetupPage />} />
+
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/settings/*" element={<SettingsPage />} />
+            </Route>
+
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  )
 }
 ````
 
-## File: CLAUDE.md
+## File: docs/ARCHITECTURE.md
 ````markdown
-# draba
+# Architecture
 
-## Overview
-draba is a team coordination and planning tool for small-to-medium teams. It occupies the space between a shared calendar (too simple) and a full project management suite (too complex). The core mental model is **Person + Time Range + Work** — teams see who is working on what, at a glance, in a shared timeline view.
+## System Overview
 
-## Context Loading Protocol
+draba is an API-first, event-driven team coordination tool. The API server is the single source of truth. All clients (web, CLI, MCP agents) are dumb consumers of the same REST + WebSocket API. Every state change emits an internal event; calendar sync, real-time broadcast, and notifications are event consumers.
 
-**At the start of a session** — read `docs/ai-context/session-state.md` first. It is a short snapshot of current phase status, recent unfiled bug fixes, known open issues, and the recommended starting point. This replaces reading TASKS.md + log.md + ROADMAP.md from scratch.
-
-**Looking up a type, struct field, or component prop** — grep `docs/ai-context/repomap.md` for the symbol name instead of a full codebase search. Do not read the file wholesale; it is 1.3 MB and exceeds the Read tool's limit. Use targeted lookups only:
 ```
-Grep("MemberDetail", "docs/ai-context/repomap.md", output_mode="content")
+Web UI ──┐
+   CLI ──┤
+   MCP ──┤──→ REST API ──→ Internal Event Bus ──→ Calendar Sync (Google, CalDAV)
+Agents ──┤                                    ──→ WebSocket Broadcast
+         └──→ WebSocket (real-time subscribe)  ──→ Notifications (future)
 ```
 
-**Before writing code** — if the file in question is listed in the repomap directory structure, read it directly with the Read tool before editing. Do not infer signatures from memory.
+The server also implements a built-in CalDAV endpoint, allowing iOS/macOS Calendar apps to connect directly without any external CalDAV server dependency.
 
-## Tech Stack
-- Backend: Go (single binary, self-hosted first)
-- Frontend: React (TypeScript) + shadcn/ui + Tailwind CSS
-- Database: SQLite (default), MySQL/MariaDB, Postgres (configurable)
-- Calendar sync: Google Calendar API, CalDAV (iOS/macOS) — Microsoft/Outlook is v2
-- Deployment: Docker (primary), direct binary install
-- Real-time: WebSockets
+---
 
-## Key Principles
-- **Ruthlessly resist feature creep.** The product succeeds by doing one thing extremely well.
-- **API-first.** Every client (web, CLI, MCP) is a consumer of the same API.
-- **Event-driven.** Every state change emits an internal event. Calendar sync, WebSocket broadcast, and notifications are all event consumers.
-- **Self-hosted by default.** The product must run as a single Docker container with zero external dependencies.
-- **The app is the source of truth.** Calendars are read projections, not the data store.
-- **No paid dependencies without approval.**
+## Components
 
-## Project Structure
-- `packages/api/` — Go API server (REST + WebSocket)
-- `packages/web/` — React web frontend
-- `packages/shared/` — OpenAPI spec + generated TypeScript types
-- `docs/` — Architecture, requirements, design, tasks
-- `skills/` — Reference docs for Claude (how to do things)
-- `.claude/commands/` — Reusable slash commands
+### API Server (`packages/api/`)
 
-## Working Agreements
-- Always run `golangci-lint run` before committing Go code
-- Always run `pnpm --filter web lint` before committing frontend code
-- Always run `pnpm --filter api test` after changes to the API
-- Read `docs/REQUIREMENTS.md` before starting new features
-- Read `docs/ARCHITECTURE.md` before making structural changes
-- Check `docs/TASKS.md` for current priorities
-- Check `docs/ROADMAP.md` to understand which phase we're in and what the exit criteria are
+- Language: Go
+- Transport: HTTP/REST + WebSocket
+- Auth: JWT (access token) + short-lived refresh tokens; invite tokens for registration
+- Database access: abstracted repository layer supporting SQLite, MySQL/MariaDB, and Postgres
+- Internal event bus: in-process pub/sub; every write operation publishes a typed event
+- CalDAV server: built-in, implemented as part of the Go server (no Radicale dependency)
+- Google Calendar sync: OAuth 2.0 connection per user; outbound push + inbound webhook
+- Entry point: `cmd/draba/main.go`
 
-## References
-- [docs/ai-context/session-state.md](docs/ai-context/session-state.md) — **Read first.** Current phase status, recent fixes, open issues, next steps
-- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — What the app does
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — How the system is built
-- [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — Code style and patterns
-- [docs/TASKS.md](docs/TASKS.md) — Current backlog and priorities
-- [docs/ROADMAP.md](docs/ROADMAP.md) — Phased development timeline with effort estimates and exit criteria
-- [docs/design/DESIGN_SYSTEM.md](docs/design/DESIGN_SYSTEM.md) — Visual design tokens
-- [docs/design/UX_PATTERNS.md](docs/design/UX_PATTERNS.md) — Interaction patterns
-- [skills/go-comments.md](skills/go-comments.md) — Go comment conventions (package headers, exported doc comments, inline why-comments)
-- [skills/ts-comments.md](skills/ts-comments.md) — TypeScript/React comment conventions (file headers, TSDoc on exports, inline why-comments)
-````
+### Web Frontend (`packages/web/`)
 
-## File: docker-compose.yml
-````yaml
-services:
-  api:
-    build:
-      context: .
-      dockerfile: packages/api/Dockerfile
-      target: dev
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./packages/api:/app
-    environment:
-      - DRABA_PORT=8080
-      - DRABA_DB_DRIVER=sqlite
-      - DRABA_DB_DSN=./draba.db
-      - DRABA_JWT_SECRET=dev-secret-change-in-prod
-      - DRABA_LOG_LEVEL=debug
+- Framework: React (TypeScript, strict mode)
+- UI components: shadcn/ui (copy-paste components, owned by the repo — not a runtime dependency)
+- Styling: Tailwind CSS v4; design tokens via CSS custom properties following shadcn convention
+- State management: TanStack Query (server state); React Context or Zustand for global UI state (TBD when needed)
+- Routing: React Router
+- Real-time: WebSocket client, reconnects automatically
+- Build: Vite
+- Static files served by the Go binary in production (embedded)
 
-  web:
-    build:
-      context: .
-      dockerfile: packages/web/Dockerfile
-    ports:
-      - "5173:5173"
-    volumes:
-      - ./packages/web/src:/app/packages/web/src
-      - ./packages/web/public:/app/packages/web/public
-      - ./packages/web/index.html:/app/packages/web/index.html
-    environment:
-      - VITE_API_URL=http://api:8080
-    depends_on:
-      - api
+### Shared (`packages/shared/`)
+
+- OpenAPI specification (`openapi.yaml`) — the contract between API and web
+- TypeScript types generated from the OpenAPI spec (used by `packages/web`)
+- Go server models generated from the OpenAPI spec (used by `packages/api`) using `oapi-codegen`
+- This is the source of truth for the API shape; Go structs and TS types both derive from it
+
+---
+
+## Data Model
+
+### Core Entities
+
+```
+users
+  id, email, password_hash, display_name, avatar_url, is_superadmin,
+  created_at, updated_at, archived_at (nullable)
+  -- archived_at: when set, user account is inactivated (login rejected)
+
+teams
+  id, name, slug, description (nullable), notes (nullable),
+  color (nullable), icon (nullable), invite_link_token (nullable),
+  created_at, updated_at, archived_at (nullable)
+
+team_members
+  id, team_id, user_id (nullable), display_name (nullable), role (admin|member),
+  color, icon (nullable), joined_at, archived_at (nullable)
+  -- user_id is null and display_name is populated for login-less "Participants"
+  -- role="admin" represents a Team Admin
+  -- archived_at: when set, member is inactivated (access disabled, data preserved)
+
+team_statuses
+  id, team_id, name, color, position, created_at, updated_at
+  -- seeded with Planned / In Progress / Done on team creation
+  -- position controls Kanban column order and dropdown sort order
+
+invites
+  id, team_id, email, token, role, invited_by, expires_at, accepted_at
+
+api_tokens
+  id, user_id, name, token_hash,
+  scope (read|add|edit_own|edit_all),
+  last_used_at, created_at, revoked_at (nullable)
+
+activities
+  id, team_id, title, description, status, percent_complete,
+  icon, color, start_at, end_at, all_day,
+  status_id (FK → team_statuses),
+  parent_activity_id (nullable → self-ref FK),
+  location, url, rrule,
+  caldav_uid, google_event_id,     -- external IDs for sync (VEVENT identifiers)
+  created_by, created_at, updated_at, archived_at (nullable)
+
+activity_tags
+  activity_id, tag
+
+activity_assignments
+  activity_id, team_member_id (FK → team_members.id)
+
+activity_links
+  id, activity_id (FK), provider (e.g. asana), external_id, url
+
+timelines
+  id, team_id, name, start_date, end_date,
+  visibility (public|restricted), share_token, ical_token,
+  created_by, created_at, updated_at, archived_at (nullable)
+
+timeline_access
+  timeline_id, team_member_id, role (admin|member)
+  -- role="admin" represents a Timeline Admin
+
+team_inbound_webhooks
+  id, team_id, provider, token, created_by, created_at
+
+calendar_connections
+  id, user_id, provider (google|caldav),
+  credentials_encrypted, caldav_url,
+  last_synced_at, created_at
+```
+
+### Key Relationships
+
+- An activity belongs to a team and can be assigned to multiple users (`activity_assignments`)
+- An activity can have a parent activity (same team), enabling nesting without a separate Project entity
+- An activity created via an external integration has `is_external=true` and an associated `activity_links` record
+- A timeline is a named date range over a team's events — not a data container
+- Calendar connections are per-user; each user chooses which calendars to sync their events to
+
+---
+
+## Data Flow
+
+### Activity Create / Update
+
+1. Client sends REST request → API handler validates and writes to DB
+2. Handler publishes typed event to internal event bus (e.g., `activity.updated`)
+3. Event bus fans out to consumers:
+   - **WebSocket broadcaster** — pushes delta to all connected clients subscribed to that team
+   - **Calendar sync worker** — pushes change to Google Calendar and/or CalDAV for each assigned user who has a connection
+
+### External Connectors (Inbound One-Way Sync)
+
+1. External system (e.g. Asana) pushes a payload to `POST /webhooks/:provider/:token`
+2. Handler verifies the token against `team_inbound_webhooks` to identify the team
+3. Handler parses the payload, finds or creates an activity (setting `is_external=true`), and updates `activity_links`
+4. Publishes `activity.updated` to the event bus → WebSocket broadcast (UI renders block as read-only)
+
+### Inbound Google Calendar Sync
+
+1. Google pushes a webhook notification to `/webhooks/google`
+2. Handler fetches the changed activity from Google Calendar API
+3. Upserts the activity in draba DB (matched on `google_event_id`)
+4. Publishes `activity.updated` to the event bus → WebSocket broadcast
+
+### CalDAV (Inbound from iOS/macOS)
+
+1. Client issues a CalDAV REPORT or PUT to draba's built-in CalDAV endpoint
+2. draba handles the CalDAV protocol natively and writes to DB
+3. Publishes to event bus → WebSocket broadcast + outbound Google sync if connected
+
+### Real-Time
+
+- WebSocket connections are scoped per team
+- On connect, client subscribes to one or more team rooms
+- Server broadcasts JSON delta payloads on `activity.*` and `timeline.*` messages
+
+---
+
+## Key Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Language | Go | Single static binary; easy Docker distribution; excellent concurrency for WebSockets |
+| Database default | SQLite | Zero-config self-hosting — one binary + one file |
+| DB abstraction | Repository pattern | Swap SQLite/MySQL/Postgres without touching business logic |
+| CalDAV | Built-in Go server | No external Radicale dependency; simpler self-hosted story |
+| Calendar sync v1 | Google + CalDAV only | Microsoft is lower priority; adds OAuth complexity for small gain |
+| Frontend | React + TypeScript | Large ecosystem; strong typing; team familiarity |
+| UI library | shadcn/ui + Tailwind CSS | Copy-paste ownership model; Tailwind utility classes; strong shadcn/React ecosystem |
+| API contract | OpenAPI spec in `packages/shared/` | Single source of truth; generate TS types for web |
+| Auth | JWT + email invite flow | Simple, stateless, no OAuth complexity in v1 |
+| Real-time | WebSockets | Lower latency than polling; Go handles many concurrent connections well |
+| Static files | Embedded in Go binary | Single artifact deployment — no separate static server needed |
+| Deployment | Docker container | Zero external dependencies in SQLite mode; ships as one image |
+| Tenancy | One container per customer | Simpler ops and data isolation to start; multi-tenant is a later optimization |
+
+---
+
+## Infrastructure
+
+### Self-Hosted (v1)
+
+- Single Docker image: `ghcr.io/draba/draba:latest`
+- Configuration via environment variables (DB path, DB type, SMTP, Google OAuth credentials)
+- SQLite: data stored in a mounted volume
+- MySQL/Postgres: point to external DB via connection string env var
+- No external services required in SQLite mode
+
+### Directory Structure (Go server)
+
+```
+packages/api/
+  cmd/draba/          -- main entry point
+  internal/
+    api/              -- HTTP handlers and routing
+    auth/             -- JWT, invite tokens, password hashing
+    caldav/           -- built-in CalDAV server implementation
+    calendar/         -- Google Calendar sync + CalDAV outbound sync
+    db/               -- repository layer (SQLite/MySQL/Postgres adapters)
+    events/           -- internal event bus
+    models/           -- domain types
+    ws/               -- WebSocket hub and broadcaster
+  migrations/         -- SQL migration files
+```
+
+### CI/CD
+
+- [TBD — GitHub Actions; build + test on PR; publish Docker image on tag]
 ````
 
 ## File: packages/api/internal/api/timeline_handler.go
@@ -19614,351 +19963,260 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
 }
 ````
 
-## File: packages/web/src/App.tsx
+## File: packages/web/src/types/index.ts
 ````typescript
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AuthProvider } from '@/contexts/AuthContext'
-import ProtectedRoute from '@/components/ProtectedRoute'
-import LoginPage from '@/pages/LoginPage'
-import RegisterPage from '@/pages/RegisterPage'
-import DashboardPage from '@/pages/DashboardPage'
-import SetupPage from '@/pages/SetupPage'
-import SettingsPage from '@/pages/SettingsPage'
-import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
-import ResetPasswordPage from '@/pages/ResetPasswordPage'
+/**
+ * Local UI types and design-token palettes.
+ *
+ * Wire-format API types come from generated definitions in `packages/shared/`.
+ * Only view-state types (computed from API data) live here.
+ *
+ * ACTIVITY_COLORS and MEMBER_COLORS are now re-exported from identity-constants
+ * so there is a single source of truth for the 16-color palette.
+ */
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
-})
+export { ACTIVITY_COLORS, MEMBER_COLORS } from '@/components/identity/identity-constants';
 
-export default function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          <Routes>
-            {/* First-run setup — public, shown before any users exist */}
-            <Route path="/setup" element={<SetupPage />} />
-
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/reset-password" element={<ResetPasswordPage />} />
-
-            {/* Protected routes */}
-            <Route element={<ProtectedRoute />}>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="/settings/*" element={<SettingsPage />} />
-            </Route>
-
-            {/* Fallback */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
-  )
+/** A person who can be assigned to events on a timeline. */
+export interface Member {
+  id: string;
+  name: string;
+  initials: string;
+  /** Hex color for display (e.g. '#288C9B'). Falls back to palette slot when not set. */
+  color: string;
 }
+
+// ── Legacy types — kept for ActivityPanel until Phase 8.2 rewrites it ──────────
+
+/** @deprecated Phase 8.2 will replace this with the API Activity type. */
+export type ActivityStatus = 'planned' | 'in-progress' | 'done';
+
+/** @deprecated Phase 8.2 will replace this with the API Activity type. */
+export interface DrabaActivity {
+  id: string;
+  title: string;
+  memberId: string;
+  startDate: string;
+  endDate: string;
+  startCol: number;
+  span: number;
+  color: string;
+  status: ActivityStatus;
+  notes?: string;
+}
+
+/** @deprecated Phase 8.2 will replace this with resolved team_statuses labels. */
+export const STATUS_LABELS: Record<ActivityStatus, string> = {
+  'planned':     'Planned',
+  'in-progress': 'In progress',
+  'done':        'Done',
+};
 ````
 
-## File: .gitignore
-````
-# Dependencies
-node_modules/
-.pnp
-.pnp.js
-
-# Build outputs
-dist/
-build/
-out/
-.next/
-.nuxt/
-.vite/
-
-# Environment variables — never commit secrets
-.env
-.env.local
-.env.*.local
-
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Runtime / OS
-.DS_Store
-Thumbs.db
-*.pem
-
-# Editor
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Test coverage
-coverage/
-.nyc_output/
-
-# TypeScript
-*.tsbuildinfo
-
-# Go
-packages/api/tmp/
-
-# Embedded web build artifacts — populated by Docker; not checked in
-packages/api/ui/static/*
-!packages/api/ui/static/.gitkeep
-*.exe
-*.dll
-*.so
-*.dylib
-
-# Database
-*.db
-
-# Claude Code — personal/local settings only
-# (CLAUDE.md, skills/, and .claude/commands/ are committed — they're shared team context)
-.claude/settings.local.json
-.claude/todos
-.claude/launch.json
-.claude/mockups/
-GEMINI.md
-````
-
-## File: docs/ARCHITECTURE.md
+## File: docs/REQUIREMENTS.md
 ````markdown
-# Architecture
+# Requirements
 
-## System Overview
+## Product Summary
+draba is a lightweight team coordination and planning tool. It answers one question — **"Who is working on what, and when?"** — without the overhead of a full project management suite. The primary interface is a horizontal timeline grouped by person, where work appears as blocks across time. Teams adopt it in minutes, not weeks.
 
-draba is an API-first, event-driven team coordination tool. The API server is the single source of truth. All clients (web, CLI, MCP agents) are dumb consumers of the same REST + WebSocket API. Every state change emits an internal event; calendar sync, real-time broadcast, and notifications are event consumers.
+**Target users:** Small teams of 5–20 people. Marketing, creative, and product teams who need visibility across people and time without tickets, sprints, or dependencies.
 
-```
-Web UI ──┐
-   CLI ──┤
-   MCP ──┤──→ REST API ──→ Internal Event Bus ──→ Calendar Sync (Google, CalDAV)
-Agents ──┤                                    ──→ WebSocket Broadcast
-         └──→ WebSocket (real-time subscribe)  ──→ Notifications (future)
-```
-
-The server also implements a built-in CalDAV endpoint, allowing iOS/macOS Calendar apps to connect directly without any external CalDAV server dependency.
+**Positioning:** Not a calendar replacement. Not a project management tool. A shared team timeline.
 
 ---
 
-## Components
+## Functional Requirements
 
-### API Server (`packages/api/`)
+### Users and Auth
+- [ ] Admins can invite users to a team via email invite link
+- [ ] Invited users register by following the invite link and setting up an account (email + password)
+- [ ] Users have: display name, email, optional avatar
+- [ ] Four levels of participation:
+  - **Team Admins:** Manage the team overall. Can invite new people to the team and can create multiple teams.
+  - **Timeline Admins:** Scoped to specific timelines. Can configure those timelines and add/remove people (from the team) to their timelines.
+  - **Users:** Have a login. Can participate in timelines assigned to them.
+  - **Participants:** Do not have a login. Managed as team members (e.g. contractors) so they can be scheduled on timelines and assigned colors without needing account access.
+- [ ] Users can belong to multiple teams simultaneously
+- [ ] Password reset via email
 
-- Language: Go
-- Transport: HTTP/REST + WebSocket
-- Auth: JWT (access token) + short-lived refresh tokens; invite tokens for registration
-- Database access: abstracted repository layer supporting SQLite, MySQL/MariaDB, and Postgres
-- Internal event bus: in-process pub/sub; every write operation publishes a typed event
-- CalDAV server: built-in, implemented as part of the Go server (no Radicale dependency)
-- Google Calendar sync: OAuth 2.0 connection per user; outbound push + inbound webhook
-- Entry point: `cmd/draba/main.go`
+### API Access Tokens
+Programmatic access (CLI, webhooks, MCP) uses scoped API tokens rather than user passwords.
 
-### Web Frontend (`packages/web/`)
+- [ ] Admins and members can generate named API tokens for their account
+- [ ] Tokens have a configurable permission scope: read-only | add | edit/delete own | edit/delete all
+- [ ] Tokens can be revoked at any time
+- [ ] Token values are shown once at creation and never stored in plaintext (hashed at rest)
+- [ ] CLI, webhook consumers, and MCP integrations authenticate using these tokens
 
-- Framework: React (TypeScript, strict mode)
-- UI components: shadcn/ui (copy-paste components, owned by the repo — not a runtime dependency)
-- Styling: Tailwind CSS v4; design tokens via CSS custom properties following shadcn convention
-- State management: TanStack Query (server state); React Context or Zustand for global UI state (TBD when needed)
-- Routing: React Router
-- Real-time: WebSocket client, reconnects automatically
-- Build: Vite
-- Static files served by the Go binary in production (embedded)
+### Teams
+- [ ] Admins can create teams with a name, description, notes, and identity (icon + color)
+- [ ] Admins can edit team name, description, notes, and identity
+- [ ] Admins can invite users to a team by email (one-time invite)
+- [ ] Admins can generate a reusable invite link for a team; anyone with the link can register and join
+- [ ] Admins can revoke or regenerate the reusable invite link
+- [ ] Admins can add existing registered users to a team
+- [ ] Admins can remove members from a team (cannot remove the last admin)
+- [ ] Admins can promote a member to team admin or demote to member
+- [ ] Admins can create participants (login-less team members) who can be assigned to activities but don't have draba accounts
+- [ ] Teams can be archived (hidden from active views, data preserved, restorable)
+- [ ] Teams have a name, description, notes, identity, and a list of members
 
-### Shared (`packages/shared/`)
+### Members
+- [ ] Each team member has a display name, identity (icon + color), and a role (admin, member, or participant)
+- [ ] Admins can edit any member's display name, identity, and role
+- [ ] Members can edit their own display name and identity
+- [ ] Members can be inactivated (access disabled, data preserved, reversible) — uses the same archive pattern as other entities but displayed as "Inactivate" in the UI
+- [ ] Inactivated members cannot log in; their activity assignments are preserved
+- [ ] Super admins can promote any non-participant member to super admin status
+- [ ] Super admins can inactivate or delete user accounts (delete only when no active activities and single team)
+- [ ] Each member has computed stats: timeline counts (active/archived), activity counts (past due, running, upcoming, unscheduled, archived) — date-relative, not status-relative
 
-- OpenAPI specification (`openapi.yaml`) — the contract between API and web
-- TypeScript types generated from the OpenAPI spec (used by `packages/web`)
-- Go server models generated from the OpenAPI spec (used by `packages/api`) using `oapi-codegen`
-- This is the source of truth for the API shape; Go structs and TS types both derive from it
+### Activities
+Activities are the core data object — a block of time assigned to one or more people.
 
----
+- [ ] Activities have: title, start date/time, end date/time, description/notes, status, percent complete, tags, icon, color, assigned people (one or more)
+- [ ] Activities can have a parent activity (another event within the same team), enabling simple nesting (e.g., "Launch Week" contains "Design Review")
+- [ ] Activities store all standard CalDAV VEVENT fields natively (UID, DTSTART, DTEND, SUMMARY, DESCRIPTION, LOCATION, URL, RRULE, etc.) so no information is lost in sync
+- [ ] Activities support recurrence rules (RRULE) from CalDAV/Google
+- [ ] Activities are scoped to a team
+- [ ] Activities can be archived (hidden from active views but not deleted; recoverable)
 
-## Data Model
+### Timelines
+Timelines are named viewing windows — a name and a date range — scoped to a team. They are not data containers; they are views over the team's activities.
 
-### Core Entities
+- [ ] Teams can create multiple timelines, including overlapping ones
+- [ ] Each timeline has: name, start date, end date
+- [ ] Team membership controls who can view a timeline by default; team admins implicitly access all timelines, members require an explicit access grant (see RBAC in Phase 8.0)
+- [ ] Timelines can be archived (removed from active list but preserved; recoverable)
+- [ ] External / public visibility is handled via the **Shares** model (below) — a timeline is not inherently "public" or "restricted"; it becomes externally visible only via a share link the team explicitly creates
 
-```
-users
-  id, email, password_hash, display_name, avatar_url, is_superadmin,
-  created_at, updated_at, archived_at (nullable)
-  -- archived_at: when set, user account is inactivated (login rejected)
+### Timeline Views
+The primary view is a Gantt chart. Additional views display the same underlying activities in different formats.
 
-teams
-  id, name, slug, description (nullable), notes (nullable),
-  color (nullable), icon (nullable), invite_link_token (nullable),
-  created_at, updated_at, archived_at (nullable)
+- [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per activity, bars span their date range; see `docs/design/UX_PATTERNS.md`
+  - A **timeline sub-toolbar** sits between the top bar and the grid. It provides:
+    - **Zoom** — variable column width (day granularity, zoom in/out)
+    - **Group by** — controls how activity rows are organized:
+      - _None_ — flat list, sorted by the active sort key
+      - _Member_ — one labeled section per assigned team member; events with multiple assignees appear under their primary assignee
+      - _Parent activity_ — root activities shown first; child events (those with `parentActivityId` set) indented beneath their parent
+    - **Sort by** — Start date (default), End date, Title A–Z
+    - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
+- [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
+- [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of activities; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many activities at once.
+- [ ] **Kanban view** — read-only; columns = statuses (in the team's configured status order); cards = activities, color-coded by assigned person(s); multiple assignees shown as stacked color indicators. This is a viewing mode only — dragging cards to change status is out of scope for v1.
+- [ ] View switcher in the timeline header to toggle between available views
+- [ ] Each view persists its own toolbar state per timeline (group / sort / zoom / column visibility / filter preset) via user preferences
 
-team_members
-  id, team_id, user_id (nullable), display_name (nullable), role (admin|member),
-  color, icon (nullable), joined_at, archived_at (nullable)
-  -- user_id is null and display_name is populated for login-less "Participants"
-  -- role="admin" represents a Team Admin
-  -- archived_at: when set, member is inactivated (access disabled, data preserved)
+> **Note:** Kanban is intentionally read-only in v1; drag-to-change-status is a later addition once the status model is proven.
 
-team_statuses
-  id, team_id, name, color, position, created_at, updated_at
-  -- seeded with Planned / In Progress / Done on team creation
-  -- position controls Kanban column order and dropdown sort order
+### Team Configuration
+Admins can customize team-level settings that apply to all members and views.
 
-invites
-  id, team_id, email, token, role, invited_by, expires_at, accepted_at
+**Statuses**
+- [ ] Each team has a configurable list of statuses (name + color)
+- [ ] Default statuses created when a team is created: `Planned`, `In Progress`, `Done`
+- [ ] Admins can add, rename, reorder, and delete statuses
+- [ ] Statuses have a display order that controls column order in Kanban view and sort order in dropdowns
+- [ ] At least one status must always exist (cannot delete the last one)
+- [ ] Deleting a status requires choosing a replacement status for any events currently using it
+- [ ] Status color is used as the column header color in Kanban view
 
-api_tokens
-  id, user_id, name, token_hash,
-  scope (read|add|edit_own|edit_all),
-  last_used_at, created_at, revoked_at (nullable)
+**Member Colors**
+- [ ] Each team member has a display color, used to color-code their events in Kanban view and any other person-first views
+- [ ] Admin can set member colors; members can also set their own
+- [ ] Default color is auto-assigned from a preset palette on invite acceptance
 
-activities
-  id, team_id, title, description, status, percent_complete,
-  icon, color, start_at, end_at, all_day,
-  status_id (FK → team_statuses),
-  parent_activity_id (nullable → self-ref FK),
-  location, url, rrule,
-  caldav_uid, google_event_id,     -- external IDs for sync (VEVENT identifiers)
-  created_by, created_at, updated_at, archived_at (nullable)
+### Real-Time Collaboration
+- [ ] Multiple users can view and edit the same timeline simultaneously
+- [ ] Changes (event create, update, delete) appear in real-time for all connected users
+- [ ] No last-write-wins data loss — changes are applied and broadcast immediately
 
-activity_tags
-  activity_id, tag
+### Calendar Sync
+- [ ] Users can connect a personal Google Calendar account (OAuth 2.0) for two-way sync of their assigned events
+- [ ] Users can connect a personal CalDAV account (iOS/macOS Calendar, Fastmail, Thunderbird, etc.) for two-way sync
+- [ ] draba implements a built-in CalDAV endpoint — Apple Calendar users point their app directly at the draba server
+- [ ] Outbound sync: when an event is created/updated/deleted in draba, changes push to all connected personal calendars for assigned users
+- [ ] Inbound sync: changes made in Google Calendar trigger a webhook that updates draba
+- [ ] **Team read-only feed:** each timeline exposes a subscribable iCal/CalDAV URL that any calendar app can subscribe to for a read-only view of all team events in that timeline
+- [ ] Public iCal/Google Calendar feeds include only basic event info (title, date range, assigned people) — notes and internal fields are stripped
+- [ ] Microsoft/Outlook sync is explicitly out of scope for v1
 
-activity_assignments
-  activity_id, team_member_id (FK → team_members.id)
+### External Connectors (e.g. Asana, Aha!)
+- [ ] Draba supports a one-way, read-only inbound feed from external systems of record.
+- [ ] Teams can generate unique inbound Webhook URLs to paste into Asana, Jira, etc.
+- [ ] External events appear alongside hand-crafted Draba events in the timeline and Gantt views.
+- [ ] Events generated via connectors are marked as "read-only" in Draba — users cannot change dates or properties via the Draba UI (they must change them in Asana).
+- [ ] The event card links back to the original source URL.
 
-activity_links
-  id, activity_id (FK), provider (e.g. asana), external_id, url
+### Sharing and Public Access
+Sharing in draba is a first-class entity, not a property of a timeline. A **Share** is a frozen pairing of `{ timeline + view type + view configuration + optional password + optional expiry }`. One timeline can have many shares, each tuned for a different audience.
 
-timelines
-  id, team_id, name, start_date, end_date,
-  visibility (public|restricted), share_token, ical_token,
-  created_by, created_at, updated_at, archived_at (nullable)
+- [ ] A Share captures: the source timeline, the view type (Gantt / List / Calendar / Kanban), and a snapshot of the view's configuration at creation time (filter, sort, group, zoom, column visibility, etc.)
+- [ ] The view-config snapshot is **frozen** at creation — later edits to the live view do not retroactively change existing shares
+- [ ] A Share can optionally require a password to view (stored hashed; not retrievable)
+- [ ] A Share can optionally expire on a given date; expired shares return a clear "this link has expired" page
+- [ ] A Share can be revoked at any time by the creator or a team admin; revoked links are immediately unusable
+- [ ] A single timeline can host many independent shares simultaneously (e.g., a public Gantt for stakeholders + a password-protected List for contractors)
+- [ ] Share viewers see the chosen view in read-only mode — no drag, no inline edit, no create
+- [ ] Share URLs are unguessable (URL-safe random tokens); password-protected shares additionally rate-limit unlock attempts
+- [ ] Team admins can list, edit, and revoke any share for their team; members can only manage shares they created
+- [ ] Each timeline also exposes a public iCal feed URL (separate from the Share model) containing sanitized event data for calendar app subscription — see Calendar Sync
 
-timeline_access
-  timeline_id, team_member_id, role (admin|member)
-  -- role="admin" represents a Timeline Admin
+### Data Portability
+Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visual** (one-way view exports for sharing offline — PDF / PNG / Markdown).
 
-team_inbound_webhooks
-  id, team_id, provider, token, created_by, created_at
+**Tabular (round-trip):**
+- [ ] Events can be exported to CSV and Excel (.xlsx) from any timeline view
+- [ ] Events can be imported from a CSV or Excel file
+- [ ] A downloadable template file is provided showing the expected import format
+- [ ] Import shows a preview and validation errors before committing
 
-calendar_connections
-  id, user_id, provider (google|caldav),
-  credentials_encrypted, caldav_url,
-  last_synced_at, created_at
-```
-
-### Key Relationships
-
-- An activity belongs to a team and can be assigned to multiple users (`activity_assignments`)
-- An activity can have a parent activity (same team), enabling nesting without a separate Project entity
-- An activity created via an external integration has `is_external=true` and an associated `activity_links` record
-- A timeline is a named date range over a team's events — not a data container
-- Calendar connections are per-user; each user chooses which calendars to sync their events to
-
----
-
-## Data Flow
-
-### Activity Create / Update
-
-1. Client sends REST request → API handler validates and writes to DB
-2. Handler publishes typed event to internal event bus (e.g., `activity.updated`)
-3. Event bus fans out to consumers:
-   - **WebSocket broadcaster** — pushes delta to all connected clients subscribed to that team
-   - **Calendar sync worker** — pushes change to Google Calendar and/or CalDAV for each assigned user who has a connection
-
-### External Connectors (Inbound One-Way Sync)
-
-1. External system (e.g. Asana) pushes a payload to `POST /webhooks/:provider/:token`
-2. Handler verifies the token against `team_inbound_webhooks` to identify the team
-3. Handler parses the payload, finds or creates an activity (setting `is_external=true`), and updates `activity_links`
-4. Publishes `activity.updated` to the event bus → WebSocket broadcast (UI renders block as read-only)
-
-### Inbound Google Calendar Sync
-
-1. Google pushes a webhook notification to `/webhooks/google`
-2. Handler fetches the changed activity from Google Calendar API
-3. Upserts the activity in draba DB (matched on `google_event_id`)
-4. Publishes `activity.updated` to the event bus → WebSocket broadcast
-
-### CalDAV (Inbound from iOS/macOS)
-
-1. Client issues a CalDAV REPORT or PUT to draba's built-in CalDAV endpoint
-2. draba handles the CalDAV protocol natively and writes to DB
-3. Publishes to event bus → WebSocket broadcast + outbound Google sync if connected
-
-### Real-Time
-
-- WebSocket connections are scoped per team
-- On connect, client subscribes to one or more team rooms
-- Server broadcasts JSON delta payloads on `activity.*` and `timeline.*` messages
-
----
-
-## Key Decisions
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Language | Go | Single static binary; easy Docker distribution; excellent concurrency for WebSockets |
-| Database default | SQLite | Zero-config self-hosting — one binary + one file |
-| DB abstraction | Repository pattern | Swap SQLite/MySQL/Postgres without touching business logic |
-| CalDAV | Built-in Go server | No external Radicale dependency; simpler self-hosted story |
-| Calendar sync v1 | Google + CalDAV only | Microsoft is lower priority; adds OAuth complexity for small gain |
-| Frontend | React + TypeScript | Large ecosystem; strong typing; team familiarity |
-| UI library | shadcn/ui + Tailwind CSS | Copy-paste ownership model; Tailwind utility classes; strong shadcn/React ecosystem |
-| API contract | OpenAPI spec in `packages/shared/` | Single source of truth; generate TS types for web |
-| Auth | JWT + email invite flow | Simple, stateless, no OAuth complexity in v1 |
-| Real-time | WebSockets | Lower latency than polling; Go handles many concurrent connections well |
-| Static files | Embedded in Go binary | Single artifact deployment — no separate static server needed |
-| Deployment | Docker container | Zero external dependencies in SQLite mode; ships as one image |
-| Tenancy | One container per customer | Simpler ops and data isolation to start; multi-tenant is a later optimization |
+**Visual (view-shaped, one-way out):**
+- [ ] Gantt → PDF (landscape, paginated by date range) and PNG (single page)
+- [ ] Kanban → PDF (columns side-by-side, paginated when too wide for one page) and PNG
+- [ ] List → CSV, xlsx, Markdown table, and PDF
+- [ ] Calendar → PDF, one page per month / week / day depending on active sub-layout
+- [ ] All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description
+- [ ] All visual exports respect the active filter / sort / group at time of export — the deliverable is "what's on the screen right now"
 
 ---
 
-## Infrastructure
+## Non-Functional Requirements
+- [ ] API response time < 200ms for standard reads under normal load
+- [ ] Real-time updates delivered within 500ms of a change
+- [ ] Self-hosted: runs as a single Docker container with no external service dependencies
+- [ ] Direct binary install is also supported (for users who don't use Docker)
+- [ ] Database: SQLite by default; MySQL/MariaDB and Postgres are supported configuration options
+- [ ] Same Docker artifact deploys to self-hosted and any future cloud offering
+- [ ] All API endpoints are authenticated (except public timeline share links and public iCal feeds)
+- [ ] All secrets, calendar credentials, and API tokens stored encrypted/hashed at rest
 
-### Self-Hosted (v1)
+---
 
-- Single Docker image: `ghcr.io/draba/draba:latest`
-- Configuration via environment variables (DB path, DB type, SMTP, Google OAuth credentials)
-- SQLite: data stored in a mounted volume
-- MySQL/Postgres: point to external DB via connection string env var
-- No external services required in SQLite mode
+## Constraints
+- Must run as a single Docker container with zero required external services (SQLite path)
+- No paid third-party services required for self-hosting
+- Calendar sync credentials and API tokens must never be stored in plaintext
+- No server-side rendering required
 
-### Directory Structure (Go server)
+---
 
-```
-packages/api/
-  cmd/draba/          -- main entry point
-  internal/
-    api/              -- HTTP handlers and routing
-    auth/             -- JWT, invite tokens, password hashing
-    caldav/           -- built-in CalDAV server implementation
-    calendar/         -- Google Calendar sync + CalDAV outbound sync
-    db/               -- repository layer (SQLite/MySQL/Postgres adapters)
-    events/           -- internal event bus
-    models/           -- domain types
-    ws/               -- WebSocket hub and broadcaster
-  migrations/         -- SQL migration files
-```
-
-### CI/CD
-
-- [TBD — GitHub Actions; build + test on PR; publish Docker image on tag]
+## Out of Scope (v1)
+- Microsoft / Outlook / Exchange calendar sync
+- Kanban drag-to-change-status (Kanban is in v1 as a read-only view; interactive status changes via drag are v2)
+- Gantt dependency arrows / critical-path visualization (parent–child grouping is in scope; visual dependency arrows are not)
+- Time tracking or billable hours
+- Task dependencies or critical path
+- Workload balancing or capacity planning
+- Billing or invoicing
+- Automation or rule-based triggers
+- Mobile native apps (web/PWA first)
+- Multi-tenant cloud hosting (self-hosted per-customer to start)
+- SSO / SAML / OAuth login (email + password only for v1)
+- MCP server integration (parking lot — token auth system is designed to support it when ready)
+- CLI binary (parking lot — token auth system is designed to support it when ready)
 ````
 
 ## File: packages/api/internal/api/api_types.gen.go
@@ -21111,260 +21369,54 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
 }
 ````
 
-## File: packages/web/src/types/index.ts
+## File: packages/web/vite.config.ts
 ````typescript
-/**
- * Local UI types and design-token palettes.
- *
- * Wire-format API types come from generated definitions in `packages/shared/`.
- * Only view-state types (computed from API data) live here.
- *
- * ACTIVITY_COLORS and MEMBER_COLORS are now re-exported from identity-constants
- * so there is a single source of truth for the 16-color palette.
- */
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
-export { ACTIVITY_COLORS, MEMBER_COLORS } from '@/components/identity/identity-constants';
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
 
-/** A person who can be assigned to events on a timeline. */
-export interface Member {
-  id: string;
-  name: string;
-  initials: string;
-  /** Hex color for display (e.g. '#288C9B'). Falls back to palette slot when not set. */
-  color: string;
-}
-
-// ── Legacy types — kept for ActivityPanel until Phase 8.2 rewrites it ──────────
-
-/** @deprecated Phase 8.2 will replace this with the API Activity type. */
-export type ActivityStatus = 'planned' | 'in-progress' | 'done';
-
-/** @deprecated Phase 8.2 will replace this with the API Activity type. */
-export interface DrabaActivity {
-  id: string;
-  title: string;
-  memberId: string;
-  startDate: string;
-  endDate: string;
-  startCol: number;
-  span: number;
-  color: string;
-  status: ActivityStatus;
-  notes?: string;
-}
-
-/** @deprecated Phase 8.2 will replace this with resolved team_statuses labels. */
-export const STATUS_LABELS: Record<ActivityStatus, string> = {
-  'planned':     'Planned',
-  'in-progress': 'In progress',
-  'done':        'Done',
-};
-````
-
-## File: docs/REQUIREMENTS.md
-````markdown
-# Requirements
-
-## Product Summary
-draba is a lightweight team coordination and planning tool. It answers one question — **"Who is working on what, and when?"** — without the overhead of a full project management suite. The primary interface is a horizontal timeline grouped by person, where work appears as blocks across time. Teams adopt it in minutes, not weeks.
-
-**Target users:** Small teams of 5–20 people. Marketing, creative, and product teams who need visibility across people and time without tickets, sprints, or dependencies.
-
-**Positioning:** Not a calendar replacement. Not a project management tool. A shared team timeline.
-
----
-
-## Functional Requirements
-
-### Users and Auth
-- [ ] Admins can invite users to a team via email invite link
-- [ ] Invited users register by following the invite link and setting up an account (email + password)
-- [ ] Users have: display name, email, optional avatar
-- [ ] Four levels of participation:
-  - **Team Admins:** Manage the team overall. Can invite new people to the team and can create multiple teams.
-  - **Timeline Admins:** Scoped to specific timelines. Can configure those timelines and add/remove people (from the team) to their timelines.
-  - **Users:** Have a login. Can participate in timelines assigned to them.
-  - **Participants:** Do not have a login. Managed as team members (e.g. contractors) so they can be scheduled on timelines and assigned colors without needing account access.
-- [ ] Users can belong to multiple teams simultaneously
-- [ ] Password reset via email
-
-### API Access Tokens
-Programmatic access (CLI, webhooks, MCP) uses scoped API tokens rather than user passwords.
-
-- [ ] Admins and members can generate named API tokens for their account
-- [ ] Tokens have a configurable permission scope: read-only | add | edit/delete own | edit/delete all
-- [ ] Tokens can be revoked at any time
-- [ ] Token values are shown once at creation and never stored in plaintext (hashed at rest)
-- [ ] CLI, webhook consumers, and MCP integrations authenticate using these tokens
-
-### Teams
-- [ ] Admins can create teams with a name, description, notes, and identity (icon + color)
-- [ ] Admins can edit team name, description, notes, and identity
-- [ ] Admins can invite users to a team by email (one-time invite)
-- [ ] Admins can generate a reusable invite link for a team; anyone with the link can register and join
-- [ ] Admins can revoke or regenerate the reusable invite link
-- [ ] Admins can add existing registered users to a team
-- [ ] Admins can remove members from a team (cannot remove the last admin)
-- [ ] Admins can promote a member to team admin or demote to member
-- [ ] Admins can create participants (login-less team members) who can be assigned to activities but don't have draba accounts
-- [ ] Teams can be archived (hidden from active views, data preserved, restorable)
-- [ ] Teams have a name, description, notes, identity, and a list of members
-
-### Members
-- [ ] Each team member has a display name, identity (icon + color), and a role (admin, member, or participant)
-- [ ] Admins can edit any member's display name, identity, and role
-- [ ] Members can edit their own display name and identity
-- [ ] Members can be inactivated (access disabled, data preserved, reversible) — uses the same archive pattern as other entities but displayed as "Inactivate" in the UI
-- [ ] Inactivated members cannot log in; their activity assignments are preserved
-- [ ] Super admins can promote any non-participant member to super admin status
-- [ ] Super admins can inactivate or delete user accounts (delete only when no active activities and single team)
-- [ ] Each member has computed stats: timeline counts (active/archived), activity counts (past due, running, upcoming, unscheduled, archived) — date-relative, not status-relative
-
-### Activities
-Activities are the core data object — a block of time assigned to one or more people.
-
-- [ ] Activities have: title, start date/time, end date/time, description/notes, status, percent complete, tags, icon, color, assigned people (one or more)
-- [ ] Activities can have a parent activity (another event within the same team), enabling simple nesting (e.g., "Launch Week" contains "Design Review")
-- [ ] Activities store all standard CalDAV VEVENT fields natively (UID, DTSTART, DTEND, SUMMARY, DESCRIPTION, LOCATION, URL, RRULE, etc.) so no information is lost in sync
-- [ ] Activities support recurrence rules (RRULE) from CalDAV/Google
-- [ ] Activities are scoped to a team
-- [ ] Activities can be archived (hidden from active views but not deleted; recoverable)
-
-### Timelines
-Timelines are named viewing windows — a name and a date range — scoped to a team. They are not data containers; they are views over the team's activities.
-
-- [ ] Teams can create multiple timelines, including overlapping ones
-- [ ] Each timeline has: name, start date, end date
-- [ ] Team membership controls who can view a timeline by default; team admins implicitly access all timelines, members require an explicit access grant (see RBAC in Phase 8.0)
-- [ ] Timelines can be archived (removed from active list but preserved; recoverable)
-- [ ] External / public visibility is handled via the **Shares** model (below) — a timeline is not inherently "public" or "restricted"; it becomes externally visible only via a share link the team explicitly creates
-
-### Timeline Views
-The primary view is a Gantt chart. Additional views display the same underlying activities in different formats.
-
-- [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per activity, bars span their date range; see `docs/design/UX_PATTERNS.md`
-  - A **timeline sub-toolbar** sits between the top bar and the grid. It provides:
-    - **Zoom** — variable column width (day granularity, zoom in/out)
-    - **Group by** — controls how activity rows are organized:
-      - _None_ — flat list, sorted by the active sort key
-      - _Member_ — one labeled section per assigned team member; events with multiple assignees appear under their primary assignee
-      - _Parent activity_ — root activities shown first; child events (those with `parentActivityId` set) indented beneath their parent
-    - **Sort by** — Start date (default), End date, Title A–Z
-    - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
-- [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
-- [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of activities; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many activities at once.
-- [ ] **Kanban view** — read-only; columns = statuses (in the team's configured status order); cards = activities, color-coded by assigned person(s); multiple assignees shown as stacked color indicators. This is a viewing mode only — dragging cards to change status is out of scope for v1.
-- [ ] View switcher in the timeline header to toggle between available views
-- [ ] Each view persists its own toolbar state per timeline (group / sort / zoom / column visibility / filter preset) via user preferences
-
-> **Note:** Kanban is intentionally read-only in v1; drag-to-change-status is a later addition once the status model is proven.
-
-### Team Configuration
-Admins can customize team-level settings that apply to all members and views.
-
-**Statuses**
-- [ ] Each team has a configurable list of statuses (name + color)
-- [ ] Default statuses created when a team is created: `Planned`, `In Progress`, `Done`
-- [ ] Admins can add, rename, reorder, and delete statuses
-- [ ] Statuses have a display order that controls column order in Kanban view and sort order in dropdowns
-- [ ] At least one status must always exist (cannot delete the last one)
-- [ ] Deleting a status requires choosing a replacement status for any events currently using it
-- [ ] Status color is used as the column header color in Kanban view
-
-**Member Colors**
-- [ ] Each team member has a display color, used to color-code their events in Kanban view and any other person-first views
-- [ ] Admin can set member colors; members can also set their own
-- [ ] Default color is auto-assigned from a preset palette on invite acceptance
-
-### Real-Time Collaboration
-- [ ] Multiple users can view and edit the same timeline simultaneously
-- [ ] Changes (event create, update, delete) appear in real-time for all connected users
-- [ ] No last-write-wins data loss — changes are applied and broadcast immediately
-
-### Calendar Sync
-- [ ] Users can connect a personal Google Calendar account (OAuth 2.0) for two-way sync of their assigned events
-- [ ] Users can connect a personal CalDAV account (iOS/macOS Calendar, Fastmail, Thunderbird, etc.) for two-way sync
-- [ ] draba implements a built-in CalDAV endpoint — Apple Calendar users point their app directly at the draba server
-- [ ] Outbound sync: when an event is created/updated/deleted in draba, changes push to all connected personal calendars for assigned users
-- [ ] Inbound sync: changes made in Google Calendar trigger a webhook that updates draba
-- [ ] **Team read-only feed:** each timeline exposes a subscribable iCal/CalDAV URL that any calendar app can subscribe to for a read-only view of all team events in that timeline
-- [ ] Public iCal/Google Calendar feeds include only basic event info (title, date range, assigned people) — notes and internal fields are stripped
-- [ ] Microsoft/Outlook sync is explicitly out of scope for v1
-
-### External Connectors (e.g. Asana, Aha!)
-- [ ] Draba supports a one-way, read-only inbound feed from external systems of record.
-- [ ] Teams can generate unique inbound Webhook URLs to paste into Asana, Jira, etc.
-- [ ] External events appear alongside hand-crafted Draba events in the timeline and Gantt views.
-- [ ] Events generated via connectors are marked as "read-only" in Draba — users cannot change dates or properties via the Draba UI (they must change them in Asana).
-- [ ] The event card links back to the original source URL.
-
-### Sharing and Public Access
-Sharing in draba is a first-class entity, not a property of a timeline. A **Share** is a frozen pairing of `{ timeline + view type + view configuration + optional password + optional expiry }`. One timeline can have many shares, each tuned for a different audience.
-
-- [ ] A Share captures: the source timeline, the view type (Gantt / List / Calendar / Kanban), and a snapshot of the view's configuration at creation time (filter, sort, group, zoom, column visibility, etc.)
-- [ ] The view-config snapshot is **frozen** at creation — later edits to the live view do not retroactively change existing shares
-- [ ] A Share can optionally require a password to view (stored hashed; not retrievable)
-- [ ] A Share can optionally expire on a given date; expired shares return a clear "this link has expired" page
-- [ ] A Share can be revoked at any time by the creator or a team admin; revoked links are immediately unusable
-- [ ] A single timeline can host many independent shares simultaneously (e.g., a public Gantt for stakeholders + a password-protected List for contractors)
-- [ ] Share viewers see the chosen view in read-only mode — no drag, no inline edit, no create
-- [ ] Share URLs are unguessable (URL-safe random tokens); password-protected shares additionally rate-limit unlock attempts
-- [ ] Team admins can list, edit, and revoke any share for their team; members can only manage shares they created
-- [ ] Each timeline also exposes a public iCal feed URL (separate from the Share model) containing sanitized event data for calendar app subscription — see Calendar Sync
-
-### Data Portability
-Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visual** (one-way view exports for sharing offline — PDF / PNG / Markdown).
-
-**Tabular (round-trip):**
-- [ ] Events can be exported to CSV and Excel (.xlsx) from any timeline view
-- [ ] Events can be imported from a CSV or Excel file
-- [ ] A downloadable template file is provided showing the expected import format
-- [ ] Import shows a preview and validation errors before committing
-
-**Visual (view-shaped, one-way out):**
-- [ ] Gantt → PDF (landscape, paginated by date range) and PNG (single page)
-- [ ] Kanban → PDF (columns side-by-side, paginated when too wide for one page) and PNG
-- [ ] List → CSV, xlsx, Markdown table, and PDF
-- [ ] Calendar → PDF, one page per month / week / day depending on active sub-layout
-- [ ] All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description
-- [ ] All visual exports respect the active filter / sort / group at time of export — the deliverable is "what's on the screen right now"
-
----
-
-## Non-Functional Requirements
-- [ ] API response time < 200ms for standard reads under normal load
-- [ ] Real-time updates delivered within 500ms of a change
-- [ ] Self-hosted: runs as a single Docker container with no external service dependencies
-- [ ] Direct binary install is also supported (for users who don't use Docker)
-- [ ] Database: SQLite by default; MySQL/MariaDB and Postgres are supported configuration options
-- [ ] Same Docker artifact deploys to self-hosted and any future cloud offering
-- [ ] All API endpoints are authenticated (except public timeline share links and public iCal feeds)
-- [ ] All secrets, calendar credentials, and API tokens stored encrypted/hashed at rest
-
----
-
-## Constraints
-- Must run as a single Docker container with zero required external services (SQLite path)
-- No paid third-party services required for self-hosting
-- Calendar sync credentials and API tokens must never be stored in plaintext
-- No server-side rendering required
-
----
-
-## Out of Scope (v1)
-- Microsoft / Outlook / Exchange calendar sync
-- Kanban drag-to-change-status (Kanban is in v1 as a read-only view; interactive status changes via drag are v2)
-- Gantt dependency arrows / critical-path visualization (parent–child grouping is in scope; visual dependency arrows are not)
-- Time tracking or billable hours
-- Task dependencies or critical path
-- Workload balancing or capacity planning
-- Billing or invoicing
-- Automation or rule-based triggers
-- Mobile native apps (web/PWA first)
-- Multi-tenant cloud hosting (self-hosted per-customer to start)
-- SSO / SAML / OAuth login (email + password only for v1)
-- MCP server integration (parking lot — token auth system is designed to support it when ready)
-- CLI binary (parking lot — token auth system is designed to support it when ready)
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
 ````
 
 ## File: packages/web/src/components/gantt/GanttToolbar.tsx
@@ -21583,54 +21635,54 @@ export default function GanttToolbar({
 }
 ````
 
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
+## File: packages/api/Dockerfile
+````
+# ── Web builder ──
+FROM node:22-alpine AS web-builder
+RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /workspace
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/web/package.json packages/web/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install --frozen-lockfile
+COPY packages/web packages/web
+COPY packages/shared packages/shared
+RUN pnpm --filter @draba/web build
 
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+# ── Go dependency cache ──
+FROM golang:1.25-alpine AS go-deps
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
 
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
+# ── Production builder — embeds web dist into the Go binary ──
+FROM go-deps AS builder
+COPY packages/api/ .
+COPY --from=web-builder /workspace/packages/web/dist ./ui/static
+RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
+
+# ── Dev stage (used by docker-compose for hot reload) ──
+# Source is provided by the docker-compose volume mount, not baked in here —
+# baking it in caused Air to see a spurious "change" on first mount and restart.
+FROM golang:1.25-alpine AS dev
+RUN go install github.com/air-verse/air@latest
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+CMD ["air", "-c", ".air.toml"]
+
+# ── Production stage ──
+FROM alpine:3.21 AS prod
+RUN apk add --no-cache ca-certificates \
+    && addgroup -g 1000 draba \
+    && adduser -u 1000 -G draba -s /bin/sh -D draba \
+    && mkdir -p /data \
+    && chown draba:draba /data
+COPY --from=builder /draba /usr/local/bin/draba
+WORKDIR /data
+USER draba
+EXPOSE 8080
+CMD ["draba"]
 ````
 
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
@@ -23275,56 +23327,6 @@ func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
 	}
 	return &t, nil
 }
-````
-
-## File: packages/api/Dockerfile
-````
-# ── Web builder ──
-FROM node:22-alpine AS web-builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
-WORKDIR /workspace
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/web/package.json packages/web/
-COPY packages/shared/package.json packages/shared/
-RUN pnpm install --frozen-lockfile
-COPY packages/web packages/web
-COPY packages/shared packages/shared
-RUN pnpm --filter @draba/web build
-
-# ── Go dependency cache ──
-FROM golang:1.25-alpine AS go-deps
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-
-# ── Production builder — embeds web dist into the Go binary ──
-FROM go-deps AS builder
-COPY packages/api/ .
-COPY --from=web-builder /workspace/packages/web/dist ./ui/static
-RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
-
-# ── Dev stage (used by docker-compose for hot reload) ──
-# Source is provided by the docker-compose volume mount, not baked in here —
-# baking it in caused Air to see a spurious "change" on first mount and restart.
-FROM golang:1.25-alpine AS dev
-RUN go install github.com/air-verse/air@latest
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-CMD ["air", "-c", ".air.toml"]
-
-# ── Production stage ──
-FROM alpine:3.21 AS prod
-RUN apk add --no-cache ca-certificates \
-    && addgroup -g 1000 draba \
-    && adduser -u 1000 -G draba -s /bin/sh -D draba \
-    && mkdir -p /data \
-    && chown draba:draba /data
-COPY --from=builder /draba /usr/local/bin/draba
-WORKDIR /data
-USER draba
-EXPOSE 8080
-CMD ["draba"]
 ````
 
 ## File: packages/api/go.mod
