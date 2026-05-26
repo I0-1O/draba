@@ -141,7 +141,7 @@ function DashboardShell() {
   const { data: teamMembers = [] } = useTeamMembers(teamId)
   const userId = (user as { id?: string } | null)?.id ?? ''
   const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
-  const canEditTeam = teamMembers.some(m => m.userId === userId && m.role === 'admin')
+  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
 
   const handleSelectTeam = useCallback((id: string) => {
     setActiveTeamId(id)

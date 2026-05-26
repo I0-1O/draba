@@ -156,6 +156,21 @@ func (r *TeamRepo) ListByUserID(userID string, includeArchived bool) ([]*models.
 	return teams, nil
 }
 
+// ListAll returns every team in the system, optionally including archived ones.
+// Used by superadmin callers who need visibility across all teams.
+func (r *TeamRepo) ListAll(includeArchived bool) ([]*models.Team, error) {
+	teams := make([]*models.Team, 0)
+	query := `SELECT * FROM teams`
+	if !includeArchived {
+		query += ` WHERE archived_at IS NULL`
+	}
+	query += ` ORDER BY created_at ASC`
+	if err := r.db.Select(&teams, query); err != nil {
+		return nil, fmt.Errorf("listing all teams: %w", err)
+	}
+	return teams, nil
+}
+
 // Count returns the total number of teams.
 func (r *TeamRepo) Count() (int, error) {
 	var count int

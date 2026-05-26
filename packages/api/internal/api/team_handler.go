@@ -19,7 +19,20 @@ var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
 func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromContext(r.Context())
 	includeArchived := r.URL.Query().Get("archived") == "true"
-	teams, err := s.teams.ListByUserID(claims.UserID, includeArchived)
+
+	// Superadmins see all teams system-wide, not just the ones they belong to.
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list teams")
+		return
+	}
+
+	var teams []*models.Team
+	if caller.IsSuperadmin {
+		teams, err = s.teams.ListAll(includeArchived)
+	} else {
+		teams, err = s.teams.ListByUserID(claims.UserID, includeArchived)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list teams")
 		return

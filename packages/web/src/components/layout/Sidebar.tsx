@@ -371,7 +371,7 @@ function MemberSidebarRow({ displayName, color, isInactive = false, onEdit }: Me
       <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
         {displayName}
       </span>
-      {onEdit && hovered && (
+      {onEdit && (
         <button
           onClick={e => { e.stopPropagation(); onEdit(); }}
           title={`Edit ${displayName}`}
@@ -380,6 +380,9 @@ function MemberSidebarRow({ displayName, color, isInactive = false, onEdit }: Me
             width: 22, height: 22, marginRight: 6,
             background: 'none', border: 'none', borderRadius: 4,
             color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            pointerEvents: hovered ? 'auto' : 'none',
           }}
           onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
           onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
