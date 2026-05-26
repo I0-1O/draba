@@ -222,7 +222,6 @@ packages/
         utils.ts
       pages/
         settings/
-          AdminPage.tsx
           AdminUsersPage.tsx
           AiKeysPage.tsx
           CommunicationPage.tsx
@@ -273,6 +272,23 @@ README.md
 
 # Files
 
+## File: .claude/commands/build-phase.md
+````markdown
+Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or "Phase 1").
+
+1. Read the phase's scope and exit criteria from ROADMAP.md.
+2. Find the corresponding tasks in docs/TASKS.md.
+3. Read any referenced docs (ARCHITECTURE.md, CONVENTIONS.md, REQUIREMENTS.md) relevant to this phase before writing any code.
+4. Update the phase status in ROADMAP.md from ⬜ to 🔄 before starting work.
+5. Implement every task in the phase's scope, following CONVENTIONS.md throughout.
+6. After implementation: run `golangci-lint run` (Go) and/or `pnpm --filter web lint` (web), run tests, and verify every exit criterion from ROADMAP.md is met. Suggest running `/test-phase <N>` and `/review-phase <N>` to fan the verification out across subagents in parallel.
+7. Check off completed items in TASKS.md.
+8. Update the phase status in ROADMAP.md:
+   - If all exit criteria pass: ✅ Done, add the completion date.
+   - If any exit criterion fails or needs manual verification: mark 🔄 In Progress and add a note listing what still needs review.
+9. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
+````
+
 ## File: .claude/commands/new-feature.md
 ````markdown
 Read docs/REQUIREMENTS.md and docs/TASKS.md.
@@ -282,11 +298,73 @@ Follow the patterns in docs/CONVENTIONS.md.
 After implementation, run tests and lint.
 ````
 
+## File: .claude/commands/review-phase.md
+````markdown
+Run the diff review for the phase specified in $ARGUMENTS (e.g. "2" or "Phase 2").
+
+1. Read `docs/REVIEW.md` and the phase's section in `docs/ROADMAP.md` so you know the scope you're reviewing against.
+
+2. Identify the diff to review:
+   - Default: `git diff main...HEAD` (everything on the current branch since main).
+   - If the user passes a base ref (e.g. `/review-phase 2 v0.2.0`), diff against that instead.
+
+3. Spawn these subagents **in parallel** via the Agent tool:
+   - **scope-review** (`general-purpose`): given the phase's ROADMAP scope and the diff, list anything outside scope. Cite `file:line`.
+   - **security-review** (`general-purpose`): apply the Security section of `docs/REVIEW.md` to the diff. Look for secrets, auth gaps, SQL concat, plaintext passwords, hardcoded JWT secrets.
+   - **convention-review** (`Explore`): apply CONVENTIONS.md + the Conventions & docs section of `docs/REVIEW.md`. Flag style and doc-update misses.
+   - **test-coverage-review** (`Explore`): for each new code path in the diff, check whether a test exercises it. Flag uncovered paths.
+
+   Each agent must return findings as `severity | file:line | one-line rationale`, with severities `blocker / suggestion / nit`. Under 300 words per agent.
+
+4. Merge findings into a single report grouped by severity (blockers first). Drop empty severity groups.
+
+5. Print the report to the user. If there are blockers, recommend they be addressed before flipping the phase status to ✅. Do not modify source code, do not commit, do not flip ROADMAP status.
+````
+
 ## File: .claude/commands/review.md
 ````markdown
 Review the current git diff.
 Check for: convention violations (see docs/CONVENTIONS.md), missing tests, type safety issues, and error handling gaps.
 Summarize findings and suggest fixes.
+````
+
+## File: .claude/commands/test-phase.md
+````markdown
+Run the automated test suite for the phase specified in $ARGUMENTS (e.g. "2" or "Phase 2").
+
+1. Read `docs/TESTING.md` end-to-end. Identify the subagents whose "active from" phase is ≤ the target phase. Read each per-phase section from Phase 1 through the target phase (regression — earlier phases must still pass).
+
+2. Resolve the live-smoke target URL in this priority order:
+   - `DRABA_TEST_URL` env var
+   - The `reference_test_docker.md` memory entry
+   - If neither is available, mark live-smoke subagents as **skipped** for this run.
+
+   Also resolve `DRABA_TEST_INVITE_TOKEN` (env or memory). If it is missing, the `api-smoke` subagent should skip the register-flow assertions and run only the auth-required flows that don't need fresh registration.
+
+2a. **Reset the live test environment.** Before running live-smoke subagents:
+   - Run `ssh draba-test` (the SSH alias is pinned to the reset wrapper via `authorized_keys command=`, so no command argument is needed). Confirm output ends with "Done."
+   - If SSH fails or the alias is not configured, **stop and ask the user to run `scripts/reset-test-env.sh` on the docker host**, then resume when they confirm. Do not proceed with live smoke against a dirty DB.
+   - Skip this entire step if no live-smoke subagents are active for the target phase.
+
+3. Spawn the active subagents **in parallel** via the Agent tool (single message, multiple Agent calls). Each agent prompt must:
+   - State which subagent role it is (`static-check`, `unit-test`, `schema-check`, `api-smoke`, `security-review`, etc.)
+   - Quote the exact assertions from `docs/TESTING.md` for the target phase + all prior phases relevant to its role
+   - Pass the resolved smoke URL when applicable
+   - Request a concise pass/fail report (under 300 words) with file:line citations for any failure
+
+4. Aggregate results into a single table — columns: subagent | status (pass / fail / skipped) | summary. Print blockers first, then failures, then skips, then passes.
+
+5. If any subagent failed, stop here — do not append to the log. Surface the failures to the user with concrete next steps.
+
+6. If all active subagents passed (or skipped cleanly), append a dated entry to `docs/log.md`:
+   ```
+   ## YYYY-MM-DD — /test-phase N
+   - Subagents run: <list>
+   - Result: all pass (or: N pass, M skip)
+   - Smoke target: <url or "skipped">
+   ```
+
+7. Report the table back to the user. Do not modify any source code.
 ````
 
 ## File: docs/design/preview/colors-brand.html
@@ -937,6 +1015,54 @@ Summarize findings and suggest fixes.
 </html>
 ````
 
+## File: docs/REVIEW.md
+````markdown
+# Review Checklist
+
+Used by `/review-phase` (and human reviewers) when evaluating the diff for a completed phase. For test procedures, see [TESTING.md](TESTING.md).
+
+## Scope
+- Diff stays inside the phase's ROADMAP scope. Out-of-scope changes are flagged for a separate PR.
+- No new features, abstractions, or refactors that the phase did not call for.
+- No premature generalization (no "future-proof" hooks, configs, or interfaces with only one caller).
+
+## Correctness
+- Every ROADMAP exit criterion for the phase is verifiable from the diff or a test.
+- Error handling at boundaries (HTTP, DB, external APIs) only — internal calls trust contracts.
+- No silent failures: errors are returned, logged at the right level, or both.
+
+## Security
+- No secrets, tokens, or host-specific values in the diff (grep for `epcot.lan`, `8081`, `BEGIN PRIVATE KEY`, `password =`).
+- New routes wired through auth middleware unless explicitly public.
+- Authorization checked, not just authentication (team membership, ownership).
+- No SQL string concatenation; parameterized queries only.
+- Password handling uses the project's hash helper; never stored or logged in plaintext.
+
+## Data
+- Migrations are forward-only and idempotent (re-run is a no-op).
+- No destructive migrations without explicit acknowledgement in the commit message.
+
+## Tests
+- New code paths have at least one test, OR the diff documents why not.
+- Tests use real SQLite (in-memory is fine), not mocks of the DB layer.
+- No `t.Skip` or commented-out assertions left in.
+
+## Conventions & docs
+- CONVENTIONS.md style followed (naming, file layout, error wrapping).
+- Comments explain *why*, not *what*. No tutorial-style docstrings.
+- Public API changes reflected in OpenAPI spec (Phase 4+).
+- `docs/log.md` has a dated entry for this phase's work.
+- `docs/ROADMAP.md` and `docs/TASKS.md` reflect the new status.
+
+## Hygiene
+- No `console.log`, `fmt.Println`, or debugger statements left behind.
+- No commented-out code blocks.
+- No unused imports, vars, or files.
+
+## Output format
+`/review-phase` should report findings as a table grouped by severity: **blocker / suggestion / nit**. Each finding cites a `file:line` and a one-line rationale. Empty categories are omitted.
+````
+
 ## File: packages/api/internal/db/migrations/001_initial_schema.sql
 ````sql
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1147,6 +1273,41 @@ func Migrate(database *sqlx.DB) error {
 	}
 
 	return nil
+}
+````
+
+## File: packages/api/internal/tier/registry.go
+````go
+package tier
+
+import "net/http"
+
+// ModuleContext is the surface exposed to pro modules at registration time.
+// Pro modules mount their routes on Mux and may inspect Tier for capability gating.
+type ModuleContext struct {
+	Mux  *http.ServeMux
+	Tier Tier
+}
+
+// Module is implemented by each pro module package. Modules self-register
+// via their init() function using Register, following the side-effect import pattern:
+//
+//	import _ "github.com/you/draba-pro/sso"
+type Module interface {
+	Name() string
+	Register(*ModuleContext) error
+}
+
+var registered []Module
+
+// Register adds a module to the registry. Call from init() in the pro module package.
+func Register(m Module) {
+	registered = append(registered, m)
+}
+
+// Registered returns all modules added via Register.
+func Registered() []Module {
+	return registered
 }
 ````
 
@@ -1646,85 +1807,6 @@ Apache License
 ````yaml
 packages:
   - "packages/*"
-````
-
-## File: .claude/commands/build-phase.md
-````markdown
-Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or "Phase 1").
-
-1. Read the phase's scope and exit criteria from ROADMAP.md.
-2. Find the corresponding tasks in docs/TASKS.md.
-3. Read any referenced docs (ARCHITECTURE.md, CONVENTIONS.md, REQUIREMENTS.md) relevant to this phase before writing any code.
-4. Update the phase status in ROADMAP.md from ⬜ to 🔄 before starting work.
-5. Implement every task in the phase's scope, following CONVENTIONS.md throughout.
-6. After implementation: run `golangci-lint run` (Go) and/or `pnpm --filter web lint` (web), run tests, and verify every exit criterion from ROADMAP.md is met. Suggest running `/test-phase <N>` and `/review-phase <N>` to fan the verification out across subagents in parallel.
-7. Check off completed items in TASKS.md.
-8. Update the phase status in ROADMAP.md:
-   - If all exit criteria pass: ✅ Done, add the completion date.
-   - If any exit criterion fails or needs manual verification: mark 🔄 In Progress and add a note listing what still needs review.
-9. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
-````
-
-## File: .claude/commands/review-phase.md
-````markdown
-Run the diff review for the phase specified in $ARGUMENTS (e.g. "2" or "Phase 2").
-
-1. Read `docs/REVIEW.md` and the phase's section in `docs/ROADMAP.md` so you know the scope you're reviewing against.
-
-2. Identify the diff to review:
-   - Default: `git diff main...HEAD` (everything on the current branch since main).
-   - If the user passes a base ref (e.g. `/review-phase 2 v0.2.0`), diff against that instead.
-
-3. Spawn these subagents **in parallel** via the Agent tool:
-   - **scope-review** (`general-purpose`): given the phase's ROADMAP scope and the diff, list anything outside scope. Cite `file:line`.
-   - **security-review** (`general-purpose`): apply the Security section of `docs/REVIEW.md` to the diff. Look for secrets, auth gaps, SQL concat, plaintext passwords, hardcoded JWT secrets.
-   - **convention-review** (`Explore`): apply CONVENTIONS.md + the Conventions & docs section of `docs/REVIEW.md`. Flag style and doc-update misses.
-   - **test-coverage-review** (`Explore`): for each new code path in the diff, check whether a test exercises it. Flag uncovered paths.
-
-   Each agent must return findings as `severity | file:line | one-line rationale`, with severities `blocker / suggestion / nit`. Under 300 words per agent.
-
-4. Merge findings into a single report grouped by severity (blockers first). Drop empty severity groups.
-
-5. Print the report to the user. If there are blockers, recommend they be addressed before flipping the phase status to ✅. Do not modify source code, do not commit, do not flip ROADMAP status.
-````
-
-## File: .claude/commands/test-phase.md
-````markdown
-Run the automated test suite for the phase specified in $ARGUMENTS (e.g. "2" or "Phase 2").
-
-1. Read `docs/TESTING.md` end-to-end. Identify the subagents whose "active from" phase is ≤ the target phase. Read each per-phase section from Phase 1 through the target phase (regression — earlier phases must still pass).
-
-2. Resolve the live-smoke target URL in this priority order:
-   - `DRABA_TEST_URL` env var
-   - The `reference_test_docker.md` memory entry
-   - If neither is available, mark live-smoke subagents as **skipped** for this run.
-
-   Also resolve `DRABA_TEST_INVITE_TOKEN` (env or memory). If it is missing, the `api-smoke` subagent should skip the register-flow assertions and run only the auth-required flows that don't need fresh registration.
-
-2a. **Reset the live test environment.** Before running live-smoke subagents:
-   - Run `ssh draba-test` (the SSH alias is pinned to the reset wrapper via `authorized_keys command=`, so no command argument is needed). Confirm output ends with "Done."
-   - If SSH fails or the alias is not configured, **stop and ask the user to run `scripts/reset-test-env.sh` on the docker host**, then resume when they confirm. Do not proceed with live smoke against a dirty DB.
-   - Skip this entire step if no live-smoke subagents are active for the target phase.
-
-3. Spawn the active subagents **in parallel** via the Agent tool (single message, multiple Agent calls). Each agent prompt must:
-   - State which subagent role it is (`static-check`, `unit-test`, `schema-check`, `api-smoke`, `security-review`, etc.)
-   - Quote the exact assertions from `docs/TESTING.md` for the target phase + all prior phases relevant to its role
-   - Pass the resolved smoke URL when applicable
-   - Request a concise pass/fail report (under 300 words) with file:line citations for any failure
-
-4. Aggregate results into a single table — columns: subagent | status (pass / fail / skipped) | summary. Print blockers first, then failures, then skips, then passes.
-
-5. If any subagent failed, stop here — do not append to the log. Surface the failures to the user with concrete next steps.
-
-6. If all active subagents passed (or skipped cleanly), append a dated entry to `docs/log.md`:
-   ```
-   ## YYYY-MM-DD — /test-phase N
-   - Subagents run: <list>
-   - Result: all pass (or: N pass, M skip)
-   - Smoke target: <url or "skipped">
-   ```
-
-7. Report the table back to the user. Do not modify any source code.
 ````
 
 ## File: .github/workflows/ci.yml
@@ -6061,52 +6143,229 @@ ALTER TABLE activity_assignments RENAME TO event_assignments;
 **Take a DB backup before applying migration 005.** This is the one irreversible step if you don't have a backup.
 ````
 
-## File: docs/REVIEW.md
+## File: docs/TESTING.md
 ````markdown
-# Review Checklist
+# Testing & Review Procedures
 
-Used by `/review-phase` (and human reviewers) when evaluating the diff for a completed phase. For test procedures, see [TESTING.md](TESTING.md).
+This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
 
-## Scope
-- Diff stays inside the phase's ROADMAP scope. Out-of-scope changes are flagged for a separate PR.
-- No new features, abstractions, or refactors that the phase did not call for.
-- No premature generalization (no "future-proof" hooks, configs, or interfaces with only one caller).
+For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
 
-## Correctness
-- Every ROADMAP exit criterion for the phase is verifiable from the diff or a test.
-- Error handling at boundaries (HTTP, DB, external APIs) only — internal calls trust contracts.
-- No silent failures: errors are returned, logged at the right level, or both.
+---
 
-## Security
-- No secrets, tokens, or host-specific values in the diff (grep for `epcot.lan`, `8081`, `BEGIN PRIVATE KEY`, `password =`).
-- New routes wired through auth middleware unless explicitly public.
-- Authorization checked, not just authentication (team membership, ownership).
-- No SQL string concatenation; parameterized queries only.
-- Password handling uses the project's hash helper; never stored or logged in plaintext.
+## Test environment setup (manual, do once per host)
 
-## Data
-- Migrations are forward-only and idempotent (re-run is a no-op).
-- No destructive migrations without explicit acknowledgement in the commit message.
+These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
 
-## Tests
-- New code paths have at least one test, OR the diff documents why not.
-- Tests use real SQLite (in-memory is fine), not mocks of the DB layer.
-- No `t.Skip` or commented-out assertions left in.
+### Step 1 — One-time host prep (manual)
+On the docker host, as the `draba-test` user (created in the SSH setup steps below):
 
-## Conventions & docs
-- CONVENTIONS.md style followed (naming, file layout, error wrapping).
-- Comments explain *why*, not *what*. No tutorial-style docstrings.
-- Public API changes reflected in OpenAPI spec (Phase 4+).
-- `docs/log.md` has a dated entry for this phase's work.
-- `docs/ROADMAP.md` and `docs/TASKS.md` reflect the new status.
+1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
+2. Create `~/.draba-test.env` (chmod 600) with:
+   ```
+   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
+   DRABA_TEST_ADMIN_EMAIL=test-admin@local
+   DRABA_TEST_INVITE_EMAIL=invitee@local
+   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
+   DRABA_CONTAINER=draba
+   ```
+   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
+   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
 
-## Hygiene
-- No `console.log`, `fmt.Println`, or debugger statements left behind.
-- No commented-out code blocks.
-- No unused imports, vars, or files.
+### Step 2 — Per-run reset (manual or SSH-driven)
+Before each `/test-phase` run that needs a clean DB, run on the docker host:
+```bash
+./scripts/reset-test-env.sh
+```
+This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
 
-## Output format
-`/review-phase` should report findings as a table grouped by severity: **blocker / suggestion / nit**. Each finding cites a `file:line` and a one-line rationale. Empty categories are omitted.
+### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
+On the machine where you run Claude (this Windows box):
+- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
+- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
+- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
+
+### What's manual vs automated, at a glance
+
+| Step | Where it runs | Who does it |
+|---|---|---|
+| Host prep (Step 1) | Docker host | **You, once** |
+| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
+| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
+| API smoke against live container | Dev box → live container | Claude |
+| Logging the run to `docs/log.md` | Dev box | Claude |
+
+---
+
+## Global procedures
+
+These run regardless of phase.
+
+### Static checks
+- `cd packages/api && golangci-lint run`
+- `cd packages/api && go vet ./...`
+- `pnpm --filter web lint`
+- `pnpm --filter web build`
+
+### Unit & integration
+- `cd packages/api && go test -count=1 ./...`
+- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
+
+### Live smoke target
+Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
+1. `DRABA_TEST_URL` environment variable, if set.
+2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
+3. If neither is available, the subagent reports **skipped**, not failed.
+
+### Review checklist (always)
+- CONVENTIONS.md compliance
+- No scope creep beyond the phase's ROADMAP entry
+- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
+- No secrets, no `.env` files, no host-specific values committed
+- Migrations idempotent (re-run produces no diff)
+- `docs/log.md` updated with a dated entry
+
+---
+
+## Subagent map
+
+| Subagent | Scope | Active from |
+|---|---|---|
+| `static-check` | lint + vet + web typecheck/build | Phase 1 |
+| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
+| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
+| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
+| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
+| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
+| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
+| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
+
+---
+
+## Per-phase procedures
+
+### Phase 1 — Project Infrastructure
+
+**static-check**
+- `go build ./...` from `packages/api/` succeeds with no errors
+- `pnpm build` from `packages/web/` succeeds
+- `golangci-lint run` is clean
+- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
+
+### Phase 2 — API Foundation (DB & Auth)
+
+**unit-test**
+- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
+- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
+  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
+  - `Validate` rejects a token signed with a different secret (tampered signature)
+  - `Validate` rejects an expired token
+  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
+  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
+  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
+- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
+  - `GetValid` returns `sql.ErrNoRows` for an expired invite
+  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
+
+**schema-check**
+- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
+- Restart the container; assert migration runner produces no schema changes (idempotency)
+
+**api-smoke** (against `$DRABA_TEST_URL`)
+- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
+- `POST /auth/register` with an invalid/missing invite token → 4xx
+- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
+- `POST /auth/login` with the registered credentials → 200, returns JWT
+- `POST /auth/login` with a non-existent email → 401
+- `POST /auth/login` with bad credentials → 401
+- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
+- `POST /auth/refresh` with an access token (wrong type) → 401
+- `POST /auth/refresh` with a token signed by a different secret → 401
+- A subsequent authenticated request with the issued JWT → 200 (validates signing)
+
+**security-review**
+- No password fields stored in plaintext (grep migrations + handlers)
+- JWT secret loaded from env/config, not hardcoded
+- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
+- No SQL string concatenation in queries
+
+### Phase 3 — Core API (Events & Teams)
+
+**api-smoke**
+- `POST /teams` → returns team (201 Created)
+- `GET /teams/:id` with member token → 200 OK, returns team
+- `GET /teams/:id` with non-member token → 403 Forbidden
+- `POST /teams/:id/invites` → returns invite token (201 Created)
+- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
+- `POST /teams/:id/events`, then `GET /teams/:id/events?from=…&to=…` returns it (200 OK)
+- `PATCH /events/:id` updates fields (200 OK); `DELETE /events/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
+- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
+- Authz: a user not on the team cannot read or mutate that team's events (403 Forbidden)
+- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
+
+**security-review**
+- Every new route requires auth middleware
+- Team membership enforced on every team-scoped endpoint
+
+### Phase 4 — OpenAPI Spec & Type Generation
+
+**type-sync**
+- `pnpm generate` succeeds with no errors
+- `git diff` after generate is empty (committed types match spec)
+- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
+
+### Phase 5 — Real-Time (WebSocket)
+
+**unit-test**
+- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
+- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
+- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
+
+**ws-smoke**
+- Two clients on team A both receive a delta within 500ms of an event mutation
+- A client on team B does not receive team A's events
+- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
+  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
+
+### Phase 6 — Timelines
+
+**unit-test**
+- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
+  - Grant access then revoke; `HasAccess` returns false after revoke
+  - Revoking access that was never granted is a no-op (no error)
+- `timeline_repo.ListByTeam` — unit test needed:
+  - Returns all non-archived timelines for a team in descending creation order
+  - Returns empty slice (not error) when team has no timelines
+
+**api-smoke**
+- `POST /teams/:id/timelines` with JWT → 201 Created
+- `GET /timelines/:id` with JWT (user on access list) → 200 OK
+- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
+- `GET /timelines/share/:token` → 200 OK without requiring auth
+
+### Phase 7 — Web — Scaffold
+
+**web-e2e**
+- Navigating to protected routes unauthenticated redirects to `/login`
+- Successful login redirects to the main app view and stores the token
+- TanStack Query successfully fetches team/event data from the API
+- WebSocket client successfully connects and maintains a heartbeat
+
+**Known gap — frontend component unit tests**
+No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
+
+### Phase 8+ — Web
+
+*Stubs.* Detailed assertions added when each phase begins.
+
+---
+
+## Adding tests for a new phase
+
+1. Find the phase's section in this file (or add one if missing).
+2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
+3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
+4. That's it — `/test-phase` will pick it up on the next run.
 ````
 
 ## File: packages/api/internal/api/activity_handler.go
@@ -6498,231 +6757,6 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 		Payload: map[string]string{"id": activityID},
 	})
 	w.WriteHeader(http.StatusNoContent)
-}
-````
-
-## File: packages/api/internal/api/admin_handler.go
-````go
-package api
-
-import (
-	"encoding/json"
-	"net/http"
-
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-)
-
-// requireSuperadmin is a shared guard for admin endpoints. Returns false
-// and writes a 403 if the caller is not a superadmin.
-func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
-		return false
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return false
-	}
-	return true
-}
-
-// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
-// with the password masked. Superadmin-only.
-func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	cfg, err := s.mailer.LoadConfig()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
-		return
-	}
-	if cfg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
-		return
-	}
-
-	// Mask the password in the response.
-	masked := *cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
-// validates it by sending a test email to the caller's address. Superadmin-only.
-func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
-		return
-	}
-
-	// Fetch caller email for the validation test.
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
-		return
-	}
-
-	// Validate by sending a test email before persisting.
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed: "+err.Error())
-		return
-	}
-
-	if err := s.mailer.SaveConfig(&cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
-		return
-	}
-
-	masked := cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
-// provided config without persisting it. Superadmin-only.
-func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
-		return
-	}
-
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed: "+err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
-}
-
-// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
-// Superadmin-only.
-func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-	if err := s.mailer.DeleteConfig(); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
-// defaults. Superadmin-only.
-func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name"}
-	settings := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := s.instanceSets.Get(k)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
-			return
-		}
-		settings[k] = v
-	}
-
-	// Apply defaults for missing keys.
-	if settings["registration_policy"] == "" {
-		settings["registration_policy"] = "invite_only"
-	}
-	if settings["default_timezone"] == "" {
-		settings["default_timezone"] = "UTC"
-	}
-	if settings["default_date_format"] == "" {
-		settings["default_date_format"] = "MMM D, YYYY"
-	}
-	if settings["default_week_start"] == "" {
-		settings["default_week_start"] = "monday"
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
-}
-
-// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
-// instance-level settings. Superadmin-only.
-func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var body map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Validate known keys and values.
-	allowed := map[string]bool{
-		"registration_policy": true,
-		"default_timezone":    true,
-		"default_date_format": true,
-		"default_week_start":  true,
-		"instance_name":       true,
-	}
-	for k := range body {
-		if !allowed[k] {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
-			return
-		}
-	}
-	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
-		return
-	}
-	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
-		return
-	}
-
-	for k, v := range body {
-		if err := s.instanceSets.Set(k, v); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
-}
-
-func smtpTestBody() string {
-	return `<html><body>
-<p>This is a test email from <strong>draba</strong>.</p>
-<p>If you received this, your SMTP configuration is working correctly.</p>
-</body></html>`
 }
 ````
 
@@ -8169,242 +8203,116 @@ func (r *UserPreferenceRepo) Upsert(p *models.UserPreference) error {
 }
 ````
 
-## File: packages/api/internal/mailer/mailer.go
+## File: packages/api/internal/tier/enforce.go
 ````go
-// Package mailer sends email via SMTP. Configuration is read from
-// instance_settings at send time so changes take effect without a restart.
-// When SMTP is not configured, Send returns nil (not an error) so callers
-// can treat "no mailer" as a no-op — the forgot-password flow still returns
-// 200 to prevent email enumeration.
-package mailer
+package tier
 
-import (
-	"crypto/tls"
-	"encoding/json"
-	"fmt"
-	"log/slog"
-	"net/smtp"
-	"strings"
+import "errors"
+
+// Sentinel errors returned when a tier limit would be exceeded. Handlers
+// translate these into HTTP 402 (Payment Required) responses.
+var (
+	ErrUserLimitReached = errors.New("user limit reached for current tier")
+	ErrTeamLimitReached = errors.New("team limit reached for current tier")
 )
 
-// SMTPConfig holds the full SMTP configuration for the instance.
-type SMTPConfig struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	Username   string `json:"username"`
-	Password   string `json:"password"` // stored encrypted in instance_settings; decrypted before use
-	FromName   string `json:"fromName"`
-	FromEmail  string `json:"fromEmail"`
-	Encryption string `json:"encryption"` // "none" | "tls" | "starttls"
-}
-
-// SettingsReader is the subset of InstanceSettingsRepo used by Mailer.
-type SettingsReader interface {
-	Get(key string) (string, error)
-	Set(key, value string) error
-}
-
-// Mailer sends email via SMTP. The zero value is valid; calling Send on an
-// unconfigured Mailer is a no-op.
-type Mailer struct {
-	settings SettingsReader
-}
-
-// New returns a Mailer that reads config from settings at send time.
-func New(settings SettingsReader) *Mailer {
-	return &Mailer{settings: settings}
-}
-
-// LoadConfig reads the SMTP configuration from instance_settings.
-// Returns nil when SMTP has not been configured.
-func (m *Mailer) LoadConfig() (*SMTPConfig, error) {
-	raw, err := m.settings.Get("smtp_config")
-	if err != nil {
-		return nil, fmt.Errorf("loading smtp config: %w", err)
-	}
-	if raw == "" {
-		return nil, nil
-	}
-	var cfg SMTPConfig
-	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return nil, fmt.Errorf("parsing smtp config: %w", err)
-	}
-	return &cfg, nil
-}
-
-// IsConfigured reports whether SMTP has been set up.
-func (m *Mailer) IsConfigured() bool {
-	cfg, err := m.LoadConfig()
-	return err == nil && cfg != nil && cfg.Host != ""
-}
-
-// SaveConfig serialises cfg and stores it in instance_settings.
-func (m *Mailer) SaveConfig(cfg *SMTPConfig) error {
-	b, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("serialising smtp config: %w", err)
-	}
-	return m.settings.Set("smtp_config", string(b))
-}
-
-// DeleteConfig removes the SMTP configuration.
-func (m *Mailer) DeleteConfig() error {
-	return m.settings.Set("smtp_config", "")
-}
-
-// Send sends a plain-text / HTML email to a single recipient.
-// Returns nil without sending when SMTP is not configured.
-func (m *Mailer) Send(to, subject, htmlBody string) error {
-	cfg, err := m.LoadConfig()
-	if err != nil {
-		slog.Warn("mailer: failed to load config", "err", err)
-		return nil
-	}
-	if cfg == nil || cfg.Host == "" {
-		slog.Debug("mailer: no smtp config — email skipped", "to", to, "subject", subject)
-		return nil
-	}
-
-	return sendViaConfig(cfg, to, subject, htmlBody)
-}
-
-// SendWithConfig sends using an explicit config object, bypassing the stored
-// config. Used by the SMTP test endpoint before saving.
-func SendWithConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
-	return sendViaConfig(cfg, to, subject, htmlBody)
-}
-
-func sendViaConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
-	from := fmt.Sprintf("%s <%s>", cfg.FromName, cfg.FromEmail)
-	msg := buildMessage(from, to, subject, htmlBody)
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-
-	switch strings.ToLower(cfg.Encryption) {
-	case "tls":
-		return sendTLS(cfg, addr, from, to, msg)
-	case "starttls":
-		return sendSTARTTLS(cfg, addr, from, to, msg)
-	default:
-		return sendPlain(cfg, addr, from, to, msg)
-	}
-}
-
-func buildMessage(from, to, subject, htmlBody string) string {
-	var b strings.Builder
-	b.WriteString("From: " + from + "\r\n")
-	b.WriteString("To: " + to + "\r\n")
-	b.WriteString("Subject: " + subject + "\r\n")
-	b.WriteString("MIME-Version: 1.0\r\n")
-	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
-	b.WriteString("\r\n")
-	b.WriteString(htmlBody)
-	return b.String()
-}
-
-func sendPlain(cfg *SMTPConfig, addr, from, to, msg string) error {
-	var auth smtp.Auth
-	if cfg.Username != "" {
-		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-	}
-	if err := smtp.SendMail(addr, auth, cfg.FromEmail, []string{to}, []byte(msg)); err != nil {
-		return fmt.Errorf("smtp send: %w", err)
+// CheckUserLimit returns ErrUserLimitReached when adding one more user
+// would exceed this tier's MaxUsers. A MaxUsers of 0 is unlimited.
+func (t Tier) CheckUserLimit(currentCount int) error {
+	if l := t.Limits(); l.MaxUsers != 0 && currentCount >= l.MaxUsers {
+		return ErrUserLimitReached
 	}
 	return nil
 }
 
-func sendTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
-	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; ServerName ensures cert validation
-	conn, err := tls.Dial("tcp", addr, tlsCfg)
-	if err != nil {
-		return fmt.Errorf("smtp tls dial: %w", err)
+// CheckTeamLimit returns ErrTeamLimitReached when adding one more team
+// would exceed this tier's MaxTeams. A MaxTeams of 0 is unlimited.
+func (t Tier) CheckTeamLimit(currentCount int) error {
+	if l := t.Limits(); l.MaxTeams != 0 && currentCount >= l.MaxTeams {
+		return ErrTeamLimitReached
 	}
-	defer conn.Close()
-
-	c, err := smtp.NewClient(conn, cfg.Host)
-	if err != nil {
-		return fmt.Errorf("smtp new client: %w", err)
-	}
-	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
-
-	if cfg.Username != "" {
-		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
-		}
-	}
-	return doSend(c, cfg.FromEmail, to, msg)
-}
-
-func sendSTARTTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
-	c, err := smtp.Dial(addr)
-	if err != nil {
-		return fmt.Errorf("smtp dial: %w", err)
-	}
-	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
-
-	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; this is standard TLS
-	if err := c.StartTLS(tlsCfg); err != nil {
-		return fmt.Errorf("smtp starttls: %w", err)
-	}
-	if cfg.Username != "" {
-		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
-		}
-	}
-	return doSend(c, cfg.FromEmail, to, msg)
-}
-
-func doSend(c *smtp.Client, from, to, msg string) error {
-	if err := c.Mail(from); err != nil {
-		return fmt.Errorf("smtp MAIL: %w", err)
-	}
-	if err := c.Rcpt(to); err != nil {
-		return fmt.Errorf("smtp RCPT: %w", err)
-	}
-	w, err := c.Data()
-	if err != nil {
-		return fmt.Errorf("smtp DATA: %w", err)
-	}
-	if _, err := fmt.Fprint(w, msg); err != nil {
-		return fmt.Errorf("smtp write body: %w", err)
-	}
-	return w.Close()
+	return nil
 }
 ````
 
-## File: packages/api/internal/tier/registry.go
+## File: packages/api/internal/tier/tier.go
 ````go
+// Package tier defines the deployment tiers (Unlimited, Team, Business,
+// Enterprise) and the per-tier limits and capability gates the API enforces.
+// Pro modules register through this package so they can read the active Tier
+// at startup. See registry.go for the module registration contract.
 package tier
 
-import "net/http"
+import (
+	"fmt"
+	"os"
+)
 
-// ModuleContext is the surface exposed to pro modules at registration time.
-// Pro modules mount their routes on Mux and may inspect Tier for capability gating.
-type ModuleContext struct {
-	Mux  *http.ServeMux
-	Tier Tier
+// Tier is a deployment tier identifier. The zero value (empty string) is
+// Unlimited, which is what self-hosted/free installs run as.
+type Tier string
+
+const (
+	Unlimited  Tier = ""
+	Team       Tier = "team"
+	Business   Tier = "business"
+	Enterprise Tier = "enterprise"
+)
+
+// Limits holds the maximums for a tier. 0 means unlimited.
+type Limits struct {
+	MaxUsers int
+	MaxTeams int
 }
 
-// Module is implemented by each pro module package. Modules self-register
-// via their init() function using Register, following the side-effect import pattern:
-//
-//	import _ "github.com/you/draba-pro/sso"
-type Module interface {
-	Name() string
-	Register(*ModuleContext) error
+var tierLimits = map[Tier]Limits{
+	Unlimited:  {MaxUsers: 0, MaxTeams: 0},
+	Team:       {MaxUsers: 5, MaxTeams: 1},
+	Business:   {MaxUsers: 15, MaxTeams: 3},
+	Enterprise: {MaxUsers: 0, MaxTeams: 0},
 }
 
-var registered []Module
-
-// Register adds a module to the registry. Call from init() in the pro module package.
-func Register(m Module) {
-	registered = append(registered, m)
+// tierOrder is used by AtLeast to compare capability levels.
+var tierOrder = map[Tier]int{
+	Unlimited:  0,
+	Team:       1,
+	Business:   2,
+	Enterprise: 3,
 }
 
-// Registered returns all modules added via Register.
-func Registered() []Module {
-	return registered
+// Load reads DRABA_TIER from the environment. Unset returns Unlimited.
+// An unrecognised value is an error — fail closed, don't silently default.
+func Load() (Tier, error) {
+	v := os.Getenv("DRABA_TIER")
+	if v == "" {
+		return Unlimited, nil
+	}
+	t := Tier(v)
+	if _, ok := tierLimits[t]; !ok {
+		return "", fmt.Errorf("unknown DRABA_TIER %q: must be team, business, or enterprise", v)
+	}
+	return t, nil
+}
+
+// Limits returns the user/team caps for this tier. Unknown tiers return
+// the zero value, which is interpreted as "unlimited".
+func (t Tier) Limits() Limits {
+	return tierLimits[t]
+}
+
+// AtLeast reports whether t is at least as capable as other.
+// Unlimited (self-host, free) is the lowest; Enterprise is the highest.
+func (t Tier) AtLeast(other Tier) bool {
+	return tierOrder[t] >= tierOrder[other]
+}
+
+// String returns the tier name for logs and error messages. Unlimited
+// renders as "unlimited" rather than the empty string.
+func (t Tier) String() string {
+	if t == Unlimited {
+		return "unlimited"
+	}
+	return string(t)
 }
 ````
 
@@ -9603,1032 +9511,6 @@ export function cn(...inputs: ClassValue[]) {
 }
 ````
 
-## File: packages/web/src/pages/settings/AdminUsersPage.tsx
-````typescript
-/**
- * /settings/users — Superadmin: view and search all users; orphaned-user alert.
- */
-
-import { useState } from 'react'
-import { useAdminUsers } from '@/hooks/useSettings'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { Input } from '@/components/ui/input'
-import { AlertTriangle } from 'lucide-react'
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-export default function AdminUsersPage() {
-  const [orphanedOnly, setOrphanedOnly] = useState(false)
-  const [search, setSearch] = useState('')
-  const { data: allData, error: allError } = useAdminUsers(false)
-  const { data: orphanData } = useAdminUsers(true)
-
-  const allUsers = allData?.users ?? []
-  const orphanedCount = orphanData?.users.length ?? 0
-  const displayed = (orphanedOnly ? orphanData?.users ?? [] : allUsers)
-    .filter(u => {
-      if (!search) return true
-      const q = search.toLowerCase()
-      return u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
-    })
-
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Users</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        All accounts in this organization. Use team management to assign or remove memberships.
-      </p>
-
-      <div style={sectionStyle}>
-        {orphanedCount > 0 && !orphanedOnly && (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 10,
-            padding: '10px 14px', marginBottom: 16,
-            background: 'rgba(210,153,34,0.1)', border: '1px solid rgba(210,153,34,0.3)',
-            borderRadius: 8,
-          }}>
-            <AlertTriangle size={16} style={{ color: '#d2993a', flexShrink: 0 }} />
-            <span style={{ fontSize: 13, color: '#d2993a' }}>
-              {orphanedCount} user{orphanedCount > 1 ? 's' : ''} with no team memberships.
-            </span>
-            <button
-              onClick={() => setOrphanedOnly(true)}
-              style={{ marginLeft: 'auto', fontSize: 12, color: '#d2993a', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
-            >
-              View
-            </button>
-          </div>
-        )}
-
-        {allError && (
-        <div style={{
-          padding: '12px 16px', marginBottom: 16,
-          background: 'rgba(248,81,73,0.1)', border: '1px solid rgba(248,81,73,0.3)',
-          borderRadius: 8, fontSize: 13, color: '#f85149',
-        }}>
-          Failed to load users. This endpoint requires the Phase 10.1.3 backend — rebuild and redeploy the Docker container.
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
-          <Input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search by name or email…"
-            style={{ maxWidth: 300 }}
-          />
-          <div style={{ display: 'flex', gap: 4 }}>
-            {[
-              { label: `All (${allUsers.length})`, v: false },
-              { label: `Orphaned (${orphanedCount})`, v: true },
-            ].map(({ label, v }) => (
-              <button
-                key={String(v)}
-                onClick={() => setOrphanedOnly(v)}
-                style={{
-                  padding: '6px 12px', borderRadius: 6, fontSize: 12, border: '1px solid',
-                  borderColor: orphanedOnly === v ? '#58a6ff' : '#30363d',
-                  background: orphanedOnly === v ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: orphanedOnly === v ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer',
-                }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {displayed.length === 0 ? (
-          <p style={{ fontSize: 13, color: '#8b949e' }}>No users found.</p>
-        ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr>
-                {['User', 'Email', 'Teams', 'Status'].map(h => (
-                  <th key={h} style={{ textAlign: 'left', fontSize: 11, color: '#8b949e', fontWeight: 600, padding: '0 8px 10px', letterSpacing: '0.4px' }}>
-                    {h.toUpperCase()}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {displayed.map(u => (
-                <tr key={u.id} style={{ borderTop: '1px solid #21262d' }}>
-                  <td style={{ padding: '10px 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <Badge identity={{ color: u.color ?? '#288C9B', icon: u.icon ?? '__none__' } satisfies Identity} name={u.displayName} size={28} shape="circle" />
-                    <span style={{ fontSize: 13, color: '#e6edf3' }}>{u.displayName}</span>
-                    {u.isSuperadmin && (
-                      <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'rgba(88,166,255,0.15)', color: '#58a6ff' }}>
-                        superadmin
-                      </span>
-                    )}
-                  </td>
-                  <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.email}</td>
-                  <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.teamCount}</td>
-                  <td style={{ padding: '10px 8px' }}>
-                    {u.archivedAt ? (
-                      <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(248,81,73,0.15)', color: '#f85149' }}>
-                        Inactive
-                      </span>
-                    ) : (
-                      <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(63,185,80,0.15)', color: '#3fb950' }}>
-                        Active
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/AiKeysPage.tsx
-````typescript
-/**
- * /settings/ai — Superadmin: AI / LLM API key configuration.
- * Stub for Phase 10.1.3 — key storage and model wiring are deferred.
- */
-
-import { Sparkles } from 'lucide-react'
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-export default function AiKeysPage() {
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>AI / LLM Keys</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Connect AI providers to enable AI-assisted features in draba.
-      </p>
-
-      <div style={sectionStyle}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-          <div style={{ width: 40, height: 40, borderRadius: 10, background: 'rgba(88,166,255,0.1)', border: '1px solid rgba(88,166,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Sparkles size={18} style={{ color: '#58a6ff' }} />
-          </div>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>AI features coming soon</div>
-            <div style={{ fontSize: 12, color: '#8b949e', marginTop: 2 }}>Configure an API key when AI functionality is available.</div>
-          </div>
-        </div>
-
-        <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 16 }}>
-          When AI features are enabled, you'll be able to add API keys for providers such as Anthropic, OpenAI, and others. Keys are stored encrypted and used only for organization-wide AI requests.
-        </p>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {['Anthropic (Claude)', 'OpenAI (GPT)', 'Google (Gemini)', 'Custom / self-hosted'].map(provider => (
-            <div
-              key={provider}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '12px 16px',
-                borderRadius: 8,
-                border: '1px solid #30363d',
-                background: '#161b22',
-                opacity: 0.5,
-              }}
-            >
-              <span style={{ fontSize: 13, color: '#e6edf3' }}>{provider}</span>
-              <span style={{ fontSize: 11, color: '#8b949e', padding: '2px 8px', borderRadius: 4, border: '1px solid #30363d' }}>
-                Not configured
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/CommunicationPage.tsx
-````typescript
-/**
- * /settings/communication — Superadmin: email / SMTP configuration.
- */
-
-import { useState, useEffect } from 'react'
-import { useAdminSMTP, useSaveSMTP, useTestSMTP, useDeleteSMTP } from '@/hooks/useSettings'
-import type { components } from '@draba/shared'
-import { ApiError } from '@/lib/api'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-import { Eye, EyeOff } from 'lucide-react'
-
-type SMTPConfig = components['schemas']['SMTPConfig']
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-const selectStyle: React.CSSProperties = {
-  background: '#161b22',
-  border: '1px solid #30363d',
-  borderRadius: 6,
-  color: '#e6edf3',
-  padding: '8px 12px',
-  fontSize: 13,
-  cursor: 'pointer',
-}
-
-export default function CommunicationPage() {
-  const { data } = useAdminSMTP()
-  const saveSMTP = useSaveSMTP()
-  const testSMTP = useTestSMTP()
-  const deleteSMTP = useDeleteSMTP()
-
-  const [host, setHost] = useState('')
-  const [port, setPort] = useState('587')
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [fromName, setFromName] = useState('')
-  const [fromEmail, setFromEmail] = useState('')
-  const [encryption, setEncryption] = useState<'none' | 'tls' | 'starttls'>('starttls')
-  const [showPw, setShowPw] = useState(false)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-  const [testState, setTestState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
-
-  useEffect(() => {
-    const cfg = data?.smtp
-    if (cfg) {
-      setHost(cfg.host ?? '')
-      setPort(String(cfg.port ?? 587))
-      setUsername(cfg.username ?? '')
-      setFromName(cfg.fromName ?? '')
-      setFromEmail(cfg.fromEmail ?? '')
-      setEncryption((cfg.encryption as 'none' | 'tls' | 'starttls') ?? 'starttls')
-    }
-  }, [data])
-
-  function buildConfig(): SMTPConfig {
-    return { host, port: parseInt(port, 10), username, password, fromName, fromEmail, encryption }
-  }
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await saveSMTP.mutateAsync(buildConfig())
-      setFeedback({ type: 'success', msg: 'SMTP settings saved and validated.' })
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to save SMTP settings.'
-      setFeedback({ type: 'error', msg })
-    }
-  }
-
-  async function handleTest() {
-    setTestState('sending')
-    try {
-      const res = await testSMTP.mutateAsync(buildConfig())
-      setTestState('sent')
-      setFeedback({ type: 'success', msg: `Test email sent to ${res.to}` })
-    } catch (err) {
-      setTestState('failed')
-      const msg = err instanceof ApiError ? err.message : 'SMTP test failed.'
-      setFeedback({ type: 'error', msg })
-    }
-    setTimeout(() => setTestState('idle'), 3000)
-  }
-
-  async function handleDelete() {
-    await deleteSMTP.mutateAsync()
-    setHost(''); setPort('587'); setUsername(''); setPassword('')
-    setFromName(''); setFromEmail(''); setEncryption('starttls')
-    setFeedback({ type: 'success', msg: 'SMTP configuration cleared.' })
-  }
-
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Communication</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Configure outbound email for password resets and invitations.
-      </p>
-
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-          SMTP / Email
-        </h3>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-          <div style={fieldStyle}>
-            <Label style={{ color: '#e6edf3' }}>SMTP host</Label>
-            <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
-          </div>
-          <div style={fieldStyle}>
-            <Label style={{ color: '#e6edf3' }}>Port</Label>
-            <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
-          </div>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Username</Label>
-          <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" style={{ maxWidth: 360 }} />
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Password</Label>
-          <div style={{ position: 'relative', maxWidth: 360 }}>
-            <Input
-              type={showPw ? 'text' : 'password'}
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              placeholder="••••••••"
-            />
-            <button
-              onClick={() => setShowPw(v => !v)}
-              style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer' }}
-            >
-              {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
-            </button>
-          </div>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-          <div style={fieldStyle}>
-            <Label style={{ color: '#e6edf3' }}>From name</Label>
-            <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
-          </div>
-          <div style={fieldStyle}>
-            <Label style={{ color: '#e6edf3' }}>From email</Label>
-            <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
-          </div>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Encryption</Label>
-          <select
-            value={encryption}
-            onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
-            style={{ ...selectStyle, maxWidth: 200 }}
-          >
-            <option value="none">None</option>
-            <option value="tls">TLS</option>
-            <option value="starttls">STARTTLS</option>
-          </select>
-        </div>
-
-        {feedback && (
-          <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
-            {feedback.msg}
-          </p>
-        )}
-
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
-            {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
-          </Button>
-          <Button variant="outline" onClick={handleTest} disabled={testSMTP.isPending || !host}>
-            {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
-          </Button>
-          {data?.smtp && (
-            <Button variant="ghost" style={{ color: '#f85149' }} onClick={handleDelete}>
-              Clear config
-            </Button>
-          )}
-        </div>
-        <p style={{ fontSize: 12, color: '#8b949e', marginTop: 12 }}>
-          When SMTP is not configured, password resets and email invitations are unavailable.
-        </p>
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/OrganizationPage.tsx
-````typescript
-/**
- * /settings/organization — Superadmin: organization name, registration policy,
- * and system-wide defaults (language, timezone, week start).
- */
-
-import { useState, useEffect } from 'react'
-import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-const selectStyle: React.CSSProperties = {
-  background: '#161b22',
-  border: '1px solid #30363d',
-  borderRadius: 6,
-  color: '#e6edf3',
-  padding: '8px 12px',
-  fontSize: 13,
-  cursor: 'pointer',
-}
-
-export default function OrganizationPage() {
-  const { data } = useAdminSettings()
-  const patch = usePatchAdminSettings()
-
-  const settings = data?.settings ?? {}
-  const [orgName, setOrgName] = useState('')
-  const [regPolicy, setRegPolicy] = useState('invite_only')
-  const [timezone, setTimezone] = useState('UTC')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setOrgName(settings.instance_name || '')
-    setRegPolicy(settings.registration_policy || 'invite_only')
-    setTimezone(settings.default_timezone || 'UTC')
-    setWeekStart(settings.default_week_start || 'monday')
-  }, [JSON.stringify(settings)])
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await patch.mutateAsync({
-        instance_name: orgName,
-        registration_policy: regPolicy,
-        default_timezone: timezone,
-        default_week_start: weekStart,
-      })
-      setFeedback({ type: 'success', msg: 'Settings saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Organization</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        System-wide identity and defaults for this draba installation.
-      </p>
-
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-          Identity
-        </h3>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Organization name</Label>
-          <Input
-            value={orgName}
-            onChange={e => setOrgName(e.target.value)}
-            placeholder="My Company"
-            style={{ maxWidth: 320 }}
-          />
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
-            Shown in the browser tab title and login page.
-          </p>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Registration policy</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {[
-              { v: 'invite_only', label: 'Invite only' },
-              { v: 'open', label: 'Open registration' },
-            ].map(({ v, label }) => (
-              <button
-                key={v}
-                onClick={() => setRegPolicy(v)}
-                style={{
-                  padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
-                  borderColor: regPolicy === v ? '#58a6ff' : '#30363d',
-                  background: regPolicy === v ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: regPolicy === v ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer',
-                }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-          System defaults
-        </h3>
-        <p style={{ fontSize: 12, color: '#8b949e', marginBottom: 16 }}>
-          Applied to new accounts when the user hasn't set their own preference.
-        </p>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Default language</Label>
-          <select style={{ ...selectStyle, maxWidth: 240, opacity: 0.6, cursor: 'not-allowed' }} disabled>
-            <option value="en">English (en)</option>
-          </select>
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
-            Additional languages coming in a future release.
-          </p>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Default timezone</Label>
-          <select value={timezone} onChange={e => setTimezone(e.target.value)} style={{ ...selectStyle, maxWidth: 280 }}>
-            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Default week starts on</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                style={{
-                  padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
-                  borderColor: weekStart === d ? '#58a6ff' : '#30363d',
-                  background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: weekStart === d ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer', textTransform: 'capitalize',
-                }}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {feedback && (
-        <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
-          {feedback.msg}
-        </p>
-      )}
-      <Button onClick={handleSave} disabled={patch.isPending}>
-        {patch.isPending ? 'Saving…' : 'Save settings'}
-      </Button>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/SecurityPage.tsx
-````typescript
-/**
- * /settings/security — Change password form.
- */
-
-import { useState } from 'react'
-import { useChangePassword } from '@/hooks/useSettings'
-import { ApiError } from '@/lib/api'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-export default function SecurityPage() {
-  const changePassword = useChangePassword()
-
-  const [current, setCurrent] = useState('')
-  const [next, setNext] = useState('')
-  const [confirm, setConfirm] = useState('')
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  const mismatch = next !== confirm && confirm !== ''
-  const tooShort = next.length > 0 && next.length < 8
-  const canSave = current !== '' && next.length >= 8 && next === confirm
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!canSave) return
-    setFeedback(null)
-    try {
-      await changePassword.mutateAsync({ currentPassword: current, newPassword: next })
-      setFeedback({ type: 'success', msg: 'Password updated successfully.' })
-      setCurrent('')
-      setNext('')
-      setConfirm('')
-    } catch (err) {
-      const code = err instanceof ApiError ? err.code : ''
-      const msg =
-        code === 'WRONG_PASSWORD'
-          ? 'Current password is incorrect.'
-          : err instanceof ApiError
-          ? err.message
-          : 'Failed to change password.'
-      setFeedback({ type: 'error', msg })
-    }
-  }
-
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Security</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Update your password. You'll need to enter your current password to confirm the change.
-      </p>
-
-      <div style={sectionStyle}>
-        <form onSubmit={handleSubmit}>
-          <div style={fieldStyle}>
-            <Label htmlFor="currentPw" style={{ color: '#e6edf3' }}>Current password</Label>
-            <Input
-              id="currentPw"
-              type="password"
-              value={current}
-              onChange={e => setCurrent(e.target.value)}
-              autoComplete="current-password"
-              style={{ maxWidth: 360 }}
-            />
-          </div>
-
-          <div style={fieldStyle}>
-            <Label htmlFor="newPw" style={{ color: '#e6edf3' }}>New password</Label>
-            <Input
-              id="newPw"
-              type="password"
-              value={next}
-              onChange={e => setNext(e.target.value)}
-              autoComplete="new-password"
-              style={{ maxWidth: 360, borderColor: tooShort ? '#f85149' : undefined }}
-            />
-            {tooShort && (
-              <p style={{ fontSize: 12, color: '#f85149', margin: 0 }}>
-                Password must be at least 8 characters.
-              </p>
-            )}
-          </div>
-
-          <div style={fieldStyle}>
-            <Label htmlFor="confirmPw" style={{ color: '#e6edf3' }}>Confirm new password</Label>
-            <Input
-              id="confirmPw"
-              type="password"
-              value={confirm}
-              onChange={e => setConfirm(e.target.value)}
-              autoComplete="new-password"
-              style={{ maxWidth: 360, borderColor: mismatch ? '#f85149' : undefined }}
-            />
-            {mismatch && (
-              <p style={{ fontSize: 12, color: '#f85149', margin: 0 }}>Passwords don't match.</p>
-            )}
-          </div>
-
-          {feedback && (
-            <p style={{
-              fontSize: 13,
-              color: feedback.type === 'success' ? '#3fb950' : '#f85149',
-              marginBottom: 12,
-            }}>
-              {feedback.msg}
-            </p>
-          )}
-
-          <Button type="submit" disabled={!canSave || changePassword.isPending}>
-            {changePassword.isPending ? 'Updating…' : 'Update password'}
-          </Button>
-        </form>
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/TokensPage.tsx
-````typescript
-/**
- * /settings/tokens — API token management. Create, list, and revoke tokens.
- * The raw token value is shown exactly once on creation.
- */
-
-import { useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { createAuthFetch, ApiError } from '@/lib/api'
-import type { components } from '@draba/shared'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-import { Key, Copy, Check, Trash2 } from 'lucide-react'
-
-type APIToken = components['schemas']['APIToken']
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-function useTokens() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: ['tokens'],
-    queryFn: () => authFetch<APIToken[]>('/tokens'),
-  })
-}
-
-function useCreateToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (data: { name: string; scope: string }) =>
-      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
-
-function useRevokeToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) =>
-      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
-
-const SCOPES: { value: string; label: string; desc: string }[] = [
-  { value: 'read', label: 'Read-only', desc: 'Can read data but not create or modify.' },
-  { value: 'add', label: 'Add', desc: 'Can create new activities and timelines.' },
-  { value: 'edit_own', label: 'Edit own', desc: 'Can edit activities created by this user.' },
-  { value: 'edit_all', label: 'Edit all', desc: 'Full read-write access.' },
-]
-
-function relativeTime(dateStr: string) {
-  const ms = Date.now() - new Date(dateStr).getTime()
-  const days = Math.floor(ms / 86400000)
-  if (days === 0) return 'today'
-  if (days === 1) return 'yesterday'
-  if (days < 30) return `${days} days ago`
-  const months = Math.floor(days / 30)
-  return `${months} month${months > 1 ? 's' : ''} ago`
-}
-
-export default function TokensPage() {
-  const { data: tokens = [], isLoading } = useTokens()
-  const createToken = useCreateToken()
-  const revokeToken = useRevokeToken()
-
-  const [showCreate, setShowCreate] = useState(false)
-  const [name, setName] = useState('')
-  const [scope, setScope] = useState('read')
-  const [newSecret, setNewSecret] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null)
-
-  const activeTokens = tokens.filter(t => !t.revokedAt)
-
-  async function handleCreate() {
-    setError(null)
-    try {
-      const result = await createToken.mutateAsync({ name: name.trim(), scope })
-      setNewSecret(result.rawValue)
-      setName('')
-      setScope('read')
-      setShowCreate(false)
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Failed to create token.')
-    }
-  }
-
-  async function handleCopy() {
-    if (!newSecret) return
-    await navigator.clipboard.writeText(newSecret)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
-
-  async function handleRevoke(id: string) {
-    await revokeToken.mutateAsync(id)
-    setConfirmRevoke(null)
-  }
-
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>API Tokens</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Long-lived tokens for programmatic access. The raw value is shown once — copy it before closing.
-      </p>
-
-      {/* One-time secret reveal */}
-      {newSecret && (
-        <div style={{ ...sectionStyle, borderColor: '#238636', background: 'rgba(35,134,54,0.1)', marginBottom: 20 }}>
-          <p style={{ fontSize: 13, color: '#3fb950', marginBottom: 12, fontWeight: 600 }}>
-            Token created — copy it now, it won't be shown again.
-          </p>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <code style={{
-              flex: 1, padding: '8px 12px', background: '#0d1117',
-              borderRadius: 6, fontSize: 12, color: '#e6edf3',
-              border: '1px solid #30363d', wordBreak: 'break-all',
-            }}>
-              {newSecret}
-            </code>
-            <Button size="sm" variant="outline" onClick={handleCopy} style={{ gap: 6, minWidth: 80 }}>
-              {copied ? <Check size={14} /> : <Copy size={14} />}
-              {copied ? 'Copied!' : 'Copy'}
-            </Button>
-          </div>
-          <Button
-            size="sm"
-            variant="ghost"
-            style={{ marginTop: 12, color: '#8b949e' }}
-            onClick={() => setNewSecret(null)}
-          >
-            Dismiss
-          </Button>
-        </div>
-      )}
-
-      {/* Token list */}
-      <div style={sectionStyle}>
-        {isLoading ? (
-          <p style={{ fontSize: 13, color: '#8b949e' }}>Loading…</p>
-        ) : activeTokens.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '24px 0' }}>
-            <Key size={32} style={{ color: '#30363d', marginBottom: 12 }} />
-            <p style={{ fontSize: 13, color: '#8b949e' }}>No API tokens yet.</p>
-          </div>
-        ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr>
-                {['Name', 'Scope', 'Last used', 'Created', ''].map(h => (
-                  <th key={h} style={{ textAlign: 'left', fontSize: 11, color: '#8b949e', fontWeight: 600, padding: '0 0 10px', letterSpacing: '0.4px' }}>
-                    {h.toUpperCase()}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {activeTokens.map(tok => (
-                <tr key={tok.id} style={{ borderTop: '1px solid #21262d' }}>
-                  <td style={{ padding: '12px 0', fontSize: 13, color: '#e6edf3', fontWeight: 500 }}>{tok.name}</td>
-                  <td style={{ padding: '12px 8px', fontSize: 12 }}>
-                    <span style={{
-                      padding: '2px 8px', borderRadius: 4,
-                      background: '#30363d', color: '#8b949e',
-                    }}>
-                      {tok.scope}
-                    </span>
-                  </td>
-                  <td style={{ padding: '12px 8px', fontSize: 13, color: '#8b949e' }}>
-                    {tok.lastUsedAt ? relativeTime(tok.lastUsedAt) : 'Never'}
-                  </td>
-                  <td style={{ padding: '12px 8px', fontSize: 13, color: '#8b949e' }}>
-                    {relativeTime(tok.createdAt)}
-                  </td>
-                  <td style={{ padding: '12px 0', textAlign: 'right' }}>
-                    {confirmRevoke === tok.id ? (
-                      <span style={{ fontSize: 12, display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center' }}>
-                        <span style={{ color: '#f85149' }}>Revoke?</span>
-                        <button
-                          onClick={() => void handleRevoke(tok.id)}
-                          style={{ color: '#f85149', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0 }}
-                        >
-                          Yes
-                        </button>
-                        <button
-                          onClick={() => setConfirmRevoke(null)}
-                          style={{ color: '#8b949e', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0 }}
-                        >
-                          Cancel
-                        </button>
-                      </span>
-                    ) : (
-                      <button
-                        onClick={() => setConfirmRevoke(tok.id)}
-                        style={{ color: '#8b949e', background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}
-                        title="Revoke"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        <Button
-          size="sm"
-          variant="outline"
-          style={{ marginTop: activeTokens.length > 0 ? 16 : 0 }}
-          onClick={() => setShowCreate(v => !v)}
-        >
-          {showCreate ? 'Cancel' : 'New token'}
-        </Button>
-
-        {showCreate && (
-          <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid #30363d' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
-              <Label style={{ color: '#e6edf3' }}>Token name</Label>
-              <Input
-                value={name}
-                onChange={e => setName(e.target.value)}
-                placeholder="e.g. CI bot, personal script"
-                style={{ maxWidth: 320 }}
-              />
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-              <Label style={{ color: '#e6edf3' }}>Scope</Label>
-              {SCOPES.map(s => (
-                <label key={s.value} style={{ display: 'flex', gap: 10, cursor: 'pointer', alignItems: 'flex-start' }}>
-                  <input
-                    type="radio"
-                    name="scope"
-                    value={s.value}
-                    checked={scope === s.value}
-                    onChange={() => setScope(s.value)}
-                    style={{ marginTop: 2 }}
-                  />
-                  <span>
-                    <span style={{ fontSize: 13, color: '#e6edf3', fontWeight: 500 }}>{s.label}</span>
-                    <span style={{ fontSize: 12, color: '#8b949e', display: 'block' }}>{s.desc}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-            {error && <p style={{ fontSize: 13, color: '#f85149', marginBottom: 12 }}>{error}</p>}
-            <Button
-              size="sm"
-              onClick={handleCreate}
-              disabled={!name.trim() || createToken.isPending}
-            >
-              {createToken.isPending ? 'Creating…' : 'Create token'}
-            </Button>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/pages/ForgotPasswordPage.tsx
 ````typescript
 /**
@@ -11519,231 +10401,6 @@ docs: document WebSocket message protocol
 - No `any` in TypeScript without a `// reason:` comment
 ````
 
-## File: docs/TESTING.md
-````markdown
-# Testing & Review Procedures
-
-This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
-
-For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
-
----
-
-## Test environment setup (manual, do once per host)
-
-These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
-
-### Step 1 — One-time host prep (manual)
-On the docker host, as the `draba-test` user (created in the SSH setup steps below):
-
-1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
-2. Create `~/.draba-test.env` (chmod 600) with:
-   ```
-   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
-   DRABA_TEST_ADMIN_EMAIL=test-admin@local
-   DRABA_TEST_INVITE_EMAIL=invitee@local
-   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
-   DRABA_CONTAINER=draba
-   ```
-   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
-   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
-
-### Step 2 — Per-run reset (manual or SSH-driven)
-Before each `/test-phase` run that needs a clean DB, run on the docker host:
-```bash
-./scripts/reset-test-env.sh
-```
-This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
-
-### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
-On the machine where you run Claude (this Windows box):
-- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
-- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
-- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
-
-### What's manual vs automated, at a glance
-
-| Step | Where it runs | Who does it |
-|---|---|---|
-| Host prep (Step 1) | Docker host | **You, once** |
-| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
-| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
-| API smoke against live container | Dev box → live container | Claude |
-| Logging the run to `docs/log.md` | Dev box | Claude |
-
----
-
-## Global procedures
-
-These run regardless of phase.
-
-### Static checks
-- `cd packages/api && golangci-lint run`
-- `cd packages/api && go vet ./...`
-- `pnpm --filter web lint`
-- `pnpm --filter web build`
-
-### Unit & integration
-- `cd packages/api && go test -count=1 ./...`
-- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
-
-### Live smoke target
-Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
-1. `DRABA_TEST_URL` environment variable, if set.
-2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
-3. If neither is available, the subagent reports **skipped**, not failed.
-
-### Review checklist (always)
-- CONVENTIONS.md compliance
-- No scope creep beyond the phase's ROADMAP entry
-- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
-- No secrets, no `.env` files, no host-specific values committed
-- Migrations idempotent (re-run produces no diff)
-- `docs/log.md` updated with a dated entry
-
----
-
-## Subagent map
-
-| Subagent | Scope | Active from |
-|---|---|---|
-| `static-check` | lint + vet + web typecheck/build | Phase 1 |
-| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
-| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
-| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
-| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
-| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
-| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
-| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
-
----
-
-## Per-phase procedures
-
-### Phase 1 — Project Infrastructure
-
-**static-check**
-- `go build ./...` from `packages/api/` succeeds with no errors
-- `pnpm build` from `packages/web/` succeeds
-- `golangci-lint run` is clean
-- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
-
-### Phase 2 — API Foundation (DB & Auth)
-
-**unit-test**
-- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
-- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
-  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
-  - `Validate` rejects a token signed with a different secret (tampered signature)
-  - `Validate` rejects an expired token
-  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
-  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
-  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
-- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
-  - `GetValid` returns `sql.ErrNoRows` for an expired invite
-  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
-
-**schema-check**
-- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
-- Restart the container; assert migration runner produces no schema changes (idempotency)
-
-**api-smoke** (against `$DRABA_TEST_URL`)
-- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
-- `POST /auth/register` with an invalid/missing invite token → 4xx
-- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
-- `POST /auth/login` with the registered credentials → 200, returns JWT
-- `POST /auth/login` with a non-existent email → 401
-- `POST /auth/login` with bad credentials → 401
-- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
-- `POST /auth/refresh` with an access token (wrong type) → 401
-- `POST /auth/refresh` with a token signed by a different secret → 401
-- A subsequent authenticated request with the issued JWT → 200 (validates signing)
-
-**security-review**
-- No password fields stored in plaintext (grep migrations + handlers)
-- JWT secret loaded from env/config, not hardcoded
-- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
-- No SQL string concatenation in queries
-
-### Phase 3 — Core API (Events & Teams)
-
-**api-smoke**
-- `POST /teams` → returns team (201 Created)
-- `GET /teams/:id` with member token → 200 OK, returns team
-- `GET /teams/:id` with non-member token → 403 Forbidden
-- `POST /teams/:id/invites` → returns invite token (201 Created)
-- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
-- `POST /teams/:id/events`, then `GET /teams/:id/events?from=…&to=…` returns it (200 OK)
-- `PATCH /events/:id` updates fields (200 OK); `DELETE /events/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
-- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
-- Authz: a user not on the team cannot read or mutate that team's events (403 Forbidden)
-- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
-
-**security-review**
-- Every new route requires auth middleware
-- Team membership enforced on every team-scoped endpoint
-
-### Phase 4 — OpenAPI Spec & Type Generation
-
-**type-sync**
-- `pnpm generate` succeeds with no errors
-- `git diff` after generate is empty (committed types match spec)
-- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
-
-### Phase 5 — Real-Time (WebSocket)
-
-**unit-test**
-- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
-- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
-- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
-
-**ws-smoke**
-- Two clients on team A both receive a delta within 500ms of an event mutation
-- A client on team B does not receive team A's events
-- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
-  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
-
-### Phase 6 — Timelines
-
-**unit-test**
-- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
-  - Grant access then revoke; `HasAccess` returns false after revoke
-  - Revoking access that was never granted is a no-op (no error)
-- `timeline_repo.ListByTeam` — unit test needed:
-  - Returns all non-archived timelines for a team in descending creation order
-  - Returns empty slice (not error) when team has no timelines
-
-**api-smoke**
-- `POST /teams/:id/timelines` with JWT → 201 Created
-- `GET /timelines/:id` with JWT (user on access list) → 200 OK
-- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
-- `GET /timelines/share/:token` → 200 OK without requiring auth
-
-### Phase 7 — Web — Scaffold
-
-**web-e2e**
-- Navigating to protected routes unauthenticated redirects to `/login`
-- Successful login redirects to the main app view and stores the token
-- TanStack Query successfully fetches team/event data from the API
-- WebSocket client successfully connects and maintains a heartbeat
-
-**Known gap — frontend component unit tests**
-No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
-
-### Phase 8+ — Web
-
-*Stubs.* Detailed assertions added when each phase begins.
-
----
-
-## Adding tests for a new phase
-
-1. Find the phase's section in this file (or add one if missing).
-2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
-3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
-4. That's it — `/test-phase` will pick it up on the next run.
-````
-
 ## File: packages/api/cmd/draba/reset_password.go
 ````go
 package main
@@ -11803,6 +10460,234 @@ func runResetPassword(args []string) {
 
 	database.Close()
 	fmt.Printf("password updated for %s\n", *email)
+}
+````
+
+## File: packages/api/internal/api/admin_handler.go
+````go
+package api
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+)
+
+// requireSuperadmin is a shared guard for admin endpoints. Returns false
+// and writes a 403 if the caller is not a superadmin.
+func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
+		return false
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return false
+	}
+	return true
+}
+
+// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
+// with the password masked. Superadmin-only.
+func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	cfg, err := s.mailer.LoadConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
+		return
+	}
+	if cfg == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
+		return
+	}
+
+	// Mask the password in the response.
+	masked := *cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
+// validates it by sending a test email to the caller's address. Superadmin-only.
+func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
+		return
+	}
+
+	// Fetch caller email for the validation test.
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
+		return
+	}
+
+	// Validate by sending a test email before persisting.
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp validation failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
+		return
+	}
+
+	if err := s.mailer.SaveConfig(&cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
+		return
+	}
+
+	masked := cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
+// provided config without persisting it. Superadmin-only.
+func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
+		return
+	}
+
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp test failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
+}
+
+// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
+// Superadmin-only.
+func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+	if err := s.mailer.DeleteConfig(); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
+// defaults. Superadmin-only.
+func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name"}
+	settings := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := s.instanceSets.Get(k)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
+			return
+		}
+		settings[k] = v
+	}
+
+	// Apply defaults for missing keys.
+	if settings["registration_policy"] == "" {
+		settings["registration_policy"] = "invite_only"
+	}
+	if settings["default_timezone"] == "" {
+		settings["default_timezone"] = "UTC"
+	}
+	if settings["default_date_format"] == "" {
+		settings["default_date_format"] = "MMM D, YYYY"
+	}
+	if settings["default_week_start"] == "" {
+		settings["default_week_start"] = "monday"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+}
+
+// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
+// instance-level settings. Superadmin-only.
+func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Validate known keys and values.
+	allowed := map[string]bool{
+		"registration_policy": true,
+		"default_timezone":    true,
+		"default_date_format": true,
+		"default_week_start":  true,
+		"instance_name":       true,
+	}
+	for k := range body {
+		if !allowed[k] {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
+			return
+		}
+	}
+	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
+		return
+	}
+	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
+		return
+	}
+
+	for k, v := range body {
+		if err := s.instanceSets.Set(k, v); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
+}
+
+func smtpTestBody() string {
+	return `<html><body>
+<p>This is a test email from <strong>draba</strong>.</p>
+<p>If you received this, your SMTP configuration is working correctly.</p>
+</body></html>`
 }
 ````
 
@@ -12359,116 +11244,298 @@ func (r *InviteRepo) GetByToken(token string) (*models.Invite, error) {
 }
 ````
 
-## File: packages/api/internal/tier/enforce.go
+## File: packages/api/internal/mailer/mailer.go
 ````go
-package tier
-
-import "errors"
-
-// Sentinel errors returned when a tier limit would be exceeded. Handlers
-// translate these into HTTP 402 (Payment Required) responses.
-var (
-	ErrUserLimitReached = errors.New("user limit reached for current tier")
-	ErrTeamLimitReached = errors.New("team limit reached for current tier")
-)
-
-// CheckUserLimit returns ErrUserLimitReached when adding one more user
-// would exceed this tier's MaxUsers. A MaxUsers of 0 is unlimited.
-func (t Tier) CheckUserLimit(currentCount int) error {
-	if l := t.Limits(); l.MaxUsers != 0 && currentCount >= l.MaxUsers {
-		return ErrUserLimitReached
-	}
-	return nil
-}
-
-// CheckTeamLimit returns ErrTeamLimitReached when adding one more team
-// would exceed this tier's MaxTeams. A MaxTeams of 0 is unlimited.
-func (t Tier) CheckTeamLimit(currentCount int) error {
-	if l := t.Limits(); l.MaxTeams != 0 && currentCount >= l.MaxTeams {
-		return ErrTeamLimitReached
-	}
-	return nil
-}
-````
-
-## File: packages/api/internal/tier/tier.go
-````go
-// Package tier defines the deployment tiers (Unlimited, Team, Business,
-// Enterprise) and the per-tier limits and capability gates the API enforces.
-// Pro modules register through this package so they can read the active Tier
-// at startup. See registry.go for the module registration contract.
-package tier
+// Package mailer sends email via SMTP. Configuration is read from
+// instance_settings at send time so changes take effect without a restart.
+// When SMTP is not configured, Send returns nil (not an error) so callers
+// can treat "no mailer" as a no-op — the forgot-password flow still returns
+// 200 to prevent email enumeration.
+package mailer
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"os"
+	"io"
+	"log/slog"
+	"net/smtp"
+	"strings"
 )
 
-// Tier is a deployment tier identifier. The zero value (empty string) is
-// Unlimited, which is what self-hosted/free installs run as.
-type Tier string
+// encPrefix marks values encrypted with AES-256-GCM so LoadConfig can
+// distinguish them from legacy plaintext values written before encryption
+// was introduced.
+const encPrefix = "enc:v1:"
 
-const (
-	Unlimited  Tier = ""
-	Team       Tier = "team"
-	Business   Tier = "business"
-	Enterprise Tier = "enterprise"
-)
-
-// Limits holds the maximums for a tier. 0 means unlimited.
-type Limits struct {
-	MaxUsers int
-	MaxTeams int
+// SMTPConfig holds the full SMTP configuration for the instance.
+type SMTPConfig struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Username   string `json:"username"`
+	Password   string `json:"password"` // stored encrypted at rest via AES-256-GCM
+	FromName   string `json:"fromName"`
+	FromEmail  string `json:"fromEmail"`
+	Encryption string `json:"encryption"` // "none" | "tls" | "starttls"
 }
 
-var tierLimits = map[Tier]Limits{
-	Unlimited:  {MaxUsers: 0, MaxTeams: 0},
-	Team:       {MaxUsers: 5, MaxTeams: 1},
-	Business:   {MaxUsers: 15, MaxTeams: 3},
-	Enterprise: {MaxUsers: 0, MaxTeams: 0},
+// SettingsReader is the subset of InstanceSettingsRepo used by Mailer.
+type SettingsReader interface {
+	Get(key string) (string, error)
+	Set(key, value string) error
 }
 
-// tierOrder is used by AtLeast to compare capability levels.
-var tierOrder = map[Tier]int{
-	Unlimited:  0,
-	Team:       1,
-	Business:   2,
-	Enterprise: 3,
+// Mailer sends email via SMTP. The zero value is valid; calling Send on an
+// unconfigured Mailer is a no-op.
+type Mailer struct {
+	settings SettingsReader
+	encKey   []byte // 32-byte AES-256 key derived from keyMaterial; nil disables encryption
 }
 
-// Load reads DRABA_TIER from the environment. Unset returns Unlimited.
-// An unrecognised value is an error — fail closed, don't silently default.
-func Load() (Tier, error) {
-	v := os.Getenv("DRABA_TIER")
-	if v == "" {
-		return Unlimited, nil
+// New returns a Mailer that reads config from settings at send time.
+// keyMaterial is used to derive an AES-256 key for encrypting stored SMTP
+// passwords. Pass nil to disable encryption (tests, zero-value usage).
+func New(settings SettingsReader, keyMaterial []byte) *Mailer {
+	var encKey []byte
+	if len(keyMaterial) > 0 {
+		k := sha256.Sum256(keyMaterial)
+		encKey = k[:]
 	}
-	t := Tier(v)
-	if _, ok := tierLimits[t]; !ok {
-		return "", fmt.Errorf("unknown DRABA_TIER %q: must be team, business, or enterprise", v)
+	return &Mailer{settings: settings, encKey: encKey}
+}
+
+// LoadConfig reads the SMTP configuration from instance_settings.
+// Returns nil when SMTP has not been configured.
+func (m *Mailer) LoadConfig() (*SMTPConfig, error) {
+	raw, err := m.settings.Get("smtp_config")
+	if err != nil {
+		return nil, fmt.Errorf("loading smtp config: %w", err)
 	}
-	return t, nil
-}
-
-// Limits returns the user/team caps for this tier. Unknown tiers return
-// the zero value, which is interpreted as "unlimited".
-func (t Tier) Limits() Limits {
-	return tierLimits[t]
-}
-
-// AtLeast reports whether t is at least as capable as other.
-// Unlimited (self-host, free) is the lowest; Enterprise is the highest.
-func (t Tier) AtLeast(other Tier) bool {
-	return tierOrder[t] >= tierOrder[other]
-}
-
-// String returns the tier name for logs and error messages. Unlimited
-// renders as "unlimited" rather than the empty string.
-func (t Tier) String() string {
-	if t == Unlimited {
-		return "unlimited"
+	if raw == "" {
+		return nil, nil
 	}
-	return string(t)
+	var cfg SMTPConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return nil, fmt.Errorf("parsing smtp config: %w", err)
+	}
+	if cfg.Password != "" {
+		dec, err := m.decryptPassword(cfg.Password)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting smtp password: %w", err)
+		}
+		cfg.Password = dec
+	}
+	return &cfg, nil
+}
+
+// IsConfigured reports whether SMTP has been set up.
+func (m *Mailer) IsConfigured() bool {
+	cfg, err := m.LoadConfig()
+	return err == nil && cfg != nil && cfg.Host != ""
+}
+
+// SaveConfig serialises cfg and stores it in instance_settings.
+// The password field is encrypted before storage when an encryption key is set.
+func (m *Mailer) SaveConfig(cfg *SMTPConfig) error {
+	toStore := *cfg
+	if cfg.Password != "" {
+		enc, err := m.encryptPassword(cfg.Password)
+		if err != nil {
+			return fmt.Errorf("encrypting smtp password: %w", err)
+		}
+		toStore.Password = enc
+	}
+	b, err := json.Marshal(toStore)
+	if err != nil {
+		return fmt.Errorf("serialising smtp config: %w", err)
+	}
+	return m.settings.Set("smtp_config", string(b))
+}
+
+// DeleteConfig removes the SMTP configuration.
+func (m *Mailer) DeleteConfig() error {
+	return m.settings.Set("smtp_config", "")
+}
+
+// Send sends a plain-text / HTML email to a single recipient.
+// Returns nil without sending when SMTP is not configured.
+func (m *Mailer) Send(to, subject, htmlBody string) error {
+	cfg, err := m.LoadConfig()
+	if err != nil {
+		slog.Warn("mailer: failed to load config", "err", err)
+		return nil
+	}
+	if cfg == nil || cfg.Host == "" {
+		slog.Debug("mailer: no smtp config — email skipped", "subject", subject)
+		return nil
+	}
+
+	return sendViaConfig(cfg, to, subject, htmlBody)
+}
+
+// SendWithConfig sends using an explicit config object, bypassing the stored
+// config. Used by the SMTP test endpoint before saving.
+func SendWithConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
+	return sendViaConfig(cfg, to, subject, htmlBody)
+}
+
+// encryptPassword encrypts plaintext with AES-256-GCM and returns a
+// base64-encoded ciphertext prefixed with encPrefix. Returns plaintext
+// unchanged when no encryption key is set.
+func (m *Mailer) encryptPassword(plaintext string) (string, error) {
+	if len(m.encKey) == 0 {
+		return plaintext, nil
+	}
+	block, err := aes.NewCipher(m.encKey)
+	if err != nil {
+		return "", fmt.Errorf("creating cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("creating gcm: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", fmt.Errorf("generating nonce: %w", err)
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return encPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// decryptPassword reverses encryptPassword. Values without encPrefix are
+// returned as-is — this handles configs saved before encryption was added.
+func (m *Mailer) decryptPassword(encoded string) (string, error) {
+	if !strings.HasPrefix(encoded, encPrefix) {
+		// Plaintext fallback — encrypts on next SaveConfig call.
+		return encoded, nil
+	}
+	if len(m.encKey) == 0 {
+		return "", fmt.Errorf("encryption key not set; cannot decrypt smtp password")
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(encoded, encPrefix))
+	if err != nil {
+		return "", fmt.Errorf("decoding encrypted password: %w", err)
+	}
+	block, err := aes.NewCipher(m.encKey)
+	if err != nil {
+		return "", fmt.Errorf("creating cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("creating gcm: %w", err)
+	}
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	plain, err := gcm.Open(nil, data[:nonceSize], data[nonceSize:], nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypting password: %w", err)
+	}
+	return string(plain), nil
+}
+
+func sendViaConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
+	from := fmt.Sprintf("%s <%s>", cfg.FromName, cfg.FromEmail)
+	msg := buildMessage(from, to, subject, htmlBody)
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+
+	switch strings.ToLower(cfg.Encryption) {
+	case "tls":
+		return sendTLS(cfg, addr, from, to, msg)
+	case "starttls":
+		return sendSTARTTLS(cfg, addr, from, to, msg)
+	default:
+		return sendPlain(cfg, addr, from, to, msg)
+	}
+}
+
+func buildMessage(from, to, subject, htmlBody string) string {
+	var b strings.Builder
+	b.WriteString("From: " + from + "\r\n")
+	b.WriteString("To: " + to + "\r\n")
+	b.WriteString("Subject: " + subject + "\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	b.WriteString("\r\n")
+	b.WriteString(htmlBody)
+	return b.String()
+}
+
+func sendPlain(cfg *SMTPConfig, addr, from, to, msg string) error {
+	var auth smtp.Auth
+	if cfg.Username != "" {
+		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+	}
+	if err := smtp.SendMail(addr, auth, cfg.FromEmail, []string{to}, []byte(msg)); err != nil {
+		return fmt.Errorf("smtp send: %w", err)
+	}
+	return nil
+}
+
+func sendTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
+	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; ServerName ensures cert validation
+	conn, err := tls.Dial("tcp", addr, tlsCfg)
+	if err != nil {
+		return fmt.Errorf("smtp tls dial: %w", err)
+	}
+	defer conn.Close()
+
+	c, err := smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		return fmt.Errorf("smtp new client: %w", err)
+	}
+	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
+
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err := c.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+	return doSend(c, cfg.FromEmail, to, msg)
+}
+
+func sendSTARTTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		return fmt.Errorf("smtp dial: %w", err)
+	}
+	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
+
+	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; this is standard TLS
+	if err := c.StartTLS(tlsCfg); err != nil {
+		return fmt.Errorf("smtp starttls: %w", err)
+	}
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err := c.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+	return doSend(c, cfg.FromEmail, to, msg)
+}
+
+func doSend(c *smtp.Client, from, to, msg string) error {
+	if err := c.Mail(from); err != nil {
+		return fmt.Errorf("smtp MAIL: %w", err)
+	}
+	if err := c.Rcpt(to); err != nil {
+		return fmt.Errorf("smtp RCPT: %w", err)
+	}
+	w, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("smtp DATA: %w", err)
+	}
+	if _, err := fmt.Fprint(w, msg); err != nil {
+		return fmt.Errorf("smtp write body: %w", err)
+	}
+	return w.Close()
 }
 ````
 
@@ -13715,176 +12782,6 @@ export function useDeleteUser() {
 }
 ````
 
-## File: packages/web/src/hooks/useSettings.ts
-````typescript
-/**
- * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
- * profile, password change, forgot/reset password, SMTP config, instance
- * settings, and the admin user list.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { apiFetch, createAuthFetch } from '@/lib/api'
-import type { components } from '@draba/shared'
-
-type User = components['schemas']['User']
-type SMTPConfig = components['schemas']['SMTPConfig']
-
-// ── Profile ──────────────────────────────────────────────────────────────────
-
-export function useUpdateProfile() {
-  const { getAccessToken, patchUser } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
-      authFetch<User>('/users/me', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: (updated) => {
-      qc.setQueryData(['me'], updated)
-      patchUser(updated)
-      // Invalidate all team member lists so the sidebar reflects the new color/icon.
-      void qc.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-// ── Password ──────────────────────────────────────────────────────────────────
-
-export function useChangePassword() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
-      authFetch<{ status: string }>('/users/me/password', {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Forgot / reset password (public, no auth required) ───────────────────────
-
-export function useForgotPassword() {
-  return useMutation({
-    mutationFn: (email: string) =>
-      apiFetch<{ status: string }>('/auth/forgot-password', {
-        method: 'POST',
-        body: JSON.stringify({ email }),
-      }),
-  })
-}
-
-export function useResetPassword() {
-  return useMutation({
-    mutationFn: (data: { token: string; newPassword: string }) =>
-      apiFetch<{ status: string }>('/auth/reset-password', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Admin: SMTP ──────────────────────────────────────────────────────────────
-
-export function useAdminSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'smtp'],
-    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
-  })
-}
-
-export function useSaveSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
-        method: 'PUT',
-        body: JSON.stringify(cfg),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-export function useTestSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
-        method: 'POST',
-        body: JSON.stringify(cfg),
-      }),
-  })
-}
-
-export function useDeleteSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: () =>
-      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-// ── Admin: Instance settings ──────────────────────────────────────────────────
-
-export function useAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'settings'],
-    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
-  })
-}
-
-export function usePatchAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: Record<string, string>) =>
-      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
-  })
-}
-
-// ── Admin: Users ──────────────────────────────────────────────────────────────
-
-export type AdminUserRow = User & { teamCount: number }
-
-export function useAdminUsers(orphanedOnly = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'users', { orphanedOnly }],
-    queryFn: () =>
-      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
-  })
-}
-````
-
 ## File: packages/web/src/lib/api.ts
 ````typescript
 /**
@@ -14053,61 +12950,209 @@ export function matchEvents(
 }
 ````
 
-## File: packages/web/src/pages/settings/AdminPage.tsx
+## File: packages/web/src/pages/settings/AdminUsersPage.tsx
 ````typescript
 /**
- * /settings/admin — Superadmin-only: SMTP, instance settings, user management.
+ * /settings/users — Superadmin: view and search all users; orphaned-user alert.
+ */
+
+import { useState } from 'react'
+import { useAdminUsers } from '@/hooks/useSettings'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { Input } from '@/components/ui/input'
+import { AlertTriangle } from 'lucide-react'
+
+export default function AdminUsersPage() {
+  const [orphanedOnly, setOrphanedOnly] = useState(false)
+  const [search, setSearch] = useState('')
+  const { data: allData, error: allError } = useAdminUsers(false)
+  const { data: orphanData } = useAdminUsers(true)
+
+  const allUsers = allData?.users ?? []
+  const orphanedCount = orphanData?.users?.length ?? 0
+  const displayed = (orphanedOnly ? orphanData?.users ?? [] : allUsers)
+    .filter(u => {
+      if (!search) return true
+      const q = search.toLowerCase()
+      return u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
+    })
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Users</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        All accounts in this organization. Use team management to assign or remove memberships.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        {orphanedCount > 0 && !orphanedOnly && (
+          <div className="flex items-center gap-2.5 px-3.5 py-2.5 mb-4 bg-warning/10 border border-warning/30 rounded-lg">
+            <AlertTriangle size={16} className="text-warning shrink-0" />
+            <span className="text-[13px] text-warning">
+              {orphanedCount} user{orphanedCount > 1 ? 's' : ''} with no team memberships.
+            </span>
+            <button
+              onClick={() => setOrphanedOnly(true)}
+              className="ml-auto text-xs text-warning bg-transparent border-none cursor-pointer underline"
+            >
+              View
+            </button>
+          </div>
+        )}
+
+        {allError && (
+          <div className="px-4 py-3 mb-4 bg-destructive/10 border border-destructive/30 rounded-lg text-[13px] text-destructive">
+            Failed to load users. This endpoint requires the Phase 10.1.3 backend — rebuild and redeploy the Docker container.
+          </div>
+        )}
+
+        <div className="flex gap-2 mb-4 items-center">
+          <Input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search by name or email…"
+            className="max-w-[300px]"
+          />
+          <div className="flex gap-1">
+            {[
+              { label: `All (${allUsers.length})`, v: false },
+              { label: `Orphaned (${orphanedCount})`, v: true },
+            ].map(({ label, v }) => (
+              <button
+                key={String(v)}
+                onClick={() => setOrphanedOnly(v)}
+                className={`px-3 py-1.5 rounded-md text-xs border cursor-pointer ${
+                  orphanedOnly === v
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {displayed.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No users found.</p>
+        ) : (
+          <table className="w-full border-collapse">
+            <thead>
+              <tr>
+                {['User', 'Email', 'Teams', 'Status'].map(h => (
+                  <th key={h} className="text-left text-[11px] text-muted-foreground font-semibold pb-2.5 px-2 tracking-[0.4px]">
+                    {h.toUpperCase()}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {displayed.map(u => (
+                <tr key={u.id} className="border-t border-card">
+                  <td className="py-2.5 px-2 flex items-center gap-2.5">
+                    <Badge identity={{ color: u.color ?? '#288C9B', icon: u.icon ?? '__none__' } satisfies Identity} name={u.displayName} size={28} shape="circle" />
+                    <span className="text-[13px] text-foreground">{u.displayName}</span>
+                    {u.isSuperadmin && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-primary/15 text-primary">
+                        superadmin
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-2.5 px-2 text-[13px] text-muted-foreground">{u.email}</td>
+                  <td className="py-2.5 px-2 text-[13px] text-muted-foreground">{u.teamCount}</td>
+                  <td className="py-2.5 px-2">
+                    {u.archivedAt ? (
+                      <span className="text-xs px-2 py-0.5 rounded bg-destructive/15 text-destructive">
+                        Inactive
+                      </span>
+                    ) : (
+                      <span className="text-xs px-2 py-0.5 rounded bg-success/15 text-success">
+                        Active
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/AiKeysPage.tsx
+````typescript
+/**
+ * /settings/ai — Superadmin: AI / LLM API key configuration.
+ * Stub for Phase 10.6 — AI Key Management. Key storage, model routing, and
+ * usage tracking are deferred to that phase.
+ */
+
+import { Sparkles } from 'lucide-react'
+
+export default function AiKeysPage() {
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">AI / LLM Keys</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Connect AI providers to enable AI-assisted features in draba.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-10 h-10 rounded-[10px] bg-primary/10 border border-primary/20 flex items-center justify-center">
+            <Sparkles size={18} className="text-primary" />
+          </div>
+          <div>
+            <div className="text-sm font-semibold text-foreground">AI features coming in Phase 10.6</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Configure an API key when AI functionality is available.</div>
+          </div>
+        </div>
+
+        <p className="text-[13px] text-muted-foreground mb-4">
+          When AI features are enabled, you'll be able to add API keys for providers such as Anthropic, OpenAI, and others. Keys are stored encrypted and used only for organization-wide AI requests.
+        </p>
+
+        <div className="flex flex-col gap-2">
+          {['Anthropic (Claude)', 'OpenAI (GPT)', 'Google (Gemini)', 'Custom / self-hosted'].map(provider => (
+            <div
+              key={provider}
+              className="flex items-center justify-between px-4 py-3 rounded-lg border border-border bg-background opacity-50"
+            >
+              <span className="text-[13px] text-foreground">{provider}</span>
+              <span className="text-[11px] text-muted-foreground px-2 py-0.5 rounded border border-border">
+                Not configured
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/CommunicationPage.tsx
+````typescript
+/**
+ * /settings/communication — Superadmin: email / SMTP configuration.
  */
 
 import { useState, useEffect } from 'react'
-import {
-  useAdminSMTP,
-  useSaveSMTP,
-  useTestSMTP,
-  useDeleteSMTP,
-  useAdminSettings,
-  usePatchAdminSettings,
-  useAdminUsers,
-} from '@/hooks/useSettings'
+import { useAdminSMTP, useSaveSMTP, useTestSMTP, useDeleteSMTP } from '@/hooks/useSettings'
 import type { components } from '@draba/shared'
 import { ApiError } from '@/lib/api'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { Eye, EyeOff, AlertTriangle } from 'lucide-react'
+import { Eye, EyeOff } from 'lucide-react'
 
 type SMTPConfig = components['schemas']['SMTPConfig']
 
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-const selectStyle: React.CSSProperties = {
-  background: '#161b22',
-  border: '1px solid #30363d',
-  borderRadius: 6,
-  color: '#e6edf3',
-  padding: '8px 12px',
-  fontSize: 13,
-  cursor: 'pointer',
-}
-
-// ── SMTP section ──────────────────────────────────────────────────────────────
-
-function SMTPSection() {
+export default function CommunicationPage() {
   const { data } = useAdminSMTP()
   const saveSMTP = useSaveSMTP()
   const testSMTP = useTestSMTP()
@@ -14173,341 +13218,607 @@ function SMTPSection() {
   }
 
   return (
-    <div style={sectionStyle}>
-      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-        Email / SMTP
-      </h3>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>SMTP host</Label>
-          <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
-        </div>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Port</Label>
-          <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
-        </div>
-      </div>
-
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Username</Label>
-        <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" style={{ maxWidth: 360 }} />
-      </div>
-
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Password</Label>
-        <div style={{ position: 'relative', maxWidth: 360 }}>
-          <Input
-            type={showPw ? 'text' : 'password'}
-            value={password}
-            onChange={e => setPassword(e.target.value)}
-            placeholder="••••••••"
-          />
-          <button
-            onClick={() => setShowPw(v => !v)}
-            style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer' }}
-          >
-            {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
-          </button>
-        </div>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>From name</Label>
-          <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
-        </div>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>From email</Label>
-          <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
-        </div>
-      </div>
-
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Encryption</Label>
-        <select
-          value={encryption}
-          onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
-          style={{ ...selectStyle, maxWidth: 200 }}
-        >
-          <option value="none">None</option>
-          <option value="tls">TLS</option>
-          <option value="starttls">STARTTLS</option>
-        </select>
-      </div>
-
-      {feedback && (
-        <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
-          {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
-        </Button>
-        <Button variant="outline" onClick={handleTest} disabled={testSMTP.isPending || !host}>
-          {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
-        </Button>
-        {data?.smtp && (
-          <Button variant="ghost" style={{ color: '#f85149' }} onClick={handleDelete}>
-            Clear config
-          </Button>
-        )}
-      </div>
-      <p style={{ fontSize: 12, color: '#8b949e', marginTop: 12 }}>
-        When SMTP is not configured, password resets and email invitations are unavailable.
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Communication</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Configure outbound email for password resets and invitations.
       </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          SMTP / Email
+        </h3>
+
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="flex flex-col gap-1.5">
+            <Label>SMTP host</Label>
+            <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>Port</Label>
+            <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Username</Label>
+          <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" className="max-w-[360px]" />
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Password</Label>
+          <div className="relative max-w-[360px]">
+            <Input
+              type={showPw ? 'text' : 'password'}
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
+            />
+            <button
+              onClick={() => setShowPw(v => !v)}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 bg-transparent border-none text-muted-foreground cursor-pointer"
+            >
+              {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="flex flex-col gap-1.5">
+            <Label>From name</Label>
+            <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>From email</Label>
+            <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Encryption</Label>
+          <select
+            value={encryption}
+            onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[200px]"
+          >
+            <option value="none">None</option>
+            <option value="tls">TLS</option>
+            <option value="starttls">STARTTLS</option>
+          </select>
+        </div>
+
+        {feedback && (
+          <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+            {feedback.msg}
+          </p>
+        )}
+
+        <div className="flex gap-2 flex-wrap">
+          <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
+            {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
+          </Button>
+          <Button variant="outline" onClick={handleTest} disabled={testSMTP.isPending || !host}>
+            {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
+          </Button>
+          {data?.smtp && (
+            <Button variant="ghost" className="text-destructive" onClick={handleDelete}>
+              Clear config
+            </Button>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground mt-3">
+          When SMTP is not configured, password resets and email invitations are unavailable.
+        </p>
+      </div>
     </div>
   )
 }
+````
 
-// ── Instance defaults section ─────────────────────────────────────────────────
+## File: packages/web/src/pages/settings/OrganizationPage.tsx
+````typescript
+/**
+ * /settings/organization — Superadmin: organization name, registration policy,
+ * and system-wide defaults (language placeholder, timezone, week start).
+ * Language support is deferred to Phase 10.7 — Localization & Language Support.
+ */
 
-function InstanceSection() {
+import { useState, useEffect } from 'react'
+import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+export default function OrganizationPage() {
   const { data } = useAdminSettings()
   const patch = usePatchAdminSettings()
 
   const settings = data?.settings ?? {}
+  const [orgName, setOrgName] = useState('')
   const [regPolicy, setRegPolicy] = useState('invite_only')
   const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
   const [weekStart, setWeekStart] = useState('monday')
-  const [instanceName, setInstanceName] = useState('')
-  const [feedback, setFeedback] = useState<string | null>(null)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
   useEffect(() => {
+    setOrgName(settings.instance_name || '')
     setRegPolicy(settings.registration_policy || 'invite_only')
     setTimezone(settings.default_timezone || 'UTC')
-    setDateFormat(settings.default_date_format || 'MMM D, YYYY')
     setWeekStart(settings.default_week_start || 'monday')
-    setInstanceName(settings.instance_name || '')
   }, [JSON.stringify(settings)])
 
   async function handleSave() {
     setFeedback(null)
-    await patch.mutateAsync({
-      registration_policy: regPolicy,
-      default_timezone: timezone,
-      default_date_format: dateFormat,
-      default_week_start: weekStart,
-      instance_name: instanceName,
-    })
-    setFeedback('Settings saved.')
-    setTimeout(() => setFeedback(null), 2000)
+    try {
+      await patch.mutateAsync({
+        instance_name: orgName,
+        registration_policy: regPolicy,
+        default_timezone: timezone,
+        default_week_start: weekStart,
+      })
+      setFeedback({ type: 'success', msg: 'Settings saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
+    }
   }
 
   return (
-    <div style={sectionStyle}>
-      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-        Instance defaults
-      </h3>
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        System-wide identity and defaults for this draba installation.
+      </p>
 
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Instance name</Label>
-        <Input
-          value={instanceName}
-          onChange={e => setInstanceName(e.target.value)}
-          placeholder="draba"
-          style={{ maxWidth: 320 }}
-        />
-        <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>Shown in the browser tab title and login page.</p>
-      </div>
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Identity
+        </h3>
 
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Registration policy</Label>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {[
-            { v: 'invite_only', label: 'Invite only' },
-            { v: 'open', label: 'Open registration' },
-          ].map(({ v, label }) => (
-            <button
-              key={v}
-              onClick={() => setRegPolicy(v)}
-              style={{
-                padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
-                borderColor: regPolicy === v ? '#58a6ff' : '#30363d',
-                background: regPolicy === v ? 'rgba(88,166,255,0.1)' : '#161b22',
-                color: regPolicy === v ? '#58a6ff' : '#8b949e',
-                cursor: 'pointer',
-              }}
-            >
-              {label}
-            </button>
-          ))}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Organization name</Label>
+          <Input
+            value={orgName}
+            onChange={e => setOrgName(e.target.value)}
+            placeholder="My Company"
+            className="max-w-xs"
+          />
+          <p className="text-xs text-muted-foreground m-0">
+            Shown in the browser tab title and login page.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Registration policy</Label>
+          <div className="flex gap-2">
+            {[
+              { v: 'invite_only', label: 'Invite only' },
+              { v: 'open', label: 'Open registration' },
+            ].map(({ v, label }) => (
+              <button
+                key={v}
+                onClick={() => setRegPolicy(v)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
+                  regPolicy === v
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Default timezone</Label>
-        <select value={timezone} onChange={e => setTimezone(e.target.value)} style={{ ...selectStyle, maxWidth: 280 }}>
-          {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-            'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
-            <option key={tz} value={tz}>{tz}</option>
-          ))}
-        </select>
-      </div>
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
+          System defaults
+        </h3>
+        <p className="text-xs text-muted-foreground mb-4">
+          Applied to new accounts when the user hasn't set their own preference.
+        </p>
 
-      <div style={fieldStyle}>
-        <Label style={{ color: '#e6edf3' }}>Default week starts on</Label>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {(['monday', 'sunday'] as const).map(d => (
-            <button
-              key={d}
-              onClick={() => setWeekStart(d)}
-              style={{
-                padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
-                borderColor: weekStart === d ? '#58a6ff' : '#30363d',
-                background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
-                color: weekStart === d ? '#58a6ff' : '#8b949e',
-                cursor: 'pointer', textTransform: 'capitalize',
-              }}
-            >
-              {d}
-            </button>
-          ))}
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default language</Label>
+          <select
+            disabled
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
+          >
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default timezone</Label>
+          <select
+            value={timezone}
+            onChange={e => setTimezone(e.target.value)}
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
+          >
+            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
-      {feedback && <p style={{ fontSize: 13, color: '#3fb950', marginBottom: 12 }}>{feedback}</p>}
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
       <Button onClick={handleSave} disabled={patch.isPending}>
-        {patch.isPending ? 'Saving…' : 'Save defaults'}
+        {patch.isPending ? 'Saving…' : 'Save settings'}
       </Button>
     </div>
   )
 }
+````
 
-// ── Users section ─────────────────────────────────────────────────────────────
+## File: packages/web/src/pages/settings/SecurityPage.tsx
+````typescript
+/**
+ * /settings/security — Change password form.
+ */
 
-function UsersSection() {
-  const [orphanedOnly, setOrphanedOnly] = useState(false)
-  const [search, setSearch] = useState('')
-  const { data: allData } = useAdminUsers(false)
-  const { data: orphanData } = useAdminUsers(true)
+import { useState } from 'react'
+import { useChangePassword } from '@/hooks/useSettings'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
 
-  const allUsers = allData?.users ?? []
-  const orphanedCount = orphanData?.users.length ?? 0
-  const displayed = (orphanedOnly ? orphanData?.users ?? [] : allUsers)
-    .filter(u => {
-      if (!search) return true
-      const q = search.toLowerCase()
-      return u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
-    })
+export default function SecurityPage() {
+  const changePassword = useChangePassword()
+
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  const mismatch = next !== confirm && confirm !== ''
+  const tooShort = next.length > 0 && next.length < 8
+  const canSave = current !== '' && next.length >= 8 && next === confirm
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!canSave) return
+    setFeedback(null)
+    try {
+      await changePassword.mutateAsync({ currentPassword: current, newPassword: next })
+      setFeedback({ type: 'success', msg: 'Password updated successfully.' })
+      setCurrent('')
+      setNext('')
+      setConfirm('')
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : ''
+      const msg =
+        code === 'WRONG_PASSWORD'
+          ? 'Current password is incorrect.'
+          : err instanceof ApiError
+          ? err.message
+          : 'Failed to change password.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
 
   return (
-    <div style={sectionStyle}>
-      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-        Users
-      </h3>
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Security</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Update your password. You'll need to enter your current password to confirm the change.
+      </p>
 
-      {orphanedCount > 0 && !orphanedOnly && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 10,
-          padding: '10px 14px', marginBottom: 16,
-          background: 'rgba(210,153,34,0.1)', border: '1px solid rgba(210,153,34,0.3)',
-          borderRadius: 8,
-        }}>
-          <AlertTriangle size={16} style={{ color: '#d2993a', flexShrink: 0 }} />
-          <span style={{ fontSize: 13, color: '#d2993a' }}>
-            {orphanedCount} user{orphanedCount > 1 ? 's' : ''} with no team memberships.
-          </span>
-          <button
-            onClick={() => setOrphanedOnly(true)}
-            style={{ marginLeft: 'auto', fontSize: 12, color: '#d2993a', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
-          >
-            View
-          </button>
-        </div>
-      )}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <form onSubmit={handleSubmit}>
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="currentPw">Current password</Label>
+            <Input
+              id="currentPw"
+              type="password"
+              value={current}
+              onChange={e => setCurrent(e.target.value)}
+              autoComplete="current-password"
+              className="max-w-[360px]"
+            />
+          </div>
 
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
-        <Input
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          placeholder="Search by name or email…"
-          style={{ maxWidth: 300 }}
-        />
-        <div style={{ display: 'flex', gap: 4 }}>
-          {[
-            { label: `All (${allUsers.length})`, v: false },
-            { label: `Orphaned (${orphanedCount})`, v: true },
-          ].map(({ label, v }) => (
-            <button
-              key={String(v)}
-              onClick={() => setOrphanedOnly(v)}
-              style={{
-                padding: '6px 12px', borderRadius: 6, fontSize: 12, border: '1px solid',
-                borderColor: orphanedOnly === v ? '#58a6ff' : '#30363d',
-                background: orphanedOnly === v ? 'rgba(88,166,255,0.1)' : '#161b22',
-                color: orphanedOnly === v ? '#58a6ff' : '#8b949e',
-                cursor: 'pointer',
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="newPw">New password</Label>
+            <Input
+              id="newPw"
+              type="password"
+              value={next}
+              onChange={e => setNext(e.target.value)}
+              autoComplete="new-password"
+              className={`max-w-[360px]${tooShort ? ' border-destructive' : ''}`}
+            />
+            {tooShort && (
+              <p className="text-xs text-destructive m-0">
+                Password must be at least 8 characters.
+              </p>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="confirmPw">Confirm new password</Label>
+            <Input
+              id="confirmPw"
+              type="password"
+              value={confirm}
+              onChange={e => setConfirm(e.target.value)}
+              autoComplete="new-password"
+              className={`max-w-[360px]${mismatch ? ' border-destructive' : ''}`}
+            />
+            {mismatch && (
+              <p className="text-xs text-destructive m-0">Passwords don't match.</p>
+            )}
+          </div>
+
+          {feedback && (
+            <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+              {feedback.msg}
+            </p>
+          )}
+
+          <Button type="submit" disabled={!canSave || changePassword.isPending}>
+            {changePassword.isPending ? 'Updating…' : 'Update password'}
+          </Button>
+        </form>
       </div>
-
-      {displayed.length === 0 ? (
-        <p style={{ fontSize: 13, color: '#8b949e' }}>No users found.</p>
-      ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr>
-              {['User', 'Email', 'Teams', 'Status'].map(h => (
-                <th key={h} style={{ textAlign: 'left', fontSize: 11, color: '#8b949e', fontWeight: 600, padding: '0 8px 10px', letterSpacing: '0.4px' }}>
-                  {h.toUpperCase()}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {displayed.map(u => (
-              <tr key={u.id} style={{ borderTop: '1px solid #21262d' }}>
-                <td style={{ padding: '10px 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <Badge identity={{ color: u.color ?? '#288C9B', icon: u.icon ?? '__none__' } satisfies Identity} name={u.displayName} size={28} shape="circle" />
-                  <span style={{ fontSize: 13, color: '#e6edf3' }}>{u.displayName}</span>
-                  {u.isSuperadmin && (
-                    <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'rgba(88,166,255,0.15)', color: '#58a6ff' }}>
-                      superadmin
-                    </span>
-                  )}
-                </td>
-                <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.email}</td>
-                <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.teamCount}</td>
-                <td style={{ padding: '10px 8px' }}>
-                  {u.archivedAt ? (
-                    <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(248,81,73,0.15)', color: '#f85149' }}>
-                      Inactive
-                    </span>
-                  ) : (
-                    <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(63,185,80,0.15)', color: '#3fb950' }}>
-                      Active
-                    </span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
     </div>
   )
 }
+````
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+## File: packages/web/src/pages/settings/TokensPage.tsx
+````typescript
+/**
+ * /settings/tokens — API token management. Create, list, and revoke tokens.
+ * The raw token value is shown exactly once on creation.
+ */
 
-export default function AdminPage() {
+import { useState } from 'react'
+import { useTokens, useCreateToken, useRevokeToken } from '@/hooks/useSettings'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+import { Key, Copy, Check, Trash2 } from 'lucide-react'
+
+const SCOPES: { value: string; label: string; desc: string }[] = [
+  { value: 'read', label: 'Read-only', desc: 'Can read data but not create or modify.' },
+  { value: 'add', label: 'Add', desc: 'Can create new activities and timelines.' },
+  { value: 'edit_own', label: 'Edit own', desc: 'Can edit activities created by this user.' },
+  { value: 'edit_all', label: 'Edit all', desc: 'Full read-write access.' },
+]
+
+function relativeTime(dateStr: string) {
+  const ms = Date.now() - new Date(dateStr).getTime()
+  const days = Math.floor(ms / 86400000)
+  if (days === 0) return 'today'
+  if (days === 1) return 'yesterday'
+  if (days < 30) return `${days} days ago`
+  const months = Math.floor(days / 30)
+  return `${months} month${months > 1 ? 's' : ''} ago`
+}
+
+export default function TokensPage() {
+  const { data: tokens = [], isLoading } = useTokens()
+  const createToken = useCreateToken()
+  const revokeToken = useRevokeToken()
+
+  const [showCreate, setShowCreate] = useState(false)
+  const [name, setName] = useState('')
+  const [scope, setScope] = useState('read')
+  const [newSecret, setNewSecret] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null)
+
+  const activeTokens = tokens.filter(t => !t.revokedAt)
+
+  async function handleCreate() {
+    setError(null)
+    try {
+      const result = await createToken.mutateAsync({ name: name.trim(), scope })
+      setNewSecret(result.rawValue)
+      setName('')
+      setScope('read')
+      setShowCreate(false)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to create token.')
+    }
+  }
+
+  async function handleCopy() {
+    if (!newSecret) return
+    await navigator.clipboard.writeText(newSecret)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  async function handleRevoke(id: string) {
+    await revokeToken.mutateAsync(id)
+    setConfirmRevoke(null)
+  }
+
   return (
     <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Administration</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Superadmin controls for SMTP, registration policy, and user management.
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">API Tokens</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Long-lived tokens for programmatic access. The raw value is shown once — copy it before closing.
       </p>
-      <SMTPSection />
-      <InstanceSection />
-      <UsersSection />
+
+      {/* One-time secret reveal */}
+      {newSecret && (
+        <div className="bg-success/10 border border-success/30 rounded-[10px] p-6 mb-5">
+          <p className="text-sm text-success font-semibold mb-3">
+            Token created — copy it now, it won't be shown again.
+          </p>
+          <div className="flex gap-2 items-center">
+            <code className="flex-1 px-3 py-2 bg-background rounded-md text-xs text-foreground border border-border break-all">
+              {newSecret}
+            </code>
+            <Button size="sm" variant="outline" onClick={handleCopy} className="gap-1.5 min-w-[80px]">
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+              {copied ? 'Copied!' : 'Copy'}
+            </Button>
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="mt-3 text-muted-foreground"
+            onClick={() => setNewSecret(null)}
+          >
+            Dismiss
+          </Button>
+        </div>
+      )}
+
+      {/* Token list */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : activeTokens.length === 0 ? (
+          <div className="text-center py-6">
+            <Key size={32} className="text-border mx-auto mb-3" />
+            <p className="text-sm text-muted-foreground">No API tokens yet.</p>
+          </div>
+        ) : (
+          <table className="w-full border-collapse">
+            <thead>
+              <tr>
+                {['Name', 'Scope', 'Last used', 'Created', ''].map(h => (
+                  <th key={h} className="text-left text-[11px] text-muted-foreground font-semibold pb-2.5 tracking-[0.4px]">
+                    {h.toUpperCase()}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {activeTokens.map(tok => (
+                <tr key={tok.id} className="border-t border-card">
+                  <td className="py-3 text-[13px] text-foreground font-medium">{tok.name}</td>
+                  <td className="py-3 px-2 text-xs">
+                    <span className="px-2 py-0.5 rounded bg-muted text-muted-foreground">
+                      {tok.scope}
+                    </span>
+                  </td>
+                  <td className="py-3 px-2 text-[13px] text-muted-foreground">
+                    {tok.lastUsedAt ? relativeTime(tok.lastUsedAt) : 'Never'}
+                  </td>
+                  <td className="py-3 px-2 text-[13px] text-muted-foreground">
+                    {relativeTime(tok.createdAt)}
+                  </td>
+                  <td className="py-3 text-right">
+                    {confirmRevoke === tok.id ? (
+                      <span className="text-xs flex gap-2 justify-end items-center">
+                        <span className="text-destructive">Revoke?</span>
+                        <button
+                          onClick={() => void handleRevoke(tok.id)}
+                          className="text-destructive bg-transparent border-none cursor-pointer text-xs p-0"
+                        >
+                          Yes
+                        </button>
+                        <button
+                          onClick={() => setConfirmRevoke(null)}
+                          className="text-muted-foreground bg-transparent border-none cursor-pointer text-xs p-0"
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmRevoke(tok.id)}
+                        className="text-muted-foreground bg-transparent border-none cursor-pointer p-1"
+                        title="Revoke"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <Button
+          size="sm"
+          variant="outline"
+          className={activeTokens.length > 0 ? 'mt-4' : ''}
+          onClick={() => setShowCreate(v => !v)}
+        >
+          {showCreate ? 'Cancel' : 'New token'}
+        </Button>
+
+        {showCreate && (
+          <div className="mt-4 pt-4 border-t border-border">
+            <div className="flex flex-col gap-1.5 mb-4">
+              <Label>Token name</Label>
+              <Input
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="e.g. CI bot, personal script"
+                className="max-w-xs"
+              />
+            </div>
+            <div className="flex flex-col gap-2 mb-4">
+              <Label>Scope</Label>
+              {SCOPES.map(s => (
+                <label key={s.value} className="flex gap-2.5 cursor-pointer items-start">
+                  <input
+                    type="radio"
+                    name="scope"
+                    value={s.value}
+                    checked={scope === s.value}
+                    onChange={() => setScope(s.value)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    <span className="text-[13px] text-foreground font-medium">{s.label}</span>
+                    <span className="text-xs text-muted-foreground block">{s.desc}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            {error && <p className="text-[13px] text-destructive mb-3">{error}</p>}
+            <Button
+              size="sm"
+              onClick={handleCreate}
+              disabled={!name.trim() || createToken.isPending}
+            >
+              {createToken.isPending ? 'Creating…' : 'Create token'}
+            </Button>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -15070,6 +14381,113 @@ See `skills/ts-comments.md` for comment conventions (file-level headers, TSDoc o
 }
 ````
 
+## File: scripts/reset-test-env.sh
+````bash
+#!/usr/bin/env bash
+#
+# Reset the draba test environment to a known clean state.
+# Run on the docker host (epcot.lan) as the `draba-test` user
+# (which must be in the `docker` group). No sudo required.
+#
+# What it does:
+#   1. Stops the `draba` container
+#   2. Wipes the SQLite DB files via a one-off `alpine` container
+#      (so file permissions inside the bind mount don't matter)
+#   3. Starts `draba` — its boot-time migration runner creates the
+#      fresh schema
+#   4. Waits up to 30s for `schema_migrations` to be queryable
+#   5. Stops `draba` again, seeds a bootstrap team + a known invite
+#      token via a one-off `sqlite3` container, then restarts
+#
+# Required env (sourced from $HOME/.draba-test.env at the top):
+#   DRABA_TEST_INVITE_TOKEN  — known token the api-smoke subagent uses
+#   DRABA_TEST_ADMIN_EMAIL   — bootstrap admin (invite issuer) email
+#   DRABA_TEST_INVITE_EMAIL  — email the invite is issued to; the
+#                              smoke test registers as this user
+#                              (default: invitee@local)
+#   DRABA_DB_DIR             — host bind-mount dir holding draba.db
+#   DRABA_CONTAINER          — container name (default: draba)
+#   DRABA_DB_FILENAME        — DB filename inside DRABA_DB_DIR
+#                              (default: draba.db)
+
+set -euo pipefail
+
+ENV_FILE="${HOME}/.draba-test.env"
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+fi
+
+: "${DRABA_TEST_INVITE_TOKEN:?must be set in ~/.draba-test.env}"
+: "${DRABA_TEST_ADMIN_EMAIL:?must be set in ~/.draba-test.env}"
+: "${DRABA_DB_DIR:?must be set in ~/.draba-test.env}"
+DRABA_CONTAINER="${DRABA_CONTAINER:-draba}"
+DRABA_DB_FILENAME="${DRABA_DB_FILENAME:-draba.db}"
+DRABA_TEST_INVITE_EMAIL="${DRABA_TEST_INVITE_EMAIL:-invitee@local}"
+
+SQLITE_IMG="keinos/sqlite3:latest"
+ALPINE_IMG="alpine:latest"
+
+echo "[1/6] Stopping container '$DRABA_CONTAINER'..."
+docker stop "$DRABA_CONTAINER" >/dev/null
+
+echo "[2/6] Wiping DB files in $DRABA_DB_DIR..."
+docker run --rm -v "$DRABA_DB_DIR:/data" "$ALPINE_IMG" sh -c \
+    "rm -f /data/${DRABA_DB_FILENAME} /data/${DRABA_DB_FILENAME}-shm /data/${DRABA_DB_FILENAME}-wal"
+
+echo "[3/6] Starting container (migrations run on boot)..."
+docker start "$DRABA_CONTAINER" >/dev/null
+
+echo "[4/6] Waiting for migrations to complete..."
+for i in $(seq 1 30); do
+    if docker run --rm -v "$DRABA_DB_DIR:/data:ro" "$SQLITE_IMG" \
+         sqlite3 "/data/${DRABA_DB_FILENAME}" \
+         "SELECT 1 FROM schema_migrations LIMIT 1;" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+    if [[ "$i" -eq 30 ]]; then
+        echo "ERROR: migrations did not complete within 30s" >&2
+        exit 1
+    fi
+done
+
+echo "[5/6] Stopping container to seed exclusively..."
+docker stop "$DRABA_CONTAINER" >/dev/null
+
+ADMIN_ID="bootstrap-admin"
+TEAM_ID="bootstrap-team"
+INVITE_ID="bootstrap-invite"
+EXPIRES=$(date -u -d '+7 days' '+%Y-%m-%d %H:%M:%S')
+
+# DRABA_TEST_ADMIN_PASSWORD_HASH — bcrypt hash of the admin's login password.
+# If not set in ~/.draba-test.env, the admin row is seeded as non-loginable
+# (suitable for CI-only runs where only the invite flow is tested).
+DRABA_TEST_ADMIN_PASSWORD_HASH="${DRABA_TEST_ADMIN_PASSWORD_HASH:-x-not-loginable}"
+
+docker run --rm -i --user 0:0 -v "$DRABA_DB_DIR:/data" "$SQLITE_IMG" \
+    sqlite3 "/data/${DRABA_DB_FILENAME}" <<SQL
+INSERT INTO users (id, email, password_hash, display_name, is_superadmin)
+VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', '${DRABA_TEST_ADMIN_PASSWORD_HASH}', 'Test Bootstrap', 1);
+
+INSERT INTO teams (id, name, slug)
+VALUES ('${TEAM_ID}', 'Test Team', 'test-team');
+
+INSERT INTO team_members (id, team_id, user_id, role)
+VALUES ('bootstrap-admin-member', '${TEAM_ID}', '${ADMIN_ID}', 'admin');
+
+INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at)
+VALUES ('${INVITE_ID}', '${TEAM_ID}', '${DRABA_TEST_INVITE_EMAIL}', '${DRABA_TEST_INVITE_TOKEN}', 'member', '${ADMIN_ID}', '${EXPIRES}');
+SQL
+
+echo "[6/6] Restarting container..."
+docker start "$DRABA_CONTAINER" >/dev/null
+
+echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
+````
+
 ## File: .repomixignore
 ````
 # Ignore dependency locks
@@ -15152,6 +14570,41 @@ Grep("MemberDetail", "docs/ai-context/repomap.md", output_mode="content")
 - [docs/design/UX_PATTERNS.md](docs/design/UX_PATTERNS.md) — Interaction patterns
 - [skills/go-comments.md](skills/go-comments.md) — Go comment conventions (package headers, exported doc comments, inline why-comments)
 - [skills/ts-comments.md](skills/ts-comments.md) — TypeScript/React comment conventions (file headers, TSDoc on exports, inline why-comments)
+````
+
+## File: docker-compose.yml
+````yaml
+services:
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+      target: dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./packages/api:/app
+    environment:
+      - DRABA_PORT=8080
+      - DRABA_DB_DRIVER=sqlite
+      - DRABA_DB_DSN=./draba.db
+      - DRABA_JWT_SECRET=dev-secret-change-in-prod
+      - DRABA_LOG_LEVEL=debug
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./packages/web/src:/app/packages/web/src
+      - ./packages/web/public:/app/packages/web/public
+      - ./packages/web/index.html:/app/packages/web/index.html
+    environment:
+      - VITE_API_URL=http://api:8080
+    depends_on:
+      - api
 ````
 
 ## File: .github/workflows/repomap.yml
@@ -16404,6 +15857,213 @@ export default function MemberAvatar({ member, size = 28, className }: Props) {
 }
 ````
 
+## File: packages/web/src/hooks/useSettings.ts
+````typescript
+/**
+ * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
+ * profile, password change, forgot/reset password, SMTP config, instance
+ * settings, and the admin user list.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { apiFetch, createAuthFetch } from '@/lib/api'
+import type { components } from '@draba/shared'
+
+type User = components['schemas']['User']
+type SMTPConfig = components['schemas']['SMTPConfig']
+type APIToken = components['schemas']['APIToken']
+
+// ── Profile ──────────────────────────────────────────────────────────────────
+
+export function useUpdateProfile() {
+  const { getAccessToken, patchUser } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
+      authFetch<User>('/users/me', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: (updated) => {
+      qc.setQueryData(['me'], updated)
+      patchUser(updated)
+      // Invalidate all team member lists so the sidebar reflects the new color/icon.
+      void qc.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+// ── Password ──────────────────────────────────────────────────────────────────
+
+export function useChangePassword() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
+      authFetch<{ status: string }>('/users/me/password', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Forgot / reset password (public, no auth required) ───────────────────────
+
+export function useForgotPassword() {
+  return useMutation({
+    mutationFn: (email: string) =>
+      apiFetch<{ status: string }>('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }),
+  })
+}
+
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: (data: { token: string; newPassword: string }) =>
+      apiFetch<{ status: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Admin: SMTP ──────────────────────────────────────────────────────────────
+
+export function useAdminSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'smtp'],
+    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
+  })
+}
+
+export function useSaveSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
+        method: 'PUT',
+        body: JSON.stringify(cfg),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+export function useTestSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
+        method: 'POST',
+        body: JSON.stringify(cfg),
+      }),
+  })
+}
+
+export function useDeleteSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: () =>
+      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+// ── Admin: Instance settings ──────────────────────────────────────────────────
+
+export function useAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'settings'],
+    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
+  })
+}
+
+export function usePatchAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: Record<string, string>) =>
+      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
+  })
+}
+
+// ── API Tokens ────────────────────────────────────────────────────────────────
+
+export function useTokens() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: ['tokens'],
+    queryFn: () => authFetch<APIToken[]>('/tokens'),
+  })
+}
+
+export function useCreateToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { name: string; scope: string }) =>
+      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+export function useRevokeToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+// ── Admin: Users ──────────────────────────────────────────────────────────────
+
+export type AdminUserRow = User & { teamCount: number }
+
+export function useAdminUsers(orphanedOnly = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'users', { orphanedOnly }],
+    queryFn: () =>
+      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
+  })
+}
+````
+
 ## File: packages/web/src/hooks/useWebSocket.ts
 ````typescript
 /**
@@ -16661,397 +16321,6 @@ describe('matchActivities', () => {
     expect(results[0].activityId).toBe('bare')
   })
 })
-````
-
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * View consumption (Gantt date format, etc.) is deferred to Phase 10.4.
- */
-
-import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-const selectStyle: React.CSSProperties = {
-  background: '#161b22',
-  border: '1px solid #30363d',
-  borderRadius: 6,
-  color: '#e6edf3',
-  padding: '8px 12px',
-  fontSize: 13,
-  maxWidth: 320,
-  cursor: 'pointer',
-}
-
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
-
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
-
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-
-  const [theme, setTheme] = useState('system')
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setTheme((prefMap['theme'] as string | undefined) ?? 'system')
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-  }, [JSON.stringify(prefMap)])
-
-  function applyTheme(value: string) {
-    const html = document.documentElement
-    if (value === 'dark') {
-      html.classList.add('dark')
-    } else if (value === 'light') {
-      html.classList.remove('dark')
-    } else {
-      if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-        html.classList.add('dark')
-      } else {
-        html.classList.remove('dark')
-      }
-    }
-  }
-
-  function handleThemeChange(value: string) {
-    setTheme(value)
-    // Apply visually right away so the user sees the change, but only persist on Save.
-    applyTheme(value)
-  }
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await Promise.all([
-        upsert.mutateAsync({ key: 'theme', value: theme }),
-        upsert.mutateAsync({ key: 'timezone', value: timezone }),
-        upsert.mutateAsync({ key: 'date_format', value: dateFormat }),
-        upsert.mutateAsync({ key: 'week_start', value: weekStart }),
-      ])
-      setFeedback({ type: 'success', msg: 'Preferences saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Preferences</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Personal appearance and regional settings.
-      </p>
-
-      {/* Appearance */}
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-          Appearance
-        </h3>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Theme</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {(['light', 'dark', 'system'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  fontSize: 13,
-                  border: '1px solid',
-                  borderColor: theme === t ? '#58a6ff' : '#30363d',
-                  background: theme === t ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: theme === t ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer',
-                  textTransform: 'capitalize',
-                }}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>Preview applies immediately; saved when you click Save.</p>
-        </div>
-      </div>
-
-      {/* Regional */}
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-          Regional
-        </h3>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Language</Label>
-          <select style={{ ...selectStyle, opacity: 0.6, cursor: 'not-allowed' }} disabled>
-            <option value="en">English (en)</option>
-          </select>
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
-            Additional languages coming in a future release.
-          </p>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Timezone</Label>
-          <select
-            value={timezone}
-            onChange={e => setTimezone(e.target.value)}
-            style={selectStyle}
-          >
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Date format</Label>
-          <select
-            value={dateFormat}
-            onChange={e => setDateFormat(e.target.value)}
-            style={selectStyle}
-          >
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Week starts on</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  fontSize: 13,
-                  border: '1px solid',
-                  borderColor: weekStart === d ? '#58a6ff' : '#30363d',
-                  background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: weekStart === d ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer',
-                  textTransform: 'capitalize',
-                }}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {feedback && (
-        <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <Button onClick={handleSave} disabled={upsert.isPending}>
-        {upsert.isPending ? 'Saving…' : 'Save preferences'}
-      </Button>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/ProfilePage.tsx
-````typescript
-/**
- * /settings/profile — Display name, identity (color + icon), and read-only email.
- */
-
-import { useState, useEffect } from 'react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useUpdateProfile } from '@/hooks/useSettings'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { ApiError } from '@/lib/api'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-export default function ProfilePage() {
-  const { user } = useAuth()
-  const updateProfile = useUpdateProfile()
-
-  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: user?.color ?? '#288C9B',
-    icon: user?.icon ?? '__none__',
-  })
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    if (user) {
-      setDisplayName(user.displayName)
-      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
-    }
-  }, [user])
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
-      setFeedback({ type: 'success', msg: 'Profile updated.' })
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
-      setFeedback({ type: 'error', msg })
-    }
-  }
-
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Profile</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Changes to your name and identity propagate across all your team memberships.
-      </p>
-
-      <div style={sectionStyle}>
-        {/* Identity preview */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24 }}>
-          <Badge identity={identity} name={displayName} size={48} shape="circle" />
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>
-                {displayName || 'Your Name'}
-              </span>
-              {user?.isSuperadmin && (
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 4,
-                  background: 'rgba(88,166,255,0.15)', color: '#58a6ff',
-                  fontWeight: 600, letterSpacing: '0.3px',
-                }}>
-                  Superadmin
-                </span>
-              )}
-            </div>
-            <div style={{ fontSize: 12, color: '#8b949e', marginTop: 2 }}>
-              Identity preview — shown in sidebar and Gantt
-            </div>
-          </div>
-        </div>
-
-        {/* Identity picker */}
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Color & Icon</Label>
-          <IdentityWidget
-            identity={identity}
-            name={displayName}
-            shape="circle"
-            onChange={(next) => setIdentity(next)}
-          />
-        </div>
-
-        {/* Display name */}
-        <div style={fieldStyle}>
-          <Label htmlFor="displayName" style={{ color: '#e6edf3' }}>Display name</Label>
-          <Input
-            id="displayName"
-            value={displayName}
-            onChange={e => setDisplayName(e.target.value)}
-            placeholder="Your name"
-            style={{ maxWidth: 360 }}
-          />
-        </div>
-
-        {/* Email (read-only) */}
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Email</Label>
-          <Input
-            value={user?.email ?? ''}
-            disabled
-            style={{ maxWidth: 360, opacity: 0.6 }}
-          />
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
-            Email changes are not yet supported.
-          </p>
-        </div>
-
-        {feedback && (
-          <p style={{
-            fontSize: 13,
-            color: feedback.type === 'success' ? '#3fb950' : '#f85149',
-            marginBottom: 12,
-          }}>
-            {feedback.msg}
-          </p>
-        )}
-
-        <Button
-          onClick={handleSave}
-          disabled={updateProfile.isPending || !displayName.trim()}
-        >
-          {updateProfile.isPending ? 'Saving…' : 'Save profile'}
-        </Button>
-      </div>
-    </div>
-  )
-}
 ````
 
 ## File: packages/web/src/pages/LoginPage.tsx
@@ -17732,113 +17001,6 @@ export default function SetupPage() {
 }
 ````
 
-## File: scripts/reset-test-env.sh
-````bash
-#!/usr/bin/env bash
-#
-# Reset the draba test environment to a known clean state.
-# Run on the docker host (epcot.lan) as the `draba-test` user
-# (which must be in the `docker` group). No sudo required.
-#
-# What it does:
-#   1. Stops the `draba` container
-#   2. Wipes the SQLite DB files via a one-off `alpine` container
-#      (so file permissions inside the bind mount don't matter)
-#   3. Starts `draba` — its boot-time migration runner creates the
-#      fresh schema
-#   4. Waits up to 30s for `schema_migrations` to be queryable
-#   5. Stops `draba` again, seeds a bootstrap team + a known invite
-#      token via a one-off `sqlite3` container, then restarts
-#
-# Required env (sourced from $HOME/.draba-test.env at the top):
-#   DRABA_TEST_INVITE_TOKEN  — known token the api-smoke subagent uses
-#   DRABA_TEST_ADMIN_EMAIL   — bootstrap admin (invite issuer) email
-#   DRABA_TEST_INVITE_EMAIL  — email the invite is issued to; the
-#                              smoke test registers as this user
-#                              (default: invitee@local)
-#   DRABA_DB_DIR             — host bind-mount dir holding draba.db
-#   DRABA_CONTAINER          — container name (default: draba)
-#   DRABA_DB_FILENAME        — DB filename inside DRABA_DB_DIR
-#                              (default: draba.db)
-
-set -euo pipefail
-
-ENV_FILE="${HOME}/.draba-test.env"
-if [[ -f "$ENV_FILE" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    set +a
-fi
-
-: "${DRABA_TEST_INVITE_TOKEN:?must be set in ~/.draba-test.env}"
-: "${DRABA_TEST_ADMIN_EMAIL:?must be set in ~/.draba-test.env}"
-: "${DRABA_DB_DIR:?must be set in ~/.draba-test.env}"
-DRABA_CONTAINER="${DRABA_CONTAINER:-draba}"
-DRABA_DB_FILENAME="${DRABA_DB_FILENAME:-draba.db}"
-DRABA_TEST_INVITE_EMAIL="${DRABA_TEST_INVITE_EMAIL:-invitee@local}"
-
-SQLITE_IMG="keinos/sqlite3:latest"
-ALPINE_IMG="alpine:latest"
-
-echo "[1/6] Stopping container '$DRABA_CONTAINER'..."
-docker stop "$DRABA_CONTAINER" >/dev/null
-
-echo "[2/6] Wiping DB files in $DRABA_DB_DIR..."
-docker run --rm -v "$DRABA_DB_DIR:/data" "$ALPINE_IMG" sh -c \
-    "rm -f /data/${DRABA_DB_FILENAME} /data/${DRABA_DB_FILENAME}-shm /data/${DRABA_DB_FILENAME}-wal"
-
-echo "[3/6] Starting container (migrations run on boot)..."
-docker start "$DRABA_CONTAINER" >/dev/null
-
-echo "[4/6] Waiting for migrations to complete..."
-for i in $(seq 1 30); do
-    if docker run --rm -v "$DRABA_DB_DIR:/data:ro" "$SQLITE_IMG" \
-         sqlite3 "/data/${DRABA_DB_FILENAME}" \
-         "SELECT 1 FROM schema_migrations LIMIT 1;" >/dev/null 2>&1; then
-        break
-    fi
-    sleep 1
-    if [[ "$i" -eq 30 ]]; then
-        echo "ERROR: migrations did not complete within 30s" >&2
-        exit 1
-    fi
-done
-
-echo "[5/6] Stopping container to seed exclusively..."
-docker stop "$DRABA_CONTAINER" >/dev/null
-
-ADMIN_ID="bootstrap-admin"
-TEAM_ID="bootstrap-team"
-INVITE_ID="bootstrap-invite"
-EXPIRES=$(date -u -d '+7 days' '+%Y-%m-%d %H:%M:%S')
-
-# DRABA_TEST_ADMIN_PASSWORD_HASH — bcrypt hash of the admin's login password.
-# If not set in ~/.draba-test.env, the admin row is seeded as non-loginable
-# (suitable for CI-only runs where only the invite flow is tested).
-DRABA_TEST_ADMIN_PASSWORD_HASH="${DRABA_TEST_ADMIN_PASSWORD_HASH:-x-not-loginable}"
-
-docker run --rm -i --user 0:0 -v "$DRABA_DB_DIR:/data" "$SQLITE_IMG" \
-    sqlite3 "/data/${DRABA_DB_FILENAME}" <<SQL
-INSERT INTO users (id, email, password_hash, display_name, is_superadmin)
-VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', '${DRABA_TEST_ADMIN_PASSWORD_HASH}', 'Test Bootstrap', 1);
-
-INSERT INTO teams (id, name, slug)
-VALUES ('${TEAM_ID}', 'Test Team', 'test-team');
-
-INSERT INTO team_members (id, team_id, user_id, role)
-VALUES ('bootstrap-admin-member', '${TEAM_ID}', '${ADMIN_ID}', 'admin');
-
-INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at)
-VALUES ('${INVITE_ID}', '${TEAM_ID}', '${DRABA_TEST_INVITE_EMAIL}', '${DRABA_TEST_INVITE_TOKEN}', 'member', '${ADMIN_ID}', '${EXPIRES}');
-SQL
-
-echo "[6/6] Restarting container..."
-docker start "$DRABA_CONTAINER" >/dev/null
-
-echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
-````
-
 ## File: .gitignore
 ````
 # Dependencies
@@ -17905,41 +17067,6 @@ packages/api/ui/static/*
 .claude/launch.json
 .claude/mockups/
 GEMINI.md
-````
-
-## File: docker-compose.yml
-````yaml
-services:
-  api:
-    build:
-      context: .
-      dockerfile: packages/api/Dockerfile
-      target: dev
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./packages/api:/app
-    environment:
-      - DRABA_PORT=8080
-      - DRABA_DB_DRIVER=sqlite
-      - DRABA_DB_DSN=./draba.db
-      - DRABA_JWT_SECRET=dev-secret-change-in-prod
-      - DRABA_LOG_LEVEL=debug
-
-  web:
-    build:
-      context: .
-      dockerfile: packages/web/Dockerfile
-    ports:
-      - "5173:5173"
-    volumes:
-      - ./packages/web/src:/app/packages/web/src
-      - ./packages/web/public:/app/packages/web/public
-      - ./packages/web/index.html:/app/packages/web/index.html
-    environment:
-      - VITE_API_URL=http://api:8080
-    depends_on:
-      - api
 ````
 
 ## File: packages/api/internal/events/bus.go
@@ -18966,116 +18093,275 @@ export function useDeleteActivity(teamId: string) {
 }
 ````
 
-## File: packages/web/src/pages/SettingsPage.tsx
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
 ````typescript
 /**
- * SettingsPage — shell with left-nav and nested sub-routes.
- *
- * Phase 10.1.1: initial shell + Teams link.
- * Phase 10.1.3: full settings — Profile, Security, Preferences, API Tokens,
- * and Organization section (superadmin only): Organization, Communication,
- * Users, AI Keys.
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * View consumption (Gantt date format, etc.) is deferred to Phase 10.4.
  */
 
-import { Link, useLocation, Navigate, Routes, Route } from 'react-router-dom'
-import { ArrowLeft, User, Settings, Key, Lock, MessageSquare, Users, Sparkles, Building2 } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useNavigate } from 'react-router-dom'
-import ProfilePage from '@/pages/settings/ProfilePage'
-import SecurityPage from '@/pages/settings/SecurityPage'
-import PreferencesPage from '@/pages/settings/PreferencesPage'
-import TokensPage from '@/pages/settings/TokensPage'
-import OrganizationPage from '@/pages/settings/OrganizationPage'
-import CommunicationPage from '@/pages/settings/CommunicationPage'
-import AdminUsersPage from '@/pages/settings/AdminUsersPage'
-import AiKeysPage from '@/pages/settings/AiKeysPage'
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
 
-const navLinkStyle = (active: boolean): React.CSSProperties => ({
-  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
-  borderRadius: 7, fontSize: 13, color: active ? '#e6edf3' : '#8b949e',
-  background: active ? '#2d333b' : 'none', textDecoration: 'none',
-  cursor: 'pointer', border: 'none', width: '100%', fontFamily: 'inherit',
-  fontWeight: active ? 500 : 400,
-})
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
 
-const navSectionLabel: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, color: '#484f58',
-  letterSpacing: '0.5px', textTransform: 'uppercase',
-  padding: '4px 12px', marginTop: 12,
-}
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
 
-export default function SettingsPage() {
-  const { user } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const path = location.pathname
+const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
 
-  function isActive(prefix: string) {
-    return path === prefix || path.startsWith(prefix + '/')
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+  }, [JSON.stringify(prefMap)])
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
+        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
+        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
   }
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', background: '#0d1117', color: '#e6edf3', fontFamily: 'var(--font-sans, Inter, sans-serif)' }}>
-      {/* Left nav */}
-      <div style={{ width: 220, borderRight: '1px solid #30363d', padding: '16px 12px', display: 'flex', flexDirection: 'column', gap: 2, flexShrink: 0 }}>
-        <button
-          onClick={() => navigate('/')}
-          style={{ ...navLinkStyle(false), marginBottom: 12, color: '#8b949e' }}
-        >
-          <ArrowLeft size={14} />
-          Back to app
-        </button>
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Personal appearance and regional settings.
+      </p>
 
-        <div style={navSectionLabel}>Account</div>
+      {/* Regional */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Regional
+        </h3>
 
-        <Link to="/settings/profile" style={navLinkStyle(isActive('/settings/profile'))}>
-          <User size={14} /> Profile
-        </Link>
-        <Link to="/settings/security" style={navLinkStyle(isActive('/settings/security'))}>
-          <Lock size={14} /> Security
-        </Link>
-        <Link to="/settings/preferences" style={navLinkStyle(isActive('/settings/preferences'))}>
-          <Settings size={14} /> Preferences
-        </Link>
-        <Link to="/settings/tokens" style={navLinkStyle(isActive('/settings/tokens'))}>
-          <Key size={14} /> API Tokens
-        </Link>
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Language</Label>
+          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
 
-        {user?.isSuperadmin && (
-          <>
-            <div style={navSectionLabel}>Organization</div>
-            <Link to="/settings/organization" style={navLinkStyle(isActive('/settings/organization'))}>
-              <Building2 size={14} /> Organization
-            </Link>
-            <Link to="/settings/communication" style={navLinkStyle(isActive('/settings/communication'))}>
-              <MessageSquare size={14} /> Communication
-            </Link>
-            <Link to="/settings/users" style={navLinkStyle(isActive('/settings/users'))}>
-              <Users size={14} /> Users
-            </Link>
-            <Link to="/settings/ai" style={navLinkStyle(isActive('/settings/ai'))}>
-              <Sparkles size={14} /> AI Keys
-            </Link>
-          </>
-        )}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Date format</Label>
+          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
-      {/* Content area */}
-      <div style={{ flex: 1, padding: '32px 40px', maxWidth: 800, minWidth: 0 }}>
-        <Routes>
-          <Route path="profile" element={<ProfilePage />} />
-          <Route path="security" element={<SecurityPage />} />
-          <Route path="preferences" element={<PreferencesPage />} />
-          <Route path="tokens" element={<TokensPage />} />
-          <Route path="organization" element={user?.isSuperadmin ? <OrganizationPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="communication" element={user?.isSuperadmin ? <CommunicationPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="users" element={user?.isSuperadmin ? <AdminUsersPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="ai" element={user?.isSuperadmin ? <AiKeysPage /> : <Navigate to="/settings/profile" replace />} />
-          {/* Legacy redirect: old /settings/admin deep links fall to organization */}
-          <Route path="admin/*" element={user?.isSuperadmin ? <Navigate to="/settings/organization" replace /> : <Navigate to="/settings/profile" replace />} />
-          <Route index element={<Navigate to="/settings/profile" replace />} />
-          <Route path="*" element={<Navigate to="/settings/profile" replace />} />
-        </Routes>
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/ProfilePage.tsx
+````typescript
+/**
+ * /settings/profile — Display name, identity (color + icon), and read-only email.
+ */
+
+import { useState, useEffect } from 'react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useUpdateProfile } from '@/hooks/useSettings'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+export default function ProfilePage() {
+  const { user } = useAuth()
+  const updateProfile = useUpdateProfile()
+
+  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: user?.color ?? '#288C9B',
+    icon: user?.icon ?? '__none__',
+  })
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    if (user) {
+      setDisplayName(user.displayName)
+      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
+    }
+  }, [user])
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
+      setFeedback({ type: 'success', msg: 'Profile updated.' })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Profile</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Changes to your name and identity propagate across all your team memberships.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        {/* Identity preview */}
+        <div className="flex items-center gap-4 mb-6">
+          <Badge identity={identity} name={displayName} size={48} shape="circle" />
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-[15px] font-semibold text-foreground">
+                {displayName || 'Your Name'}
+              </span>
+              {user?.isSuperadmin && (
+                <span className="text-[11px] px-2 py-0.5 rounded bg-primary/15 text-primary font-semibold tracking-wide">
+                  Superadmin
+                </span>
+              )}
+            </div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              Identity preview — shown in sidebar and Gantt
+            </div>
+          </div>
+        </div>
+
+        {/* Identity picker */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Color & Icon</Label>
+          <IdentityWidget
+            identity={identity}
+            name={displayName}
+            shape="circle"
+            onChange={(next) => setIdentity(next)}
+          />
+        </div>
+
+        {/* Display name */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label htmlFor="displayName">Display name</Label>
+          <Input
+            id="displayName"
+            value={displayName}
+            onChange={e => setDisplayName(e.target.value)}
+            placeholder="Your name"
+            className="max-w-[360px]"
+          />
+        </div>
+
+        {/* Email (read-only) */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Email</Label>
+          <Input
+            value={user?.email ?? ''}
+            disabled
+            className="max-w-[360px] opacity-60"
+          />
+          <p className="text-xs text-muted-foreground m-0">
+            Email changes are not yet supported.
+          </p>
+        </div>
+
+        {feedback && (
+          <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+            {feedback.msg}
+          </p>
+        )}
+
+        <Button
+          onClick={handleSave}
+          disabled={updateProfile.isPending || !displayName.trim()}
+        >
+          {updateProfile.isPending ? 'Saving…' : 'Save profile'}
+        </Button>
       </div>
     </div>
   )
@@ -21024,6 +20310,127 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
 }
 ````
 
+## File: packages/web/src/pages/SettingsPage.tsx
+````typescript
+/**
+ * SettingsPage — shell with left-nav and nested sub-routes.
+ *
+ * Phase 10.1.1: initial shell + Teams link.
+ * Phase 10.1.3: full settings — Profile, Security, Preferences, API Tokens,
+ * and Organization section (superadmin only): Organization, Communication,
+ * Users, AI Keys (Phase 10.6 stub).
+ */
+
+import { Link, useLocation, Navigate, Routes, Route } from 'react-router-dom'
+import { ArrowLeft, User, Settings, Key, Lock, MessageSquare, Users, Sparkles, Building2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useNavigate } from 'react-router-dom'
+import ProfilePage from '@/pages/settings/ProfilePage'
+import SecurityPage from '@/pages/settings/SecurityPage'
+import PreferencesPage from '@/pages/settings/PreferencesPage'
+import TokensPage from '@/pages/settings/TokensPage'
+import OrganizationPage from '@/pages/settings/OrganizationPage'
+import CommunicationPage from '@/pages/settings/CommunicationPage'
+import AdminUsersPage from '@/pages/settings/AdminUsersPage'
+import AiKeysPage from '@/pages/settings/AiKeysPage'
+
+function NavLink({ to, active, children }: { to: string; active: boolean; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] no-underline cursor-pointer ${
+        active
+          ? 'bg-muted text-foreground font-medium'
+          : 'text-muted-foreground font-normal hover:text-foreground'
+      }`}
+    >
+      {children}
+    </Link>
+  )
+}
+
+export default function SettingsPage() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const path = location.pathname
+
+  function isActive(prefix: string) {
+    return path === prefix || path.startsWith(prefix + '/')
+  }
+
+  return (
+    <div className="flex min-h-screen bg-background text-foreground font-sans">
+      {/* Left nav */}
+      <div className="w-[220px] border-r border-border px-3 py-4 flex flex-col gap-0.5 shrink-0">
+        <button
+          onClick={() => navigate('/')}
+          className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] text-muted-foreground mb-3 bg-transparent border-none cursor-pointer w-full font-inherit hover:text-foreground"
+        >
+          <ArrowLeft size={14} />
+          Back to app
+        </button>
+
+        <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
+          Account
+        </div>
+
+        <NavLink to="/settings/profile" active={isActive('/settings/profile')}>
+          <User size={14} /> Profile
+        </NavLink>
+        <NavLink to="/settings/security" active={isActive('/settings/security')}>
+          <Lock size={14} /> Security
+        </NavLink>
+        <NavLink to="/settings/preferences" active={isActive('/settings/preferences')}>
+          <Settings size={14} /> Preferences
+        </NavLink>
+        <NavLink to="/settings/tokens" active={isActive('/settings/tokens')}>
+          <Key size={14} /> API Tokens
+        </NavLink>
+
+        {user?.isSuperadmin && (
+          <>
+            <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
+              Organization
+            </div>
+            <NavLink to="/settings/organization" active={isActive('/settings/organization')}>
+              <Building2 size={14} /> Organization
+            </NavLink>
+            <NavLink to="/settings/communication" active={isActive('/settings/communication')}>
+              <MessageSquare size={14} /> Communication
+            </NavLink>
+            <NavLink to="/settings/users" active={isActive('/settings/users')}>
+              <Users size={14} /> Users
+            </NavLink>
+            <NavLink to="/settings/ai" active={isActive('/settings/ai')}>
+              <Sparkles size={14} /> AI Keys
+            </NavLink>
+          </>
+        )}
+      </div>
+
+      {/* Content area */}
+      <div className="flex-1 px-10 py-8 max-w-[800px] min-w-0">
+        <Routes>
+          <Route path="profile" element={<ProfilePage />} />
+          <Route path="security" element={<SecurityPage />} />
+          <Route path="preferences" element={<PreferencesPage />} />
+          <Route path="tokens" element={<TokensPage />} />
+          <Route path="organization" element={user?.isSuperadmin ? <OrganizationPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="communication" element={user?.isSuperadmin ? <CommunicationPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="users" element={user?.isSuperadmin ? <AdminUsersPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="ai" element={user?.isSuperadmin ? <AiKeysPage /> : <Navigate to="/settings/profile" replace />} />
+          {/* Legacy redirect: old /settings/admin deep links fall to organization */}
+          <Route path="admin/*" element={user?.isSuperadmin ? <Navigate to="/settings/organization" replace /> : <Navigate to="/settings/profile" replace />} />
+          <Route index element={<Navigate to="/settings/profile" replace />} />
+          <Route path="*" element={<Navigate to="/settings/profile" replace />} />
+        </Routes>
+      </div>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/types/index.ts
 ````typescript
 /**
@@ -22394,6 +21801,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -22669,7 +22077,7 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
 	// when not set so the email still contains useful info.
 	baseURL := strings.TrimRight(getBaseURL(), "/")
-	resetLink := baseURL + "/reset-password?token=" + rawToken
+	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
 
 	subject := "Reset your draba password"
 	body2 := "<html><body>" +
@@ -25595,6 +25003,151 @@ func flatten[T any](s []*T) []T {
 }
 ````
 
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+````
+
 ## File: packages/api/internal/models/models.go
 ````go
 // Package models holds the domain types shared across the API, db,
@@ -25831,151 +25384,6 @@ type Invite struct {
 	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
 	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
 	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
-}
-````
-
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	m := mailer.New(instanceSetsRepo)
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 ````
 
@@ -33987,6 +33395,9 @@ This document organizes development into discrete phases with effort estimates a
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
 | 10.4 | [Preference Consumption, Branding & Backup](#phase-104--preference-consumption-branding--backup-admin) | S — 1 day | ⬜ |
+| 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
+| 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
+| 10.7 | [Localization & Language Support](#phase-107--localization--language-support) | L — 3–5 days | ⬜ |
 | 11.1 | [Web — List / Spreadsheet View](#phase-111--web--list--spreadsheet-view) | M — 2–3 days | ⬜ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
@@ -34880,6 +34291,96 @@ Wires the user and instance preferences stored in 10.1.3 into the rest of the sy
 
 ---
 
+### Phase 10.5 — Communications Testing
+**Status:** ⬜ | **Effort:** S (1 day)
+
+Comprehensive automated tests for every outbound email flow. No new features; this phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production.
+
+**Scope:**
+
+*Flows to cover (one integration test each):*
+- Invite email: `POST /teams/:id/invites` → mailer.SendInvite called with correct recipient and link
+- Password reset request: `POST /auth/forgot-password` with a known-SMTP server → email delivered; token stored hashed
+- Password reset confirm: `POST /auth/reset-password` → password updated; token marked used; second attempt rejected
+- SMTP validation: `PUT /admin/smtp` with a valid test server → test email sent before config is persisted
+- SMTP test: `POST /admin/smtp/test` → email sent to caller; no config persisted
+
+*Mailer unit tests:*
+- `SaveConfig` → password is encrypted before storage (sentinel prefix present)
+- `LoadConfig` → encrypted password is decrypted on read; plaintext fallback for legacy values
+- `Send` with no config → no-op (returns nil)
+- `encryptPassword` / `decryptPassword` round-trip
+
+*Test infrastructure:*
+- Add a `newTestSMTPServer(t)` helper using `net/smtp` or a simple TCP listener to capture outbound SMTP without a real mail server
+
+**Exit criteria — safe to pause when:**
+- All flows above have at least one passing integration test
+- `SaveConfig`/`LoadConfig` encryption round-trip has a unit test
+- `go test ./...` passes clean
+
+---
+
+### Phase 10.6 — AI Key Management
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Ships the AI/LLM key configuration surface stubbed in Phase 10.1.3. Adds encrypted storage, model routing, and a usage log so superadmins can connect AI providers and see which features are consuming tokens.
+
+**Scope:**
+
+*API:*
+- New table `ai_provider_keys`: id, provider (anthropic | openai | google | custom), api_key (encrypted AES-256-GCM, same pattern as SMTP password), model_override, created_at, updated_at
+- `GET /admin/ai/keys` — list configured providers (key masked); superadmin only
+- `PUT /admin/ai/keys/:provider` — upsert a provider key; validates by making a lightweight test call; superadmin only
+- `DELETE /admin/ai/keys/:provider` — remove a provider key; superadmin only
+
+*Web — `/settings/ai` (replaces current stub):*
+- Real form replacing the placeholder cards: provider selector, API key input (masked), model override field
+- "Test connection" button calls a test endpoint before saving
+- Usage log section (read-only): last 10 AI requests with timestamp, provider, model, token count
+
+*Encryption:*
+- Reuse the AES-256-GCM pattern introduced for SMTP passwords in Phase 10.1.3
+
+**Exit criteria — safe to pause when:**
+- A superadmin can configure an Anthropic key and verify via the test connection button
+- The key is stored encrypted and masked in the GET response
+- Removing a key clears it from the DB
+- `golangci-lint run` clean; `go test ./...` passes
+
+---
+
+### Phase 10.7 — Localization & Language Support
+**Status:** ⬜ | **Effort:** L (3–5 days)
+
+Adds i18n infrastructure and ships the first non-English locale. The "Default language" fields in `/settings/preferences` and `/settings/organization` (currently disabled stubs) become functional.
+
+**Scope:**
+
+*Infrastructure:*
+- Adopt `react-i18next` (or equivalent) for the web client
+- Extract all user-facing strings from React components into locale JSON files
+- Add a `language` column to `user_preferences` (per-user) and a `default_language` key to `instance_settings`
+- `PATCH /users/me/preferences` accepts `language` key; `PATCH /admin/settings` accepts `default_language`
+
+*Locales:*
+- `en` — English (extracted from existing strings; the baseline)
+- Ship at least one additional locale to validate the pipeline (e.g. `es` — Spanish, or `fr` — French)
+
+*Web — settings surfaces:*
+- Enable the "Language" dropdown in `/settings/preferences` (user-level)
+- Enable the "Default language" dropdown in `/settings/organization` (instance-level)
+- Language change takes effect on next page load (no hard reload required)
+
+**Exit criteria — safe to pause when:**
+- Switching to the second locale changes all UI strings in the web app
+- User language preference persists across logout/login
+- Instance default language is used when the user has no preference set
+- Adding a new locale requires only a new JSON file (no code changes)
+- `pnpm --filter web lint` clean
+
+---
+
 ### Phase 11.1 — Web — List / Spreadsheet View
 **Status:** ⬜ | **Effort:** M (2–3 days)
 
@@ -35155,6 +34656,36 @@ By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), an
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-05-26 — /review-phase 10.1.3 — fixes applied
+
+Post-review fixes across security, tests, conventions, and ROADMAP:
+
+**Security:**
+- `mailer.go`: SMTP password now encrypted at rest with AES-256-GCM (key derived from `DRABA_JWT_SECRET`); `enc:v1:` prefix distinguishes encrypted from legacy plaintext values
+- `main.go`: passes `[]byte(jwtSecret)` to `mailer.New()`
+- `auth_handler.go`: password reset link uses `url.QueryEscape(rawToken)` (was raw concatenation)
+- `admin_handler.go`: SMTP validation/test errors logged at Warn; generic message returned to caller (was leaking internal error detail)
+- `mailer.go`: removed recipient email from debug-skip log line
+
+**Tests added:**
+- `settings_handler_test.go`: `TestForgotPassword_KnownUser_CreatesToken`, `TestResetPassword_Success`, `TestResetPassword_ExpiredToken`, `TestPatchAdminSettings_Success`, `TestPatchAdminSettings_RejectsUnknownKey`
+- `password_reset_token_repo_test.go`: Create/GetValid/expired/MarkUsed
+- `instance_settings_repo_test.go`: Get missing/Set/Upsert/Delete
+- `team_handler_test.go`: added `testServerEnv` + `newTeamTestServerFull()` helper for direct repo access in tests
+
+**Frontend:**
+- `AdminPage.tsx`: deleted (dead code — not routed; split pages are the active routes)
+- All settings pages converted from inline `style` objects to Tailwind utility classes using design-system tokens (`bg-card`, `text-foreground`, `text-muted-foreground`, `border-border`, etc.)
+- Token hooks (`useTokens`, `useCreateToken`, `useRevokeToken`) extracted from `TokensPage.tsx` to `useSettings.ts`
+- `AiKeysPage.tsx`: file-header comment updated to reference Phase 10.6; language placeholders in `PreferencesPage` and `OrganizationPage` now reference Phase 10.7
+
+**ROADMAP:**
+- Added Phase 10.5 — Communications Testing (SMTP + mailer integration/unit tests)
+- Added Phase 10.6 — AI Key Management (replaces AiKeysPage stub)
+- Added Phase 10.7 — Localization & Language Support (language dropdowns become functional)
 
 ---
 
