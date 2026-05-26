@@ -10,7 +10,7 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users } from 'lucide-react'
-import { IdentityPicker } from '@/components/identity/IdentityPicker'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import type { Identity } from '@/components/identity/identity-constants'
 import { Badge } from '@/components/identity/Badge'
 import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser } from '@/hooks/useMemberManagement'
@@ -216,7 +216,7 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid #30363d', flexShrink: 0 }}>
               <div style={{ flexShrink: 0 }}>
-                <IdentityPicker
+                <IdentityWidget
                   identity={effectiveIdentity}
                   name={effectiveName}
                   shape="circle"

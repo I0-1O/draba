@@ -140,6 +140,7 @@ function DashboardShell() {
   // Check whether the current user is an admin of the active team.
   const { data: teamMembers = [] } = useTeamMembers(teamId)
   const userId = (user as { id?: string } | null)?.id ?? ''
+  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
   const canEditTeam = teamMembers.some(m => m.userId === userId && m.role === 'admin')
 
   const handleSelectTeam = useCallback((id: string) => {
@@ -246,11 +247,11 @@ function DashboardShell() {
         archivedTeams={archivedTeams}
         canEditTeam={canEditTeam}
         onSelectTeam={handleSelectTeam}
-        onNewTeam={() => { setEditingTeam(null); setTeamModalMode('new'); }}
+        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
         onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
         onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
         members={teamMembers.length > 0 ? teamMembers : undefined}
-        onEditMember={m => setEditingMember(m)}
+        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
       />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
@@ -438,7 +439,7 @@ function DashboardShell() {
           teamId={teamId}
           memberId={editingMember.id}
           isAdmin={canEditTeam}
-          isSuperadmin={Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)}
+          isSuperadmin={isSuperadmin}
           onClose={() => setEditingMember(null)}
         />
       )}

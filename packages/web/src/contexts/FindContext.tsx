@@ -76,8 +76,14 @@ export function FindProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const registerMatches = useCallback((orderedIds: string[], reasons: Map<string, string[]>) => {
-    setMatchedIds(orderedIds)
-    setMatchReasons(reasons)
+    // Functional updaters bail out (no re-render) when values haven't changed,
+    // breaking the GanttView→context→GanttView render cycle.
+    setMatchedIds(prev =>
+      prev.length === orderedIds.length && prev.every((id, i) => id === orderedIds[i])
+        ? prev
+        : orderedIds
+    )
+    setMatchReasons(prev => prev === reasons ? prev : reasons)
     setActiveIndex(0)
   }, [])
 

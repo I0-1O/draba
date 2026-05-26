@@ -15,6 +15,7 @@ import {
   Plug,
 } from 'lucide-react';
 import { Badge } from '@/components/identity/Badge';
+import { useAuth } from '@/contexts/AuthContext';
 import type { components } from '@draba/shared';
 
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
@@ -399,6 +400,8 @@ function MemberSidebarRow({ displayName, color, isInactive = false, onEdit }: Me
 const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
 
 export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, onUnarchiveTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+  const { user } = useAuth();
+  const currentUserId = (user as { id?: string } | null)?.id;
   const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
   const [teamOpen, setTeamOpen] = useState(true);
   const [activityOpen, setActivityOpen] = useState(true);
@@ -629,8 +632,8 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
               />
             )}
 
-            {/* New team button — shown when team section is open */}
-            {teamOpen && (
+            {/* New team button — only superadmins get onNewTeam passed from the parent */}
+            {teamOpen && onNewTeam && (
               <button
                 onClick={onNewTeam}
                 style={{
@@ -739,7 +742,9 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                           displayName={displayName}
                           color={color}
                           isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
-                          onEdit={isReal ? () => onEditMember?.(m as TeamMemberWithUser) : undefined}
+                          onEdit={isReal && onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
+                            ? () => onEditMember(m as TeamMemberWithUser)
+                            : undefined}
                         />
                       );
                     })}

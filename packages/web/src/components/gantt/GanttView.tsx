@@ -355,8 +355,7 @@ export default function GanttView({
 
   useEffect(() => {
     registerMatches(orderedMatchIds, computedMatchReasons);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderedMatchIds, computedMatchReasons]);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
 
   // Build the FindState passed to GanttGrid
   const hasQuery = debouncedQuery.trim().length > 0;
