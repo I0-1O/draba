@@ -7823,6 +7823,45 @@ func (r *APITokenRepo) TouchLastUsed(id string) error {
 }
 ````
 
+## File: packages/api/internal/db/db.go
+````go
+// Package db provides the database connection, schema migrations,
+// and repository types backing the API server. The default driver is
+// SQLite (modernc.org/sqlite, a pure-Go build to avoid cgo); MySQL and
+// Postgres are planned per docs/ARCHITECTURE.md.
+package db
+
+import (
+	"fmt"
+
+	"github.com/jmoiron/sqlx"
+	_ "modernc.org/sqlite"
+)
+
+// Open opens and configures a SQLite database at the given path.
+func Open(dsn string) (*sqlx.DB, error) {
+	database, err := sqlx.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening database: %w", err)
+	}
+
+	// SQLite performs better with a single writer connection.
+	database.SetMaxOpenConns(1)
+
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+	}
+	for _, p := range pragmas {
+		if _, err = database.Exec(p); err != nil {
+			return nil, fmt.Errorf("configuring database (%s): %w", p, err)
+		}
+	}
+
+	return database, nil
+}
+````
+
 ## File: packages/api/internal/db/instance_settings_repo.go
 ````go
 package db
@@ -12220,45 +12259,6 @@ ALTER TABLE event_assignments RENAME TO activity_assignments;
 ALTER TABLE activities RENAME COLUMN parent_event_id TO parent_activity_id;
 ALTER TABLE activity_tags RENAME COLUMN event_id TO activity_id;
 ALTER TABLE activity_assignments RENAME COLUMN event_id TO activity_id;
-````
-
-## File: packages/api/internal/db/db.go
-````go
-// Package db provides the database connection, schema migrations,
-// and repository types backing the API server. The default driver is
-// SQLite (modernc.org/sqlite, a pure-Go build to avoid cgo); MySQL and
-// Postgres are planned per docs/ARCHITECTURE.md.
-package db
-
-import (
-	"fmt"
-
-	"github.com/jmoiron/sqlx"
-	_ "modernc.org/sqlite"
-)
-
-// Open opens and configures a SQLite database at the given path.
-func Open(dsn string) (*sqlx.DB, error) {
-	database, err := sqlx.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("opening database: %w", err)
-	}
-
-	// SQLite performs better with a single writer connection.
-	database.SetMaxOpenConns(1)
-
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA foreign_keys=ON",
-	}
-	for _, p := range pragmas {
-		if _, err = database.Exec(p); err != nil {
-			return nil, fmt.Errorf("configuring database (%s): %w", p, err)
-		}
-	}
-
-	return database, nil
-}
 ````
 
 ## File: packages/api/internal/db/invite_repo.go
@@ -20203,6 +20203,56 @@ func (c *client) writePump(h *Hub) {
 }
 ````
 
+## File: packages/api/Dockerfile
+````
+# ── Web builder ──
+FROM node:22-alpine AS web-builder
+RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /workspace
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/web/package.json packages/web/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install --frozen-lockfile
+COPY packages/web packages/web
+COPY packages/shared packages/shared
+RUN pnpm --filter @draba/web build
+
+# ── Go dependency cache ──
+FROM golang:1.25-alpine AS go-deps
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+
+# ── Production builder — embeds web dist into the Go binary ──
+FROM go-deps AS builder
+COPY packages/api/ .
+COPY --from=web-builder /workspace/packages/web/dist ./ui/static
+RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
+
+# ── Dev stage (used by docker-compose for hot reload) ──
+# Source is provided by the docker-compose volume mount, not baked in here —
+# baking it in caused Air to see a spurious "change" on first mount and restart.
+FROM golang:1.25-alpine AS dev
+RUN go install github.com/air-verse/air@latest
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+CMD ["air", "-c", ".air.toml"]
+
+# ── Production stage ──
+FROM alpine:3.21 AS prod
+RUN apk add --no-cache ca-certificates \
+    && addgroup -g 1000 draba \
+    && adduser -u 1000 -G draba -s /bin/sh -D draba \
+    && mkdir -p /data \
+    && chown draba:draba /data
+COPY --from=builder /draba /usr/local/bin/draba
+WORKDIR /data
+USER draba
+EXPOSE 8080
+CMD ["draba"]
+````
+
 ## File: packages/web/src/components/TeamModal.tsx
 ````typescript
 /**
@@ -21792,54 +21842,37 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
-## File: packages/api/Dockerfile
+## File: packages/api/go.mod
 ````
-# ── Web builder ──
-FROM node:22-alpine AS web-builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
-WORKDIR /workspace
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/web/package.json packages/web/
-COPY packages/shared/package.json packages/shared/
-RUN pnpm install --frozen-lockfile
-COPY packages/web packages/web
-COPY packages/shared packages/shared
-RUN pnpm --filter @draba/web build
+module github.com/I0-1O/draba/packages/api
 
-# ── Go dependency cache ──
-FROM golang:1.25-alpine AS go-deps
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
+go 1.24.0
 
-# ── Production builder — embeds web dist into the Go binary ──
-FROM go-deps AS builder
-COPY packages/api/ .
-COPY --from=web-builder /workspace/packages/web/dist ./ui/static
-RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
+require (
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/gorilla/websocket v1.5.3
+	github.com/jmoiron/sqlx v1.4.0
+	github.com/stretchr/testify v1.11.1
+	golang.org/x/crypto v0.46.0
+	modernc.org/sqlite v1.34.5
+)
 
-# ── Dev stage (used by docker-compose for hot reload) ──
-# Source is provided by the docker-compose volume mount, not baked in here —
-# baking it in caused Air to see a spurious "change" on first mount and restart.
-FROM golang:1.25-alpine AS dev
-RUN go install github.com/air-verse/air@latest
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-CMD ["air", "-c", ".air.toml"]
-
-# ── Production stage ──
-FROM alpine:3.21 AS prod
-RUN apk add --no-cache ca-certificates \
-    && addgroup -g 1000 draba \
-    && adduser -u 1000 -G draba -s /bin/sh -D draba \
-    && mkdir -p /data \
-    && chown draba:draba /data
-COPY --from=builder /draba /usr/local/bin/draba
-WORKDIR /data
-USER draba
-EXPOSE 8080
-CMD ["draba"]
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/oapi-codegen/runtime v1.4.0 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+	modernc.org/libc v1.61.6 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.8.0 // indirect
+)
 ````
 
 ## File: packages/web/src/components/filters/FilterDropdown.tsx
@@ -22082,89 +22115,6 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
 }
 ````
 
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
-````
-
-## File: packages/api/go.mod
-````
-module github.com/I0-1O/draba/packages/api
-
-go 1.24.0
-
-require (
-	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/gorilla/websocket v1.5.3
-	github.com/jmoiron/sqlx v1.4.0
-	github.com/stretchr/testify v1.11.1
-	golang.org/x/crypto v0.46.0
-	modernc.org/sqlite v1.34.5
-)
-
-require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/oapi-codegen/runtime v1.4.0 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
-	modernc.org/libc v1.61.6 // indirect
-	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.8.0 // indirect
-)
-````
-
 ## File: packages/web/src/components/gantt/GanttToolbar.tsx
 ````typescript
 /**
@@ -22379,6 +22329,59 @@ export default function GanttToolbar({
     </div>
   );
 }
+````
+
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
 ````
 
 ## File: packages/api/internal/api/auth_handler.go
@@ -25831,6 +25834,151 @@ type Invite struct {
 }
 ````
 
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	m := mailer.New(instanceSetsRepo)
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+````
+
 ## File: packages/shared/src/index.ts
 ````typescript
 /**
@@ -28803,151 +28951,6 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-}
-````
-
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	m := mailer.New(instanceSetsRepo)
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 ````
 
