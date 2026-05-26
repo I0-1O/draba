@@ -36,10 +36,11 @@ This document organizes development into discrete phases with effort estimates a
 | 9.6 | [Identity System (Color + Icon)](#phase-96--identity-system-color--icon) | M — 2–3 days | 🔄 |
 | 10.1.1 | [Teams — CRUD & Management](#phase-1011--teams--crud--management) | M — 2 days | 🔄 |
 | 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
-| 10.1.3 | [Member Access & Data Lifecycle](#phase-1013--member-access--data-lifecycle) | S–M — 1–2 days | ⬜ |
+| 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | ⬜ |
+| 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | ⬜ |
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
-| 10.4 | [Profile, Tokens & Admin Settings (Web)](#phase-104--profile-tokens--admin-settings-web) | S — 1 day | ⬜ |
+| 10.4 | [Preference Consumption, Branding & Backup](#phase-104--preference-consumption-branding--backup-admin) | S — 1 day | ⬜ |
 | 11.1 | [Web — List / Spreadsheet View](#phase-111--web--list--spreadsheet-view) | M — 2–3 days | ⬜ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
@@ -671,7 +672,115 @@ Member management is the most interaction-dense part of team administration. Spl
 
 ---
 
-### Phase 10.1.3 — Member Access & Data Lifecycle
+### Phase 10.1.3 — Settings — Profile, Tokens & Admin
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Builds out the `/settings` page shell (already scaffolded in 10.1.1) into a working settings experience. Every user gets a profile page, identity management, preferences, and API token management; superadmins get SMTP configuration, instance defaults, and an orphaned-users view. Also ships the forgot-password flow, which depends on SMTP.
+
+**Why now (before 10.1.4):** Users currently cannot change their own display name, password, or identity without API calls. Self-service profile editing and password management are table-stakes for any multi-user deployment. SMTP configuration unlocks email-based invite delivery and password reset — both of which become increasingly painful to lack as more users join. Shipping this before the data-lifecycle hardening in 10.1.4 means admins have full visibility into users and accounts before we tighten deletion semantics.
+
+**What exists today:**
+- Settings page shell with left-nav (`SettingsPage.tsx`) — links to Profile, Tokens, Teams, Admin; only Teams has content
+- `GET /auth/me` returns the current user's profile
+- No `PATCH /users/me` endpoint — display name and password cannot be changed from the UI
+- `reset_password.go` CLI subcommand exists (hashes + updates by email) but no HTTP endpoint
+- API token CRUD is fully implemented in the backend (`POST /tokens`, `GET /tokens`, `DELETE /tokens/:id`)
+- No SMTP infrastructure — invites work via manual token copy, no emails sent
+- `users` table has no color/icon fields; identity lives at the `team_members` level only
+- `user_preferences` table and `GET/PUT /users/me/preferences` endpoints exist (shipped in Phase 8.4) — used for per-timeline view settings but no UI for account-level preferences
+
+**Scope:**
+
+*Schema (migration 010):*
+- Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity, same value space as `team_members.color/icon`
+- Add `instance_settings` table (`key` TEXT PK, `value` TEXT, `updated_at`) — stores SMTP config and instance-level defaults
+- Add `password_reset_tokens` table (`id`, `user_id`, `token_hash`, `expires_at`, `used_at`, `created_at`)
+
+*API — profile management:*
+- `PATCH /users/me` — update `display_name`, `color`, `icon`; validates non-empty name, trims whitespace; when color or icon changes, propagates to all `team_members` rows for the user where the member's color/icon has not been explicitly overridden by a team admin (i.e. where `team_members.color/icon` currently matches the user's old value, or is NULL)
+- `PUT /users/me/password` — change password; requires `currentPassword` + `newPassword`; verifies current hash before updating; returns 401 `WRONG_PASSWORD` on mismatch
+- Email remains read-only for v1 (changing email would require verification flow)
+
+*API — forgot password:*
+- `POST /auth/forgot-password` — accepts `{ email }`; generates a time-limited reset token (1 hour), stores hash in `password_reset_tokens` table; sends reset link via SMTP if configured; always returns 200 (no email enumeration)
+- `POST /auth/reset-password` — accepts `{ token, newPassword }`; validates token not expired, hashes new password, updates user, invalidates token; returns 200 or 400 `TOKEN_INVALID`/`TOKEN_EXPIRED`
+
+*API — SMTP configuration (superadmin only):*
+- `GET /admin/smtp` — returns current SMTP config (password masked); superadmin only
+- `PUT /admin/smtp` — upsert SMTP config; validates by sending a test email to the calling user's address; returns success/failure with error details; superadmin only
+- `POST /admin/smtp/test` — sends a test email without saving config; superadmin only
+- `DELETE /admin/smtp` — clears SMTP config; superadmin only
+- Internal `mailer` package: wraps `net/smtp`; reads config from `instance_settings` at send time (no restart needed); exposes `Send(to, subject, htmlBody)` and `IsConfigured() bool`
+- When SMTP is not configured: `forgot-password` returns 200 but logs a warning; invite endpoints continue to return the token for manual copy
+
+*API — orphaned users (superadmin only):*
+- `GET /admin/users` — returns all users with their team membership counts and account status (active/archived); supports `?orphaned=true` filter (users with zero active team memberships); superadmin only
+- This reuses the existing user model; no new tables needed
+
+*API — instance settings (superadmin only):*
+- `GET /admin/settings` — returns all instance-level settings (registration policy, default timezone, default date format, default week start); superadmin only
+- `PATCH /admin/settings` — update one or more instance-level settings; superadmin only
+- Settings stored in `instance_settings` table alongside SMTP config
+- Instance defaults provide fallbacks for users who haven't set personal preferences
+
+*Web — Profile (`/settings/profile`):*
+- Display name field with save button; calls `PATCH /users/me`
+- **Identity picker:** color + icon selector (reuses the existing `IdentityWidget` component from 9.6); changing identity here propagates to all team memberships
+- Email shown read-only with explanatory note
+- Success/error feedback inline (no toast system needed — keep it simple)
+
+*Web — Security (`/settings/security`):*
+- Change password form: current password + new password + confirm; calls `PUT /users/me/password`
+- Validation: new + confirm must match; new ≥ 8 chars; save disabled until valid
+- Success/error feedback inline
+
+*Web — Preferences (`/settings/preferences`):*
+- **Defaults:** default team (dropdown of user's teams), default timeline (filtered by selected team) — stored via existing `PUT /users/me/preferences`
+- **Regional:** timezone (IANA selector), date format (`MMM D, YYYY` / `MM/DD/YYYY` / `DD/MM/YYYY` / `YYYY-MM-DD`), week starts on (Monday / Sunday)
+- **Appearance:** theme toggle (Light / Dark / System) — already partially wired via localStorage; this phase persists it server-side
+- All preferences use the existing `user_preferences` API; this phase adds the UI and stores the values but does **not** require the Gantt or other views to consume them yet (that lands in 10.4)
+
+*Web — API Tokens (`/settings/tokens`):*
+- Table: name, scope badge, last used (relative time), created date, revoke button
+- Create dialog: name input + scope picker (read-only / add / edit-own / edit-all) with brief descriptions of each scope
+- On creation: one-time secret reveal with copy-to-clipboard; warning that it won't be shown again
+- Revoke: confirmation dialog, then `DELETE /tokens/:id`
+
+*Web — Admin (`/settings/admin`, superadmin only):*
+- **Instance defaults section:** default timezone, default date format, default week start — these serve as fallbacks for users who haven't set personal preferences; calls `PATCH /admin/settings`
+- **Registration policy:** toggle between invite-only and open registration (stored in `instance_settings`)
+- **SMTP section:** form with host, port, username, password, from address, from name, encryption dropdown (none/TLS/STARTTLS); "Test connection" button sends test email; "Save" validates then stores; info note: "When SMTP is not configured, password resets and email invitations are unavailable"
+- **Users section:** table of all users (name, email, team count, status badge); orphaned alert banner with count + filter toggle; search by name/email; click row opens existing MemberModal; "Assign team" action on orphaned users
+
+*Web — Forgot password flow:*
+- `/forgot-password` public page: email input → calls `POST /auth/forgot-password` → shows "check your email" message (regardless of whether email exists)
+- `/reset-password?token=...` public page: new password + confirm → calls `POST /auth/reset-password` → success redirects to login
+- Login page: "Forgot password?" link
+- When SMTP is not configured: forgot-password page shows "Password reset is not available — contact your administrator"
+
+**Error-reduction notes:** Recent phases (10.1.1, 10.1.2) had significant bug fix rounds. To reduce errors in this phase:
+- Each API endpoint gets at least one happy-path and one error-path test before moving to the next endpoint
+- Frontend forms are tested against the real API (via dev proxy to Docker) before marking the section complete, not just type-checked
+- SMTP send is tested with a real mail server (or a local test tool like MailHog) before marking SMTP complete
+- The forgot-password flow is tested end-to-end (request → email received → click link → new password works) before exit
+
+**Exit criteria — safe to pause when:**
+- A user can change their display name and identity (color/icon) from `/settings/profile`; identity change propagates to all team memberships; visible in sidebar and member lists
+- A user can change their password from `/settings/security`; the old password stops working and the new one works
+- A user can set preferences (default team/timeline, timezone, date format, week start, theme) from `/settings/preferences`; values persist across logout (views don't need to consume them yet)
+- Forgot-password: requesting a reset sends an email (when SMTP configured); clicking the link allows setting a new password; the token expires after 1 hour and after use
+- Forgot-password without SMTP: the page shows a clear "contact admin" message instead of a broken form
+- A user can create an API token, see the secret once, copy it, and use it to authenticate an API call; can revoke it and it stops working
+- A superadmin can configure SMTP from the admin page; test email arrives; saving persists without restart
+- A superadmin can set instance defaults (timezone, date format, week start); these are stored and retrievable
+- A superadmin can view all users and filter to orphaned users; clicking a user opens their detail; "Assign team" works on orphaned users
+- A superadmin can toggle registration policy; the setting takes effect immediately
+- A non-superadmin does not see the Admin section
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 10.1.4 — Member Access & Data Lifecycle
 **Status:** ⬜ | **Effort:** S–M (1–2 days)
 
 Closes the data-integrity and access-revocation gaps left open by 10.1.2. Defines explicit semantics for every lifecycle state a member can be in and ensures that activity data is never silently orphaned or destroyed.
@@ -695,7 +804,7 @@ Hard-delete of a `team_members` row is only ever permitted when the member has z
 
 **Scope:**
 
-*Schema (migration 010):*
+*Schema (migration 011):*
 - Verify `activity_assignments.team_member_id` FK is declared with `ON DELETE RESTRICT`; add an explicit constraint migration if not
 - Same for `timeline_access.team_member_id`
 - Enable `PRAGMA foreign_keys = ON` in the DB initialization path (currently SQLite defaults to off) to enforce the constraint at runtime
@@ -796,39 +905,32 @@ Closes the Timelines cornerstone. Same problem space as 10.1: today timelines ca
 
 ---
 
-### Phase 10.4 — Profile, Tokens & Admin Settings (Web)
+### Phase 10.4 — Preference Consumption, Branding & Backup (Admin)
 **Status:** ⬜ | **Effort:** S (1 day)
 
-Cross-cutting settings — everything that isn't team- or timeline-scoped. Smaller than the original 10.2 because team/timeline management now lives in 10.1 / 10.2 / 10.3.
+Wires the user and instance preferences stored in 10.1.3 into the rest of the system, and adds cosmetic branding + backup visibility for admins.
 
 **Scope:**
 
-*Routing & shell:*
-- `/settings` route with left-nav layout; sections gated by role
-- Nav items: Profile · API Tokens · Team (× N) · Admin (superadmin only) — the Team entries link to the surfaces shipped in 10.1–10.3
+*Preference consumption (system-wide):*
+- Gantt, List, and Calendar views respect user's date format and week-start preferences
+- Public/shared timeline views fall back to instance-level defaults when no user is logged in
+- Theme preference synced from server on login (currently localStorage-only)
+- Default team/timeline applied on login to skip the team selector step
 
-*Profile (`/settings/profile`):*
-- Display name edit (PATCH against user record), change password form
-- Email shown read-only for v1
-- Avatar upload — stretch
-
-*API Tokens (`/settings/tokens`):*
-- List existing tokens (name, scope, last used, created) with revoke button
-- Create token dialog: name + scope picker (read-only / add / edit-own / edit-all)
-- One-time secret reveal on creation with copy-to-clipboard; never shown again
-
-*Admin (`/settings/admin`, superadmin only):*
-- Instance name + branding (logo, accent color override)
-- Registration policy toggle (invite-only vs open)
-- Backup status read-only surface (DB path, last-modified)
-- *Deferred to Phase 14:* SMTP config (lands with password-reset flow)
+*Admin (`/settings/admin`, superadmin only — extends the admin section from 10.1.3):*
+- Instance name + branding: custom instance name (shown in browser tab title and login page), accent color override, optional logo upload
+- Backup status: read-only surface showing DB file path, size, and last-modified timestamp
+- Instance name and accent color stored in `instance_settings` (table shipped in 10.1.3)
 
 **Exit criteria — safe to pause when:**
-- A user can change display name and password from `/settings/profile`; both persist across logout
-- A user can create, see the secret once for, and revoke an API token from the UI; the token successfully authenticates an API call
-- A superadmin sees the Admin nav item and can change instance name, branding, and registration policy
-- A non-superadmin does not see the Admin nav item
-- All four `/settings` sections coexist with the team and timeline surfaces from 10.1–10.3 without route collision
+- Gantt view renders dates using the user's chosen date format; public views use instance defaults
+- Week-start preference shifts the Gantt grid column alignment
+- A user's default team/timeline loads automatically on login
+- A superadmin can set a custom instance name; it appears in the browser tab title and on the login page
+- A superadmin can set an accent color override; the change applies globally
+- Backup status section shows the current DB path and last-modified time
+- Settings persist across container restarts
 
 ---
 

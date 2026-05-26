@@ -13,9 +13,10 @@ _Updated after each significant work session. Read this first to orient — it i
 | 9.6 | Identity System | ✅ | ⬜ needs Docker verification |
 | 10.1.1 | Teams CRUD | ✅ | ⬜ needs Docker verification |
 | 10.1.2 | Members Management | ✅ | ⬜ needs Docker verification |
-| 10.1.3 | Member Access & Data Lifecycle | ⬜ not started | — |
+| 10.1.3 | Settings — Profile, Tokens & Admin | ⬜ not started | — |
+| 10.1.4 | Member Access & Data Lifecycle | ⬜ not started | — |
 
-Next phase to build: **10.1.3** (see ROADMAP.md for full spec and TASKS.md for checklist).
+Next phase to build: **10.1.3** — Settings (profile + identity, security, preferences, API tokens, forgot-password, SMTP config, instance defaults, orphaned users admin view). See ROADMAP.md for full spec.
 
 ---
 
@@ -62,7 +63,7 @@ These were found during manual testing of 10.1.2 and fixed 2026-05-25:
 ## Recent Decisions
 
 - **Role change semantics (2026-05-25):** Changed from "can't remove last admin" to "can't change own role." An admin can demote any other admin; they cannot demote themselves. This invariant guarantees at least one admin always exists (the current user).
-- **Member removal guard (deferred to 10.1.3):** Hard-deleting a `team_members` row when the member has `activity_assignments` is currently unguarded. SQLite FK enforcement may not be on. This is the primary concern for 10.1.3.
+- **Member removal guard (deferred to 10.1.4):** Hard-deleting a `team_members` row when the member has `activity_assignments` is currently unguarded. SQLite FK enforcement may not be on. This is the primary concern for 10.1.4.
 - **repomap.md usage:** Use Grep on it for targeted symbol lookups; do not read it wholesale (1.3 MB, exceeds Read tool limit).
 
 ---
@@ -74,7 +75,7 @@ These were found during manual testing of 10.1.2 and fixed 2026-05-25:
 - [ ] Create participant (no login) — verify appears in sidebar without refresh
 - [ ] Change member role (promote to admin, demote back) — verify persists
 - [ ] Remove member with zero assignments — verify success
-- [ ] Remove member with assignments — currently no guard (10.1.3 work); may fail with FK error or silently orphan rows
+- [ ] Remove member with assignments — currently no guard (10.1.4 work); may fail with FK error or silently orphan rows
 - [ ] Generate invite link → copy → register new account via that URL
 - [ ] MemberModal: stats chips show correct counts
 - [ ] MemberModal (superadmin): promote, inactivate, delete all show correct dialogs
