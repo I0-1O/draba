@@ -292,10 +292,10 @@ func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) 
 	// Activity counts from activity_assignments.
 	rows, err := r.db.Query(`
 		SELECT
-			SUM(CASE WHEN a.archived_at IS NOT NULL                                                     THEN 1 ELSE 0 END) AS archived,
-			SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                                     THEN 1 ELSE 0 END) AS past_due,
-			SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ?                   THEN 1 ELSE 0 END) AS running,
-			SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                                     THEN 1 ELSE 0 END) AS upcoming
+			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                                     THEN 1 ELSE 0 END), 0) AS archived,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                                     THEN 1 ELSE 0 END), 0) AS past_due,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ?                   THEN 1 ELSE 0 END), 0) AS running,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                                     THEN 1 ELSE 0 END), 0) AS upcoming
 		FROM activity_assignments aa
 		JOIN activities a ON a.id = aa.activity_id
 		WHERE aa.team_member_id = ?

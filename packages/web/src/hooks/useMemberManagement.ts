@@ -160,7 +160,8 @@ export function useTeamInvites(teamId: string) {
 
   return useQuery({
     queryKey: memberKeys.invites(teamId),
-    queryFn: () => authFetch<Invite[]>(`/teams/${teamId}/invites`),
+    // Normalize null → [] so callers can safely use .length / .map
+    queryFn: async () => (await authFetch<Invite[] | null>(`/teams/${teamId}/invites`)) ?? [],
     enabled: Boolean(teamId),
   })
 }
@@ -233,7 +234,7 @@ export function useUserSearch(q: string) {
 
   return useQuery({
     queryKey: memberKeys.userSearch(q),
-    queryFn: () => authFetch<User[]>(`/users/search?q=${encodeURIComponent(q)}`),
+    queryFn: async () => (await authFetch<User[] | null>(`/users/search?q=${encodeURIComponent(q)}`)) ?? [],
     enabled: q.length >= 2,
   })
 }

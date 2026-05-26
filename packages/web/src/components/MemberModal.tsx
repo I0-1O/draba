@@ -86,7 +86,7 @@ function ConfirmDialog({ variant, icon, title, body, confirmLabel, busy, onCance
 
 export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
   const { user: currentUser } = useAuth()
-  const { data: detail, isLoading } = useMemberDetail(teamId, memberId)
+  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
   const updateMember = useUpdateMember(teamId)
   const promoteUser = usePromoteUser()
   const archiveUser = useArchiveUser()
@@ -97,11 +97,24 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
   const [displayName, setDisplayName] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | null>(null)
 
-  if (isLoading || !detail) {
+  if (isLoading || isError || !detail) {
     return createPortal(
-      <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}>
-        <div style={{ width: 560, height: 300, background: '#21262d', border: '1px solid #30363d', borderRadius: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <span style={{ color: '#484f58', fontSize: 13 }}>Loading…</span>
+      <div
+        onClick={e => { if (e.target === e.currentTarget) onClose() }}
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+      >
+        <div style={{ width: 560, height: 300, background: '#21262d', border: '1px solid #30363d', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
+          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 4, display: 'flex' }}>
+            <X size={18} />
+          </button>
+          {isError ? (
+            <>
+              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
+              <button onClick={onClose} style={{ fontSize: 12, color: '#8b949e', background: 'none', border: '1px solid #30363d', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit' }}>Dismiss</button>
+            </>
+          ) : (
+            <span style={{ color: '#484f58', fontSize: 13 }}>Loading…</span>
+          )}
         </div>
       </div>,
       document.body,

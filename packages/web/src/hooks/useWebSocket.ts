@@ -31,10 +31,18 @@ interface Options {
   onMessage?: (msg: WsMessage) => void
 }
 
-// When API_BASE is empty (embedded SPA), derive from the current page origin.
+// Priority:
+// 1. VITE_API_URL is set → use it (explicit override, e.g. cross-origin prod).
+// 2. VITE_API_TARGET is set → connect directly to the dev target, bypassing
+//    the Vite proxy. Vite v6's ws: true proxy is unreliable and connecting
+//    directly avoids the upgrade-handshake issues on the dev server.
+// 3. Fallback → derive from the current page origin (production embedded mode,
+//    or local dev where the Vite proxy handles the /ws path).
 const WS_BASE = API_BASE
   ? API_BASE.replace(/^http/, 'ws')
-  : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
+  : (import.meta.env.VITE_API_TARGET as string | undefined)
+    ? (import.meta.env.VITE_API_TARGET as string).replace(/^http/, 'ws')
+    : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
 const MAX_BACKOFF_MS = 30_000
 
 export function useWebSocket({ token, teamIds = [], onMessage }: Options) {

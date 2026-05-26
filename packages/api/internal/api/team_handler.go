@@ -542,17 +542,10 @@ func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Prevent removing the last admin.
-	if req.Role != nil && *req.Role == "member" && target.Role == "admin" {
-		admins, err := s.teams.CountAdmins(teamID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to count admins")
-			return
-		}
-		if admins <= 1 {
-			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot demote the last admin")
-			return
-		}
+	// Admins cannot change their own role — another admin must do it.
+	if req.Role != nil && target.UserID != nil && *target.UserID == claims.UserID {
+		writeError(w, http.StatusConflict, "SELF_ROLE_CHANGE", "cannot change your own role")
+		return
 	}
 
 	if err := s.teams.UpdateMember(memberID, req.DisplayName, req.Color, req.Icon, req.Role); err != nil {

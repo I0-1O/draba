@@ -10,11 +10,11 @@ import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Archive, Mail, Link2, Copy, Check, Plus, Minus, RefreshCw, UserMinus } from 'lucide-react';
 import { IdentityWidget } from '@/components/identity/IdentityWidget';
-import { IdentityPicker } from '@/components/identity/IdentityPicker';
 import { Badge } from '@/components/identity/Badge';
 import type { Identity } from '@/components/identity/identity-constants';
 import { IDENTITY_COLORS } from '@/components/identity/identity-constants';
 import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities';
+import { useAuth } from '@/contexts/AuthContext';
 import {
   useTeamInvites, useRevokeInvite,
   useTeamInviteLink, useCreateInviteLink, useRevokeInviteLink,
@@ -110,6 +110,8 @@ const labelStyle: React.CSSProperties = {
 // ── Main component ──────────────────────────────────────────────────────────
 
 export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin = true }: Props) {
+  const { user } = useAuth()
+  const currentUserId = (user as { id?: string } | null)?.id ?? ''
   const [tab, setTab] = useState<Tab>('settings');
   const [teamSaved, setTeamSaved] = useState(mode === 'edit');
   const [showBanner, setShowBanner] = useState(false);
@@ -330,7 +332,7 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
                   {t}
                   {t === 'members' && teamSaved && (
                     <span style={{ fontSize: 11, color: '#484f58', background: '#2d333b', borderRadius: 99, padding: '1px 6px' }}>
-                      0
+                      {members.length}
                     </span>
                   )}
                 </button>
@@ -478,7 +480,7 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
                     <div style={{ background: '#2d333b', border: '1px solid #30363d', borderRadius: 8, padding: 14 }}>
                       <label style={labelStyle}>New participant</label>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <IdentityPicker
+                        <IdentityWidget
                           identity={participantIdentity}
                           name={participantName}
                           shape="circle"
@@ -513,6 +515,13 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Role-change error banner */}
+              {updateMember.isError && (
+                <div style={{ fontSize: 12, color: '#F59E0B', background: '#F59E0B10', border: '1px solid #F59E0B33', borderRadius: 7, padding: '7px 12px' }}>
+                  {(updateMember.error as { message?: string })?.message ?? 'Could not update role.'}
                 </div>
               )}
 
@@ -556,7 +565,7 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
                               if (isParticipant || role === 'participant') return;
                               updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
                             }}
-                            disabled={isParticipant}
+                            disabled={isParticipant || m.userId === currentUserId}
                             hideParticipant={!isParticipant}
                           />
                         )}

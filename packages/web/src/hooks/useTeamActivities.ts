@@ -35,7 +35,7 @@ export function useMyTeams(includeArchived = false) {
 
   return useQuery({
     queryKey: [...keys.myTeams(), { includeArchived }],
-    queryFn: () => authFetch<Team[]>(includeArchived ? '/teams?archived=true' : '/teams'),
+    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
   })
 }
 
@@ -58,7 +58,7 @@ export function useTeamTimelines(teamId: string) {
 
   return useQuery({
     queryKey: keys.teamTimelines(teamId),
-    queryFn: () => authFetch<Timeline[]>(`/teams/${teamId}/timelines`),
+    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
     enabled: Boolean(teamId),
   })
 }
@@ -70,12 +70,12 @@ export function useTeamActivities(teamId: string, from?: string, to?: string) {
 
   return useQuery({
     queryKey: keys.teamActivities(teamId, from, to),
-    queryFn: () => {
+    queryFn: async () => {
       const params = new URLSearchParams()
       if (from) params.set('from', from)
       if (to) params.set('to', to)
       const qs = params.toString()
-      return authFetch<Activity[]>(`/teams/${teamId}/activities${qs ? `?${qs}` : ''}`)
+      return (await authFetch<Activity[] | null>(`/teams/${teamId}/activities${qs ? `?${qs}` : ''}`)) ?? []
     },
     enabled: Boolean(teamId),
   })
@@ -88,7 +88,7 @@ export function useTeamMembers(teamId: string) {
 
   return useQuery({
     queryKey: keys.teamMembers(teamId),
-    queryFn: () => authFetch<TeamMemberWithUser[]>(`/teams/${teamId}/members`),
+    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
     enabled: Boolean(teamId),
   })
 }
