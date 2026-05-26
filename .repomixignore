@@ -1,0 +1,15 @@
+# Ignore dependency locks
+package-lock.json
+yarn.lock
+go.sum
+
+# Ignore media and assets
+public/
+docs/assets/
+*.svg
+*.png
+
+# Ignore tests if you only want architectural context
+**/*.test.tsx
+**/*.spec.ts
+*_test.go
