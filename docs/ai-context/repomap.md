@@ -223,6 +223,10 @@ packages/
       pages/
         settings/
           AdminPage.tsx
+          AdminUsersPage.tsx
+          AiKeysPage.tsx
+          CommunicationPage.tsx
+          OrganizationPage.tsx
           PreferencesPage.tsx
           ProfilePage.tsx
           SecurityPage.tsx
@@ -933,6 +937,354 @@ Summarize findings and suggest fixes.
 </html>
 ````
 
+## File: packages/api/internal/db/migrations/001_initial_schema.sql
+````sql
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version     INTEGER PRIMARY KEY,
+    applied_at  DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    email         TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    display_name  TEXT NOT NULL,
+    avatar_url    TEXT,
+    created_at    DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at    DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS teams (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    slug       TEXT NOT NULL UNIQUE,
+    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS team_members (
+    team_id   TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role      TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+    color     TEXT,
+    joined_at DATETIME NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS team_statuses (
+    id         TEXT PRIMARY KEY,
+    team_id    TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    color      TEXT NOT NULL,
+    position   INTEGER NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS invites (
+    id          TEXT PRIMARY KEY,
+    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    email       TEXT NOT NULL,
+    token       TEXT NOT NULL UNIQUE,
+    role        TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+    invited_by  TEXT NOT NULL REFERENCES users(id),
+    expires_at  DATETIME NOT NULL,
+    accepted_at DATETIME,
+    created_at  DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL UNIQUE,
+    scope        TEXT NOT NULL CHECK (scope IN ('read', 'add', 'edit_own', 'edit_all')),
+    last_used_at DATETIME,
+    created_at   DATETIME NOT NULL DEFAULT (datetime('now')),
+    revoked_at   DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id               TEXT PRIMARY KEY,
+    team_id          TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    title            TEXT NOT NULL,
+    description      TEXT,
+    icon             TEXT,
+    color            TEXT,
+    start_at         DATETIME NOT NULL,
+    end_at           DATETIME NOT NULL,
+    all_day          BOOLEAN NOT NULL DEFAULT 0,
+    status_id        TEXT REFERENCES team_statuses(id),
+    parent_event_id  TEXT REFERENCES events(id),
+    percent_complete INTEGER,
+    location         TEXT,
+    url              TEXT,
+    rrule            TEXT,
+    caldav_uid       TEXT,
+    google_event_id  TEXT,
+    created_by       TEXT NOT NULL REFERENCES users(id),
+    created_at       DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at       DATETIME NOT NULL DEFAULT (datetime('now')),
+    archived_at      DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS event_tags (
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    tag      TEXT NOT NULL,
+    PRIMARY KEY (event_id, tag)
+);
+
+CREATE TABLE IF NOT EXISTS event_assignments (
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    user_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (event_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS timelines (
+    id          TEXT PRIMARY KEY,
+    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    start_date  TEXT NOT NULL,
+    end_date    TEXT NOT NULL,
+    visibility  TEXT NOT NULL CHECK (visibility IN ('public', 'restricted')),
+    share_token TEXT NOT NULL UNIQUE,
+    ical_token  TEXT NOT NULL UNIQUE,
+    created_by  TEXT NOT NULL REFERENCES users(id),
+    created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    archived_at DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS timeline_access (
+    timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (timeline_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS calendar_connections (
+    id                    TEXT PRIMARY KEY,
+    user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider              TEXT NOT NULL CHECK (provider IN ('google', 'caldav')),
+    credentials_encrypted TEXT,
+    caldav_url            TEXT,
+    last_synced_at        DATETIME,
+    created_at            DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+````
+
+## File: packages/api/internal/db/migrations.go
+````go
+package db
+
+import (
+	"embed"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/jmoiron/sqlx"
+)
+
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+// Migrate applies any unapplied SQL migration files in order. It is idempotent.
+func Migrate(database *sqlx.DB) error {
+	if _, err := database.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version    INTEGER PRIMARY KEY,
+			applied_at DATETIME NOT NULL DEFAULT (datetime('now'))
+		)
+	`); err != nil {
+		return fmt.Errorf("ensuring schema_migrations table: %w", err)
+	}
+
+	entries, err := migrationFiles.ReadDir("migrations")
+	if err != nil {
+		return fmt.Errorf("reading migrations: %w", err)
+	}
+
+	type migration struct {
+		version int
+		name    string
+	}
+	var pending []migration
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		vStr := strings.SplitN(e.Name(), "_", 2)[0]
+		v, err := strconv.Atoi(vStr)
+		if err != nil {
+			continue
+		}
+		pending = append(pending, migration{version: v, name: e.Name()})
+	}
+	sort.Slice(pending, func(i, j int) bool { return pending[i].version < pending[j].version })
+
+	for _, m := range pending {
+		var count int
+		if err := database.Get(&count, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, m.version); err != nil {
+			return fmt.Errorf("checking migration %d: %w", m.version, err)
+		}
+		if count > 0 {
+			continue
+		}
+
+		sql, err := migrationFiles.ReadFile("migrations/" + m.name)
+		if err != nil {
+			return fmt.Errorf("reading migration %s: %w", m.name, err)
+		}
+
+		if _, err := database.Exec(string(sql)); err != nil {
+			return fmt.Errorf("applying migration %s: %w", m.name, err)
+		}
+
+		if _, err := database.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, m.version); err != nil {
+			return fmt.Errorf("recording migration %d: %w", m.version, err)
+		}
+	}
+
+	return nil
+}
+````
+
+## File: packages/api/migrations/001_initial_schema.sql
+````sql
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version     INTEGER PRIMARY KEY,
+    applied_at  DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    email         TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    display_name  TEXT NOT NULL,
+    avatar_url    TEXT,
+    created_at    DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at    DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS teams (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    slug       TEXT NOT NULL UNIQUE,
+    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS team_members (
+    team_id   TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role      TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+    color     TEXT,
+    joined_at DATETIME NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS team_statuses (
+    id         TEXT PRIMARY KEY,
+    team_id    TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    color      TEXT NOT NULL,
+    position   INTEGER NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS invites (
+    id          TEXT PRIMARY KEY,
+    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    email       TEXT NOT NULL,
+    token       TEXT NOT NULL UNIQUE,
+    role        TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+    invited_by  TEXT NOT NULL REFERENCES users(id),
+    expires_at  DATETIME NOT NULL,
+    accepted_at DATETIME,
+    created_at  DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    token_hash  TEXT NOT NULL UNIQUE,
+    scope       TEXT NOT NULL CHECK (scope IN ('read', 'add', 'edit_own', 'edit_all')),
+    last_used_at DATETIME,
+    created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    revoked_at  DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id               TEXT PRIMARY KEY,
+    team_id          TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    title            TEXT NOT NULL,
+    description      TEXT,
+    icon             TEXT,
+    color            TEXT,
+    start_at         DATETIME NOT NULL,
+    end_at           DATETIME NOT NULL,
+    all_day          BOOLEAN NOT NULL DEFAULT 0,
+    status_id        TEXT REFERENCES team_statuses(id),
+    parent_event_id  TEXT REFERENCES events(id),
+    percent_complete INTEGER,
+    location         TEXT,
+    url              TEXT,
+    rrule            TEXT,
+    caldav_uid       TEXT,
+    google_event_id  TEXT,
+    created_by       TEXT NOT NULL REFERENCES users(id),
+    created_at       DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at       DATETIME NOT NULL DEFAULT (datetime('now')),
+    archived_at      DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS event_tags (
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    tag      TEXT NOT NULL,
+    PRIMARY KEY (event_id, tag)
+);
+
+CREATE TABLE IF NOT EXISTS event_assignments (
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    user_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (event_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS timelines (
+    id          TEXT PRIMARY KEY,
+    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    start_date  TEXT NOT NULL,
+    end_date    TEXT NOT NULL,
+    visibility  TEXT NOT NULL CHECK (visibility IN ('public', 'restricted')),
+    share_token TEXT NOT NULL UNIQUE,
+    ical_token  TEXT NOT NULL UNIQUE,
+    created_by  TEXT NOT NULL REFERENCES users(id),
+    created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    archived_at DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS timeline_access (
+    timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (timeline_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS calendar_connections (
+    id                    TEXT PRIMARY KEY,
+    user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider              TEXT NOT NULL CHECK (provider IN ('google', 'caldav')),
+    credentials_encrypted TEXT,
+    caldav_url            TEXT,
+    last_synced_at        DATETIME,
+    created_at            DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+````
+
 ## File: packages/api/.air.toml
 ````toml
 root = "."
@@ -1042,6 +1394,47 @@ CMD ["pnpm", "dev", "--host"]
   },
   "include": ["vite.config.ts"]
 }
+````
+
+## File: .golangci.yml
+````yaml
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - gofmt
+    - goimports
+    - gocritic
+    - revive
+    - misspell
+    - nolintlint
+
+linters-settings:
+  goimports:
+    local-prefixes: github.com/I0-1O/draba
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+  nolintlint:
+    require-explanation: true
+    require-specific: true
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
 ````
 
 ## File: LICENSE
@@ -1332,6 +1725,70 @@ Run the automated test suite for the phase specified in $ARGUMENTS (e.g. "2" or 
    ```
 
 7. Report the table back to the user. Do not modify any source code.
+````
+
+## File: .github/workflows/ci.yml
+````yaml
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  api:
+    name: API (Go)
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    defaults:
+      run:
+        working-directory: packages/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -race -count=1
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: packages/api
+          args: --config ../../.golangci.yml
+          skip-cache: true
+
+  web:
+    name: Web (React)
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm --filter @draba/web build
 ````
 
 ## File: .github/workflows/docker-publish.yml
@@ -6621,139 +7078,134 @@ func LooksLikeAPIToken(raw string) bool {
 }
 ````
 
-## File: packages/api/internal/db/migrations/001_initial_schema.sql
-````sql
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version     INTEGER PRIMARY KEY,
-    applied_at  DATETIME NOT NULL DEFAULT (datetime('now'))
-);
+## File: packages/api/internal/auth/jwt.go
+````go
+package auth
 
-CREATE TABLE IF NOT EXISTS users (
-    id            TEXT PRIMARY KEY,
-    email         TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    display_name  TEXT NOT NULL,
-    avatar_url    TEXT,
-    created_at    DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at    DATETIME NOT NULL DEFAULT (datetime('now'))
-);
+import (
+	"fmt"
+	"time"
 
-CREATE TABLE IF NOT EXISTS teams (
-    id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL,
-    slug       TEXT NOT NULL UNIQUE,
-    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
-);
+	"github.com/golang-jwt/jwt/v5"
+)
 
-CREATE TABLE IF NOT EXISTS team_members (
-    team_id   TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role      TEXT NOT NULL CHECK (role IN ('admin', 'member')),
-    color     TEXT,
-    joined_at DATETIME NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (team_id, user_id)
-);
+// Token TTLs. Access tokens are short-lived so revocation latency is bounded;
+// refresh tokens are long enough to survive a typical work week.
+const (
+	accessTokenTTL  = 15 * time.Minute
+	refreshTokenTTL = 7 * 24 * time.Hour
+)
 
-CREATE TABLE IF NOT EXISTS team_statuses (
-    id         TEXT PRIMARY KEY,
-    team_id    TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    name       TEXT NOT NULL,
-    color      TEXT NOT NULL,
-    position   INTEGER NOT NULL,
-    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
-);
+// Claims is the JWT payload used for both access and refresh tokens.
+// The Type field discriminates the two so a refresh token cannot be
+// presented in place of an access token (and vice versa).
+type Claims struct {
+	UserID string `json:"uid"`
+	Email  string `json:"email"`
+	Type   string `json:"type"` // "access" or "refresh"
+	jwt.RegisteredClaims
+}
 
-CREATE TABLE IF NOT EXISTS invites (
-    id          TEXT PRIMARY KEY,
-    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    email       TEXT NOT NULL,
-    token       TEXT NOT NULL UNIQUE,
-    role        TEXT NOT NULL CHECK (role IN ('admin', 'member')),
-    invited_by  TEXT NOT NULL REFERENCES users(id),
-    expires_at  DATETIME NOT NULL,
-    accepted_at DATETIME,
-    created_at  DATETIME NOT NULL DEFAULT (datetime('now'))
-);
+// TokenService signs and validates JWTs with a shared HMAC secret.
+type TokenService struct {
+	secret []byte
+}
 
-CREATE TABLE IF NOT EXISTS api_tokens (
-    id           TEXT PRIMARY KEY,
-    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name         TEXT NOT NULL,
-    token_hash   TEXT NOT NULL UNIQUE,
-    scope        TEXT NOT NULL CHECK (scope IN ('read', 'add', 'edit_own', 'edit_all')),
-    last_used_at DATETIME,
-    created_at   DATETIME NOT NULL DEFAULT (datetime('now')),
-    revoked_at   DATETIME
-);
+// NewTokenService returns a TokenService that signs with secret.
+// The secret must be kept private; rotating it invalidates every issued token.
+func NewTokenService(secret string) *TokenService {
+	return &TokenService{secret: []byte(secret)}
+}
 
-CREATE TABLE IF NOT EXISTS events (
-    id               TEXT PRIMARY KEY,
-    team_id          TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    title            TEXT NOT NULL,
-    description      TEXT,
-    icon             TEXT,
-    color            TEXT,
-    start_at         DATETIME NOT NULL,
-    end_at           DATETIME NOT NULL,
-    all_day          BOOLEAN NOT NULL DEFAULT 0,
-    status_id        TEXT REFERENCES team_statuses(id),
-    parent_event_id  TEXT REFERENCES events(id),
-    percent_complete INTEGER,
-    location         TEXT,
-    url              TEXT,
-    rrule            TEXT,
-    caldav_uid       TEXT,
-    google_event_id  TEXT,
-    created_by       TEXT NOT NULL REFERENCES users(id),
-    created_at       DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at       DATETIME NOT NULL DEFAULT (datetime('now')),
-    archived_at      DATETIME
-);
+// IssueAccessToken returns a signed short-lived access token for the user.
+func (s *TokenService) IssueAccessToken(userID, email string) (string, error) {
+	return s.sign(userID, email, "access", accessTokenTTL)
+}
 
-CREATE TABLE IF NOT EXISTS event_tags (
-    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    tag      TEXT NOT NULL,
-    PRIMARY KEY (event_id, tag)
-);
+// IssueRefreshToken returns a signed long-lived refresh token. Refresh tokens
+// are exchanged at /auth/refresh for new access tokens.
+func (s *TokenService) IssueRefreshToken(userID, email string) (string, error) {
+	return s.sign(userID, email, "refresh", refreshTokenTTL)
+}
 
-CREATE TABLE IF NOT EXISTS event_assignments (
-    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    user_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    PRIMARY KEY (event_id, user_id)
-);
+// sign builds and serializes a Claims-bearing HS256 JWT.
+func (s *TokenService) sign(userID, email, tokenType string, ttl time.Duration) (string, error) {
+	claims := Claims{
+		UserID: userID,
+		Email:  email,
+		Type:   tokenType,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(s.secret)
+	if err != nil {
+		return "", fmt.Errorf("signing token: %w", err)
+	}
+	return signed, nil
+}
 
-CREATE TABLE IF NOT EXISTS timelines (
-    id          TEXT PRIMARY KEY,
-    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    name        TEXT NOT NULL,
-    start_date  TEXT NOT NULL,
-    end_date    TEXT NOT NULL,
-    visibility  TEXT NOT NULL CHECK (visibility IN ('public', 'restricted')),
-    share_token TEXT NOT NULL UNIQUE,
-    ical_token  TEXT NOT NULL UNIQUE,
-    created_by  TEXT NOT NULL REFERENCES users(id),
-    created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at  DATETIME NOT NULL DEFAULT (datetime('now')),
-    archived_at DATETIME
-);
+// Validate parses and verifies tokenStr, returning its claims when the
+// signature is valid, the token has not expired, and its Type matches
+// expectedType ("access" or "refresh"). Any failure returns an error and
+// nil claims.
+func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
+		// Reject any token not signed with HMAC — guards against the
+		// classic "alg=none" / algorithm-confusion attack.
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return s.secret, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("parsing token: %w", err)
+	}
+	claims, ok := token.Claims.(*Claims)
+	if !ok || !token.Valid {
+		return nil, fmt.Errorf("invalid token")
+	}
+	if claims.Type != expectedType {
+		return nil, fmt.Errorf("wrong token type")
+	}
+	return claims, nil
+}
+````
 
-CREATE TABLE IF NOT EXISTS timeline_access (
-    timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
-    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    PRIMARY KEY (timeline_id, user_id)
-);
+## File: packages/api/internal/auth/password.go
+````go
+// Package auth provides password hashing and JWT issuance/validation
+// for access and refresh tokens used by the HTTP API.
+package auth
 
-CREATE TABLE IF NOT EXISTS calendar_connections (
-    id                    TEXT PRIMARY KEY,
-    user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    provider              TEXT NOT NULL CHECK (provider IN ('google', 'caldav')),
-    credentials_encrypted TEXT,
-    caldav_url            TEXT,
-    last_synced_at        DATETIME,
-    created_at            DATETIME NOT NULL DEFAULT (datetime('now'))
-);
+import (
+	"fmt"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+// bcryptCost is the work factor for password hashing. 12 is the project
+// baseline — raise only after benchmarking on the slowest deployment target.
+const bcryptCost = 12
+
+// HashPassword returns a bcrypt hash of password using bcryptCost.
+func HashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	if err != nil {
+		return "", fmt.Errorf("hashing password: %w", err)
+	}
+	return string(hash), nil
+}
+
+// CheckPassword returns nil when password matches hash. A non-nil result
+// (typically bcrypt.ErrMismatchedHashAndPassword) means the password is wrong;
+// callers should treat any error as authentication failure without leaking
+// which case occurred.
+func CheckPassword(hash, password string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
 ````
 
 ## File: packages/api/internal/db/migrations/002_saved_filters.sql
@@ -7453,84 +7905,6 @@ func (r *InstanceSettingsRepo) List() ([]*models.InstanceSetting, error) {
 }
 ````
 
-## File: packages/api/internal/db/migrations.go
-````go
-package db
-
-import (
-	"embed"
-	"fmt"
-	"sort"
-	"strconv"
-	"strings"
-
-	"github.com/jmoiron/sqlx"
-)
-
-//go:embed migrations/*.sql
-var migrationFiles embed.FS
-
-// Migrate applies any unapplied SQL migration files in order. It is idempotent.
-func Migrate(database *sqlx.DB) error {
-	if _, err := database.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    INTEGER PRIMARY KEY,
-			applied_at DATETIME NOT NULL DEFAULT (datetime('now'))
-		)
-	`); err != nil {
-		return fmt.Errorf("ensuring schema_migrations table: %w", err)
-	}
-
-	entries, err := migrationFiles.ReadDir("migrations")
-	if err != nil {
-		return fmt.Errorf("reading migrations: %w", err)
-	}
-
-	type migration struct {
-		version int
-		name    string
-	}
-	var pending []migration
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
-			continue
-		}
-		vStr := strings.SplitN(e.Name(), "_", 2)[0]
-		v, err := strconv.Atoi(vStr)
-		if err != nil {
-			continue
-		}
-		pending = append(pending, migration{version: v, name: e.Name()})
-	}
-	sort.Slice(pending, func(i, j int) bool { return pending[i].version < pending[j].version })
-
-	for _, m := range pending {
-		var count int
-		if err := database.Get(&count, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, m.version); err != nil {
-			return fmt.Errorf("checking migration %d: %w", m.version, err)
-		}
-		if count > 0 {
-			continue
-		}
-
-		sql, err := migrationFiles.ReadFile("migrations/" + m.name)
-		if err != nil {
-			return fmt.Errorf("reading migration %s: %w", m.name, err)
-		}
-
-		if _, err := database.Exec(string(sql)); err != nil {
-			return fmt.Errorf("applying migration %s: %w", m.name, err)
-		}
-
-		if _, err := database.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, m.version); err != nil {
-			return fmt.Errorf("recording migration %d: %w", m.version, err)
-		}
-	}
-
-	return nil
-}
-````
-
 ## File: packages/api/internal/db/password_reset_token_repo.go
 ````go
 package db
@@ -7993,141 +8367,6 @@ func Register(m Module) {
 func Registered() []Module {
 	return registered
 }
-````
-
-## File: packages/api/migrations/001_initial_schema.sql
-````sql
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version     INTEGER PRIMARY KEY,
-    applied_at  DATETIME NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS users (
-    id            TEXT PRIMARY KEY,
-    email         TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    display_name  TEXT NOT NULL,
-    avatar_url    TEXT,
-    created_at    DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at    DATETIME NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS teams (
-    id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL,
-    slug       TEXT NOT NULL UNIQUE,
-    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS team_members (
-    team_id   TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role      TEXT NOT NULL CHECK (role IN ('admin', 'member')),
-    color     TEXT,
-    joined_at DATETIME NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (team_id, user_id)
-);
-
-CREATE TABLE IF NOT EXISTS team_statuses (
-    id         TEXT PRIMARY KEY,
-    team_id    TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    name       TEXT NOT NULL,
-    color      TEXT NOT NULL,
-    position   INTEGER NOT NULL,
-    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS invites (
-    id          TEXT PRIMARY KEY,
-    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    email       TEXT NOT NULL,
-    token       TEXT NOT NULL UNIQUE,
-    role        TEXT NOT NULL CHECK (role IN ('admin', 'member')),
-    invited_by  TEXT NOT NULL REFERENCES users(id),
-    expires_at  DATETIME NOT NULL,
-    accepted_at DATETIME,
-    created_at  DATETIME NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS api_tokens (
-    id          TEXT PRIMARY KEY,
-    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name        TEXT NOT NULL,
-    token_hash  TEXT NOT NULL UNIQUE,
-    scope       TEXT NOT NULL CHECK (scope IN ('read', 'add', 'edit_own', 'edit_all')),
-    last_used_at DATETIME,
-    created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
-    revoked_at  DATETIME
-);
-
-CREATE TABLE IF NOT EXISTS events (
-    id               TEXT PRIMARY KEY,
-    team_id          TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    title            TEXT NOT NULL,
-    description      TEXT,
-    icon             TEXT,
-    color            TEXT,
-    start_at         DATETIME NOT NULL,
-    end_at           DATETIME NOT NULL,
-    all_day          BOOLEAN NOT NULL DEFAULT 0,
-    status_id        TEXT REFERENCES team_statuses(id),
-    parent_event_id  TEXT REFERENCES events(id),
-    percent_complete INTEGER,
-    location         TEXT,
-    url              TEXT,
-    rrule            TEXT,
-    caldav_uid       TEXT,
-    google_event_id  TEXT,
-    created_by       TEXT NOT NULL REFERENCES users(id),
-    created_at       DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at       DATETIME NOT NULL DEFAULT (datetime('now')),
-    archived_at      DATETIME
-);
-
-CREATE TABLE IF NOT EXISTS event_tags (
-    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    tag      TEXT NOT NULL,
-    PRIMARY KEY (event_id, tag)
-);
-
-CREATE TABLE IF NOT EXISTS event_assignments (
-    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    user_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    PRIMARY KEY (event_id, user_id)
-);
-
-CREATE TABLE IF NOT EXISTS timelines (
-    id          TEXT PRIMARY KEY,
-    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    name        TEXT NOT NULL,
-    start_date  TEXT NOT NULL,
-    end_date    TEXT NOT NULL,
-    visibility  TEXT NOT NULL CHECK (visibility IN ('public', 'restricted')),
-    share_token TEXT NOT NULL UNIQUE,
-    ical_token  TEXT NOT NULL UNIQUE,
-    created_by  TEXT NOT NULL REFERENCES users(id),
-    created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at  DATETIME NOT NULL DEFAULT (datetime('now')),
-    archived_at DATETIME
-);
-
-CREATE TABLE IF NOT EXISTS timeline_access (
-    timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
-    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    PRIMARY KEY (timeline_id, user_id)
-);
-
-CREATE TABLE IF NOT EXISTS calendar_connections (
-    id                    TEXT PRIMARY KEY,
-    user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    provider              TEXT NOT NULL CHECK (provider IN ('google', 'caldav')),
-    credentials_encrypted TEXT,
-    caldav_url            TEXT,
-    last_synced_at        DATETIME,
-    created_at            DATETIME NOT NULL DEFAULT (datetime('now'))
-);
 ````
 
 ## File: packages/api/ui/static/.gitkeep
@@ -9219,173 +9458,6 @@ export function useDeleteSavedFilter(teamId: string) {
 }
 ````
 
-## File: packages/web/src/hooks/useSettings.ts
-````typescript
-/**
- * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
- * profile, password change, forgot/reset password, SMTP config, instance
- * settings, and the admin user list.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { apiFetch, createAuthFetch } from '@/lib/api'
-import type { components } from '@draba/shared'
-
-type User = components['schemas']['User']
-type SMTPConfig = components['schemas']['SMTPConfig']
-
-// ── Profile ──────────────────────────────────────────────────────────────────
-
-export function useUpdateProfile() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
-      authFetch<User>('/users/me', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: (updated) => {
-      qc.setQueryData(['me'], updated)
-    },
-  })
-}
-
-// ── Password ──────────────────────────────────────────────────────────────────
-
-export function useChangePassword() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
-      authFetch<{ status: string }>('/users/me/password', {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Forgot / reset password (public, no auth required) ───────────────────────
-
-export function useForgotPassword() {
-  return useMutation({
-    mutationFn: (email: string) =>
-      apiFetch<{ status: string }>('/auth/forgot-password', {
-        method: 'POST',
-        body: JSON.stringify({ email }),
-      }),
-  })
-}
-
-export function useResetPassword() {
-  return useMutation({
-    mutationFn: (data: { token: string; newPassword: string }) =>
-      apiFetch<{ status: string }>('/auth/reset-password', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Admin: SMTP ──────────────────────────────────────────────────────────────
-
-export function useAdminSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'smtp'],
-    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
-  })
-}
-
-export function useSaveSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
-        method: 'PUT',
-        body: JSON.stringify(cfg),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-export function useTestSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
-        method: 'POST',
-        body: JSON.stringify(cfg),
-      }),
-  })
-}
-
-export function useDeleteSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: () =>
-      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-// ── Admin: Instance settings ──────────────────────────────────────────────────
-
-export function useAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'settings'],
-    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
-  })
-}
-
-export function usePatchAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: Record<string, string>) =>
-      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
-  })
-}
-
-// ── Admin: Users ──────────────────────────────────────────────────────────────
-
-export type AdminUserRow = User & { teamCount: number }
-
-export function useAdminUsers(orphanedOnly = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'users', { orphanedOnly }],
-    queryFn: () =>
-      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
-  })
-}
-````
-
 ## File: packages/web/src/lib/identity-constants.test.ts
 ````typescript
 import { describe, it, expect } from 'vitest';
@@ -9489,6 +9561,616 @@ import { twMerge } from 'tailwind-merge'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
+}
+````
+
+## File: packages/web/src/pages/settings/AdminUsersPage.tsx
+````typescript
+/**
+ * /settings/users — Superadmin: view and search all users; orphaned-user alert.
+ */
+
+import { useState } from 'react'
+import { useAdminUsers } from '@/hooks/useSettings'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { Input } from '@/components/ui/input'
+import { AlertTriangle } from 'lucide-react'
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+export default function AdminUsersPage() {
+  const [orphanedOnly, setOrphanedOnly] = useState(false)
+  const [search, setSearch] = useState('')
+  const { data: allData, error: allError } = useAdminUsers(false)
+  const { data: orphanData } = useAdminUsers(true)
+
+  const allUsers = allData?.users ?? []
+  const orphanedCount = orphanData?.users.length ?? 0
+  const displayed = (orphanedOnly ? orphanData?.users ?? [] : allUsers)
+    .filter(u => {
+      if (!search) return true
+      const q = search.toLowerCase()
+      return u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
+    })
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Users</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        All accounts in this organization. Use team management to assign or remove memberships.
+      </p>
+
+      <div style={sectionStyle}>
+        {orphanedCount > 0 && !orphanedOnly && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '10px 14px', marginBottom: 16,
+            background: 'rgba(210,153,34,0.1)', border: '1px solid rgba(210,153,34,0.3)',
+            borderRadius: 8,
+          }}>
+            <AlertTriangle size={16} style={{ color: '#d2993a', flexShrink: 0 }} />
+            <span style={{ fontSize: 13, color: '#d2993a' }}>
+              {orphanedCount} user{orphanedCount > 1 ? 's' : ''} with no team memberships.
+            </span>
+            <button
+              onClick={() => setOrphanedOnly(true)}
+              style={{ marginLeft: 'auto', fontSize: 12, color: '#d2993a', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+            >
+              View
+            </button>
+          </div>
+        )}
+
+        {allError && (
+        <div style={{
+          padding: '12px 16px', marginBottom: 16,
+          background: 'rgba(248,81,73,0.1)', border: '1px solid rgba(248,81,73,0.3)',
+          borderRadius: 8, fontSize: 13, color: '#f85149',
+        }}>
+          Failed to load users. This endpoint requires the Phase 10.1.3 backend — rebuild and redeploy the Docker container.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
+          <Input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search by name or email…"
+            style={{ maxWidth: 300 }}
+          />
+          <div style={{ display: 'flex', gap: 4 }}>
+            {[
+              { label: `All (${allUsers.length})`, v: false },
+              { label: `Orphaned (${orphanedCount})`, v: true },
+            ].map(({ label, v }) => (
+              <button
+                key={String(v)}
+                onClick={() => setOrphanedOnly(v)}
+                style={{
+                  padding: '6px 12px', borderRadius: 6, fontSize: 12, border: '1px solid',
+                  borderColor: orphanedOnly === v ? '#58a6ff' : '#30363d',
+                  background: orphanedOnly === v ? 'rgba(88,166,255,0.1)' : '#161b22',
+                  color: orphanedOnly === v ? '#58a6ff' : '#8b949e',
+                  cursor: 'pointer',
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {displayed.length === 0 ? (
+          <p style={{ fontSize: 13, color: '#8b949e' }}>No users found.</p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                {['User', 'Email', 'Teams', 'Status'].map(h => (
+                  <th key={h} style={{ textAlign: 'left', fontSize: 11, color: '#8b949e', fontWeight: 600, padding: '0 8px 10px', letterSpacing: '0.4px' }}>
+                    {h.toUpperCase()}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {displayed.map(u => (
+                <tr key={u.id} style={{ borderTop: '1px solid #21262d' }}>
+                  <td style={{ padding: '10px 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <Badge identity={{ color: u.color ?? '#288C9B', icon: u.icon ?? '__none__' } satisfies Identity} name={u.displayName} size={28} shape="circle" />
+                    <span style={{ fontSize: 13, color: '#e6edf3' }}>{u.displayName}</span>
+                    {u.isSuperadmin && (
+                      <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'rgba(88,166,255,0.15)', color: '#58a6ff' }}>
+                        superadmin
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.email}</td>
+                  <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.teamCount}</td>
+                  <td style={{ padding: '10px 8px' }}>
+                    {u.archivedAt ? (
+                      <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(248,81,73,0.15)', color: '#f85149' }}>
+                        Inactive
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(63,185,80,0.15)', color: '#3fb950' }}>
+                        Active
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/AiKeysPage.tsx
+````typescript
+/**
+ * /settings/ai — Superadmin: AI / LLM API key configuration.
+ * Stub for Phase 10.1.3 — key storage and model wiring are deferred.
+ */
+
+import { Sparkles } from 'lucide-react'
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+export default function AiKeysPage() {
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>AI / LLM Keys</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Connect AI providers to enable AI-assisted features in draba.
+      </p>
+
+      <div style={sectionStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 10, background: 'rgba(88,166,255,0.1)', border: '1px solid rgba(88,166,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Sparkles size={18} style={{ color: '#58a6ff' }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>AI features coming soon</div>
+            <div style={{ fontSize: 12, color: '#8b949e', marginTop: 2 }}>Configure an API key when AI functionality is available.</div>
+          </div>
+        </div>
+
+        <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 16 }}>
+          When AI features are enabled, you'll be able to add API keys for providers such as Anthropic, OpenAI, and others. Keys are stored encrypted and used only for organization-wide AI requests.
+        </p>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {['Anthropic (Claude)', 'OpenAI (GPT)', 'Google (Gemini)', 'Custom / self-hosted'].map(provider => (
+            <div
+              key={provider}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '12px 16px',
+                borderRadius: 8,
+                border: '1px solid #30363d',
+                background: '#161b22',
+                opacity: 0.5,
+              }}
+            >
+              <span style={{ fontSize: 13, color: '#e6edf3' }}>{provider}</span>
+              <span style={{ fontSize: 11, color: '#8b949e', padding: '2px 8px', borderRadius: 4, border: '1px solid #30363d' }}>
+                Not configured
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/CommunicationPage.tsx
+````typescript
+/**
+ * /settings/communication — Superadmin: email / SMTP configuration.
+ */
+
+import { useState, useEffect } from 'react'
+import { useAdminSMTP, useSaveSMTP, useTestSMTP, useDeleteSMTP } from '@/hooks/useSettings'
+import type { components } from '@draba/shared'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+import { Eye, EyeOff } from 'lucide-react'
+
+type SMTPConfig = components['schemas']['SMTPConfig']
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  marginBottom: 16,
+}
+
+const selectStyle: React.CSSProperties = {
+  background: '#161b22',
+  border: '1px solid #30363d',
+  borderRadius: 6,
+  color: '#e6edf3',
+  padding: '8px 12px',
+  fontSize: 13,
+  cursor: 'pointer',
+}
+
+export default function CommunicationPage() {
+  const { data } = useAdminSMTP()
+  const saveSMTP = useSaveSMTP()
+  const testSMTP = useTestSMTP()
+  const deleteSMTP = useDeleteSMTP()
+
+  const [host, setHost] = useState('')
+  const [port, setPort] = useState('587')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [fromName, setFromName] = useState('')
+  const [fromEmail, setFromEmail] = useState('')
+  const [encryption, setEncryption] = useState<'none' | 'tls' | 'starttls'>('starttls')
+  const [showPw, setShowPw] = useState(false)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [testState, setTestState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
+
+  useEffect(() => {
+    const cfg = data?.smtp
+    if (cfg) {
+      setHost(cfg.host ?? '')
+      setPort(String(cfg.port ?? 587))
+      setUsername(cfg.username ?? '')
+      setFromName(cfg.fromName ?? '')
+      setFromEmail(cfg.fromEmail ?? '')
+      setEncryption((cfg.encryption as 'none' | 'tls' | 'starttls') ?? 'starttls')
+    }
+  }, [data])
+
+  function buildConfig(): SMTPConfig {
+    return { host, port: parseInt(port, 10), username, password, fromName, fromEmail, encryption }
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await saveSMTP.mutateAsync(buildConfig())
+      setFeedback({ type: 'success', msg: 'SMTP settings saved and validated.' })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to save SMTP settings.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  async function handleTest() {
+    setTestState('sending')
+    try {
+      const res = await testSMTP.mutateAsync(buildConfig())
+      setTestState('sent')
+      setFeedback({ type: 'success', msg: `Test email sent to ${res.to}` })
+    } catch (err) {
+      setTestState('failed')
+      const msg = err instanceof ApiError ? err.message : 'SMTP test failed.'
+      setFeedback({ type: 'error', msg })
+    }
+    setTimeout(() => setTestState('idle'), 3000)
+  }
+
+  async function handleDelete() {
+    await deleteSMTP.mutateAsync()
+    setHost(''); setPort('587'); setUsername(''); setPassword('')
+    setFromName(''); setFromEmail(''); setEncryption('starttls')
+    setFeedback({ type: 'success', msg: 'SMTP configuration cleared.' })
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Communication</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Configure outbound email for password resets and invitations.
+      </p>
+
+      <div style={sectionStyle}>
+        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+          SMTP / Email
+        </h3>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+          <div style={fieldStyle}>
+            <Label style={{ color: '#e6edf3' }}>SMTP host</Label>
+            <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
+          </div>
+          <div style={fieldStyle}>
+            <Label style={{ color: '#e6edf3' }}>Port</Label>
+            <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
+          </div>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Username</Label>
+          <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" style={{ maxWidth: 360 }} />
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Password</Label>
+          <div style={{ position: 'relative', maxWidth: 360 }}>
+            <Input
+              type={showPw ? 'text' : 'password'}
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
+            />
+            <button
+              onClick={() => setShowPw(v => !v)}
+              style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer' }}
+            >
+              {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+          <div style={fieldStyle}>
+            <Label style={{ color: '#e6edf3' }}>From name</Label>
+            <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
+          </div>
+          <div style={fieldStyle}>
+            <Label style={{ color: '#e6edf3' }}>From email</Label>
+            <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
+          </div>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Encryption</Label>
+          <select
+            value={encryption}
+            onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
+            style={{ ...selectStyle, maxWidth: 200 }}
+          >
+            <option value="none">None</option>
+            <option value="tls">TLS</option>
+            <option value="starttls">STARTTLS</option>
+          </select>
+        </div>
+
+        {feedback && (
+          <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
+            {feedback.msg}
+          </p>
+        )}
+
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
+            {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
+          </Button>
+          <Button variant="outline" onClick={handleTest} disabled={testSMTP.isPending || !host}>
+            {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
+          </Button>
+          {data?.smtp && (
+            <Button variant="ghost" style={{ color: '#f85149' }} onClick={handleDelete}>
+              Clear config
+            </Button>
+          )}
+        </div>
+        <p style={{ fontSize: 12, color: '#8b949e', marginTop: 12 }}>
+          When SMTP is not configured, password resets and email invitations are unavailable.
+        </p>
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/OrganizationPage.tsx
+````typescript
+/**
+ * /settings/organization — Superadmin: organization name, registration policy,
+ * and system-wide defaults (language, timezone, week start).
+ */
+
+import { useState, useEffect } from 'react'
+import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  marginBottom: 16,
+}
+
+const selectStyle: React.CSSProperties = {
+  background: '#161b22',
+  border: '1px solid #30363d',
+  borderRadius: 6,
+  color: '#e6edf3',
+  padding: '8px 12px',
+  fontSize: 13,
+  cursor: 'pointer',
+}
+
+export default function OrganizationPage() {
+  const { data } = useAdminSettings()
+  const patch = usePatchAdminSettings()
+
+  const settings = data?.settings ?? {}
+  const [orgName, setOrgName] = useState('')
+  const [regPolicy, setRegPolicy] = useState('invite_only')
+  const [timezone, setTimezone] = useState('UTC')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setOrgName(settings.instance_name || '')
+    setRegPolicy(settings.registration_policy || 'invite_only')
+    setTimezone(settings.default_timezone || 'UTC')
+    setWeekStart(settings.default_week_start || 'monday')
+  }, [JSON.stringify(settings)])
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await patch.mutateAsync({
+        instance_name: orgName,
+        registration_policy: regPolicy,
+        default_timezone: timezone,
+        default_week_start: weekStart,
+      })
+      setFeedback({ type: 'success', msg: 'Settings saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Organization</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        System-wide identity and defaults for this draba installation.
+      </p>
+
+      <div style={sectionStyle}>
+        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+          Identity
+        </h3>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Organization name</Label>
+          <Input
+            value={orgName}
+            onChange={e => setOrgName(e.target.value)}
+            placeholder="My Company"
+            style={{ maxWidth: 320 }}
+          />
+          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
+            Shown in the browser tab title and login page.
+          </p>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Registration policy</Label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {[
+              { v: 'invite_only', label: 'Invite only' },
+              { v: 'open', label: 'Open registration' },
+            ].map(({ v, label }) => (
+              <button
+                key={v}
+                onClick={() => setRegPolicy(v)}
+                style={{
+                  padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
+                  borderColor: regPolicy === v ? '#58a6ff' : '#30363d',
+                  background: regPolicy === v ? 'rgba(88,166,255,0.1)' : '#161b22',
+                  color: regPolicy === v ? '#58a6ff' : '#8b949e',
+                  cursor: 'pointer',
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={sectionStyle}>
+        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+          System defaults
+        </h3>
+        <p style={{ fontSize: 12, color: '#8b949e', marginBottom: 16 }}>
+          Applied to new accounts when the user hasn't set their own preference.
+        </p>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Default language</Label>
+          <select style={{ ...selectStyle, maxWidth: 240, opacity: 0.6, cursor: 'not-allowed' }} disabled>
+            <option value="en">English (en)</option>
+          </select>
+          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
+            Additional languages coming in a future release.
+          </p>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Default timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} style={{ ...selectStyle, maxWidth: 280 }}>
+            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Default week starts on</Label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                style={{
+                  padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
+                  borderColor: weekStart === d ? '#58a6ff' : '#30363d',
+                  background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
+                  color: weekStart === d ? '#58a6ff' : '#8b949e',
+                  cursor: 'pointer', textTransform: 'capitalize',
+                }}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {feedback && (
+        <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
+          {feedback.msg}
+        </p>
+      )}
+      <Button onClick={handleSave} disabled={patch.isPending}>
+        {patch.isPending ? 'Saving…' : 'Save settings'}
+      </Button>
+    </div>
+  )
 }
 ````
 
@@ -10585,47 +11267,6 @@ JSX — extract to a variable or sub-component instead.
 - [ ] `pnpm --filter web lint` and `pnpm --filter web build` pass.
 ````
 
-## File: .golangci.yml
-````yaml
-run:
-  timeout: 5m
-
-linters:
-  enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - ineffassign
-    - gofmt
-    - goimports
-    - gocritic
-    - revive
-    - misspell
-    - nolintlint
-
-linters-settings:
-  goimports:
-    local-prefixes: github.com/I0-1O/draba
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-  revive:
-    rules:
-      - name: exported
-        severity: warning
-  nolintlint:
-    require-explanation: true
-    require-specific: true
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-````
-
 ## File: package.json
 ````json
 {
@@ -10700,70 +11341,6 @@ services:
 ## License
 
 [MIT License](LICENSE)
-````
-
-## File: .github/workflows/ci.yml
-````yaml
-name: CI
-
-on:
-  pull_request:
-    branches: [master]
-  push:
-    branches: [master]
-
-jobs:
-  api:
-    name: API (Go)
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    defaults:
-      run:
-        working-directory: packages/api
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test ./... -race -count=1
-
-      - name: Lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          working-directory: packages/api
-          args: --config ../../.golangci.yml
-          skip-cache: true
-
-  web:
-    name: Web (React)
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - uses: pnpm/action-setup@v4
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build
-        run: pnpm --filter @draba/web build
 ````
 
 ## File: docs/CONVENTIONS.md
@@ -11190,6 +11767,57 @@ func runResetPassword(args []string) {
 }
 ````
 
+## File: packages/api/internal/api/helpers.go
+````go
+package api
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+)
+
+// writeJSON sends v as a JSON response with the given status. Encoder
+// errors are ignored: the headers are already on the wire by the time
+// encoding happens, so there is nothing useful to do with the error.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeError writes the standard {error: {code, message}} envelope used
+// across the API. code is a stable machine identifier; message is a
+// human-readable explanation safe to surface to end users.
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+	})
+}
+
+// newID returns a 32-character hex ID derived from 16 random bytes
+// (128 bits — enough entropy that collisions are not a concern).
+func newID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// newToken returns a 64-character hex token derived from 32 random bytes
+// (256 bits). Use for invite tokens and other secrets; newID is for record IDs.
+// The longer length makes tokens visually distinct from IDs and raises the
+// brute-force bar.
+func newToken() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+````
+
 ## File: packages/api/internal/api/user_handler.go
 ````go
 package api
@@ -11569,136 +12197,6 @@ func (s *Server) handleUpsertPreference(w http.ResponseWriter, r *http.Request) 
 }
 ````
 
-## File: packages/api/internal/auth/jwt.go
-````go
-package auth
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/golang-jwt/jwt/v5"
-)
-
-// Token TTLs. Access tokens are short-lived so revocation latency is bounded;
-// refresh tokens are long enough to survive a typical work week.
-const (
-	accessTokenTTL  = 15 * time.Minute
-	refreshTokenTTL = 7 * 24 * time.Hour
-)
-
-// Claims is the JWT payload used for both access and refresh tokens.
-// The Type field discriminates the two so a refresh token cannot be
-// presented in place of an access token (and vice versa).
-type Claims struct {
-	UserID string `json:"uid"`
-	Email  string `json:"email"`
-	Type   string `json:"type"` // "access" or "refresh"
-	jwt.RegisteredClaims
-}
-
-// TokenService signs and validates JWTs with a shared HMAC secret.
-type TokenService struct {
-	secret []byte
-}
-
-// NewTokenService returns a TokenService that signs with secret.
-// The secret must be kept private; rotating it invalidates every issued token.
-func NewTokenService(secret string) *TokenService {
-	return &TokenService{secret: []byte(secret)}
-}
-
-// IssueAccessToken returns a signed short-lived access token for the user.
-func (s *TokenService) IssueAccessToken(userID, email string) (string, error) {
-	return s.sign(userID, email, "access", accessTokenTTL)
-}
-
-// IssueRefreshToken returns a signed long-lived refresh token. Refresh tokens
-// are exchanged at /auth/refresh for new access tokens.
-func (s *TokenService) IssueRefreshToken(userID, email string) (string, error) {
-	return s.sign(userID, email, "refresh", refreshTokenTTL)
-}
-
-// sign builds and serializes a Claims-bearing HS256 JWT.
-func (s *TokenService) sign(userID, email, tokenType string, ttl time.Duration) (string, error) {
-	claims := Claims{
-		UserID: userID,
-		Email:  email,
-		Type:   tokenType,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-		},
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString(s.secret)
-	if err != nil {
-		return "", fmt.Errorf("signing token: %w", err)
-	}
-	return signed, nil
-}
-
-// Validate parses and verifies tokenStr, returning its claims when the
-// signature is valid, the token has not expired, and its Type matches
-// expectedType ("access" or "refresh"). Any failure returns an error and
-// nil claims.
-func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error) {
-	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
-		// Reject any token not signed with HMAC — guards against the
-		// classic "alg=none" / algorithm-confusion attack.
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-		}
-		return s.secret, nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("parsing token: %w", err)
-	}
-	claims, ok := token.Claims.(*Claims)
-	if !ok || !token.Valid {
-		return nil, fmt.Errorf("invalid token")
-	}
-	if claims.Type != expectedType {
-		return nil, fmt.Errorf("wrong token type")
-	}
-	return claims, nil
-}
-````
-
-## File: packages/api/internal/auth/password.go
-````go
-// Package auth provides password hashing and JWT issuance/validation
-// for access and refresh tokens used by the HTTP API.
-package auth
-
-import (
-	"fmt"
-
-	"golang.org/x/crypto/bcrypt"
-)
-
-// bcryptCost is the work factor for password hashing. 12 is the project
-// baseline — raise only after benchmarking on the slowest deployment target.
-const bcryptCost = 12
-
-// HashPassword returns a bcrypt hash of password using bcryptCost.
-func HashPassword(password string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
-	if err != nil {
-		return "", fmt.Errorf("hashing password: %w", err)
-	}
-	return string(hash), nil
-}
-
-// CheckPassword returns nil when password matches hash. A non-nil result
-// (typically bcrypt.ErrMismatchedHashAndPassword) means the password is wrong;
-// callers should treat any error as authentication failure without leaking
-// which case occurred.
-func CheckPassword(hash, password string) error {
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-}
-````
-
 ## File: packages/api/internal/db/migrations/005_rename_events_to_activities.sql
 ````sql
 -- Rename domain entity: events → activities.
@@ -11722,6 +12220,143 @@ ALTER TABLE event_assignments RENAME TO activity_assignments;
 ALTER TABLE activities RENAME COLUMN parent_event_id TO parent_activity_id;
 ALTER TABLE activity_tags RENAME COLUMN event_id TO activity_id;
 ALTER TABLE activity_assignments RENAME COLUMN event_id TO activity_id;
+````
+
+## File: packages/api/internal/db/db.go
+````go
+// Package db provides the database connection, schema migrations,
+// and repository types backing the API server. The default driver is
+// SQLite (modernc.org/sqlite, a pure-Go build to avoid cgo); MySQL and
+// Postgres are planned per docs/ARCHITECTURE.md.
+package db
+
+import (
+	"fmt"
+
+	"github.com/jmoiron/sqlx"
+	_ "modernc.org/sqlite"
+)
+
+// Open opens and configures a SQLite database at the given path.
+func Open(dsn string) (*sqlx.DB, error) {
+	database, err := sqlx.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening database: %w", err)
+	}
+
+	// SQLite performs better with a single writer connection.
+	database.SetMaxOpenConns(1)
+
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+	}
+	for _, p := range pragmas {
+		if _, err = database.Exec(p); err != nil {
+			return nil, fmt.Errorf("configuring database (%s): %w", p, err)
+		}
+	}
+
+	return database, nil
+}
+````
+
+## File: packages/api/internal/db/invite_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// InviteRepo is the persistence layer for team invitation tokens.
+type InviteRepo struct {
+	db *sqlx.DB
+}
+
+// NewInviteRepo returns an InviteRepo backed by db.
+func NewInviteRepo(db *sqlx.DB) *InviteRepo {
+	return &InviteRepo{db: db}
+}
+
+// Create inserts an invite row. The caller is responsible for generating
+// the token and setting an appropriate ExpiresAt.
+func (r *InviteRepo) Create(inv *models.Invite) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at, created_at)
+		VALUES (:id, :team_id, :email, :token, :role, :invited_by, :expires_at, :created_at)
+	`, inv)
+	if err != nil {
+		return fmt.Errorf("creating invite: %w", err)
+	}
+	return nil
+}
+
+// GetValid returns an invite that is not expired and not yet accepted.
+func (r *InviteRepo) GetValid(token string) (*models.Invite, error) {
+	var inv models.Invite
+	err := r.db.Get(&inv, `
+		SELECT * FROM invites
+		WHERE token = ? AND accepted_at IS NULL AND expires_at > ?
+	`, token, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("getting invite: %w", err)
+	}
+	return &inv, nil
+}
+
+// MarkAccepted stamps accepted_at on the invite. Idempotent at the DB layer:
+// re-marking simply overwrites the timestamp.
+func (r *InviteRepo) MarkAccepted(id string) error {
+	now := time.Now()
+	_, err := r.db.Exec(`UPDATE invites SET accepted_at = ? WHERE id = ?`, now, id)
+	if err != nil {
+		return fmt.Errorf("marking invite accepted: %w", err)
+	}
+	return nil
+}
+
+// ListByTeam returns all pending (not yet accepted, not expired) invites for a
+// team, ordered by creation date descending so the newest invite is first.
+func (r *InviteRepo) ListByTeam(teamID string) ([]*models.Invite, error) {
+	var invites []*models.Invite
+	err := r.db.Select(&invites, `
+		SELECT * FROM invites
+		WHERE team_id = ? AND accepted_at IS NULL
+		ORDER BY created_at DESC
+	`, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("listing invites: %w", err)
+	}
+	return invites, nil
+}
+
+// DeleteByID hard-deletes an invite row. Used by admins to revoke a pending
+// invite before it is accepted.
+func (r *InviteRepo) DeleteByID(id string) error {
+	_, err := r.db.Exec(`DELETE FROM invites WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting invite: %w", err)
+	}
+	return nil
+}
+
+// GetByToken fetches an invite by its token field regardless of expiry or
+// accepted status. Used for invite-link validation where the caller needs to
+// check freshness itself.
+func (r *InviteRepo) GetByToken(token string) (*models.Invite, error) {
+	var inv models.Invite
+	err := r.db.Get(&inv, `SELECT * FROM invites WHERE token = ?`, token)
+	if err != nil {
+		return nil, fmt.Errorf("getting invite by token: %w", err)
+	}
+	return &inv, nil
+}
 ````
 
 ## File: packages/api/internal/tier/enforce.go
@@ -13080,6 +13715,176 @@ export function useDeleteUser() {
 }
 ````
 
+## File: packages/web/src/hooks/useSettings.ts
+````typescript
+/**
+ * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
+ * profile, password change, forgot/reset password, SMTP config, instance
+ * settings, and the admin user list.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { apiFetch, createAuthFetch } from '@/lib/api'
+import type { components } from '@draba/shared'
+
+type User = components['schemas']['User']
+type SMTPConfig = components['schemas']['SMTPConfig']
+
+// ── Profile ──────────────────────────────────────────────────────────────────
+
+export function useUpdateProfile() {
+  const { getAccessToken, patchUser } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
+      authFetch<User>('/users/me', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: (updated) => {
+      qc.setQueryData(['me'], updated)
+      patchUser(updated)
+      // Invalidate all team member lists so the sidebar reflects the new color/icon.
+      void qc.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+// ── Password ──────────────────────────────────────────────────────────────────
+
+export function useChangePassword() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
+      authFetch<{ status: string }>('/users/me/password', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Forgot / reset password (public, no auth required) ───────────────────────
+
+export function useForgotPassword() {
+  return useMutation({
+    mutationFn: (email: string) =>
+      apiFetch<{ status: string }>('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }),
+  })
+}
+
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: (data: { token: string; newPassword: string }) =>
+      apiFetch<{ status: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Admin: SMTP ──────────────────────────────────────────────────────────────
+
+export function useAdminSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'smtp'],
+    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
+  })
+}
+
+export function useSaveSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
+        method: 'PUT',
+        body: JSON.stringify(cfg),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+export function useTestSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
+        method: 'POST',
+        body: JSON.stringify(cfg),
+      }),
+  })
+}
+
+export function useDeleteSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: () =>
+      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+// ── Admin: Instance settings ──────────────────────────────────────────────────
+
+export function useAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'settings'],
+    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
+  })
+}
+
+export function usePatchAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: Record<string, string>) =>
+      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
+  })
+}
+
+// ── Admin: Users ──────────────────────────────────────────────────────────────
+
+export type AdminUserRow = User & { teamCount: number }
+
+export function useAdminUsers(orphanedOnly = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'users', { orphanedOnly }],
+    queryFn: () =>
+      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
+  })
+}
+````
+
 ## File: packages/web/src/lib/api.ts
 ````typescript
 /**
@@ -13703,356 +14508,6 @@ export default function AdminPage() {
       <SMTPSection />
       <InstanceSection />
       <UsersSection />
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * View consumption (Gantt date format, week start, etc.) is deferred to Phase 10.4.
- */
-
-import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Label } from '@/components/ui/label'
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-const selectStyle: React.CSSProperties = {
-  background: '#161b22',
-  border: '1px solid #30363d',
-  borderRadius: 6,
-  color: '#e6edf3',
-  padding: '8px 12px',
-  fontSize: 13,
-  maxWidth: 320,
-  cursor: 'pointer',
-}
-
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
-
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
-
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-
-  const [theme, setTheme] = useState('system')
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [feedback, setFeedback] = useState<string | null>(null)
-
-  useEffect(() => {
-    setTheme((prefMap['theme'] as string | undefined) ?? 'system')
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-  }, [JSON.stringify(prefMap)])
-
-  async function save(key: string, value: string) {
-    setFeedback(null)
-    await upsert.mutateAsync({ key, value })
-    setFeedback('Saved.')
-    setTimeout(() => setFeedback(null), 2000)
-  }
-
-  function handleThemeChange(value: string) {
-    setTheme(value)
-    // Apply immediately to the document.
-    const html = document.documentElement
-    if (value === 'dark') {
-      html.classList.add('dark')
-    } else if (value === 'light') {
-      html.classList.remove('dark')
-    } else {
-      if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-        html.classList.add('dark')
-      } else {
-        html.classList.remove('dark')
-      }
-    }
-    void save('theme', value)
-  }
-
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Preferences</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Regional and appearance settings. View consumption (Gantt date format, etc.) is enabled in a future phase.
-      </p>
-
-      {/* Appearance */}
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-          Appearance
-        </h3>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Theme</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {(['light', 'dark', 'system'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  fontSize: 13,
-                  border: '1px solid',
-                  borderColor: theme === t ? '#58a6ff' : '#30363d',
-                  background: theme === t ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: theme === t ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer',
-                  textTransform: 'capitalize',
-                }}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Regional */}
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-          Regional
-        </h3>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Timezone</Label>
-          <select
-            value={timezone}
-            onChange={e => { setTimezone(e.target.value); void save('timezone', e.target.value) }}
-            style={selectStyle}
-          >
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Date format</Label>
-          <select
-            value={dateFormat}
-            onChange={e => { setDateFormat(e.target.value); void save('date_format', e.target.value) }}
-            style={selectStyle}
-          >
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Week starts on</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => { setWeekStart(d); void save('week_start', d) }}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  fontSize: 13,
-                  border: '1px solid',
-                  borderColor: weekStart === d ? '#58a6ff' : '#30363d',
-                  background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: weekStart === d ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer',
-                  textTransform: 'capitalize',
-                }}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {feedback && (
-        <p style={{ fontSize: 13, color: '#3fb950', marginTop: -8, marginBottom: 8 }}>{feedback}</p>
-      )}
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/ProfilePage.tsx
-````typescript
-/**
- * /settings/profile — Display name, identity (color + icon), and read-only email.
- */
-
-import { useState, useEffect } from 'react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useUpdateProfile } from '@/hooks/useSettings'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { ApiError } from '@/lib/api'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-export default function ProfilePage() {
-  const { user } = useAuth()
-  const updateProfile = useUpdateProfile()
-
-  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: user?.color ?? '#288C9B',
-    icon: user?.icon ?? '__none__',
-  })
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    if (user) {
-      setDisplayName(user.displayName)
-      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
-    }
-  }, [user])
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
-      setFeedback({ type: 'success', msg: 'Profile updated.' })
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
-      setFeedback({ type: 'error', msg })
-    }
-  }
-
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Profile</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Changes to your name and identity propagate across all your team memberships.
-      </p>
-
-      <div style={sectionStyle}>
-        {/* Identity preview */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24 }}>
-          <Badge identity={identity} name={displayName} size={48} shape="circle" />
-          <div>
-            <div style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>
-              {displayName || 'Your Name'}
-            </div>
-            <div style={{ fontSize: 12, color: '#8b949e', marginTop: 2 }}>
-              Identity preview — shown in sidebar and Gantt
-            </div>
-          </div>
-        </div>
-
-        {/* Identity picker */}
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Color & Icon</Label>
-          <IdentityWidget
-            identity={identity}
-            name={displayName}
-            shape="circle"
-            onChange={(next) => setIdentity(next)}
-          />
-        </div>
-
-        {/* Display name */}
-        <div style={fieldStyle}>
-          <Label htmlFor="displayName" style={{ color: '#e6edf3' }}>Display name</Label>
-          <Input
-            id="displayName"
-            value={displayName}
-            onChange={e => setDisplayName(e.target.value)}
-            placeholder="Your name"
-            style={{ maxWidth: 360 }}
-          />
-        </div>
-
-        {/* Email (read-only) */}
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Email</Label>
-          <Input
-            value={user?.email ?? ''}
-            disabled
-            style={{ maxWidth: 360, opacity: 0.6 }}
-          />
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
-            Email changes are not yet supported.
-          </p>
-        </div>
-
-        {feedback && (
-          <p style={{
-            fontSize: 13,
-            color: feedback.type === 'success' ? '#3fb950' : '#f85149',
-            marginBottom: 12,
-          }}>
-            {feedback.msg}
-          </p>
-        )}
-
-        <Button
-          onClick={handleSave}
-          disabled={updateProfile.isPending || !displayName.trim()}
-        >
-          {updateProfile.isPending ? 'Saving…' : 'Save profile'}
-        </Button>
-      </div>
     </div>
   )
 }
@@ -14735,194 +15190,6 @@ jobs:
         with:
           commit_message: "chore: update automated AI repomap [skip ci]"
           file_pattern: docs/ai-context/repomap.md
-````
-
-## File: packages/api/internal/api/helpers.go
-````go
-package api
-
-import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"net/http"
-)
-
-// writeJSON sends v as a JSON response with the given status. Encoder
-// errors are ignored: the headers are already on the wire by the time
-// encoding happens, so there is nothing useful to do with the error.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// writeError writes the standard {error: {code, message}} envelope used
-// across the API. code is a stable machine identifier; message is a
-// human-readable explanation safe to surface to end users.
-func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]any{
-		"error": map[string]string{
-			"code":    code,
-			"message": message,
-		},
-	})
-}
-
-// newID returns a 32-character hex ID derived from 16 random bytes
-// (128 bits — enough entropy that collisions are not a concern).
-func newID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// newToken returns a 64-character hex token derived from 32 random bytes
-// (256 bits). Use for invite tokens and other secrets; newID is for record IDs.
-// The longer length makes tokens visually distinct from IDs and raises the
-// brute-force bar.
-func newToken() string {
-	b := make([]byte, 32)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-````
-
-## File: packages/api/internal/db/db.go
-````go
-// Package db provides the database connection, schema migrations,
-// and repository types backing the API server. The default driver is
-// SQLite (modernc.org/sqlite, a pure-Go build to avoid cgo); MySQL and
-// Postgres are planned per docs/ARCHITECTURE.md.
-package db
-
-import (
-	"fmt"
-
-	"github.com/jmoiron/sqlx"
-	_ "modernc.org/sqlite"
-)
-
-// Open opens and configures a SQLite database at the given path.
-func Open(dsn string) (*sqlx.DB, error) {
-	database, err := sqlx.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("opening database: %w", err)
-	}
-
-	// SQLite performs better with a single writer connection.
-	database.SetMaxOpenConns(1)
-
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA foreign_keys=ON",
-	}
-	for _, p := range pragmas {
-		if _, err = database.Exec(p); err != nil {
-			return nil, fmt.Errorf("configuring database (%s): %w", p, err)
-		}
-	}
-
-	return database, nil
-}
-````
-
-## File: packages/api/internal/db/invite_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// InviteRepo is the persistence layer for team invitation tokens.
-type InviteRepo struct {
-	db *sqlx.DB
-}
-
-// NewInviteRepo returns an InviteRepo backed by db.
-func NewInviteRepo(db *sqlx.DB) *InviteRepo {
-	return &InviteRepo{db: db}
-}
-
-// Create inserts an invite row. The caller is responsible for generating
-// the token and setting an appropriate ExpiresAt.
-func (r *InviteRepo) Create(inv *models.Invite) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at, created_at)
-		VALUES (:id, :team_id, :email, :token, :role, :invited_by, :expires_at, :created_at)
-	`, inv)
-	if err != nil {
-		return fmt.Errorf("creating invite: %w", err)
-	}
-	return nil
-}
-
-// GetValid returns an invite that is not expired and not yet accepted.
-func (r *InviteRepo) GetValid(token string) (*models.Invite, error) {
-	var inv models.Invite
-	err := r.db.Get(&inv, `
-		SELECT * FROM invites
-		WHERE token = ? AND accepted_at IS NULL AND expires_at > ?
-	`, token, time.Now())
-	if err != nil {
-		return nil, fmt.Errorf("getting invite: %w", err)
-	}
-	return &inv, nil
-}
-
-// MarkAccepted stamps accepted_at on the invite. Idempotent at the DB layer:
-// re-marking simply overwrites the timestamp.
-func (r *InviteRepo) MarkAccepted(id string) error {
-	now := time.Now()
-	_, err := r.db.Exec(`UPDATE invites SET accepted_at = ? WHERE id = ?`, now, id)
-	if err != nil {
-		return fmt.Errorf("marking invite accepted: %w", err)
-	}
-	return nil
-}
-
-// ListByTeam returns all pending (not yet accepted, not expired) invites for a
-// team, ordered by creation date descending so the newest invite is first.
-func (r *InviteRepo) ListByTeam(teamID string) ([]*models.Invite, error) {
-	var invites []*models.Invite
-	err := r.db.Select(&invites, `
-		SELECT * FROM invites
-		WHERE team_id = ? AND accepted_at IS NULL
-		ORDER BY created_at DESC
-	`, teamID)
-	if err != nil {
-		return nil, fmt.Errorf("listing invites: %w", err)
-	}
-	return invites, nil
-}
-
-// DeleteByID hard-deletes an invite row. Used by admins to revoke a pending
-// invite before it is accepted.
-func (r *InviteRepo) DeleteByID(id string) error {
-	_, err := r.db.Exec(`DELETE FROM invites WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting invite: %w", err)
-	}
-	return nil
-}
-
-// GetByToken fetches an invite by its token field regardless of expiry or
-// accepted status. Used for invite-link validation where the caller needs to
-// check freshness itself.
-func (r *InviteRepo) GetByToken(token string) (*models.Invite, error) {
-	var inv models.Invite
-	err := r.db.Get(&inv, `SELECT * FROM invites WHERE token = ?`, token)
-	if err != nil {
-		return nil, fmt.Errorf("getting invite by token: %w", err)
-	}
-	return &inv, nil
-}
 ````
 
 ## File: packages/api/internal/db/timeline_repo.go
@@ -16137,161 +16404,6 @@ export default function MemberAvatar({ member, size = 28, className }: Props) {
 }
 ````
 
-## File: packages/web/src/contexts/AuthContext.tsx
-````typescript
-/**
- * Auth context: current user + access token in memory, refresh token in localStorage.
- *
- * Provides login, logout, and register actions so any component can
- * authenticate without knowing about token storage details.
- */
-
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
-import type { components } from '@draba/shared'
-import {
-  API_BASE,
-  ApiError,
-  clearStoredRefreshToken,
-  getStoredRefreshToken,
-  storeRefreshToken,
-} from '@/lib/api'
-
-type User = components['schemas']['User']
-type AuthResponse = components['schemas']['AuthResponse']
-type RefreshResponse = components['schemas']['RefreshResponse']
-
-interface AuthState {
-  user: User | null
-  accessToken: string | null
-  /** True while checking the stored refresh token on initial mount. */
-  initializing: boolean
-}
-
-interface AuthContextValue extends AuthState {
-  getAccessToken: () => string | null
-  login: (email: string, password: string) => Promise<void>
-  /** Registers a new account and returns the fresh access token directly,
-   *  avoiding a race against the async setState that follows. */
-  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
-  logout: () => void
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null)
-
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const data = await res.json()
-  if (!res.ok) {
-    const err = data as { error: { code: string; message: string } }
-    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
-  }
-  return data as T
-}
-
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<AuthState>({
-    user: null,
-    accessToken: null,
-    initializing: true,
-  })
-
-  // Stable ref so callbacks never capture a stale token.
-  const tokenRef = useRef<string | null>(null)
-  tokenRef.current = state.accessToken
-
-  const getAccessToken = useCallback(() => tokenRef.current, [])
-
-  // On mount, attempt to restore session via the stored refresh token.
-  // After exchanging the refresh token we also fetch /auth/me so that `user`
-  // is populated — without it, admin checks (canEditTeam etc.) always fail
-  // because userId is '' and no member's userId matches an empty string.
-  useEffect(() => {
-    const refresh = getStoredRefreshToken()
-    if (!refresh) {
-      setState(s => ({ ...s, initializing: false }))
-      return
-    }
-    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
-      .then(async ({ accessToken }) => {
-        try {
-          const res = await fetch(`${API_BASE}/auth/me`, {
-            headers: { Authorization: `Bearer ${accessToken}` },
-          })
-          const user: User | null = res.ok ? (await res.json() as User) : null
-          setState({ user, accessToken, initializing: false })
-        } catch {
-          // /auth/me failed but the token is still valid — set what we have.
-          setState(s => ({ ...s, accessToken, initializing: false }))
-        }
-      })
-      .catch(() => {
-        clearStoredRefreshToken()
-        setState(s => ({ ...s, initializing: false }))
-      })
-  }, [])
-
-  const login = useCallback(async (email: string, password: string) => {
-    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
-      email,
-      password,
-    })
-    storeRefreshToken(refreshToken)
-    setState({ user, accessToken, initializing: false })
-  }, [])
-
-  const register = useCallback(
-    async (
-      email: string,
-      password: string,
-      displayName: string,
-      inviteToken?: string,
-    ): Promise<string> => {
-      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
-        '/auth/register',
-        { email, password, displayName, inviteToken },
-      )
-      storeRefreshToken(refreshToken)
-      setState({ user, accessToken, initializing: false })
-      // Return the token directly so callers don't race against the async
-      // setState — tokenRef won't update until the next render cycle.
-      return accessToken
-    },
-    [],
-  )
-
-  const logout = useCallback(() => {
-    clearStoredRefreshToken()
-    setState({ user: null, accessToken: null, initializing: false })
-  }, [])
-
-  const value = useMemo<AuthContextValue>(
-    () => ({ ...state, getAccessToken, login, register, logout }),
-    [state, getAccessToken, login, register, logout],
-  )
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
-}
-
-/** Returns the auth context. Throws if used outside of AuthProvider. */
-export function useAuth(): AuthContextValue {
-  const ctx = useContext(AuthContext)
-  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
-  return ctx
-}
-````
-
 ## File: packages/web/src/hooks/useWebSocket.ts
 ````typescript
 /**
@@ -16551,6 +16663,397 @@ describe('matchActivities', () => {
 })
 ````
 
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * View consumption (Gantt date format, etc.) is deferred to Phase 10.4.
+ */
+
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  marginBottom: 16,
+}
+
+const selectStyle: React.CSSProperties = {
+  background: '#161b22',
+  border: '1px solid #30363d',
+  borderRadius: 6,
+  color: '#e6edf3',
+  padding: '8px 12px',
+  fontSize: 13,
+  maxWidth: 320,
+  cursor: 'pointer',
+}
+
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
+
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
+
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+
+  const [theme, setTheme] = useState('system')
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setTheme((prefMap['theme'] as string | undefined) ?? 'system')
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+  }, [JSON.stringify(prefMap)])
+
+  function applyTheme(value: string) {
+    const html = document.documentElement
+    if (value === 'dark') {
+      html.classList.add('dark')
+    } else if (value === 'light') {
+      html.classList.remove('dark')
+    } else {
+      if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        html.classList.add('dark')
+      } else {
+        html.classList.remove('dark')
+      }
+    }
+  }
+
+  function handleThemeChange(value: string) {
+    setTheme(value)
+    // Apply visually right away so the user sees the change, but only persist on Save.
+    applyTheme(value)
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'theme', value: theme }),
+        upsert.mutateAsync({ key: 'timezone', value: timezone }),
+        upsert.mutateAsync({ key: 'date_format', value: dateFormat }),
+        upsert.mutateAsync({ key: 'week_start', value: weekStart }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Preferences</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Personal appearance and regional settings.
+      </p>
+
+      {/* Appearance */}
+      <div style={sectionStyle}>
+        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+          Appearance
+        </h3>
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Theme</Label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {(['light', 'dark', 'system'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  fontSize: 13,
+                  border: '1px solid',
+                  borderColor: theme === t ? '#58a6ff' : '#30363d',
+                  background: theme === t ? 'rgba(88,166,255,0.1)' : '#161b22',
+                  color: theme === t ? '#58a6ff' : '#8b949e',
+                  cursor: 'pointer',
+                  textTransform: 'capitalize',
+                }}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>Preview applies immediately; saved when you click Save.</p>
+        </div>
+      </div>
+
+      {/* Regional */}
+      <div style={sectionStyle}>
+        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+          Regional
+        </h3>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Language</Label>
+          <select style={{ ...selectStyle, opacity: 0.6, cursor: 'not-allowed' }} disabled>
+            <option value="en">English (en)</option>
+          </select>
+          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
+            Additional languages coming in a future release.
+          </p>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Timezone</Label>
+          <select
+            value={timezone}
+            onChange={e => setTimezone(e.target.value)}
+            style={selectStyle}
+          >
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Date format</Label>
+          <select
+            value={dateFormat}
+            onChange={e => setDateFormat(e.target.value)}
+            style={selectStyle}
+          >
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Week starts on</Label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  fontSize: 13,
+                  border: '1px solid',
+                  borderColor: weekStart === d ? '#58a6ff' : '#30363d',
+                  background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
+                  color: weekStart === d ? '#58a6ff' : '#8b949e',
+                  cursor: 'pointer',
+                  textTransform: 'capitalize',
+                }}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {feedback && (
+        <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/ProfilePage.tsx
+````typescript
+/**
+ * /settings/profile — Display name, identity (color + icon), and read-only email.
+ */
+
+import { useState, useEffect } from 'react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useUpdateProfile } from '@/hooks/useSettings'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  marginBottom: 16,
+}
+
+export default function ProfilePage() {
+  const { user } = useAuth()
+  const updateProfile = useUpdateProfile()
+
+  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: user?.color ?? '#288C9B',
+    icon: user?.icon ?? '__none__',
+  })
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    if (user) {
+      setDisplayName(user.displayName)
+      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
+    }
+  }, [user])
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
+      setFeedback({ type: 'success', msg: 'Profile updated.' })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Profile</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Changes to your name and identity propagate across all your team memberships.
+      </p>
+
+      <div style={sectionStyle}>
+        {/* Identity preview */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24 }}>
+          <Badge identity={identity} name={displayName} size={48} shape="circle" />
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>
+                {displayName || 'Your Name'}
+              </span>
+              {user?.isSuperadmin && (
+                <span style={{
+                  fontSize: 11, padding: '2px 8px', borderRadius: 4,
+                  background: 'rgba(88,166,255,0.15)', color: '#58a6ff',
+                  fontWeight: 600, letterSpacing: '0.3px',
+                }}>
+                  Superadmin
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: 12, color: '#8b949e', marginTop: 2 }}>
+              Identity preview — shown in sidebar and Gantt
+            </div>
+          </div>
+        </div>
+
+        {/* Identity picker */}
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Color & Icon</Label>
+          <IdentityWidget
+            identity={identity}
+            name={displayName}
+            shape="circle"
+            onChange={(next) => setIdentity(next)}
+          />
+        </div>
+
+        {/* Display name */}
+        <div style={fieldStyle}>
+          <Label htmlFor="displayName" style={{ color: '#e6edf3' }}>Display name</Label>
+          <Input
+            id="displayName"
+            value={displayName}
+            onChange={e => setDisplayName(e.target.value)}
+            placeholder="Your name"
+            style={{ maxWidth: 360 }}
+          />
+        </div>
+
+        {/* Email (read-only) */}
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Email</Label>
+          <Input
+            value={user?.email ?? ''}
+            disabled
+            style={{ maxWidth: 360, opacity: 0.6 }}
+          />
+          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
+            Email changes are not yet supported.
+          </p>
+        </div>
+
+        {feedback && (
+          <p style={{
+            fontSize: 13,
+            color: feedback.type === 'success' ? '#3fb950' : '#f85149',
+            marginBottom: 12,
+          }}>
+            {feedback.msg}
+          </p>
+        )}
+
+        <Button
+          onClick={handleSave}
+          disabled={updateProfile.isPending || !displayName.trim()}
+        >
+          {updateProfile.isPending ? 'Saving…' : 'Save profile'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/pages/LoginPage.tsx
 ````typescript
 import { useState } from 'react'
@@ -16672,122 +17175,6 @@ export default function LoginPage() {
           </p>
         </CardContent>
       </Card>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/SettingsPage.tsx
-````typescript
-/**
- * SettingsPage — shell with left-nav and nested sub-routes.
- *
- * Phase 10.1.1: initial shell + Teams link.
- * Phase 10.1.3: full settings experience — Profile, Security, Preferences,
- * API Tokens, and Admin (superadmin only).
- */
-
-import { Link, useLocation, Navigate } from 'react-router-dom'
-import { ArrowLeft, User, Shield as ShieldIcon, Settings, Key, Users, Lock } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useNavigate } from 'react-router-dom'
-import ProfilePage from '@/pages/settings/ProfilePage'
-import SecurityPage from '@/pages/settings/SecurityPage'
-import PreferencesPage from '@/pages/settings/PreferencesPage'
-import TokensPage from '@/pages/settings/TokensPage'
-import AdminPage from '@/pages/settings/AdminPage'
-import { Routes, Route } from 'react-router-dom'
-
-const navLinkStyle = (active: boolean): React.CSSProperties => ({
-  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
-  borderRadius: 7, fontSize: 13, color: active ? '#e6edf3' : '#8b949e',
-  background: active ? '#2d333b' : 'none', textDecoration: 'none',
-  cursor: 'pointer', border: 'none', width: '100%', fontFamily: 'inherit',
-  fontWeight: active ? 500 : 400,
-})
-
-export default function SettingsPage() {
-  const { user } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const path = location.pathname
-
-  function isActive(prefix: string) {
-    return path === prefix || path.startsWith(prefix + '/')
-  }
-
-  return (
-    <div style={{ display: 'flex', minHeight: '100vh', background: '#0d1117', color: '#e6edf3', fontFamily: 'var(--font-sans, Inter, sans-serif)' }}>
-      {/* Left nav */}
-      <div style={{ width: 220, borderRight: '1px solid #30363d', padding: '16px 12px', display: 'flex', flexDirection: 'column', gap: 2, flexShrink: 0 }}>
-        <button
-          onClick={() => navigate('/')}
-          style={{ ...navLinkStyle(false), marginBottom: 12, color: '#8b949e' }}
-        >
-          <ArrowLeft size={14} />
-          Back to app
-        </button>
-
-        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 4 }}>
-          Account
-        </div>
-
-        <Link to="/settings/profile" style={navLinkStyle(isActive('/settings/profile'))}>
-          <User size={14} /> Profile
-        </Link>
-        <Link to="/settings/security" style={navLinkStyle(isActive('/settings/security'))}>
-          <Lock size={14} /> Security
-        </Link>
-        <Link to="/settings/preferences" style={navLinkStyle(isActive('/settings/preferences'))}>
-          <Settings size={14} /> Preferences
-        </Link>
-        <Link to="/settings/tokens" style={navLinkStyle(isActive('/settings/tokens'))}>
-          <Key size={14} /> API Tokens
-        </Link>
-
-        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
-          Teams
-        </div>
-        <Link to="/settings/teams" style={navLinkStyle(isActive('/settings/teams'))}>
-          <Users size={14} /> Manage teams
-        </Link>
-
-        {user?.isSuperadmin && (
-          <>
-            <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
-              Administration
-            </div>
-            <Link to="/settings/admin" style={navLinkStyle(isActive('/settings/admin'))}>
-              <ShieldIcon size={14} /> Admin
-            </Link>
-          </>
-        )}
-      </div>
-
-      {/* Content area */}
-      <div style={{ flex: 1, padding: '32px 40px', maxWidth: 800, minWidth: 0 }}>
-        <Routes>
-          <Route path="profile" element={<ProfilePage />} />
-          <Route path="security" element={<SecurityPage />} />
-          <Route path="preferences" element={<PreferencesPage />} />
-          <Route path="tokens" element={<TokensPage />} />
-          <Route path="admin/*" element={user?.isSuperadmin ? <AdminPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="teams" element={<TeamsPlaceholder />} />
-          <Route index element={<Navigate to="/settings/profile" replace />} />
-          <Route path="*" element={<Navigate to="/settings/profile" replace />} />
-        </Routes>
-      </div>
-    </div>
-  )
-}
-
-function TeamsPlaceholder() {
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Manage Teams</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Use the team picker in the main app to create or edit teams.
-      </p>
     </div>
   )
 }
@@ -18077,6 +18464,167 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
 }
 ````
 
+## File: packages/web/src/contexts/AuthContext.tsx
+````typescript
+/**
+ * Auth context: current user + access token in memory, refresh token in localStorage.
+ *
+ * Provides login, logout, and register actions so any component can
+ * authenticate without knowing about token storage details.
+ */
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import type { components } from '@draba/shared'
+import {
+  API_BASE,
+  ApiError,
+  clearStoredRefreshToken,
+  getStoredRefreshToken,
+  storeRefreshToken,
+} from '@/lib/api'
+
+type User = components['schemas']['User']
+type AuthResponse = components['schemas']['AuthResponse']
+type RefreshResponse = components['schemas']['RefreshResponse']
+
+interface AuthState {
+  user: User | null
+  accessToken: string | null
+  /** True while checking the stored refresh token on initial mount. */
+  initializing: boolean
+}
+
+interface AuthContextValue extends AuthState {
+  getAccessToken: () => string | null
+  login: (email: string, password: string) => Promise<void>
+  /** Registers a new account and returns the fresh access token directly,
+   *  avoiding a race against the async setState that follows. */
+  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
+  logout: () => void
+  /** Merges fields into the current user object — used after profile updates. */
+  patchUser: (patch: Partial<User>) => void
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null)
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    const err = data as { error: { code: string; message: string } }
+    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
+  }
+  return data as T
+}
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [state, setState] = useState<AuthState>({
+    user: null,
+    accessToken: null,
+    initializing: true,
+  })
+
+  // Stable ref so callbacks never capture a stale token.
+  const tokenRef = useRef<string | null>(null)
+  tokenRef.current = state.accessToken
+
+  const getAccessToken = useCallback(() => tokenRef.current, [])
+
+  // On mount, attempt to restore session via the stored refresh token.
+  // After exchanging the refresh token we also fetch /auth/me so that `user`
+  // is populated — without it, admin checks (canEditTeam etc.) always fail
+  // because userId is '' and no member's userId matches an empty string.
+  useEffect(() => {
+    const refresh = getStoredRefreshToken()
+    if (!refresh) {
+      setState(s => ({ ...s, initializing: false }))
+      return
+    }
+    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
+      .then(async ({ accessToken }) => {
+        try {
+          const res = await fetch(`${API_BASE}/auth/me`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          })
+          const user: User | null = res.ok ? (await res.json() as User) : null
+          setState({ user, accessToken, initializing: false })
+        } catch {
+          // /auth/me failed but the token is still valid — set what we have.
+          setState(s => ({ ...s, accessToken, initializing: false }))
+        }
+      })
+      .catch(() => {
+        clearStoredRefreshToken()
+        setState(s => ({ ...s, initializing: false }))
+      })
+  }, [])
+
+  const login = useCallback(async (email: string, password: string) => {
+    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
+      email,
+      password,
+    })
+    storeRefreshToken(refreshToken)
+    setState({ user, accessToken, initializing: false })
+  }, [])
+
+  const register = useCallback(
+    async (
+      email: string,
+      password: string,
+      displayName: string,
+      inviteToken?: string,
+    ): Promise<string> => {
+      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
+        '/auth/register',
+        { email, password, displayName, inviteToken },
+      )
+      storeRefreshToken(refreshToken)
+      setState({ user, accessToken, initializing: false })
+      // Return the token directly so callers don't race against the async
+      // setState — tokenRef won't update until the next render cycle.
+      return accessToken
+    },
+    [],
+  )
+
+  const logout = useCallback(() => {
+    clearStoredRefreshToken()
+    setState({ user: null, accessToken: null, initializing: false })
+  }, [])
+
+  const patchUser = useCallback((patch: Partial<User>) => {
+    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
+  }, [])
+
+  const value = useMemo<AuthContextValue>(
+    () => ({ ...state, getAccessToken, login, register, logout, patchUser }),
+    [state, getAccessToken, login, register, logout, patchUser],
+  )
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+/** Returns the auth context. Throws if used outside of AuthProvider. */
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext)
+  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
+  return ctx
+}
+````
+
 ## File: packages/web/src/hooks/useTeamActivities.ts
 ````typescript
 /**
@@ -18418,57 +18966,118 @@ export function useDeleteActivity(teamId: string) {
 }
 ````
 
-## File: packages/web/src/App.tsx
+## File: packages/web/src/pages/SettingsPage.tsx
 ````typescript
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AuthProvider } from '@/contexts/AuthContext'
-import ProtectedRoute from '@/components/ProtectedRoute'
-import LoginPage from '@/pages/LoginPage'
-import RegisterPage from '@/pages/RegisterPage'
-import DashboardPage from '@/pages/DashboardPage'
-import SetupPage from '@/pages/SetupPage'
-import SettingsPage from '@/pages/SettingsPage'
-import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
-import ResetPasswordPage from '@/pages/ResetPasswordPage'
+/**
+ * SettingsPage — shell with left-nav and nested sub-routes.
+ *
+ * Phase 10.1.1: initial shell + Teams link.
+ * Phase 10.1.3: full settings — Profile, Security, Preferences, API Tokens,
+ * and Organization section (superadmin only): Organization, Communication,
+ * Users, AI Keys.
+ */
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
+import { Link, useLocation, Navigate, Routes, Route } from 'react-router-dom'
+import { ArrowLeft, User, Settings, Key, Lock, MessageSquare, Users, Sparkles, Building2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useNavigate } from 'react-router-dom'
+import ProfilePage from '@/pages/settings/ProfilePage'
+import SecurityPage from '@/pages/settings/SecurityPage'
+import PreferencesPage from '@/pages/settings/PreferencesPage'
+import TokensPage from '@/pages/settings/TokensPage'
+import OrganizationPage from '@/pages/settings/OrganizationPage'
+import CommunicationPage from '@/pages/settings/CommunicationPage'
+import AdminUsersPage from '@/pages/settings/AdminUsersPage'
+import AiKeysPage from '@/pages/settings/AiKeysPage'
+
+const navLinkStyle = (active: boolean): React.CSSProperties => ({
+  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+  borderRadius: 7, fontSize: 13, color: active ? '#e6edf3' : '#8b949e',
+  background: active ? '#2d333b' : 'none', textDecoration: 'none',
+  cursor: 'pointer', border: 'none', width: '100%', fontFamily: 'inherit',
+  fontWeight: active ? 500 : 400,
 })
 
-export default function App() {
+const navSectionLabel: React.CSSProperties = {
+  fontSize: 11, fontWeight: 600, color: '#484f58',
+  letterSpacing: '0.5px', textTransform: 'uppercase',
+  padding: '4px 12px', marginTop: 12,
+}
+
+export default function SettingsPage() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const path = location.pathname
+
+  function isActive(prefix: string) {
+    return path === prefix || path.startsWith(prefix + '/')
+  }
+
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          <Routes>
-            {/* First-run setup — public, shown before any users exist */}
-            <Route path="/setup" element={<SetupPage />} />
+    <div style={{ display: 'flex', minHeight: '100vh', background: '#0d1117', color: '#e6edf3', fontFamily: 'var(--font-sans, Inter, sans-serif)' }}>
+      {/* Left nav */}
+      <div style={{ width: 220, borderRight: '1px solid #30363d', padding: '16px 12px', display: 'flex', flexDirection: 'column', gap: 2, flexShrink: 0 }}>
+        <button
+          onClick={() => navigate('/')}
+          style={{ ...navLinkStyle(false), marginBottom: 12, color: '#8b949e' }}
+        >
+          <ArrowLeft size={14} />
+          Back to app
+        </button>
 
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/reset-password" element={<ResetPasswordPage />} />
+        <div style={navSectionLabel}>Account</div>
 
-            {/* Protected routes */}
-            <Route element={<ProtectedRoute />}>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="/settings/*" element={<SettingsPage />} />
-            </Route>
+        <Link to="/settings/profile" style={navLinkStyle(isActive('/settings/profile'))}>
+          <User size={14} /> Profile
+        </Link>
+        <Link to="/settings/security" style={navLinkStyle(isActive('/settings/security'))}>
+          <Lock size={14} /> Security
+        </Link>
+        <Link to="/settings/preferences" style={navLinkStyle(isActive('/settings/preferences'))}>
+          <Settings size={14} /> Preferences
+        </Link>
+        <Link to="/settings/tokens" style={navLinkStyle(isActive('/settings/tokens'))}>
+          <Key size={14} /> API Tokens
+        </Link>
 
-            {/* Fallback */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
+        {user?.isSuperadmin && (
+          <>
+            <div style={navSectionLabel}>Organization</div>
+            <Link to="/settings/organization" style={navLinkStyle(isActive('/settings/organization'))}>
+              <Building2 size={14} /> Organization
+            </Link>
+            <Link to="/settings/communication" style={navLinkStyle(isActive('/settings/communication'))}>
+              <MessageSquare size={14} /> Communication
+            </Link>
+            <Link to="/settings/users" style={navLinkStyle(isActive('/settings/users'))}>
+              <Users size={14} /> Users
+            </Link>
+            <Link to="/settings/ai" style={navLinkStyle(isActive('/settings/ai'))}>
+              <Sparkles size={14} /> AI Keys
+            </Link>
+          </>
+        )}
+      </div>
+
+      {/* Content area */}
+      <div style={{ flex: 1, padding: '32px 40px', maxWidth: 800, minWidth: 0 }}>
+        <Routes>
+          <Route path="profile" element={<ProfilePage />} />
+          <Route path="security" element={<SecurityPage />} />
+          <Route path="preferences" element={<PreferencesPage />} />
+          <Route path="tokens" element={<TokensPage />} />
+          <Route path="organization" element={user?.isSuperadmin ? <OrganizationPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="communication" element={user?.isSuperadmin ? <CommunicationPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="users" element={user?.isSuperadmin ? <AdminUsersPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="ai" element={user?.isSuperadmin ? <AiKeysPage /> : <Navigate to="/settings/profile" replace />} />
+          {/* Legacy redirect: old /settings/admin deep links fall to organization */}
+          <Route path="admin/*" element={user?.isSuperadmin ? <Navigate to="/settings/organization" replace /> : <Navigate to="/settings/profile" replace />} />
+          <Route index element={<Navigate to="/settings/profile" replace />} />
+          <Route path="*" element={<Navigate to="/settings/profile" replace />} />
+        </Routes>
+      </div>
+    </div>
   )
 }
 ````
@@ -18695,6 +19304,164 @@ packages/api/
 ### CI/CD
 
 - [TBD — GitHub Actions; build + test on PR; publish Docker image on tag]
+````
+
+## File: packages/api/internal/api/middleware.go
+````go
+package api
+
+import (
+	"bufio"
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+)
+
+// contextKey is an unexported type to avoid collisions with other packages
+// using context.WithValue on the same request context.
+type contextKey string
+
+const (
+	claimsKey     contextKey = "claims"
+	tokenScopeKey contextKey = "tokenScope"
+)
+
+// Scope sentinels. tokenScopeFull is used for JWT-authenticated requests
+// where no scope restriction applies; the other values mirror the api_tokens
+// schema check constraint.
+const (
+	tokenScopeFull    = "full"
+	tokenScopeRead    = "read"
+	tokenScopeAdd     = "add"
+	tokenScopeEditOwn = "edit_own"
+	tokenScopeEditAll = "edit_all"
+)
+
+// authMiddleware enforces a Bearer credential on the request, attaches the
+// resolved Claims (and any API-token scope) to the request context, and
+// rejects unauthenticated or scope-violating requests.
+//
+// The Bearer value is either a JWT access token or an API token (prefix
+// auth.APITokenPrefix). Read-only API tokens are rejected on any non-GET
+// request — write scopes are accepted on all methods.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get("Authorization")
+		if !strings.HasPrefix(header, "Bearer ") {
+			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or invalid authorization header")
+			return
+		}
+		raw := strings.TrimPrefix(header, "Bearer ")
+
+		var (
+			claims *auth.Claims
+			scope  = tokenScopeFull
+		)
+
+		if auth.LooksLikeAPIToken(raw) {
+			tok, err := s.apiTokens.GetByHash(auth.HashAPIToken(raw))
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or revoked api token")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
+				return
+			}
+			if tok.Scope == tokenScopeRead && r.Method != http.MethodGet {
+				writeError(w, http.StatusForbidden, "FORBIDDEN", "read-only token cannot perform writes")
+				return
+			}
+			user, err := s.users.GetByID(tok.UserID)
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "token owner not found")
+				return
+			}
+			claims = &auth.Claims{UserID: user.ID, Email: user.Email, Type: "access"}
+			scope = tok.Scope
+			// Best-effort last-used touch; never block the request on a write failure.
+			if err := s.apiTokens.TouchLastUsed(tok.ID); err != nil {
+				slog.Debug("api token touch failed", "id", tok.ID, "err", err)
+			}
+		} else {
+			c, err := s.tokens.Validate(raw, "access")
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
+				return
+			}
+			// Verify the user still exists. A valid JWT for a deleted user (e.g.
+			// after a DB wipe) would otherwise pass signature validation but fail
+			// later at the FK layer, producing a confusing 500 instead of a 401.
+			if _, err := s.users.GetByID(c.UserID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
+				return
+			}
+			claims = c
+		}
+
+		ctx := context.WithValue(r.Context(), claimsKey, claims)
+		ctx = context.WithValue(ctx, tokenScopeKey, scope)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// claimsFromContext returns the Claims placed by authMiddleware, or nil
+// if the request did not pass through it. Handlers behind authMiddleware
+// can rely on a non-nil result.
+func claimsFromContext(ctx context.Context) *auth.Claims {
+	c, _ := ctx.Value(claimsKey).(*auth.Claims)
+	return c
+}
+
+// statusWriter wraps ResponseWriter to capture the status code written by
+// the handler, which is not otherwise readable after the fact.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker so that the WebSocket upgrader can take
+// over the connection. Without this, the statusWriter wrapper breaks WS upgrades.
+func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := sw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return h.Hijack()
+}
+
+// requestLogger wraps next and emits a debug-level log line for every
+// request: method, path, status code, and wall-clock duration in ms.
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		slog.Debug("http",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"ms", time.Since(start).Milliseconds(),
+		)
+	})
+}
 ````
 
 ## File: packages/api/internal/api/timeline_handler.go
@@ -18925,6 +19692,250 @@ func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Re
 	}
 
 	writeJSON(w, http.StatusOK, timeline)
+}
+````
+
+## File: packages/api/internal/db/user_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// UserRepo is the persistence layer for User records.
+type UserRepo struct {
+	db *sqlx.DB
+}
+
+// NewUserRepo returns a UserRepo backed by db.
+func NewUserRepo(db *sqlx.DB) *UserRepo {
+	return &UserRepo{db: db}
+}
+
+// Create inserts u. Returns an error if the email already exists
+// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
+func (r *UserRepo) Create(u *models.User) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
+		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
+	`, u)
+	if err != nil {
+		return fmt.Errorf("creating user: %w", err)
+	}
+	return nil
+}
+
+// GetByEmail looks up a user by exact email match. Callers are expected to
+// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
+// when no row matches.
+func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by email: %w", err)
+	}
+	return &u, nil
+}
+
+// GetByID looks up a user by primary key.
+func (r *UserRepo) GetByID(id string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by id: %w", err)
+	}
+	return &u, nil
+}
+
+// UpdatePasswordByEmail replaces the password hash for the user with the
+// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
+func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
+	res, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
+		passwordHash, email,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("updating password: no user with email %q", email)
+	}
+	return nil
+}
+
+// Count returns the total number of users. Used by the registration flow
+// to detect first-user bootstrap and to enforce tier user limits.
+func (r *UserRepo) Count() (int, error) {
+	var count int
+	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
+	if err != nil {
+		return 0, fmt.Errorf("counting users: %w", err)
+	}
+	return count, nil
+}
+
+// SearchByNameOrEmail returns up to 20 users whose display_name or email
+// contains the query (case-insensitive). Archived users are excluded.
+func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
+	var users []*models.User
+	like := "%" + q + "%"
+	err := r.db.Select(&users, `
+		SELECT * FROM users
+		WHERE archived_at IS NULL
+		  AND (display_name LIKE ? OR email LIKE ?)
+		ORDER BY display_name ASC
+		LIMIT 20
+	`, like, like)
+	if err != nil {
+		return nil, fmt.Errorf("searching users: %w", err)
+	}
+	return users, nil
+}
+
+// SetSuperadmin sets or clears the is_superadmin flag on a user.
+func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		isSuperadmin, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting superadmin: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
+func (r *UserRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		at, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting user archived: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a user row. The caller must verify the user is deletable
+// (no active activities, single team membership) before calling this.
+func (r *UserRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting user: %w", err)
+	}
+	return nil
+}
+
+// UpdateProfile sets display_name, color, and icon on a user. When color or
+// icon changes, the new value is propagated to all team_members rows for the
+// user where the member's value currently matches the user's old value or is NULL
+// (i.e. has not been explicitly overridden by a team admin).
+func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
+	// Fetch old values for propagation comparison.
+	var old models.User
+	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("fetching user for profile update: %w", err)
+	}
+
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning profile update transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Exec(
+		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		displayName, color, icon, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating user profile: %w", err)
+	}
+
+	// Propagate color if changed: update team_members rows where color matches
+	// the old value or is NULL (not explicitly overridden).
+	if !ptrEqual(old.Color, color) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
+			color, id, old.Color,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating color to team_members: %w", err)
+		}
+	}
+
+	if !ptrEqual(old.Icon, icon) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
+			icon, id, old.Icon,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating icon to team_members: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing profile update: %w", err)
+	}
+	return nil
+}
+
+// UpdatePassword sets the password_hash on a user.
+func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		passwordHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	return nil
+}
+
+// ListAll returns all users with their active team membership count.
+// When orphanedOnly is true, only users with zero active memberships are returned.
+func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
+	q := `
+		SELECT u.*,
+		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
+		FROM users u
+		ORDER BY u.display_name ASC
+	`
+	if orphanedOnly {
+		q = `
+			SELECT u.*,
+			       0 AS team_count
+			FROM users u
+			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
+			ORDER BY u.display_name ASC
+		`
+	}
+	var rows []*models.AdminUserRow
+	if err := r.db.Select(&rows, q); err != nil {
+		return nil, fmt.Errorf("listing admin users: %w", err)
+	}
+	return rows, nil
+}
+
+// ptrEqual reports whether two string pointers point to equal values,
+// treating nil and a pointer to "" as distinct.
+func ptrEqual(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 ````
 
@@ -20013,6 +21024,60 @@ export const STATUS_LABELS: Record<ActivityStatus, string> = {
 };
 ````
 
+## File: packages/web/src/App.tsx
+````typescript
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AuthProvider } from '@/contexts/AuthContext'
+import ProtectedRoute from '@/components/ProtectedRoute'
+import LoginPage from '@/pages/LoginPage'
+import RegisterPage from '@/pages/RegisterPage'
+import DashboardPage from '@/pages/DashboardPage'
+import SetupPage from '@/pages/SetupPage'
+import SettingsPage from '@/pages/SettingsPage'
+import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
+import ResetPasswordPage from '@/pages/ResetPasswordPage'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
+    },
+  },
+})
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <Routes>
+            {/* First-run setup — public, shown before any users exist */}
+            <Route path="/setup" element={<SetupPage />} />
+
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/settings/*" element={<SettingsPage />} />
+            </Route>
+
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  )
+}
+````
+
 ## File: docs/REQUIREMENTS.md
 ````markdown
 # Requirements
@@ -20727,406 +21792,54 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
-## File: packages/api/internal/api/middleware.go
-````go
-package api
-
-import (
-	"bufio"
-	"context"
-	"database/sql"
-	"errors"
-	"fmt"
-	"log/slog"
-	"net"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-)
-
-// contextKey is an unexported type to avoid collisions with other packages
-// using context.WithValue on the same request context.
-type contextKey string
-
-const (
-	claimsKey     contextKey = "claims"
-	tokenScopeKey contextKey = "tokenScope"
-)
-
-// Scope sentinels. tokenScopeFull is used for JWT-authenticated requests
-// where no scope restriction applies; the other values mirror the api_tokens
-// schema check constraint.
-const (
-	tokenScopeFull    = "full"
-	tokenScopeRead    = "read"
-	tokenScopeAdd     = "add"
-	tokenScopeEditOwn = "edit_own"
-	tokenScopeEditAll = "edit_all"
-)
-
-// authMiddleware enforces a Bearer credential on the request, attaches the
-// resolved Claims (and any API-token scope) to the request context, and
-// rejects unauthenticated or scope-violating requests.
-//
-// The Bearer value is either a JWT access token or an API token (prefix
-// auth.APITokenPrefix). Read-only API tokens are rejected on any non-GET
-// request — write scopes are accepted on all methods.
-func (s *Server) authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") {
-			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or invalid authorization header")
-			return
-		}
-		raw := strings.TrimPrefix(header, "Bearer ")
-
-		var (
-			claims *auth.Claims
-			scope  = tokenScopeFull
-		)
-
-		if auth.LooksLikeAPIToken(raw) {
-			tok, err := s.apiTokens.GetByHash(auth.HashAPIToken(raw))
-			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or revoked api token")
-					return
-				}
-				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
-				return
-			}
-			if tok.Scope == tokenScopeRead && r.Method != http.MethodGet {
-				writeError(w, http.StatusForbidden, "FORBIDDEN", "read-only token cannot perform writes")
-				return
-			}
-			user, err := s.users.GetByID(tok.UserID)
-			if err != nil {
-				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "token owner not found")
-				return
-			}
-			claims = &auth.Claims{UserID: user.ID, Email: user.Email, Type: "access"}
-			scope = tok.Scope
-			// Best-effort last-used touch; never block the request on a write failure.
-			if err := s.apiTokens.TouchLastUsed(tok.ID); err != nil {
-				slog.Debug("api token touch failed", "id", tok.ID, "err", err)
-			}
-		} else {
-			c, err := s.tokens.Validate(raw, "access")
-			if err != nil {
-				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
-				return
-			}
-			// Verify the user still exists. A valid JWT for a deleted user (e.g.
-			// after a DB wipe) would otherwise pass signature validation but fail
-			// later at the FK layer, producing a confusing 500 instead of a 401.
-			if _, err := s.users.GetByID(c.UserID); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
-					return
-				}
-				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
-				return
-			}
-			claims = c
-		}
-
-		ctx := context.WithValue(r.Context(), claimsKey, claims)
-		ctx = context.WithValue(ctx, tokenScopeKey, scope)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-// claimsFromContext returns the Claims placed by authMiddleware, or nil
-// if the request did not pass through it. Handlers behind authMiddleware
-// can rely on a non-nil result.
-func claimsFromContext(ctx context.Context) *auth.Claims {
-	c, _ := ctx.Value(claimsKey).(*auth.Claims)
-	return c
-}
-
-// statusWriter wraps ResponseWriter to capture the status code written by
-// the handler, which is not otherwise readable after the fact.
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-}
-
-func (sw *statusWriter) WriteHeader(code int) {
-	sw.status = code
-	sw.ResponseWriter.WriteHeader(code)
-}
-
-// Hijack implements http.Hijacker so that the WebSocket upgrader can take
-// over the connection. Without this, the statusWriter wrapper breaks WS upgrades.
-func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	h, ok := sw.ResponseWriter.(http.Hijacker)
-	if !ok {
-		return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
-	}
-	return h.Hijack()
-}
-
-// requestLogger wraps next and emits a debug-level log line for every
-// request: method, path, status code, and wall-clock duration in ms.
-func requestLogger(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(sw, r)
-		slog.Debug("http",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", sw.status,
-			"ms", time.Since(start).Milliseconds(),
-		)
-	})
-}
+## File: packages/api/Dockerfile
 ````
+# ── Web builder ──
+FROM node:22-alpine AS web-builder
+RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /workspace
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/web/package.json packages/web/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install --frozen-lockfile
+COPY packages/web packages/web
+COPY packages/shared packages/shared
+RUN pnpm --filter @draba/web build
 
-## File: packages/api/internal/db/user_repo.go
-````go
-package db
+# ── Go dependency cache ──
+FROM golang:1.25-alpine AS go-deps
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
 
-import (
-	"fmt"
-	"time"
+# ── Production builder — embeds web dist into the Go binary ──
+FROM go-deps AS builder
+COPY packages/api/ .
+COPY --from=web-builder /workspace/packages/web/dist ./ui/static
+RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
 
-	"github.com/jmoiron/sqlx"
+# ── Dev stage (used by docker-compose for hot reload) ──
+# Source is provided by the docker-compose volume mount, not baked in here —
+# baking it in caused Air to see a spurious "change" on first mount and restart.
+FROM golang:1.25-alpine AS dev
+RUN go install github.com/air-verse/air@latest
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+CMD ["air", "-c", ".air.toml"]
 
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// UserRepo is the persistence layer for User records.
-type UserRepo struct {
-	db *sqlx.DB
-}
-
-// NewUserRepo returns a UserRepo backed by db.
-func NewUserRepo(db *sqlx.DB) *UserRepo {
-	return &UserRepo{db: db}
-}
-
-// Create inserts u. Returns an error if the email already exists
-// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
-func (r *UserRepo) Create(u *models.User) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
-		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
-	`, u)
-	if err != nil {
-		return fmt.Errorf("creating user: %w", err)
-	}
-	return nil
-}
-
-// GetByEmail looks up a user by exact email match. Callers are expected to
-// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
-// when no row matches.
-func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by email: %w", err)
-	}
-	return &u, nil
-}
-
-// GetByID looks up a user by primary key.
-func (r *UserRepo) GetByID(id string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by id: %w", err)
-	}
-	return &u, nil
-}
-
-// UpdatePasswordByEmail replaces the password hash for the user with the
-// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
-func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
-	res, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
-		passwordHash, email,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	if n == 0 {
-		return fmt.Errorf("updating password: no user with email %q", email)
-	}
-	return nil
-}
-
-// Count returns the total number of users. Used by the registration flow
-// to detect first-user bootstrap and to enforce tier user limits.
-func (r *UserRepo) Count() (int, error) {
-	var count int
-	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
-	if err != nil {
-		return 0, fmt.Errorf("counting users: %w", err)
-	}
-	return count, nil
-}
-
-// SearchByNameOrEmail returns up to 20 users whose display_name or email
-// contains the query (case-insensitive). Archived users are excluded.
-func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
-	var users []*models.User
-	like := "%" + q + "%"
-	err := r.db.Select(&users, `
-		SELECT * FROM users
-		WHERE archived_at IS NULL
-		  AND (display_name LIKE ? OR email LIKE ?)
-		ORDER BY display_name ASC
-		LIMIT 20
-	`, like, like)
-	if err != nil {
-		return nil, fmt.Errorf("searching users: %w", err)
-	}
-	return users, nil
-}
-
-// SetSuperadmin sets or clears the is_superadmin flag on a user.
-func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		isSuperadmin, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting superadmin: %w", err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
-func (r *UserRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		at, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting user archived: %w", err)
-	}
-	return nil
-}
-
-// Delete hard-deletes a user row. The caller must verify the user is deletable
-// (no active activities, single team membership) before calling this.
-func (r *UserRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting user: %w", err)
-	}
-	return nil
-}
-
-// UpdateProfile sets display_name, color, and icon on a user. When color or
-// icon changes, the new value is propagated to all team_members rows for the
-// user where the member's value currently matches the user's old value or is NULL
-// (i.e. has not been explicitly overridden by a team admin).
-func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
-	// Fetch old values for propagation comparison.
-	var old models.User
-	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("fetching user for profile update: %w", err)
-	}
-
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning profile update transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	_, err = tx.Exec(
-		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		displayName, color, icon, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating user profile: %w", err)
-	}
-
-	// Propagate color if changed: update team_members rows where color matches
-	// the old value or is NULL (not explicitly overridden).
-	if !ptrEqual(old.Color, color) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
-			color, id, old.Color,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating color to team_members: %w", err)
-		}
-	}
-
-	if !ptrEqual(old.Icon, icon) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
-			icon, id, old.Icon,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating icon to team_members: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing profile update: %w", err)
-	}
-	return nil
-}
-
-// UpdatePassword sets the password_hash on a user.
-func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		passwordHash, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	return nil
-}
-
-// ListAll returns all users with their active team membership count.
-// When orphanedOnly is true, only users with zero active memberships are returned.
-func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
-	q := `
-		SELECT u.*,
-		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
-		FROM users u
-		ORDER BY u.display_name ASC
-	`
-	if orphanedOnly {
-		q = `
-			SELECT u.*,
-			       0 AS team_count
-			FROM users u
-			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
-			ORDER BY u.display_name ASC
-		`
-	}
-	var rows []*models.AdminUserRow
-	if err := r.db.Select(&rows, q); err != nil {
-		return nil, fmt.Errorf("listing admin users: %w", err)
-	}
-	return rows, nil
-}
-
-// ptrEqual reports whether two string pointers point to equal values,
-// treating nil and a pointer to "" as distinct.
-func ptrEqual(a, b *string) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
-}
+# ── Production stage ──
+FROM alpine:3.21 AS prod
+RUN apk add --no-cache ca-certificates \
+    && addgroup -g 1000 draba \
+    && adduser -u 1000 -G draba -s /bin/sh -D draba \
+    && mkdir -p /data \
+    && chown draba:draba /data
+COPY --from=builder /draba /usr/local/bin/draba
+WORKDIR /data
+USER draba
+EXPOSE 8080
+CMD ["draba"]
 ````
 
 ## File: packages/web/src/components/filters/FilterDropdown.tsx
@@ -21419,6 +22132,39 @@ export default defineConfig(({ mode }) => {
 })
 ````
 
+## File: packages/api/go.mod
+````
+module github.com/I0-1O/draba/packages/api
+
+go 1.24.0
+
+require (
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/gorilla/websocket v1.5.3
+	github.com/jmoiron/sqlx v1.4.0
+	github.com/stretchr/testify v1.11.1
+	golang.org/x/crypto v0.46.0
+	modernc.org/sqlite v1.34.5
+)
+
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/oapi-codegen/runtime v1.4.0 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+	modernc.org/libc v1.61.6 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.8.0 // indirect
+)
+````
+
 ## File: packages/web/src/components/gantt/GanttToolbar.tsx
 ````typescript
 /**
@@ -21635,54 +22381,373 @@ export default function GanttToolbar({
 }
 ````
 
-## File: packages/api/Dockerfile
-````
-# ── Web builder ──
-FROM node:22-alpine AS web-builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
-WORKDIR /workspace
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/web/package.json packages/web/
-COPY packages/shared/package.json packages/shared/
-RUN pnpm install --frozen-lockfile
-COPY packages/web packages/web
-COPY packages/shared packages/shared
-RUN pnpm --filter @draba/web build
+## File: packages/api/internal/api/auth_handler.go
+````go
+package api
 
-# ── Go dependency cache ──
-FROM golang:1.25-alpine AS go-deps
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+	"unicode"
 
-# ── Production builder — embeds web dist into the Go binary ──
-FROM go-deps AS builder
-COPY packages/api/ .
-COPY --from=web-builder /workspace/packages/web/dist ./ui/static
-RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
+	openapi_types "github.com/oapi-codegen/runtime/types"
 
-# ── Dev stage (used by docker-compose for hot reload) ──
-# Source is provided by the docker-compose volume mount, not baked in here —
-# baking it in caused Air to see a spurious "change" on first mount and restart.
-FROM golang:1.25-alpine AS dev
-RUN go install github.com/air-verse/air@latest
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-CMD ["air", "-c", ".air.toml"]
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
 
-# ── Production stage ──
-FROM alpine:3.21 AS prod
-RUN apk add --no-cache ca-certificates \
-    && addgroup -g 1000 draba \
-    && adduser -u 1000 -G draba -s /bin/sh -D draba \
-    && mkdir -p /data \
-    && chown draba:draba /data
-COPY --from=builder /draba /usr/local/bin/draba
-WORKDIR /data
-USER draba
-EXPOSE 8080
-CMD ["draba"]
+// handleRegister handles POST /auth/register. The first user on a fresh
+// install registers without an invite (bootstrap); every subsequent user
+// must present a valid invite token. Tier user limits are enforced before
+// hashing the password to avoid wasted bcrypt work.
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var req RegisterJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+
+	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
+		return
+	}
+	if !isValidPassword(req.Password) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	// First user may register without an invite; all subsequent users require one.
+	count, err := s.users.Count()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	if err := s.tier.CheckUserLimit(count); err != nil {
+		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
+		return
+	}
+
+	var invite *models.Invite
+	var inviteLinkTeamID string // non-empty when a reusable invite link was used
+	if count > 0 {
+		if req.InviteToken == nil || *req.InviteToken == "" {
+			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
+			return
+		}
+		// Try as a one-time invite first.
+		inv, err := s.invites.GetValid(*req.InviteToken)
+		if err != nil {
+			// Not a valid one-time invite — check if it's a reusable invite link token.
+			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
+			if linkErr != nil {
+				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
+				return
+			}
+			inviteLinkTeamID = team.ID
+		} else {
+			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
+				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
+				return
+			}
+			invite = inv
+		}
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	now := time.Now()
+	user := &models.User{
+		ID:           newID(),
+		Email:        string(req.Email),
+		PasswordHash: hash,
+		DisplayName:  req.DisplayName,
+		IsSuperadmin: count == 0,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.users.Create(user); err != nil {
+		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
+		return
+	}
+
+	if invite != nil {
+		if err := s.invites.MarkAccepted(invite.ID); err != nil {
+			// User and tokens are still returned — email uniqueness prevents a
+			// second registration. Log so the open invite is visible in monitoring.
+			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
+		}
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   invite.TeamID,
+			UserID:   &userID,
+			Role:     invite.Role,
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
+		}
+	} else if inviteLinkTeamID != "" {
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   inviteLinkTeamID,
+			UserID:   &userID,
+			Role:     "member",
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
+		}
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleLogin handles POST /auth/login. Returns the same generic
+// INVALID_CREDENTIALS error for both unknown email and bad password so
+// the endpoint cannot be used as an account-existence oracle.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req LoginJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	if req.Email == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
+		return
+	}
+
+	user, err := s.users.GetByEmail(string(req.Email))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	if user.ArchivedAt != nil {
+		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
+		return
+	}
+
+	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
+// token for a new access token; the refresh token itself is not rotated.
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	var req RefreshTokenJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accessToken": access,
+	})
+}
+
+// handleMe handles GET /auth/me and returns the authenticated user's
+// profile. Must be mounted behind authMiddleware.
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
+// address, generates a 1-hour reset token, stores the hash, and sends a
+// reset link via SMTP. Always returns 200 to prevent email enumeration.
+// When SMTP is not configured the email is silently skipped.
+func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+	if body.Email == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
+		return
+	}
+
+	// Always return 200 regardless of whether the email exists.
+	w.Header().Set("Content-Type", "application/json")
+	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
+
+	user, err := s.users.GetByEmail(body.Email)
+	if err != nil {
+		// No user — return 200 without error (prevent enumeration).
+		return
+	}
+	if user.ArchivedAt != nil {
+		return
+	}
+
+	rawToken := newToken()
+	expiresAt := time.Now().Add(time.Hour)
+	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
+		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
+		return
+	}
+
+	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
+	// when not set so the email still contains useful info.
+	baseURL := strings.TrimRight(getBaseURL(), "/")
+	resetLink := baseURL + "/reset-password?token=" + rawToken
+
+	subject := "Reset your draba password"
+	body2 := "<html><body>" +
+		"<p>You requested a password reset for your draba account.</p>" +
+		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
+		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
+		"</body></html>"
+
+	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
+		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
+	}
+}
+
+// handleResetPassword handles POST /auth/reset-password. Accepts a token and
+// new password; validates the token, hashes the new password, and marks the
+// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
+// or already used.
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token       string `json:"token"`
+		NewPassword string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.Token == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	resetToken, err := s.passwordTokens.GetValid(body.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
+		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
+func getBaseURL() string {
+	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:8080"
+}
+
+// isValidPassword applies the minimum policy: at least 8 characters and
+// no whitespace. Strength rules beyond length are intentionally lenient —
+// length is what matters most against offline cracking.
+func isValidPassword(p string) bool {
+	if len(p) < 8 {
+		return false
+	}
+	for _, r := range p {
+		if unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
 ````
 
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
@@ -22577,375 +23642,6 @@ export default function GanttGrid({
 }
 ````
 
-## File: packages/api/internal/api/auth_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-	"time"
-	"unicode"
-
-	openapi_types "github.com/oapi-codegen/runtime/types"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleRegister handles POST /auth/register. The first user on a fresh
-// install registers without an invite (bootstrap); every subsequent user
-// must present a valid invite token. Tier user limits are enforced before
-// hashing the password to avoid wasted bcrypt work.
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req RegisterJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	req.DisplayName = strings.TrimSpace(req.DisplayName)
-
-	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
-		return
-	}
-	if !isValidPassword(req.Password) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	// First user may register without an invite; all subsequent users require one.
-	count, err := s.users.Count()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	if err := s.tier.CheckUserLimit(count); err != nil {
-		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
-		return
-	}
-
-	var invite *models.Invite
-	var inviteLinkTeamID string // non-empty when a reusable invite link was used
-	if count > 0 {
-		if req.InviteToken == nil || *req.InviteToken == "" {
-			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
-			return
-		}
-		// Try as a one-time invite first.
-		inv, err := s.invites.GetValid(*req.InviteToken)
-		if err != nil {
-			// Not a valid one-time invite — check if it's a reusable invite link token.
-			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
-			if linkErr != nil {
-				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
-				return
-			}
-			inviteLinkTeamID = team.ID
-		} else {
-			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
-				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
-				return
-			}
-			invite = inv
-		}
-	}
-
-	hash, err := auth.HashPassword(req.Password)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	now := time.Now()
-	user := &models.User{
-		ID:           newID(),
-		Email:        string(req.Email),
-		PasswordHash: hash,
-		DisplayName:  req.DisplayName,
-		IsSuperadmin: count == 0,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.users.Create(user); err != nil {
-		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
-		return
-	}
-
-	if invite != nil {
-		if err := s.invites.MarkAccepted(invite.ID); err != nil {
-			// User and tokens are still returned — email uniqueness prevents a
-			// second registration. Log so the open invite is visible in monitoring.
-			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
-		}
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   invite.TeamID,
-			UserID:   &userID,
-			Role:     invite.Role,
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
-		}
-	} else if inviteLinkTeamID != "" {
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   inviteLinkTeamID,
-			UserID:   &userID,
-			Role:     "member",
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
-		}
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleLogin handles POST /auth/login. Returns the same generic
-// INVALID_CREDENTIALS error for both unknown email and bad password so
-// the endpoint cannot be used as an account-existence oracle.
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req LoginJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	if req.Email == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
-		return
-	}
-
-	user, err := s.users.GetByEmail(string(req.Email))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	if user.ArchivedAt != nil {
-		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
-		return
-	}
-
-	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
-// token for a new access token; the refresh token itself is not rotated.
-func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	var req RefreshTokenJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"accessToken": access,
-	})
-}
-
-// handleMe handles GET /auth/me and returns the authenticated user's
-// profile. Must be mounted behind authMiddleware.
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
-		return
-	}
-	writeJSON(w, http.StatusOK, user)
-}
-
-// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
-// address, generates a 1-hour reset token, stores the hash, and sends a
-// reset link via SMTP. Always returns 200 to prevent email enumeration.
-// When SMTP is not configured the email is silently skipped.
-func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Email string `json:"email"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
-	if body.Email == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
-		return
-	}
-
-	// Always return 200 regardless of whether the email exists.
-	w.Header().Set("Content-Type", "application/json")
-	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
-
-	user, err := s.users.GetByEmail(body.Email)
-	if err != nil {
-		// No user — return 200 without error (prevent enumeration).
-		return
-	}
-	if user.ArchivedAt != nil {
-		return
-	}
-
-	rawToken := newToken()
-	expiresAt := time.Now().Add(time.Hour)
-	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
-		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
-		return
-	}
-
-	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
-	// when not set so the email still contains useful info.
-	baseURL := strings.TrimRight(getBaseURL(), "/")
-	resetLink := baseURL + "/reset-password?token=" + rawToken
-
-	subject := "Reset your draba password"
-	body2 := "<html><body>" +
-		"<p>You requested a password reset for your draba account.</p>" +
-		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
-		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
-		"</body></html>"
-
-	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
-		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
-	}
-}
-
-// handleResetPassword handles POST /auth/reset-password. Accepts a token and
-// new password; validates the token, hashes the new password, and marks the
-// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
-// or already used.
-func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Token       string `json:"token"`
-		NewPassword string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if body.Token == "" || body.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
-		return
-	}
-	if !isValidPassword(body.NewPassword) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	resetToken, err := s.passwordTokens.GetValid(body.Token)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
-		return
-	}
-
-	hash, err := auth.HashPassword(body.NewPassword)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
-		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
-func getBaseURL() string {
-	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
-		return v
-	}
-	return "http://localhost:8080"
-}
-
-// isValidPassword applies the minimum policy: at least 8 characters and
-// no whitespace. Strength rules beyond length are intentionally lenient —
-// length is what matters most against offline cracking.
-func isValidPassword(p string) bool {
-	if len(p) < 8 {
-		return false
-	}
-	for _, r := range p {
-		if unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
-}
-````
-
 ## File: packages/api/internal/db/team_repo.go
 ````go
 package db
@@ -23327,39 +24023,6 @@ func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
 	}
 	return &t, nil
 }
-````
-
-## File: packages/api/go.mod
-````
-module github.com/I0-1O/draba/packages/api
-
-go 1.24.0
-
-require (
-	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/gorilla/websocket v1.5.3
-	github.com/jmoiron/sqlx v1.4.0
-	github.com/stretchr/testify v1.11.1
-	golang.org/x/crypto v0.46.0
-	modernc.org/sqlite v1.34.5
-)
-
-require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/oapi-codegen/runtime v1.4.0 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
-	modernc.org/libc v1.61.6 // indirect
-	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.8.0 // indirect
-)
 ````
 
 ## File: packages/web/src/components/gantt/GanttView.tsx
@@ -28143,6 +28806,151 @@ export interface operations {
 }
 ````
 
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	m := mailer.New(instanceSetsRepo)
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+````
+
 ## File: packages/shared/openapi.yaml
 ````yaml
 openapi: "3.0.3"
@@ -30560,148 +31368,235 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
-## File: packages/api/cmd/draba/main.go
+## File: packages/api/internal/api/server.go
 ````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
 
 import (
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"net/http"
-	"os"
 	"strings"
+	"time"
 
-	"github.com/I0-1O/draba/packages/api/internal/api"
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
 	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
 )
 
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	SetArchived(id string, at *time.Time) error
+}
 
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
 	}
+}
 
-	setupLogger()
-	fmt.Print(banner)
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
 
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
 
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
 
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
 
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
 
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	m := mailer.New(instanceSetsRepo)
-	tokens := auth.NewTokenService(jwtSecret)
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
 
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	go hub.Run()
-	slog.Info("ws: hub running")
 
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
 	}
 
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
 		}
 	}
 
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
+	return requestLogger(mux)
 }
 
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
 }
 
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
 }
 ````
 
@@ -31054,11 +31949,12 @@ function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
 interface MemberSidebarRowProps {
   displayName: string;
   color: string;
+  icon?: string | null;
   isInactive?: boolean;
   onEdit?: () => void;
 }
 
-function MemberSidebarRow({ displayName, color, isInactive = false, onEdit }: MemberSidebarRowProps) {
+function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
   const [hovered, setHovered] = useState(false);
   return (
     <div
@@ -31072,7 +31968,7 @@ function MemberSidebarRow({ displayName, color, isInactive = false, onEdit }: Me
       }}
     >
       <Badge
-        identity={{ color, icon: '__name_words__' }}
+        identity={{ color, icon: icon ?? '__name_words__' }}
         name={displayName}
         shape="circle"
         size={20}
@@ -31447,12 +32343,14 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                     {(apiMembers ?? DEMO_MEMBERS.map(m => ({ id: m.id, teamId: '', userId: null, displayName: m.name, role: 'member', color: m.color, icon: null, joinedAt: '', email: '', avatarUrl: null }))).map(m => {
                       const displayName = (m as TeamMemberWithUser).displayName || m.id;
                       const color = m.color ?? '#8b949e';
+                      const icon = (m as TeamMemberWithUser).icon ?? null;
                       const isReal = Boolean(apiMembers);
                       return (
                         <MemberSidebarRow
                           key={m.id}
                           displayName={displayName}
                           color={color}
+                          icon={icon}
                           isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
                           onEdit={isReal && onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
                             ? () => onEditMember(m as TeamMemberWithUser)
@@ -31740,238 +32638,6 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
 }
 ````
 
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	SetArchived(id string, at *time.Time) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
-}
-````
-
 ## File: packages/web/src/pages/DashboardPage.tsx
 ````typescript
 /**
@@ -31995,6 +32661,8 @@ import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
 import { useMyTeams, useTeamTimelines, useTeamActivitySync, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities'
 import TeamModal from '@/components/TeamModal'
 import MemberModal from '@/components/MemberModal'
@@ -32075,12 +32743,10 @@ function DashboardShell() {
 
   const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
   const email = (user as { email?: string } | null)?.email ?? ''
-  const initials = displayName
-    .split(' ')
-    .map((n: string) => n[0])
-    .slice(0, 2)
-    .join('')
-    .toUpperCase()
+  const userIdentity: Identity = {
+    color: (user as { color?: string } | null)?.color ?? '#288C9B',
+    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+  }
 
   // Global preferences — restored on login to seed team/timeline selection.
   const { isSuccess: globalPrefsSettled } = usePreferences()
@@ -32241,23 +32907,10 @@ function DashboardShell() {
             <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
               <button
                 onClick={() => setProfileOpen(o => !o)}
-                style={{
-                  width: 28,
-                  height: 28,
-                  borderRadius: '50%',
-                  background: 'var(--primary)',
-                  border: 'none',
-                  color: 'white',
-                  fontSize: 11,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontFamily: 'var(--font-sans)',
-                }}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                title={displayName}
               >
-                {initials}
+                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
               </button>
 
               {profileOpen && (
@@ -34499,6 +35152,14 @@ By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), an
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-05-26 — /test-phase 10.1.3
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (8/8)
+- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` before run)
 
 ---
 
