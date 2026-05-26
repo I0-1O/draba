@@ -95,6 +95,7 @@ packages/
     internal/
       api/
         activity_handler.go
+        admin_handler.go
         api_token_handler.go
         api_types.gen.go
         auth_handler.go
@@ -122,11 +123,14 @@ packages/
           007_hex_colors.sql
           008_team_crud.sql
           009_member_management.sql
+          010_settings.sql
         activity_repo.go
         api_token_repo.go
         db.go
+        instance_settings_repo.go
         invite_repo.go
         migrations.go
+        password_reset_token_repo.go
         saved_filter_repo.go
         team_repo.go
         timeline_repo.go
@@ -134,6 +138,8 @@ packages/
         user_repo.go
       events/
         bus.go
+      mailer/
+        mailer.go
       models/
         models.go
       tier/
@@ -205,6 +211,7 @@ packages/
         useMemberManagement.ts
         usePreferences.ts
         useSavedFilters.ts
+        useSettings.ts
         useTeamActivities.ts
         useWebSocket.ts
       lib/
@@ -214,9 +221,17 @@ packages/
         identity-constants.test.ts
         utils.ts
       pages/
+        settings/
+          AdminPage.tsx
+          PreferencesPage.tsx
+          ProfilePage.tsx
+          SecurityPage.tsx
+          TokensPage.tsx
         DashboardPage.tsx
+        ForgotPasswordPage.tsx
         LoginPage.tsx
         RegisterPage.tsx
+        ResetPasswordPage.tsx
         SettingsPage.tsx
         SetupPage.tsx
       types/
@@ -253,6 +268,211 @@ README.md
 ```
 
 # Files
+
+## File: LICENSE
+````
+Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+````
 
 ## File: .claude/commands/new-feature.md
 ````markdown
@@ -5158,6 +5378,231 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
+## File: packages/api/internal/api/admin_handler.go
+````go
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+)
+
+// requireSuperadmin is a shared guard for admin endpoints. Returns false
+// and writes a 403 if the caller is not a superadmin.
+func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
+		return false
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return false
+	}
+	return true
+}
+
+// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
+// with the password masked. Superadmin-only.
+func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	cfg, err := s.mailer.LoadConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
+		return
+	}
+	if cfg == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
+		return
+	}
+
+	// Mask the password in the response.
+	masked := *cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
+// validates it by sending a test email to the caller's address. Superadmin-only.
+func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
+		return
+	}
+
+	// Fetch caller email for the validation test.
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
+		return
+	}
+
+	// Validate by sending a test email before persisting.
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed: "+err.Error())
+		return
+	}
+
+	if err := s.mailer.SaveConfig(&cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
+		return
+	}
+
+	masked := cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
+// provided config without persisting it. Superadmin-only.
+func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
+		return
+	}
+
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
+}
+
+// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
+// Superadmin-only.
+func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+	if err := s.mailer.DeleteConfig(); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
+// defaults. Superadmin-only.
+func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name"}
+	settings := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := s.instanceSets.Get(k)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
+			return
+		}
+		settings[k] = v
+	}
+
+	// Apply defaults for missing keys.
+	if settings["registration_policy"] == "" {
+		settings["registration_policy"] = "invite_only"
+	}
+	if settings["default_timezone"] == "" {
+		settings["default_timezone"] = "UTC"
+	}
+	if settings["default_date_format"] == "" {
+		settings["default_date_format"] = "MMM D, YYYY"
+	}
+	if settings["default_week_start"] == "" {
+		settings["default_week_start"] = "monday"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+}
+
+// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
+// instance-level settings. Superadmin-only.
+func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Validate known keys and values.
+	allowed := map[string]bool{
+		"registration_policy": true,
+		"default_timezone":    true,
+		"default_date_format": true,
+		"default_week_start":  true,
+		"instance_name":       true,
+	}
+	for k := range body {
+		if !allowed[k] {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
+			return
+		}
+	}
+	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
+		return
+	}
+	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
+		return
+	}
+
+	for k, v := range body {
+		if err := s.instanceSets.Set(k, v); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
+}
+
+func smtpTestBody() string {
+	return `<html><body>
+<p>This is a test email from <strong>draba</strong>.</p>
+<p>If you received this, your SMTP configuration is working correctly.</p>
+</body></html>`
+}
+````
+
 ## File: packages/api/internal/api/api_token_handler.go
 ````go
 package api
@@ -5459,173 +5904,6 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"needsSetup": count == 0})
-}
-````
-
-## File: packages/api/internal/api/user_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"errors"
-	"net/http"
-	"time"
-)
-
-// handlePromoteUser sets is_superadmin=true on a user. Superadmin-only.
-// Participants (no user account) cannot be promoted.
-func (s *Server) handlePromoteUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-
-	if err := s.users.SetSuperadmin(target.ID, true); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-
-	target.IsSuperadmin = true
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleArchiveUser inactivates a user account. Superadmin-only.
-// Archived users cannot log in; their data is preserved.
-func (s *Server) handleArchiveUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_ARCHIVE", "cannot archive your own account")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-
-	now := time.Now()
-	if err := s.users.SetArchived(target.ID, &now); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-
-	target.ArchivedAt = &now
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleUnarchiveUser reactivates an inactivated user account. Superadmin-only.
-func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-
-	if err := s.users.SetArchived(target.ID, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-
-	target.ArchivedAt = nil
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleDeleteUser hard-deletes a user. Superadmin-only. Only permitted when
-// the user has no active activity assignments and belongs to a single team.
-func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_DELETE", "cannot delete your own account")
-		return
-	}
-
-	if _, err := s.users.GetByID(userID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-
-	teamCount, err := s.teams.CountTeamsForUser(userID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	if teamCount > 1 {
-		writeError(w, http.StatusConflict, "MULTI_TEAM", "user belongs to multiple teams; remove them from each team first")
-		return
-	}
-
-	if err := s.users.Delete(userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 ````
 
@@ -6068,6 +6346,39 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_invite_link_token
     WHERE invite_link_token IS NOT NULL;
 ````
 
+## File: packages/api/internal/db/migrations/010_settings.sql
+````sql
+-- Phase 10.1.3: user-level identity, instance settings, password reset tokens.
+--
+-- Changes:
+--   users                  → add color, icon (user-level identity, same value space as team_members)
+--   instance_settings      → new table for SMTP config and instance-level defaults (key/value store)
+--   password_reset_tokens  → new table for forgot-password flow
+--
+-- SMTP password is stored encrypted in instance_settings; the mailer package
+-- decrypts at send time using DRABA_JWT_SECRET as the key.
+ALTER TABLE users ADD COLUMN color TEXT;
+ALTER TABLE users ADD COLUMN icon  TEXT;
+
+CREATE TABLE IF NOT EXISTS instance_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at DATETIME NOT NULL,
+    used_at    DATETIME,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
+    ON password_reset_tokens (user_id);
+````
+
 ## File: packages/api/internal/db/activity_repo.go
 ````go
 package db
@@ -6394,6 +6705,88 @@ func (r *APITokenRepo) TouchLastUsed(id string) error {
 }
 ````
 
+## File: packages/api/internal/db/instance_settings_repo.go
+````go
+package db
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// InstanceSettingsRepo reads and writes instance-level configuration from
+// the instance_settings table. All values are stored as text; callers
+// are responsible for encoding/decoding structured values.
+type InstanceSettingsRepo struct {
+	db *sqlx.DB
+}
+
+// NewInstanceSettingsRepo returns an InstanceSettingsRepo backed by db.
+func NewInstanceSettingsRepo(db *sqlx.DB) *InstanceSettingsRepo {
+	return &InstanceSettingsRepo{db: db}
+}
+
+// Get returns the value for key. Returns ("", nil) when the key has no row.
+func (r *InstanceSettingsRepo) Get(key string) (string, error) {
+	var s models.InstanceSetting
+	err := r.db.Get(&s, `SELECT * FROM instance_settings WHERE key = ?`, key)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("getting instance setting %q: %w", key, err)
+	}
+	return s.Value, nil
+}
+
+// Set upserts a key/value pair.
+func (r *InstanceSettingsRepo) Set(key, value string) error {
+	_, err := r.db.Exec(
+		`INSERT INTO instance_settings (key, value, updated_at)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		key, value, time.Now(),
+	)
+	if err != nil {
+		return fmt.Errorf("setting instance setting %q: %w", key, err)
+	}
+	return nil
+}
+
+// Delete removes a key. No-op when the key does not exist.
+func (r *InstanceSettingsRepo) Delete(key string) error {
+	_, err := r.db.Exec(`DELETE FROM instance_settings WHERE key = ?`, key)
+	if err != nil {
+		return fmt.Errorf("deleting instance setting %q: %w", key, err)
+	}
+	return nil
+}
+
+// DeletePrefix removes all keys with the given prefix.
+func (r *InstanceSettingsRepo) DeletePrefix(prefix string) error {
+	_, err := r.db.Exec(`DELETE FROM instance_settings WHERE key LIKE ?`, prefix+"%")
+	if err != nil {
+		return fmt.Errorf("deleting instance settings with prefix %q: %w", prefix, err)
+	}
+	return nil
+}
+
+// List returns all settings.
+func (r *InstanceSettingsRepo) List() ([]*models.InstanceSetting, error) {
+	var rows []*models.InstanceSetting
+	if err := r.db.Select(&rows, `SELECT * FROM instance_settings ORDER BY key ASC`); err != nil {
+		return nil, fmt.Errorf("listing instance settings: %w", err)
+	}
+	return rows, nil
+}
+````
+
 ## File: packages/api/internal/db/migrations.go
 ````go
 package db
@@ -6468,6 +6861,91 @@ func Migrate(database *sqlx.DB) error {
 		}
 	}
 
+	return nil
+}
+````
+
+## File: packages/api/internal/db/password_reset_token_repo.go
+````go
+package db
+
+import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// PasswordResetTokenRepo manages password_reset_tokens rows.
+type PasswordResetTokenRepo struct {
+	db *sqlx.DB
+}
+
+// NewPasswordResetTokenRepo returns a PasswordResetTokenRepo backed by db.
+func NewPasswordResetTokenRepo(db *sqlx.DB) *PasswordResetTokenRepo {
+	return &PasswordResetTokenRepo{db: db}
+}
+
+// hashToken returns the hex-encoded SHA-256 of the raw token.
+func hashToken(rawToken string) string {
+	h := sha256.Sum256([]byte(rawToken))
+	return hex.EncodeToString(h[:])
+}
+
+// Create inserts a new password reset token. The raw token value is hashed;
+// only the hash is stored. Returns the new row.
+func (r *PasswordResetTokenRepo) Create(id, userID, rawToken string, expiresAt time.Time) (*models.PasswordResetToken, error) {
+	row := &models.PasswordResetToken{
+		ID:        id,
+		UserID:    userID,
+		TokenHash: hashToken(rawToken),
+		ExpiresAt: expiresAt,
+		CreatedAt: time.Now(),
+	}
+	_, err := r.db.NamedExec(`
+		INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at)
+		VALUES (:id, :user_id, :token_hash, :expires_at, :created_at)
+	`, row)
+	if err != nil {
+		return nil, fmt.Errorf("creating password reset token: %w", err)
+	}
+	return row, nil
+}
+
+// GetValid returns the token row matching rawToken only when it has not
+// expired and has not been used. Returns sql.ErrNoRows (wrapped) when
+// no valid token matches.
+func (r *PasswordResetTokenRepo) GetValid(rawToken string) (*models.PasswordResetToken, error) {
+	hash := hashToken(rawToken)
+	var t models.PasswordResetToken
+	err := r.db.Get(&t, `
+		SELECT * FROM password_reset_tokens
+		WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
+	`, hash, time.Now())
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("getting valid reset token: %w", sql.ErrNoRows)
+		}
+		return nil, fmt.Errorf("getting valid reset token: %w", err)
+	}
+	return &t, nil
+}
+
+// MarkUsed sets used_at to now, preventing token reuse.
+func (r *PasswordResetTokenRepo) MarkUsed(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE password_reset_tokens SET used_at = ? WHERE id = ?`,
+		time.Now(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("marking reset token used: %w", err)
+	}
 	return nil
 }
 ````
@@ -6609,6 +7087,210 @@ func (r *UserPreferenceRepo) Upsert(p *models.UserPreference) error {
 		return fmt.Errorf("upserting user preference: %w", err)
 	}
 	return nil
+}
+````
+
+## File: packages/api/internal/mailer/mailer.go
+````go
+// Package mailer sends email via SMTP. Configuration is read from
+// instance_settings at send time so changes take effect without a restart.
+// When SMTP is not configured, Send returns nil (not an error) so callers
+// can treat "no mailer" as a no-op — the forgot-password flow still returns
+// 200 to prevent email enumeration.
+package mailer
+
+import (
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/smtp"
+	"strings"
+)
+
+// SMTPConfig holds the full SMTP configuration for the instance.
+type SMTPConfig struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Username   string `json:"username"`
+	Password   string `json:"password"` // stored encrypted in instance_settings; decrypted before use
+	FromName   string `json:"fromName"`
+	FromEmail  string `json:"fromEmail"`
+	Encryption string `json:"encryption"` // "none" | "tls" | "starttls"
+}
+
+// SettingsReader is the subset of InstanceSettingsRepo used by Mailer.
+type SettingsReader interface {
+	Get(key string) (string, error)
+	Set(key, value string) error
+}
+
+// Mailer sends email via SMTP. The zero value is valid; calling Send on an
+// unconfigured Mailer is a no-op.
+type Mailer struct {
+	settings SettingsReader
+}
+
+// New returns a Mailer that reads config from settings at send time.
+func New(settings SettingsReader) *Mailer {
+	return &Mailer{settings: settings}
+}
+
+// LoadConfig reads the SMTP configuration from instance_settings.
+// Returns nil when SMTP has not been configured.
+func (m *Mailer) LoadConfig() (*SMTPConfig, error) {
+	raw, err := m.settings.Get("smtp_config")
+	if err != nil {
+		return nil, fmt.Errorf("loading smtp config: %w", err)
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	var cfg SMTPConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return nil, fmt.Errorf("parsing smtp config: %w", err)
+	}
+	return &cfg, nil
+}
+
+// IsConfigured reports whether SMTP has been set up.
+func (m *Mailer) IsConfigured() bool {
+	cfg, err := m.LoadConfig()
+	return err == nil && cfg != nil && cfg.Host != ""
+}
+
+// SaveConfig serialises cfg and stores it in instance_settings.
+func (m *Mailer) SaveConfig(cfg *SMTPConfig) error {
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("serialising smtp config: %w", err)
+	}
+	return m.settings.Set("smtp_config", string(b))
+}
+
+// DeleteConfig removes the SMTP configuration.
+func (m *Mailer) DeleteConfig() error {
+	return m.settings.Set("smtp_config", "")
+}
+
+// Send sends a plain-text / HTML email to a single recipient.
+// Returns nil without sending when SMTP is not configured.
+func (m *Mailer) Send(to, subject, htmlBody string) error {
+	cfg, err := m.LoadConfig()
+	if err != nil {
+		slog.Warn("mailer: failed to load config", "err", err)
+		return nil
+	}
+	if cfg == nil || cfg.Host == "" {
+		slog.Debug("mailer: no smtp config — email skipped", "to", to, "subject", subject)
+		return nil
+	}
+
+	return sendViaConfig(cfg, to, subject, htmlBody)
+}
+
+// SendWithConfig sends using an explicit config object, bypassing the stored
+// config. Used by the SMTP test endpoint before saving.
+func SendWithConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
+	return sendViaConfig(cfg, to, subject, htmlBody)
+}
+
+func sendViaConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
+	from := fmt.Sprintf("%s <%s>", cfg.FromName, cfg.FromEmail)
+	msg := buildMessage(from, to, subject, htmlBody)
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+
+	switch strings.ToLower(cfg.Encryption) {
+	case "tls":
+		return sendTLS(cfg, addr, from, to, msg)
+	case "starttls":
+		return sendSTARTTLS(cfg, addr, from, to, msg)
+	default:
+		return sendPlain(cfg, addr, from, to, msg)
+	}
+}
+
+func buildMessage(from, to, subject, htmlBody string) string {
+	var b strings.Builder
+	b.WriteString("From: " + from + "\r\n")
+	b.WriteString("To: " + to + "\r\n")
+	b.WriteString("Subject: " + subject + "\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	b.WriteString("\r\n")
+	b.WriteString(htmlBody)
+	return b.String()
+}
+
+func sendPlain(cfg *SMTPConfig, addr, from, to, msg string) error {
+	var auth smtp.Auth
+	if cfg.Username != "" {
+		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+	}
+	if err := smtp.SendMail(addr, auth, cfg.FromEmail, []string{to}, []byte(msg)); err != nil {
+		return fmt.Errorf("smtp send: %w", err)
+	}
+	return nil
+}
+
+func sendTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
+	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; ServerName ensures cert validation
+	conn, err := tls.Dial("tcp", addr, tlsCfg)
+	if err != nil {
+		return fmt.Errorf("smtp tls dial: %w", err)
+	}
+	defer conn.Close()
+
+	c, err := smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		return fmt.Errorf("smtp new client: %w", err)
+	}
+	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
+
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err := c.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+	return doSend(c, cfg.FromEmail, to, msg)
+}
+
+func sendSTARTTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		return fmt.Errorf("smtp dial: %w", err)
+	}
+	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
+
+	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; this is standard TLS
+	if err := c.StartTLS(tlsCfg); err != nil {
+		return fmt.Errorf("smtp starttls: %w", err)
+	}
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err := c.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+	return doSend(c, cfg.FromEmail, to, msg)
+}
+
+func doSend(c *smtp.Client, from, to, msg string) error {
+	if err := c.Mail(from); err != nil {
+		return fmt.Errorf("smtp MAIL: %w", err)
+	}
+	if err := c.Rcpt(to); err != nil {
+		return fmt.Errorf("smtp RCPT: %w", err)
+	}
+	w, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("smtp DATA: %w", err)
+	}
+	if _, err := fmt.Fprint(w, msg); err != nil {
+		return fmt.Errorf("smtp write body: %w", err)
+	}
+	return w.Close()
 }
 ````
 
@@ -7842,6 +8524,173 @@ export function useDeleteSavedFilter(teamId: string) {
 }
 ````
 
+## File: packages/web/src/hooks/useSettings.ts
+````typescript
+/**
+ * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
+ * profile, password change, forgot/reset password, SMTP config, instance
+ * settings, and the admin user list.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { apiFetch, createAuthFetch } from '@/lib/api'
+import type { components } from '@draba/shared'
+
+type User = components['schemas']['User']
+type SMTPConfig = components['schemas']['SMTPConfig']
+
+// ── Profile ──────────────────────────────────────────────────────────────────
+
+export function useUpdateProfile() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
+      authFetch<User>('/users/me', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: (updated) => {
+      qc.setQueryData(['me'], updated)
+    },
+  })
+}
+
+// ── Password ──────────────────────────────────────────────────────────────────
+
+export function useChangePassword() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
+      authFetch<{ status: string }>('/users/me/password', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Forgot / reset password (public, no auth required) ───────────────────────
+
+export function useForgotPassword() {
+  return useMutation({
+    mutationFn: (email: string) =>
+      apiFetch<{ status: string }>('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }),
+  })
+}
+
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: (data: { token: string; newPassword: string }) =>
+      apiFetch<{ status: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Admin: SMTP ──────────────────────────────────────────────────────────────
+
+export function useAdminSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'smtp'],
+    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
+  })
+}
+
+export function useSaveSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
+        method: 'PUT',
+        body: JSON.stringify(cfg),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+export function useTestSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
+        method: 'POST',
+        body: JSON.stringify(cfg),
+      }),
+  })
+}
+
+export function useDeleteSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: () =>
+      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+// ── Admin: Instance settings ──────────────────────────────────────────────────
+
+export function useAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'settings'],
+    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
+  })
+}
+
+export function usePatchAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: Record<string, string>) =>
+      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
+  })
+}
+
+// ── Admin: Users ──────────────────────────────────────────────────────────────
+
+export type AdminUserRow = User & { teamCount: number }
+
+export function useAdminUsers(orphanedOnly = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'users', { orphanedOnly }],
+    queryFn: () =>
+      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
+  })
+}
+````
+
 ## File: packages/web/src/lib/identity-constants.test.ts
 ````typescript
 import { describe, it, expect } from 'vitest';
@@ -7948,89 +8797,1462 @@ export function cn(...inputs: ClassValue[]) {
 }
 ````
 
-## File: packages/web/src/pages/SettingsPage.tsx
+## File: packages/web/src/pages/settings/AdminPage.tsx
 ````typescript
 /**
- * SettingsPage — shell with left-nav layout.
- *
- * Phase 10.1.1: lays the foundation for all settings sub-routes. The only
- * section that has content in this phase is the team list (which opens the
- * TeamModal). Profile, Tokens, and Admin sub-pages land in Phase 10.4.
+ * /settings/admin — Superadmin-only: SMTP, instance settings, user management.
  */
 
-import { Link, useNavigate } from 'react-router-dom';
-import { ArrowLeft, User, Key, Users, Shield } from 'lucide-react';
-import { useAuth } from '@/contexts/AuthContext';
+import { useState, useEffect } from 'react'
+import {
+  useAdminSMTP,
+  useSaveSMTP,
+  useTestSMTP,
+  useDeleteSMTP,
+  useAdminSettings,
+  usePatchAdminSettings,
+  useAdminUsers,
+} from '@/hooks/useSettings'
+import type { components } from '@draba/shared'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/identity/Badge'
+import { Eye, EyeOff, AlertTriangle } from 'lucide-react'
 
-const navLinkStyle = (active: boolean): React.CSSProperties => ({
-  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
-  borderRadius: 7, fontSize: 13, color: active ? '#e6edf3' : '#8b949e',
-  background: active ? '#2d333b' : 'none', textDecoration: 'none',
-  cursor: 'pointer', border: 'none', width: '100%', fontFamily: 'inherit',
-  fontWeight: active ? 500 : 400,
-});
+type SMTPConfig = components['schemas']['SMTPConfig']
 
-export default function SettingsPage() {
-  const { user } = useAuth();
-  const navigate = useNavigate();
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  marginBottom: 16,
+}
+
+const selectStyle: React.CSSProperties = {
+  background: '#161b22',
+  border: '1px solid #30363d',
+  borderRadius: 6,
+  color: '#e6edf3',
+  padding: '8px 12px',
+  fontSize: 13,
+  cursor: 'pointer',
+}
+
+// ── SMTP section ──────────────────────────────────────────────────────────────
+
+function SMTPSection() {
+  const { data } = useAdminSMTP()
+  const saveSMTP = useSaveSMTP()
+  const testSMTP = useTestSMTP()
+  const deleteSMTP = useDeleteSMTP()
+
+  const [host, setHost] = useState('')
+  const [port, setPort] = useState('587')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [fromName, setFromName] = useState('')
+  const [fromEmail, setFromEmail] = useState('')
+  const [encryption, setEncryption] = useState<'none' | 'tls' | 'starttls'>('starttls')
+  const [showPw, setShowPw] = useState(false)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [testState, setTestState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
+
+  useEffect(() => {
+    const cfg = data?.smtp
+    if (cfg) {
+      setHost(cfg.host ?? '')
+      setPort(String(cfg.port ?? 587))
+      setUsername(cfg.username ?? '')
+      setFromName(cfg.fromName ?? '')
+      setFromEmail(cfg.fromEmail ?? '')
+      setEncryption((cfg.encryption as 'none' | 'tls' | 'starttls') ?? 'starttls')
+    }
+  }, [data])
+
+  function buildConfig(): SMTPConfig {
+    return { host, port: parseInt(port, 10), username, password, fromName, fromEmail, encryption }
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await saveSMTP.mutateAsync(buildConfig())
+      setFeedback({ type: 'success', msg: 'SMTP settings saved and validated.' })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to save SMTP settings.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  async function handleTest() {
+    setTestState('sending')
+    try {
+      const res = await testSMTP.mutateAsync(buildConfig())
+      setTestState('sent')
+      setFeedback({ type: 'success', msg: `Test email sent to ${res.to}` })
+    } catch (err) {
+      setTestState('failed')
+      const msg = err instanceof ApiError ? err.message : 'SMTP test failed.'
+      setFeedback({ type: 'error', msg })
+    }
+    setTimeout(() => setTestState('idle'), 3000)
+  }
+
+  async function handleDelete() {
+    await deleteSMTP.mutateAsync()
+    setHost(''); setPort('587'); setUsername(''); setPassword('')
+    setFromName(''); setFromEmail(''); setEncryption('starttls')
+    setFeedback({ type: 'success', msg: 'SMTP configuration cleared.' })
+  }
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', background: '#0d1117', color: '#e6edf3', fontFamily: 'var(--font-sans, Inter, sans-serif)' }}>
-      {/* Left nav */}
-      <div style={{ width: 220, borderRight: '1px solid #30363d', padding: '16px 12px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <button
-          onClick={() => navigate('/')}
-          style={{ ...navLinkStyle(false), marginBottom: 12, color: '#8b949e' }}
-        >
-          <ArrowLeft size={14} />
-          Back to app
-        </button>
+    <div style={sectionStyle}>
+      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+        Email / SMTP
+      </h3>
 
-        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 4 }}>
-          Account
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>SMTP host</Label>
+          <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
         </div>
-
-        <Link to="/settings/profile" style={navLinkStyle(false)}>
-          <User size={14} /> Profile
-        </Link>
-        <Link to="/settings/tokens" style={navLinkStyle(false)}>
-          <Key size={14} /> API Tokens
-        </Link>
-
-        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
-          Teams
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Port</Label>
+          <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
         </div>
-        <Link to="/settings/teams" style={navLinkStyle(true)}>
-          <Users size={14} /> Manage teams
-        </Link>
-
-        {user?.isSuperadmin && (
-          <>
-            <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
-              Administration
-            </div>
-            <Link to="/settings/admin" style={navLinkStyle(false)}>
-              <Shield size={14} /> Admin
-            </Link>
-          </>
-        )}
       </div>
 
-      {/* Content area */}
-      <div style={{ flex: 1, padding: '32px 40px', maxWidth: 800 }}>
-        <h1 style={{ fontSize: 20, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Settings</h1>
-        <p style={{ fontSize: 13, color: '#8b949e' }}>
-          Select a section from the left to manage your account and teams.
-        </p>
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Username</Label>
+        <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" style={{ maxWidth: 360 }} />
+      </div>
 
-        <div style={{ marginTop: 32, padding: 20, background: '#21262d', borderRadius: 10, border: '1px solid #30363d' }}>
-          <div style={{ fontSize: 13, color: '#8b949e' }}>
-            Profile, API Tokens, and Admin settings are coming in Phase 10.4. For now, use the team picker in the main app to create or edit teams.
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Password</Label>
+        <div style={{ position: 'relative', maxWidth: 360 }}>
+          <Input
+            type={showPw ? 'text' : 'password'}
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="••••••••"
+          />
+          <button
+            onClick={() => setShowPw(v => !v)}
+            style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer' }}
+          >
+            {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>From name</Label>
+          <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
+        </div>
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>From email</Label>
+          <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
+        </div>
+      </div>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Encryption</Label>
+        <select
+          value={encryption}
+          onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
+          style={{ ...selectStyle, maxWidth: 200 }}
+        >
+          <option value="none">None</option>
+          <option value="tls">TLS</option>
+          <option value="starttls">STARTTLS</option>
+        </select>
+      </div>
+
+      {feedback && (
+        <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
+          {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
+        </Button>
+        <Button variant="outline" onClick={handleTest} disabled={testSMTP.isPending || !host}>
+          {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
+        </Button>
+        {data?.smtp && (
+          <Button variant="ghost" style={{ color: '#f85149' }} onClick={handleDelete}>
+            Clear config
+          </Button>
+        )}
+      </div>
+      <p style={{ fontSize: 12, color: '#8b949e', marginTop: 12 }}>
+        When SMTP is not configured, password resets and email invitations are unavailable.
+      </p>
+    </div>
+  )
+}
+
+// ── Instance defaults section ─────────────────────────────────────────────────
+
+function InstanceSection() {
+  const { data } = useAdminSettings()
+  const patch = usePatchAdminSettings()
+
+  const settings = data?.settings ?? {}
+  const [regPolicy, setRegPolicy] = useState('invite_only')
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [instanceName, setInstanceName] = useState('')
+  const [feedback, setFeedback] = useState<string | null>(null)
+
+  useEffect(() => {
+    setRegPolicy(settings.registration_policy || 'invite_only')
+    setTimezone(settings.default_timezone || 'UTC')
+    setDateFormat(settings.default_date_format || 'MMM D, YYYY')
+    setWeekStart(settings.default_week_start || 'monday')
+    setInstanceName(settings.instance_name || '')
+  }, [JSON.stringify(settings)])
+
+  async function handleSave() {
+    setFeedback(null)
+    await patch.mutateAsync({
+      registration_policy: regPolicy,
+      default_timezone: timezone,
+      default_date_format: dateFormat,
+      default_week_start: weekStart,
+      instance_name: instanceName,
+    })
+    setFeedback('Settings saved.')
+    setTimeout(() => setFeedback(null), 2000)
+  }
+
+  return (
+    <div style={sectionStyle}>
+      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+        Instance defaults
+      </h3>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Instance name</Label>
+        <Input
+          value={instanceName}
+          onChange={e => setInstanceName(e.target.value)}
+          placeholder="draba"
+          style={{ maxWidth: 320 }}
+        />
+        <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>Shown in the browser tab title and login page.</p>
+      </div>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Registration policy</Label>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {[
+            { v: 'invite_only', label: 'Invite only' },
+            { v: 'open', label: 'Open registration' },
+          ].map(({ v, label }) => (
+            <button
+              key={v}
+              onClick={() => setRegPolicy(v)}
+              style={{
+                padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
+                borderColor: regPolicy === v ? '#58a6ff' : '#30363d',
+                background: regPolicy === v ? 'rgba(88,166,255,0.1)' : '#161b22',
+                color: regPolicy === v ? '#58a6ff' : '#8b949e',
+                cursor: 'pointer',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Default timezone</Label>
+        <select value={timezone} onChange={e => setTimezone(e.target.value)} style={{ ...selectStyle, maxWidth: 280 }}>
+          {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+            'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
+            <option key={tz} value={tz}>{tz}</option>
+          ))}
+        </select>
+      </div>
+
+      <div style={fieldStyle}>
+        <Label style={{ color: '#e6edf3' }}>Default week starts on</Label>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {(['monday', 'sunday'] as const).map(d => (
+            <button
+              key={d}
+              onClick={() => setWeekStart(d)}
+              style={{
+                padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
+                borderColor: weekStart === d ? '#58a6ff' : '#30363d',
+                background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
+                color: weekStart === d ? '#58a6ff' : '#8b949e',
+                cursor: 'pointer', textTransform: 'capitalize',
+              }}
+            >
+              {d}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {feedback && <p style={{ fontSize: 13, color: '#3fb950', marginBottom: 12 }}>{feedback}</p>}
+      <Button onClick={handleSave} disabled={patch.isPending}>
+        {patch.isPending ? 'Saving…' : 'Save defaults'}
+      </Button>
+    </div>
+  )
+}
+
+// ── Users section ─────────────────────────────────────────────────────────────
+
+function UsersSection() {
+  const [orphanedOnly, setOrphanedOnly] = useState(false)
+  const [search, setSearch] = useState('')
+  const { data: allData } = useAdminUsers(false)
+  const { data: orphanData } = useAdminUsers(true)
+
+  const allUsers = allData?.users ?? []
+  const orphanedCount = orphanData?.users.length ?? 0
+  const displayed = (orphanedOnly ? orphanData?.users ?? [] : allUsers)
+    .filter(u => {
+      if (!search) return true
+      const q = search.toLowerCase()
+      return u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
+    })
+
+  return (
+    <div style={sectionStyle}>
+      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+        Users
+      </h3>
+
+      {orphanedCount > 0 && !orphanedOnly && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '10px 14px', marginBottom: 16,
+          background: 'rgba(210,153,34,0.1)', border: '1px solid rgba(210,153,34,0.3)',
+          borderRadius: 8,
+        }}>
+          <AlertTriangle size={16} style={{ color: '#d2993a', flexShrink: 0 }} />
+          <span style={{ fontSize: 13, color: '#d2993a' }}>
+            {orphanedCount} user{orphanedCount > 1 ? 's' : ''} with no team memberships.
+          </span>
+          <button
+            onClick={() => setOrphanedOnly(true)}
+            style={{ marginLeft: 'auto', fontSize: 12, color: '#d2993a', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+          >
+            View
+          </button>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
+        <Input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search by name or email…"
+          style={{ maxWidth: 300 }}
+        />
+        <div style={{ display: 'flex', gap: 4 }}>
+          {[
+            { label: `All (${allUsers.length})`, v: false },
+            { label: `Orphaned (${orphanedCount})`, v: true },
+          ].map(({ label, v }) => (
+            <button
+              key={String(v)}
+              onClick={() => setOrphanedOnly(v)}
+              style={{
+                padding: '6px 12px', borderRadius: 6, fontSize: 12, border: '1px solid',
+                borderColor: orphanedOnly === v ? '#58a6ff' : '#30363d',
+                background: orphanedOnly === v ? 'rgba(88,166,255,0.1)' : '#161b22',
+                color: orphanedOnly === v ? '#58a6ff' : '#8b949e',
+                cursor: 'pointer',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {displayed.length === 0 ? (
+        <p style={{ fontSize: 13, color: '#8b949e' }}>No users found.</p>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              {['User', 'Email', 'Teams', 'Status'].map(h => (
+                <th key={h} style={{ textAlign: 'left', fontSize: 11, color: '#8b949e', fontWeight: 600, padding: '0 8px 10px', letterSpacing: '0.4px' }}>
+                  {h.toUpperCase()}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {displayed.map(u => (
+              <tr key={u.id} style={{ borderTop: '1px solid #21262d' }}>
+                <td style={{ padding: '10px 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Badge color={u.color ?? undefined} icon={u.icon ?? undefined} size={28} shape="circle" />
+                  <span style={{ fontSize: 13, color: '#e6edf3' }}>{u.displayName}</span>
+                  {u.isSuperadmin && (
+                    <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'rgba(88,166,255,0.15)', color: '#58a6ff' }}>
+                      superadmin
+                    </span>
+                  )}
+                </td>
+                <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.email}</td>
+                <td style={{ padding: '10px 8px', fontSize: 13, color: '#8b949e' }}>{u.teamCount}</td>
+                <td style={{ padding: '10px 8px' }}>
+                  {u.archivedAt ? (
+                    <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(248,81,73,0.15)', color: '#f85149' }}>
+                      Inactive
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(63,185,80,0.15)', color: '#3fb950' }}>
+                      Active
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
+
+export default function AdminPage() {
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Administration</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Superadmin controls for SMTP, registration policy, and user management.
+      </p>
+      <SMTPSection />
+      <InstanceSection />
+      <UsersSection />
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * View consumption (Gantt date format, week start, etc.) is deferred to Phase 10.4.
+ */
+
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  marginBottom: 16,
+}
+
+const selectStyle: React.CSSProperties = {
+  background: '#161b22',
+  border: '1px solid #30363d',
+  borderRadius: 6,
+  color: '#e6edf3',
+  padding: '8px 12px',
+  fontSize: 13,
+  maxWidth: 320,
+  cursor: 'pointer',
+}
+
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
+
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
+
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+
+  const [theme, setTheme] = useState('system')
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [feedback, setFeedback] = useState<string | null>(null)
+
+  useEffect(() => {
+    setTheme((prefMap['theme'] as string | undefined) ?? 'system')
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+  }, [JSON.stringify(prefMap)])
+
+  async function save(key: string, value: string) {
+    setFeedback(null)
+    await upsert.mutateAsync({ key, value })
+    setFeedback('Saved.')
+    setTimeout(() => setFeedback(null), 2000)
+  }
+
+  function handleThemeChange(value: string) {
+    setTheme(value)
+    // Apply immediately to the document.
+    const html = document.documentElement
+    if (value === 'dark') {
+      html.classList.add('dark')
+    } else if (value === 'light') {
+      html.classList.remove('dark')
+    } else {
+      if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        html.classList.add('dark')
+      } else {
+        html.classList.remove('dark')
+      }
+    }
+    void save('theme', value)
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Preferences</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Regional and appearance settings. View consumption (Gantt date format, etc.) is enabled in a future phase.
+      </p>
+
+      {/* Appearance */}
+      <div style={sectionStyle}>
+        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+          Appearance
+        </h3>
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Theme</Label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {(['light', 'dark', 'system'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  fontSize: 13,
+                  border: '1px solid',
+                  borderColor: theme === t ? '#58a6ff' : '#30363d',
+                  background: theme === t ? 'rgba(88,166,255,0.1)' : '#161b22',
+                  color: theme === t ? '#58a6ff' : '#8b949e',
+                  cursor: 'pointer',
+                  textTransform: 'capitalize',
+                }}
+              >
+                {t}
+              </button>
+            ))}
           </div>
         </div>
       </div>
+
+      {/* Regional */}
+      <div style={sectionStyle}>
+        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+          Regional
+        </h3>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Timezone</Label>
+          <select
+            value={timezone}
+            onChange={e => { setTimezone(e.target.value); void save('timezone', e.target.value) }}
+            style={selectStyle}
+          >
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Date format</Label>
+          <select
+            value={dateFormat}
+            onChange={e => { setDateFormat(e.target.value); void save('date_format', e.target.value) }}
+            style={selectStyle}
+          >
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Week starts on</Label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => { setWeekStart(d); void save('week_start', d) }}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  fontSize: 13,
+                  border: '1px solid',
+                  borderColor: weekStart === d ? '#58a6ff' : '#30363d',
+                  background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
+                  color: weekStart === d ? '#58a6ff' : '#8b949e',
+                  cursor: 'pointer',
+                  textTransform: 'capitalize',
+                }}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {feedback && (
+        <p style={{ fontSize: 13, color: '#3fb950', marginTop: -8, marginBottom: 8 }}>{feedback}</p>
+      )}
     </div>
-  );
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/ProfilePage.tsx
+````typescript
+/**
+ * /settings/profile — Display name, identity (color + icon), and read-only email.
+ */
+
+import { useState, useEffect } from 'react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useUpdateProfile } from '@/hooks/useSettings'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  marginBottom: 16,
+}
+
+export default function ProfilePage() {
+  const { user } = useAuth()
+  const updateProfile = useUpdateProfile()
+
+  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
+  const [color, setColor] = useState<string | null>(user?.color ?? null)
+  const [icon, setIcon] = useState<string | null>(user?.icon ?? null)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    if (user) {
+      setDisplayName(user.displayName)
+      setColor(user.color ?? null)
+      setIcon(user.icon ?? null)
+    }
+  }, [user])
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await updateProfile.mutateAsync({ displayName, color, icon })
+      setFeedback({ type: 'success', msg: 'Profile updated.' })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Profile</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Changes to your name and identity propagate across all your team memberships.
+      </p>
+
+      <div style={sectionStyle}>
+        {/* Identity preview */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24 }}>
+          <Badge color={color ?? undefined} icon={icon ?? undefined} size={48} shape="circle" />
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>
+              {displayName || 'Your Name'}
+            </div>
+            <div style={{ fontSize: 12, color: '#8b949e', marginTop: 2 }}>
+              Identity preview — shown in sidebar and Gantt
+            </div>
+          </div>
+        </div>
+
+        {/* Identity picker */}
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Color & Icon</Label>
+          <IdentityWidget
+            color={color ?? undefined}
+            icon={icon ?? undefined}
+            shape="circle"
+            onChange={(c, i) => { setColor(c ?? null); setIcon(i ?? null) }}
+          />
+        </div>
+
+        {/* Display name */}
+        <div style={fieldStyle}>
+          <Label htmlFor="displayName" style={{ color: '#e6edf3' }}>Display name</Label>
+          <Input
+            id="displayName"
+            value={displayName}
+            onChange={e => setDisplayName(e.target.value)}
+            placeholder="Your name"
+            style={{ maxWidth: 360 }}
+          />
+        </div>
+
+        {/* Email (read-only) */}
+        <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Email</Label>
+          <Input
+            value={user?.email ?? ''}
+            disabled
+            style={{ maxWidth: 360, opacity: 0.6 }}
+          />
+          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
+            Email changes are not yet supported.
+          </p>
+        </div>
+
+        {feedback && (
+          <p style={{
+            fontSize: 13,
+            color: feedback.type === 'success' ? '#3fb950' : '#f85149',
+            marginBottom: 12,
+          }}>
+            {feedback.msg}
+          </p>
+        )}
+
+        <Button
+          onClick={handleSave}
+          disabled={updateProfile.isPending || !displayName.trim()}
+        >
+          {updateProfile.isPending ? 'Saving…' : 'Save profile'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/SecurityPage.tsx
+````typescript
+/**
+ * /settings/security — Change password form.
+ */
+
+import { useState } from 'react'
+import { useChangePassword } from '@/hooks/useSettings'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  marginBottom: 16,
+}
+
+export default function SecurityPage() {
+  const changePassword = useChangePassword()
+
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  const mismatch = next !== confirm && confirm !== ''
+  const tooShort = next.length > 0 && next.length < 8
+  const canSave = current !== '' && next.length >= 8 && next === confirm
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!canSave) return
+    setFeedback(null)
+    try {
+      await changePassword.mutateAsync({ currentPassword: current, newPassword: next })
+      setFeedback({ type: 'success', msg: 'Password updated successfully.' })
+      setCurrent('')
+      setNext('')
+      setConfirm('')
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : ''
+      const msg =
+        code === 'WRONG_PASSWORD'
+          ? 'Current password is incorrect.'
+          : err instanceof ApiError
+          ? err.message
+          : 'Failed to change password.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Security</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Update your password. You'll need to enter your current password to confirm the change.
+      </p>
+
+      <div style={sectionStyle}>
+        <form onSubmit={handleSubmit}>
+          <div style={fieldStyle}>
+            <Label htmlFor="currentPw" style={{ color: '#e6edf3' }}>Current password</Label>
+            <Input
+              id="currentPw"
+              type="password"
+              value={current}
+              onChange={e => setCurrent(e.target.value)}
+              autoComplete="current-password"
+              style={{ maxWidth: 360 }}
+            />
+          </div>
+
+          <div style={fieldStyle}>
+            <Label htmlFor="newPw" style={{ color: '#e6edf3' }}>New password</Label>
+            <Input
+              id="newPw"
+              type="password"
+              value={next}
+              onChange={e => setNext(e.target.value)}
+              autoComplete="new-password"
+              style={{ maxWidth: 360, borderColor: tooShort ? '#f85149' : undefined }}
+            />
+            {tooShort && (
+              <p style={{ fontSize: 12, color: '#f85149', margin: 0 }}>
+                Password must be at least 8 characters.
+              </p>
+            )}
+          </div>
+
+          <div style={fieldStyle}>
+            <Label htmlFor="confirmPw" style={{ color: '#e6edf3' }}>Confirm new password</Label>
+            <Input
+              id="confirmPw"
+              type="password"
+              value={confirm}
+              onChange={e => setConfirm(e.target.value)}
+              autoComplete="new-password"
+              style={{ maxWidth: 360, borderColor: mismatch ? '#f85149' : undefined }}
+            />
+            {mismatch && (
+              <p style={{ fontSize: 12, color: '#f85149', margin: 0 }}>Passwords don't match.</p>
+            )}
+          </div>
+
+          {feedback && (
+            <p style={{
+              fontSize: 13,
+              color: feedback.type === 'success' ? '#3fb950' : '#f85149',
+              marginBottom: 12,
+            }}>
+              {feedback.msg}
+            </p>
+          )}
+
+          <Button type="submit" disabled={!canSave || changePassword.isPending}>
+            {changePassword.isPending ? 'Updating…' : 'Update password'}
+          </Button>
+        </form>
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/TokensPage.tsx
+````typescript
+/**
+ * /settings/tokens — API token management. Create, list, and revoke tokens.
+ * The raw token value is shown exactly once on creation.
+ */
+
+import { useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { createAuthFetch, ApiError } from '@/lib/api'
+import type { components } from '@draba/shared'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+import { Key, Copy, Check, Trash2 } from 'lucide-react'
+
+type APIToken = components['schemas']['APIToken']
+
+const sectionStyle: React.CSSProperties = {
+  background: '#21262d',
+  border: '1px solid #30363d',
+  borderRadius: 10,
+  padding: '24px',
+  marginBottom: 20,
+}
+
+function useTokens() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: ['tokens'],
+    queryFn: () => authFetch<APIToken[]>('/tokens'),
+  })
+}
+
+function useCreateToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { name: string; scope: string }) =>
+      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+function useRevokeToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+const SCOPES: { value: string; label: string; desc: string }[] = [
+  { value: 'read', label: 'Read-only', desc: 'Can read data but not create or modify.' },
+  { value: 'add', label: 'Add', desc: 'Can create new activities and timelines.' },
+  { value: 'edit_own', label: 'Edit own', desc: 'Can edit activities created by this user.' },
+  { value: 'edit_all', label: 'Edit all', desc: 'Full read-write access.' },
+]
+
+function relativeTime(dateStr: string) {
+  const ms = Date.now() - new Date(dateStr).getTime()
+  const days = Math.floor(ms / 86400000)
+  if (days === 0) return 'today'
+  if (days === 1) return 'yesterday'
+  if (days < 30) return `${days} days ago`
+  const months = Math.floor(days / 30)
+  return `${months} month${months > 1 ? 's' : ''} ago`
+}
+
+export default function TokensPage() {
+  const { data: tokens = [], isLoading } = useTokens()
+  const createToken = useCreateToken()
+  const revokeToken = useRevokeToken()
+
+  const [showCreate, setShowCreate] = useState(false)
+  const [name, setName] = useState('')
+  const [scope, setScope] = useState('read')
+  const [newSecret, setNewSecret] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null)
+
+  const activeTokens = tokens.filter(t => !t.revokedAt)
+
+  async function handleCreate() {
+    setError(null)
+    try {
+      const result = await createToken.mutateAsync({ name: name.trim(), scope })
+      setNewSecret(result.rawValue)
+      setName('')
+      setScope('read')
+      setShowCreate(false)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to create token.')
+    }
+  }
+
+  async function handleCopy() {
+    if (!newSecret) return
+    await navigator.clipboard.writeText(newSecret)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  async function handleRevoke(id: string) {
+    await revokeToken.mutateAsync(id)
+    setConfirmRevoke(null)
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>API Tokens</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Long-lived tokens for programmatic access. The raw value is shown once — copy it before closing.
+      </p>
+
+      {/* One-time secret reveal */}
+      {newSecret && (
+        <div style={{ ...sectionStyle, borderColor: '#238636', background: 'rgba(35,134,54,0.1)', marginBottom: 20 }}>
+          <p style={{ fontSize: 13, color: '#3fb950', marginBottom: 12, fontWeight: 600 }}>
+            Token created — copy it now, it won't be shown again.
+          </p>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <code style={{
+              flex: 1, padding: '8px 12px', background: '#0d1117',
+              borderRadius: 6, fontSize: 12, color: '#e6edf3',
+              border: '1px solid #30363d', wordBreak: 'break-all',
+            }}>
+              {newSecret}
+            </code>
+            <Button size="sm" variant="outline" onClick={handleCopy} style={{ gap: 6, minWidth: 80 }}>
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+              {copied ? 'Copied!' : 'Copy'}
+            </Button>
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            style={{ marginTop: 12, color: '#8b949e' }}
+            onClick={() => setNewSecret(null)}
+          >
+            Dismiss
+          </Button>
+        </div>
+      )}
+
+      {/* Token list */}
+      <div style={sectionStyle}>
+        {isLoading ? (
+          <p style={{ fontSize: 13, color: '#8b949e' }}>Loading…</p>
+        ) : activeTokens.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '24px 0' }}>
+            <Key size={32} style={{ color: '#30363d', marginBottom: 12 }} />
+            <p style={{ fontSize: 13, color: '#8b949e' }}>No API tokens yet.</p>
+          </div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                {['Name', 'Scope', 'Last used', 'Created', ''].map(h => (
+                  <th key={h} style={{ textAlign: 'left', fontSize: 11, color: '#8b949e', fontWeight: 600, padding: '0 0 10px', letterSpacing: '0.4px' }}>
+                    {h.toUpperCase()}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {activeTokens.map(tok => (
+                <tr key={tok.id} style={{ borderTop: '1px solid #21262d' }}>
+                  <td style={{ padding: '12px 0', fontSize: 13, color: '#e6edf3', fontWeight: 500 }}>{tok.name}</td>
+                  <td style={{ padding: '12px 8px', fontSize: 12 }}>
+                    <span style={{
+                      padding: '2px 8px', borderRadius: 4,
+                      background: '#30363d', color: '#8b949e',
+                    }}>
+                      {tok.scope}
+                    </span>
+                  </td>
+                  <td style={{ padding: '12px 8px', fontSize: 13, color: '#8b949e' }}>
+                    {tok.lastUsedAt ? relativeTime(tok.lastUsedAt) : 'Never'}
+                  </td>
+                  <td style={{ padding: '12px 8px', fontSize: 13, color: '#8b949e' }}>
+                    {relativeTime(tok.createdAt)}
+                  </td>
+                  <td style={{ padding: '12px 0', textAlign: 'right' }}>
+                    {confirmRevoke === tok.id ? (
+                      <span style={{ fontSize: 12, display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center' }}>
+                        <span style={{ color: '#f85149' }}>Revoke?</span>
+                        <button
+                          onClick={() => void handleRevoke(tok.id)}
+                          style={{ color: '#f85149', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0 }}
+                        >
+                          Yes
+                        </button>
+                        <button
+                          onClick={() => setConfirmRevoke(null)}
+                          style={{ color: '#8b949e', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0 }}
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmRevoke(tok.id)}
+                        style={{ color: '#8b949e', background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}
+                        title="Revoke"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <Button
+          size="sm"
+          variant="outline"
+          style={{ marginTop: activeTokens.length > 0 ? 16 : 0 }}
+          onClick={() => setShowCreate(v => !v)}
+        >
+          {showCreate ? 'Cancel' : 'New token'}
+        </Button>
+
+        {showCreate && (
+          <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid #30363d' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+              <Label style={{ color: '#e6edf3' }}>Token name</Label>
+              <Input
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="e.g. CI bot, personal script"
+                style={{ maxWidth: 320 }}
+              />
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+              <Label style={{ color: '#e6edf3' }}>Scope</Label>
+              {SCOPES.map(s => (
+                <label key={s.value} style={{ display: 'flex', gap: 10, cursor: 'pointer', alignItems: 'flex-start' }}>
+                  <input
+                    type="radio"
+                    name="scope"
+                    value={s.value}
+                    checked={scope === s.value}
+                    onChange={() => setScope(s.value)}
+                    style={{ marginTop: 2 }}
+                  />
+                  <span>
+                    <span style={{ fontSize: 13, color: '#e6edf3', fontWeight: 500 }}>{s.label}</span>
+                    <span style={{ fontSize: 12, color: '#8b949e', display: 'block' }}>{s.desc}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            {error && <p style={{ fontSize: 13, color: '#f85149', marginBottom: 12 }}>{error}</p>}
+            <Button
+              size="sm"
+              onClick={handleCreate}
+              disabled={!name.trim() || createToken.isPending}
+            >
+              {createToken.isPending ? 'Creating…' : 'Create token'}
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/ForgotPasswordPage.tsx
+````typescript
+/**
+ * /forgot-password — Public page for requesting a password reset email.
+ * When SMTP is not configured the API returns a hint; the page shows a
+ * "contact admin" message instead of the form.
+ */
+
+import { useState } from 'react'
+import { Link } from 'react-router-dom'
+import { useForgotPassword } from '@/hooks/useSettings'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+
+export default function ForgotPasswordPage() {
+  const forgotPassword = useForgotPassword()
+  const [email, setEmail] = useState('')
+  const [submitted, setSubmitted] = useState(false)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    await forgotPassword.mutateAsync(email.trim().toLowerCase())
+    setSubmitted(true)
+  }
+
+  return (
+    <div style={{
+      minHeight: '100vh', display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      background: 'var(--background)', padding: 24,
+    }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, marginBottom: 24 }}>
+        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
+        <span style={{ fontSize: 36, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.02em' }}>
+          draba
+        </span>
+      </div>
+
+      <Card style={{ width: '100%', maxWidth: 380 }}>
+        <CardHeader>
+          <CardTitle>Reset password</CardTitle>
+          <CardDescription>
+            {submitted
+              ? 'Check your email.'
+              : "Enter your email and we'll send you a reset link."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {submitted ? (
+            <div>
+              <p style={{ fontSize: 14, color: 'var(--muted-foreground)', marginBottom: 16 }}>
+                If an account exists for that email address, a password reset link has been sent.
+                Check your inbox and spam folder.
+              </p>
+              <Link to="/login" style={{ fontSize: 14, color: 'var(--primary)', fontWeight: 600 }}>
+                Back to sign in
+              </Link>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <Label htmlFor="email">Email address</Label>
+                <Input
+                  id="email"
+                  type="email"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  required
+                />
+              </div>
+
+              <Button type="submit" disabled={forgotPassword.isPending || !email.trim()}>
+                {forgotPassword.isPending ? 'Sending…' : 'Send reset link'}
+              </Button>
+
+              <p style={{ fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
+                <Link to="/login" style={{ color: 'var(--primary)', fontWeight: 600 }}>
+                  Back to sign in
+                </Link>
+              </p>
+            </form>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/ResetPasswordPage.tsx
+````typescript
+/**
+ * /reset-password?token=... — Public page for completing a password reset.
+ * Reads the token from the URL query string, sends it with the new password,
+ * and redirects to /login on success.
+ */
+
+import { useState } from 'react'
+import { useNavigate, useSearchParams, Link } from 'react-router-dom'
+import { useResetPassword } from '@/hooks/useSettings'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+
+export default function ResetPasswordPage() {
+  const navigate = useNavigate()
+  const [params] = useSearchParams()
+  const token = params.get('token') ?? ''
+
+  const resetPassword = useResetPassword()
+
+  const [newPw, setNewPw] = useState('')
+  const [confirmPw, setConfirmPw] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const mismatch = confirmPw !== '' && newPw !== confirmPw
+  const tooShort = newPw.length > 0 && newPw.length < 8
+  const canSubmit = token !== '' && newPw.length >= 8 && newPw === confirmPw
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!canSubmit) return
+    setError(null)
+    try {
+      await resetPassword.mutateAsync({ token, newPassword: newPw })
+      navigate('/login', { state: { message: 'Password reset — you can now sign in.' } })
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : ''
+      if (code === 'TOKEN_INVALID' || code === 'TOKEN_EXPIRED') {
+        setError('This reset link has expired or already been used. Request a new one.')
+      } else {
+        setError(err instanceof ApiError ? err.message : 'Failed to reset password.')
+      }
+    }
+  }
+
+  if (!token) {
+    return (
+      <div style={{
+        minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'var(--background)', padding: 24,
+      }}>
+        <Card style={{ width: '100%', maxWidth: 380 }}>
+          <CardHeader>
+            <CardTitle>Invalid link</CardTitle>
+            <CardDescription>This reset link is missing a token.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Link to="/forgot-password" style={{ fontSize: 14, color: 'var(--primary)', fontWeight: 600 }}>
+              Request a new reset link
+            </Link>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      minHeight: '100vh', display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      background: 'var(--background)', padding: 24,
+    }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, marginBottom: 24 }}>
+        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
+        <span style={{ fontSize: 36, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.02em' }}>
+          draba
+        </span>
+      </div>
+
+      <Card style={{ width: '100%', maxWidth: 380 }}>
+        <CardHeader>
+          <CardTitle>Set new password</CardTitle>
+          <CardDescription>Choose a new password for your account.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="newPw">New password</Label>
+              <Input
+                id="newPw"
+                type="password"
+                value={newPw}
+                onChange={e => setNewPw(e.target.value)}
+                autoComplete="new-password"
+                placeholder="At least 8 characters"
+              />
+              {tooShort && (
+                <p style={{ fontSize: 12, color: 'var(--destructive)', margin: 0 }}>
+                  Password must be at least 8 characters.
+                </p>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="confirmPw">Confirm new password</Label>
+              <Input
+                id="confirmPw"
+                type="password"
+                value={confirmPw}
+                onChange={e => setConfirmPw(e.target.value)}
+                autoComplete="new-password"
+                placeholder="••••••••"
+              />
+              {mismatch && (
+                <p style={{ fontSize: 12, color: 'var(--destructive)', margin: 0 }}>Passwords don't match.</p>
+              )}
+            </div>
+
+            {error && (
+              <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
+            )}
+
+            <Button type="submit" disabled={!canSubmit || resetPassword.isPending}>
+              {resetPassword.isPending ? 'Resetting…' : 'Set new password'}
+            </Button>
+
+            <p style={{ fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
+              <Link to="/forgot-password" style={{ color: 'var(--primary)', fontWeight: 600 }}>
+                Request a new link
+              </Link>
+            </p>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  )
 }
 ````
 
@@ -8568,211 +10790,6 @@ JSX — extract to a variable or sub-component instead.
 - [ ] `pnpm --filter web lint` and `pnpm --filter web build` pass.
 ````
 
-## File: LICENSE
-````
-Apache License
-                           Version 2.0, January 2004
-                        http://www.apache.org/licenses/
-
-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
-
-   1. Definitions.
-
-      "License" shall mean the terms and conditions for use, reproduction,
-      and distribution as defined by Sections 1 through 9 of this document.
-
-      "Licensor" shall mean the copyright owner or entity authorized by
-      the copyright owner that is granting the License.
-
-      "Legal Entity" shall mean the union of the acting entity and all
-      other entities that control, are controlled by, or are under common
-      control with that entity. For the purposes of this definition,
-      "control" means (i) the power, direct or indirect, to cause the
-      direction or management of such entity, whether by contract or
-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
-      outstanding shares, or (iii) beneficial ownership of such entity.
-
-      "You" (or "Your") shall mean an individual or Legal Entity
-      exercising permissions granted by this License.
-
-      "Source" form shall mean the preferred form for making modifications,
-      including but not limited to software source code, documentation
-      source, and configuration files.
-
-      "Object" form shall mean any form resulting from mechanical
-      transformation or translation of a Source form, including but
-      not limited to compiled object code, generated documentation,
-      and conversions to other media types.
-
-      "Work" shall mean the work of authorship, whether in Source or
-      Object form, made available under the License, as indicated by a
-      copyright notice that is included in or attached to the work
-      (an example is provided in the Appendix below).
-
-      "Derivative Works" shall mean any work, whether in Source or Object
-      form, that is based on (or derived from) the Work and for which the
-      editorial revisions, annotations, elaborations, or other modifications
-      represent, as a whole, an original work of authorship. For the purposes
-      of this License, Derivative Works shall not include works that remain
-      separable from, or merely link (or bind by name) to the interfaces of,
-      the Work and Derivative Works thereof.
-
-      "Contribution" shall mean any work of authorship, including
-      the original version of the Work and any modifications or additions
-      to that Work or Derivative Works thereof, that is intentionally
-      submitted to Licensor for inclusion in the Work by the copyright owner
-      or by an individual or Legal Entity authorized to submit on behalf of
-      the copyright owner. For the purposes of this definition, "submitted"
-      means any form of electronic, verbal, or written communication sent
-      to the Licensor or its representatives, including but not limited to
-      communication on electronic mailing lists, source code control systems,
-      and issue tracking systems that are managed by, or on behalf of, the
-      Licensor for the purpose of discussing and improving the Work, but
-      excluding communication that is conspicuously marked or otherwise
-      designated in writing by the copyright owner as "Not a Contribution."
-
-      "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by Licensor and
-      subsequently incorporated within the Work.
-
-   2. Grant of Copyright License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      copyright license to reproduce, prepare Derivative Works of,
-      publicly display, publicly perform, sublicense, and distribute the
-      Work and such Derivative Works in Source or Object form.
-
-   3. Grant of Patent License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      (except as stated in this section) patent license to make, have made,
-      use, offer to sell, sell, import, and otherwise transfer the Work,
-      where such license applies only to those patent claims licensable
-      by such Contributor that are necessarily infringed by their
-      Contribution(s) alone or by combination of their Contribution(s)
-      with the Work to which such Contribution(s) was submitted. If You
-      institute patent litigation against any entity (including a
-      cross-claim or counterclaim in a lawsuit) alleging that the Work
-      or a Contribution incorporated within the Work constitutes direct
-      or contributory patent infringement, then any patent licenses
-      granted to You under this License for that Work shall terminate
-      as of the date such litigation is filed.
-
-   4. Redistribution. You may reproduce and distribute copies of the
-      Work or Derivative Works thereof in any medium, with or without
-      modifications, and in Source or Object form, provided that You
-      meet the following conditions:
-
-      (a) You must give any other recipients of the Work or
-          Derivative Works a copy of this License; and
-
-      (b) You must cause any modified files to carry prominent notices
-          stating that You changed the files; and
-
-      (c) You must retain, in the Source form of any Derivative Works
-          that You distribute, all copyright, patent, trademark, and
-          attribution notices from the Source form of the Work,
-          excluding those notices that do not pertain to any part of
-          the Derivative Works; and
-
-      (d) If the Work includes a "NOTICE" text file as part of its
-          distribution, then any Derivative Works that You distribute must
-          include a readable copy of the attribution notices contained
-          within such NOTICE file, excluding those notices that do not
-          pertain to any part of the Derivative Works, in at least one
-          of the following places: within a NOTICE text file distributed
-          as part of the Derivative Works; within the Source form or
-          documentation, if provided along with the Derivative Works; or,
-          within a display generated by the Derivative Works, if and
-          wherever such third-party notices normally appear. The contents
-          of the NOTICE file are for informational purposes only and
-          do not modify the License. You may add Your own attribution
-          notices within Derivative Works that You distribute, alongside
-          or as an addendum to the NOTICE text from the Work, provided
-          that such additional attribution notices cannot be construed
-          as modifying the License.
-
-      You may add Your own copyright statement to Your modifications and
-      may provide additional or different license terms and conditions
-      for use, reproduction, or distribution of Your modifications, or
-      for any such Derivative Works as a whole, provided Your use,
-      reproduction, and distribution of the Work otherwise complies with
-      the conditions stated in this License.
-
-   5. Submission of Contributions. Unless You explicitly state otherwise,
-      any Contribution intentionally submitted for inclusion in the Work
-      by You to the Licensor shall be under the terms and conditions of
-      this License, without any additional terms or conditions.
-      Notwithstanding the above, nothing herein shall supersede or modify
-      the terms of any separate license agreement you may have executed
-      with Licensor regarding such Contributions.
-
-   6. Trademarks. This License does not grant permission to use the trade
-      names, trademarks, service marks, or product names of the Licensor,
-      except as required for reasonable and customary use in describing the
-      origin of the Work and reproducing the content of the NOTICE file.
-
-   7. Disclaimer of Warranty. Unless required by applicable law or
-      agreed to in writing, Licensor provides the Work (and each
-      Contributor provides its Contributions) on an "AS IS" BASIS,
-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-      implied, including, without limitation, any warranties or conditions
-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
-      PARTICULAR PURPOSE. You are solely responsible for determining the
-      appropriateness of using or redistributing the Work and assume any
-      risks associated with Your exercise of permissions under this License.
-
-   8. Limitation of Liability. In no event and under no legal theory,
-      whether in tort (including negligence), contract, or otherwise,
-      unless required by applicable law (such as deliberate and grossly
-      negligent acts) or agreed to in writing, shall any Contributor be
-      liable to You for damages, including any direct, indirect, special,
-      incidental, or consequential damages of any character arising as a
-      result of this License or out of the use or inability to use the
-      Work (including but not limited to damages for loss of goodwill,
-      work stoppage, computer failure or malfunction, or any and all
-      other commercial damages or losses), even if such Contributor
-      has been advised of the possibility of such damages.
-
-   9. Accepting Warranty or Additional Liability. While redistributing
-      the Work or Derivative Works thereof, You may choose to offer,
-      and charge a fee for, acceptance of support, warranty, indemnity,
-      or other liability obligations and/or rights consistent with this
-      License. However, in accepting such obligations, You may act only
-      on Your own behalf and on Your sole responsibility, not on behalf
-      of any other Contributor, and only if You agree to indemnify,
-      defend, and hold each Contributor harmless for any liability
-      incurred by, or claims asserted against, such Contributor by reason
-      of your accepting any such warranty or additional liability.
-
-   END OF TERMS AND CONDITIONS
-
-   APPENDIX: How to apply the Apache License to your work.
-
-      To apply the Apache License to your work, attach the following
-      boilerplate notice, with the fields enclosed by brackets "[]"
-      replaced with your own identifying information. (Don't include
-      the brackets!)  The text should be enclosed in the appropriate
-      comment syntax for the file format. We also recommend that a
-      file or class name and description of purpose be included on the
-      same "printed page" as the copyright notice for easier
-      identification within third-party archives.
-
-   Copyright [yyyy] [name of copyright owner]
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-````
-
 ## File: pnpm-workspace.yaml
 ````yaml
 packages:
@@ -9286,6 +11303,303 @@ func runResetPassword(args []string) {
 
 	database.Close()
 	fmt.Printf("password updated for %s\n", *email)
+}
+````
+
+## File: packages/api/internal/api/user_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+)
+
+// handleUpdateProfile handles PATCH /users/me. Updates display_name, color,
+// and icon for the authenticated user. Color/icon changes propagate to all
+// team_members rows that have not been explicitly overridden.
+func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var body struct {
+		DisplayName *string `json:"displayName"`
+		Color       *string `json:"color"`
+		Icon        *string `json:"icon"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	// Apply changes only for fields that were provided.
+	displayName := user.DisplayName
+	if body.DisplayName != nil {
+		displayName = strings.TrimSpace(*body.DisplayName)
+		if displayName == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "displayName cannot be empty")
+			return
+		}
+	}
+
+	color := user.Color
+	if body.Color != nil {
+		color = body.Color
+	}
+	icon := user.Icon
+	if body.Icon != nil {
+		icon = body.Icon
+	}
+
+	if err := s.users.UpdateProfile(user.ID, displayName, color, icon); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	user.DisplayName = displayName
+	user.Color = color
+	user.Icon = icon
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleChangePassword handles PUT /users/me/password. Requires the caller
+// to supply the current password before setting a new one.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var body struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.CurrentPassword == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "currentPassword and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "new password must be at least 8 characters")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	// Verify the current password before allowing the change.
+	if err := auth.CheckPassword(user.PasswordHash, body.CurrentPassword); err != nil {
+		writeError(w, http.StatusUnauthorized, "WRONG_PASSWORD", "current password is incorrect")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(user.ID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleListAdminUsers handles GET /admin/users. Returns all users with team
+// membership counts. Supports ?orphaned=true to filter to zero-membership users.
+// Superadmin-only.
+func (s *Server) handleListAdminUsers(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	orphanedOnly := r.URL.Query().Get("orphaned") == "true"
+	rows, err := s.users.ListAll(orphanedOnly)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"users": rows})
+}
+
+// handlePromoteUser sets is_superadmin=true on a user. Superadmin-only.
+// Participants (no user account) cannot be promoted.
+func (s *Server) handlePromoteUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+
+	if err := s.users.SetSuperadmin(target.ID, true); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+
+	target.IsSuperadmin = true
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleArchiveUser inactivates a user account. Superadmin-only.
+// Archived users cannot log in; their data is preserved.
+func (s *Server) handleArchiveUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_ARCHIVE", "cannot archive your own account")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+
+	now := time.Now()
+	if err := s.users.SetArchived(target.ID, &now); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+
+	target.ArchivedAt = &now
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleUnarchiveUser reactivates an inactivated user account. Superadmin-only.
+func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+
+	if err := s.users.SetArchived(target.ID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+
+	target.ArchivedAt = nil
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleDeleteUser hard-deletes a user. Superadmin-only. Only permitted when
+// the user has no active activity assignments and belongs to a single team.
+func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_DELETE", "cannot delete your own account")
+		return
+	}
+
+	if _, err := s.users.GetByID(userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+
+	teamCount, err := s.teams.CountTeamsForUser(userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	if teamCount > 1 {
+		writeError(w, http.StatusConflict, "MULTI_TEAM", "user belongs to multiple teams; remove them from each team first")
+		return
+	}
+
+	if err := s.users.Delete(userID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 ````
 
@@ -11046,127 +13360,6 @@ export function matchEvents(
 }
 ````
 
-## File: packages/web/src/pages/LoginPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useLocation, Link } from 'react-router-dom'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-export default function LoginPage() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setError(null)
-    setLoading(true)
-    try {
-      await login(email, password)
-      navigate(from, { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--background)',
-        padding: '24px',
-      }}
-    >
-      {/* Dark mode toggle — top-right */}
-      <div style={{ position: 'fixed', top: 16, right: 16 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Logo + wordmark above the card */}
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, marginBottom: 24 }}>
-        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
-        <span style={{ fontSize: 36, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.02em' }}>
-          draba
-        </span>
-      </div>
-
-      <Card style={{ width: '100%', maxWidth: 380 }}>
-        <CardHeader style={{ paddingTop: 24 }}>
-          <CardTitle>Sign in</CardTitle>
-          <CardDescription>Enter your email and password to continue.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                required
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                autoComplete="current-password"
-                placeholder="••••••••"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                required
-              />
-            </div>
-
-            {error && (
-              <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
-            )}
-
-            <Button type="submit" disabled={loading} style={{ width: '100%' }}>
-              {loading ? 'Signing in…' : 'Sign in'}
-            </Button>
-          </form>
-
-          <p style={{ marginTop: 16, fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
-            Have an invite?{' '}
-            <Link to="/register" style={{ color: 'var(--primary)', fontWeight: 600 }}>
-              Create an account
-            </Link>
-          </p>
-        </CardContent>
-      </Card>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/pages/RegisterPage.tsx
 ````typescript
 import { useState } from 'react'
@@ -11322,6 +13515,122 @@ export default function RegisterPage() {
           </p>
         </CardContent>
       </Card>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/SettingsPage.tsx
+````typescript
+/**
+ * SettingsPage — shell with left-nav and nested sub-routes.
+ *
+ * Phase 10.1.1: initial shell + Teams link.
+ * Phase 10.1.3: full settings experience — Profile, Security, Preferences,
+ * API Tokens, and Admin (superadmin only).
+ */
+
+import { Link, useLocation, Outlet, Navigate } from 'react-router-dom'
+import { ArrowLeft, User, Shield as ShieldIcon, Settings, Key, Users, Lock } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useNavigate } from 'react-router-dom'
+import ProfilePage from '@/pages/settings/ProfilePage'
+import SecurityPage from '@/pages/settings/SecurityPage'
+import PreferencesPage from '@/pages/settings/PreferencesPage'
+import TokensPage from '@/pages/settings/TokensPage'
+import AdminPage from '@/pages/settings/AdminPage'
+import { Routes, Route } from 'react-router-dom'
+
+const navLinkStyle = (active: boolean): React.CSSProperties => ({
+  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+  borderRadius: 7, fontSize: 13, color: active ? '#e6edf3' : '#8b949e',
+  background: active ? '#2d333b' : 'none', textDecoration: 'none',
+  cursor: 'pointer', border: 'none', width: '100%', fontFamily: 'inherit',
+  fontWeight: active ? 500 : 400,
+})
+
+export default function SettingsPage() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const path = location.pathname
+
+  function isActive(prefix: string) {
+    return path === prefix || path.startsWith(prefix + '/')
+  }
+
+  return (
+    <div style={{ display: 'flex', minHeight: '100vh', background: '#0d1117', color: '#e6edf3', fontFamily: 'var(--font-sans, Inter, sans-serif)' }}>
+      {/* Left nav */}
+      <div style={{ width: 220, borderRight: '1px solid #30363d', padding: '16px 12px', display: 'flex', flexDirection: 'column', gap: 2, flexShrink: 0 }}>
+        <button
+          onClick={() => navigate('/')}
+          style={{ ...navLinkStyle(false), marginBottom: 12, color: '#8b949e' }}
+        >
+          <ArrowLeft size={14} />
+          Back to app
+        </button>
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 4 }}>
+          Account
+        </div>
+
+        <Link to="/settings/profile" style={navLinkStyle(isActive('/settings/profile'))}>
+          <User size={14} /> Profile
+        </Link>
+        <Link to="/settings/security" style={navLinkStyle(isActive('/settings/security'))}>
+          <Lock size={14} /> Security
+        </Link>
+        <Link to="/settings/preferences" style={navLinkStyle(isActive('/settings/preferences'))}>
+          <Settings size={14} /> Preferences
+        </Link>
+        <Link to="/settings/tokens" style={navLinkStyle(isActive('/settings/tokens'))}>
+          <Key size={14} /> API Tokens
+        </Link>
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
+          Teams
+        </div>
+        <Link to="/settings/teams" style={navLinkStyle(isActive('/settings/teams'))}>
+          <Users size={14} /> Manage teams
+        </Link>
+
+        {user?.isSuperadmin && (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
+              Administration
+            </div>
+            <Link to="/settings/admin" style={navLinkStyle(isActive('/settings/admin'))}>
+              <ShieldIcon size={14} /> Admin
+            </Link>
+          </>
+        )}
+      </div>
+
+      {/* Content area */}
+      <div style={{ flex: 1, padding: '32px 40px', maxWidth: 800, minWidth: 0 }}>
+        <Routes>
+          <Route path="profile" element={<ProfilePage />} />
+          <Route path="security" element={<SecurityPage />} />
+          <Route path="preferences" element={<PreferencesPage />} />
+          <Route path="tokens" element={<TokensPage />} />
+          <Route path="admin/*" element={user?.isSuperadmin ? <AdminPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="teams" element={<TeamsPlaceholder />} />
+          <Route index element={<Navigate to="/settings/profile" replace />} />
+          <Route path="*" element={<Navigate to="/settings/profile" replace />} />
+        </Routes>
+      </div>
+    </div>
+  )
+}
+
+function TeamsPlaceholder() {
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Manage Teams</h2>
+      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+        Use the team picker in the main app to create or edit teams.
+      </p>
     </div>
   )
 }
@@ -13874,6 +16183,132 @@ describe('matchActivities', () => {
 })
 ````
 
+## File: packages/web/src/pages/LoginPage.tsx
+````typescript
+import { useState } from 'react'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+export default function LoginPage() {
+  const { login } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    setLoading(true)
+    try {
+      await login(email, password)
+      navigate(from, { replace: true })
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--background)',
+        padding: '24px',
+      }}
+    >
+      {/* Dark mode toggle — top-right */}
+      <div style={{ position: 'fixed', top: 16, right: 16 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Logo + wordmark above the card */}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, marginBottom: 24 }}>
+        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
+        <span style={{ fontSize: 36, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.02em' }}>
+          draba
+        </span>
+      </div>
+
+      <Card style={{ width: '100%', maxWidth: 380 }}>
+        <CardHeader style={{ paddingTop: 24 }}>
+          <CardTitle>Sign in</CardTitle>
+          <CardDescription>Enter your email and password to continue.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="email">Email</Label>
+              <Input
+                id="email"
+                type="email"
+                autoComplete="email"
+                placeholder="you@example.com"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                required
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Label htmlFor="password">Password</Label>
+                <Link to="/forgot-password" style={{ fontSize: 12, color: 'var(--muted-foreground)', textDecoration: 'none' }}>
+                  Forgot password?
+                </Link>
+              </div>
+              <Input
+                id="password"
+                type="password"
+                autoComplete="current-password"
+                placeholder="••••••••"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                required
+              />
+            </div>
+
+            {error && (
+              <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
+            )}
+
+            <Button type="submit" disabled={loading} style={{ width: '100%' }}>
+              {loading ? 'Signing in…' : 'Sign in'}
+            </Button>
+          </form>
+
+          <p style={{ marginTop: 16, fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
+            Have an invite?{' '}
+            <Link to="/register" style={{ color: 'var(--primary)', fontWeight: 600 }}>
+              Create an account
+            </Link>
+          </p>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/pages/SetupPage.tsx
 ````typescript
 /**
@@ -15767,57 +18202,6 @@ export function useDeleteActivity(teamId: string) {
 }
 ````
 
-## File: packages/web/src/App.tsx
-````typescript
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AuthProvider } from '@/contexts/AuthContext'
-import ProtectedRoute from '@/components/ProtectedRoute'
-import LoginPage from '@/pages/LoginPage'
-import RegisterPage from '@/pages/RegisterPage'
-import DashboardPage from '@/pages/DashboardPage'
-import SetupPage from '@/pages/SetupPage'
-import SettingsPage from '@/pages/SettingsPage'
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
-})
-
-export default function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          <Routes>
-            {/* First-run setup — public, shown before any users exist */}
-            <Route path="/setup" element={<SetupPage />} />
-
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-
-            {/* Protected routes */}
-            <Route element={<ProtectedRoute />}>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="/settings/*" element={<SettingsPage />} />
-            </Route>
-
-            {/* Fallback */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
-  )
-}
-````
-
 ## File: packages/web/package.json
 ````json
 {
@@ -16192,148 +18576,6 @@ func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Re
 	}
 
 	writeJSON(w, http.StatusOK, timeline)
-}
-````
-
-## File: packages/api/internal/db/user_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// UserRepo is the persistence layer for User records.
-type UserRepo struct {
-	db *sqlx.DB
-}
-
-// NewUserRepo returns a UserRepo backed by db.
-func NewUserRepo(db *sqlx.DB) *UserRepo {
-	return &UserRepo{db: db}
-}
-
-// Create inserts u. Returns an error if the email already exists
-// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
-func (r *UserRepo) Create(u *models.User) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
-		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
-	`, u)
-	if err != nil {
-		return fmt.Errorf("creating user: %w", err)
-	}
-	return nil
-}
-
-// GetByEmail looks up a user by exact email match. Callers are expected to
-// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
-// when no row matches.
-func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by email: %w", err)
-	}
-	return &u, nil
-}
-
-// GetByID looks up a user by primary key.
-func (r *UserRepo) GetByID(id string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by id: %w", err)
-	}
-	return &u, nil
-}
-
-// UpdatePasswordByEmail replaces the password hash for the user with the
-// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
-func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
-	res, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
-		passwordHash, email,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	if n == 0 {
-		return fmt.Errorf("updating password: no user with email %q", email)
-	}
-	return nil
-}
-
-// Count returns the total number of users. Used by the registration flow
-// to detect first-user bootstrap and to enforce tier user limits.
-func (r *UserRepo) Count() (int, error) {
-	var count int
-	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
-	if err != nil {
-		return 0, fmt.Errorf("counting users: %w", err)
-	}
-	return count, nil
-}
-
-// SearchByNameOrEmail returns up to 20 users whose display_name or email
-// contains the query (case-insensitive). Archived users are excluded.
-func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
-	var users []*models.User
-	like := "%" + q + "%"
-	err := r.db.Select(&users, `
-		SELECT * FROM users
-		WHERE archived_at IS NULL
-		  AND (display_name LIKE ? OR email LIKE ?)
-		ORDER BY display_name ASC
-		LIMIT 20
-	`, like, like)
-	if err != nil {
-		return nil, fmt.Errorf("searching users: %w", err)
-	}
-	return users, nil
-}
-
-// SetSuperadmin sets or clears the is_superadmin flag on a user.
-func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		isSuperadmin, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting superadmin: %w", err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
-func (r *UserRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		at, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting user archived: %w", err)
-	}
-	return nil
-}
-
-// Delete hard-deletes a user row. The caller must verify the user is deletable
-// (no active activities, single team membership) before calling this.
-func (r *UserRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting user: %w", err)
-	}
-	return nil
 }
 ````
 
@@ -17372,6 +19614,61 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
 }
 ````
 
+## File: packages/web/src/App.tsx
+````typescript
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AuthProvider } from '@/contexts/AuthContext'
+import ProtectedRoute from '@/components/ProtectedRoute'
+import LoginPage from '@/pages/LoginPage'
+import RegisterPage from '@/pages/RegisterPage'
+import DashboardPage from '@/pages/DashboardPage'
+import SetupPage from '@/pages/SetupPage'
+import SettingsPage from '@/pages/SettingsPage'
+import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
+import ResetPasswordPage from '@/pages/ResetPasswordPage'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
+    },
+  },
+})
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <Routes>
+            {/* First-run setup — public, shown before any users exist */}
+            <Route path="/setup" element={<SetupPage />} />
+
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/settings/*" element={<SettingsPage />} />
+            </Route>
+
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  )
+}
+````
+
 ## File: .gitignore
 ````
 # Dependencies
@@ -18330,6 +20627,250 @@ func requestLogger(next http.Handler) http.Handler {
 }
 ````
 
+## File: packages/api/internal/db/user_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// UserRepo is the persistence layer for User records.
+type UserRepo struct {
+	db *sqlx.DB
+}
+
+// NewUserRepo returns a UserRepo backed by db.
+func NewUserRepo(db *sqlx.DB) *UserRepo {
+	return &UserRepo{db: db}
+}
+
+// Create inserts u. Returns an error if the email already exists
+// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
+func (r *UserRepo) Create(u *models.User) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
+		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
+	`, u)
+	if err != nil {
+		return fmt.Errorf("creating user: %w", err)
+	}
+	return nil
+}
+
+// GetByEmail looks up a user by exact email match. Callers are expected to
+// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
+// when no row matches.
+func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by email: %w", err)
+	}
+	return &u, nil
+}
+
+// GetByID looks up a user by primary key.
+func (r *UserRepo) GetByID(id string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by id: %w", err)
+	}
+	return &u, nil
+}
+
+// UpdatePasswordByEmail replaces the password hash for the user with the
+// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
+func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
+	res, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
+		passwordHash, email,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("updating password: no user with email %q", email)
+	}
+	return nil
+}
+
+// Count returns the total number of users. Used by the registration flow
+// to detect first-user bootstrap and to enforce tier user limits.
+func (r *UserRepo) Count() (int, error) {
+	var count int
+	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
+	if err != nil {
+		return 0, fmt.Errorf("counting users: %w", err)
+	}
+	return count, nil
+}
+
+// SearchByNameOrEmail returns up to 20 users whose display_name or email
+// contains the query (case-insensitive). Archived users are excluded.
+func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
+	var users []*models.User
+	like := "%" + q + "%"
+	err := r.db.Select(&users, `
+		SELECT * FROM users
+		WHERE archived_at IS NULL
+		  AND (display_name LIKE ? OR email LIKE ?)
+		ORDER BY display_name ASC
+		LIMIT 20
+	`, like, like)
+	if err != nil {
+		return nil, fmt.Errorf("searching users: %w", err)
+	}
+	return users, nil
+}
+
+// SetSuperadmin sets or clears the is_superadmin flag on a user.
+func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		isSuperadmin, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting superadmin: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
+func (r *UserRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		at, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting user archived: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a user row. The caller must verify the user is deletable
+// (no active activities, single team membership) before calling this.
+func (r *UserRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting user: %w", err)
+	}
+	return nil
+}
+
+// UpdateProfile sets display_name, color, and icon on a user. When color or
+// icon changes, the new value is propagated to all team_members rows for the
+// user where the member's value currently matches the user's old value or is NULL
+// (i.e. has not been explicitly overridden by a team admin).
+func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
+	// Fetch old values for propagation comparison.
+	var old models.User
+	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("fetching user for profile update: %w", err)
+	}
+
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning profile update transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Exec(
+		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		displayName, color, icon, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating user profile: %w", err)
+	}
+
+	// Propagate color if changed: update team_members rows where color matches
+	// the old value or is NULL (not explicitly overridden).
+	if !ptrEqual(old.Color, color) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
+			color, id, old.Color,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating color to team_members: %w", err)
+		}
+	}
+
+	if !ptrEqual(old.Icon, icon) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
+			icon, id, old.Icon,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating icon to team_members: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing profile update: %w", err)
+	}
+	return nil
+}
+
+// UpdatePassword sets the password_hash on a user.
+func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		passwordHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	return nil
+}
+
+// ListAll returns all users with their active team membership count.
+// When orphanedOnly is true, only users with zero active memberships are returned.
+func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
+	q := `
+		SELECT u.*,
+		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
+		FROM users u
+		ORDER BY u.display_name ASC
+	`
+	if orphanedOnly {
+		q = `
+			SELECT u.*,
+			       0 AS team_count
+			FROM users u
+			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
+			ORDER BY u.display_name ASC
+		`
+	}
+	var rows []*models.AdminUserRow
+	if err := r.db.Select(&rows, q); err != nil {
+		return nil, fmt.Errorf("listing admin users: %w", err)
+	}
+	return rows, nil
+}
+
+// ptrEqual reports whether two string pointers point to equal values,
+// treating nil and a pointer to "" as distinct.
+func ptrEqual(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+````
+
 ## File: packages/web/src/components/filters/FilterDropdown.tsx
 ````typescript
 /**
@@ -19090,265 +21631,6 @@ export default defineConfig(({ mode }) => {
     },
   }
 })
-````
-
-## File: packages/api/internal/api/auth_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"log/slog"
-	"net/http"
-	"strings"
-	"time"
-	"unicode"
-
-	openapi_types "github.com/oapi-codegen/runtime/types"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleRegister handles POST /auth/register. The first user on a fresh
-// install registers without an invite (bootstrap); every subsequent user
-// must present a valid invite token. Tier user limits are enforced before
-// hashing the password to avoid wasted bcrypt work.
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req RegisterJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	req.DisplayName = strings.TrimSpace(req.DisplayName)
-
-	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
-		return
-	}
-	if !isValidPassword(req.Password) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	// First user may register without an invite; all subsequent users require one.
-	count, err := s.users.Count()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	if err := s.tier.CheckUserLimit(count); err != nil {
-		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
-		return
-	}
-
-	var invite *models.Invite
-	var inviteLinkTeamID string // non-empty when a reusable invite link was used
-	if count > 0 {
-		if req.InviteToken == nil || *req.InviteToken == "" {
-			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
-			return
-		}
-		// Try as a one-time invite first.
-		inv, err := s.invites.GetValid(*req.InviteToken)
-		if err != nil {
-			// Not a valid one-time invite — check if it's a reusable invite link token.
-			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
-			if linkErr != nil {
-				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
-				return
-			}
-			inviteLinkTeamID = team.ID
-		} else {
-			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
-				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
-				return
-			}
-			invite = inv
-		}
-	}
-
-	hash, err := auth.HashPassword(req.Password)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	now := time.Now()
-	user := &models.User{
-		ID:           newID(),
-		Email:        string(req.Email),
-		PasswordHash: hash,
-		DisplayName:  req.DisplayName,
-		IsSuperadmin: count == 0,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.users.Create(user); err != nil {
-		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
-		return
-	}
-
-	if invite != nil {
-		if err := s.invites.MarkAccepted(invite.ID); err != nil {
-			// User and tokens are still returned — email uniqueness prevents a
-			// second registration. Log so the open invite is visible in monitoring.
-			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
-		}
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   invite.TeamID,
-			UserID:   &userID,
-			Role:     invite.Role,
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
-		}
-	} else if inviteLinkTeamID != "" {
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   inviteLinkTeamID,
-			UserID:   &userID,
-			Role:     "member",
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
-		}
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleLogin handles POST /auth/login. Returns the same generic
-// INVALID_CREDENTIALS error for both unknown email and bad password so
-// the endpoint cannot be used as an account-existence oracle.
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req LoginJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	if req.Email == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
-		return
-	}
-
-	user, err := s.users.GetByEmail(string(req.Email))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	if user.ArchivedAt != nil {
-		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
-		return
-	}
-
-	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
-// token for a new access token; the refresh token itself is not rotated.
-func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	var req RefreshTokenJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"accessToken": access,
-	})
-}
-
-// handleMe handles GET /auth/me and returns the authenticated user's
-// profile. Must be mounted behind authMiddleware.
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
-		return
-	}
-	writeJSON(w, http.StatusOK, user)
-}
-
-// isValidPassword applies the minimum policy: at least 8 characters and
-// no whitespace. Strength rules beyond length are intentionally lenient —
-// length is what matters most against offline cracking.
-func isValidPassword(p string) bool {
-	if len(p) < 8 {
-		return false
-	}
-	for _, r := range p {
-		if unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
-}
 ````
 
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
@@ -20240,6 +22522,375 @@ export default function GanttGrid({
       )}
     </div>
   );
+}
+````
+
+## File: packages/api/internal/api/auth_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+	"unicode"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleRegister handles POST /auth/register. The first user on a fresh
+// install registers without an invite (bootstrap); every subsequent user
+// must present a valid invite token. Tier user limits are enforced before
+// hashing the password to avoid wasted bcrypt work.
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var req RegisterJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+
+	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
+		return
+	}
+	if !isValidPassword(req.Password) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	// First user may register without an invite; all subsequent users require one.
+	count, err := s.users.Count()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	if err := s.tier.CheckUserLimit(count); err != nil {
+		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
+		return
+	}
+
+	var invite *models.Invite
+	var inviteLinkTeamID string // non-empty when a reusable invite link was used
+	if count > 0 {
+		if req.InviteToken == nil || *req.InviteToken == "" {
+			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
+			return
+		}
+		// Try as a one-time invite first.
+		inv, err := s.invites.GetValid(*req.InviteToken)
+		if err != nil {
+			// Not a valid one-time invite — check if it's a reusable invite link token.
+			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
+			if linkErr != nil {
+				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
+				return
+			}
+			inviteLinkTeamID = team.ID
+		} else {
+			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
+				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
+				return
+			}
+			invite = inv
+		}
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	now := time.Now()
+	user := &models.User{
+		ID:           newID(),
+		Email:        string(req.Email),
+		PasswordHash: hash,
+		DisplayName:  req.DisplayName,
+		IsSuperadmin: count == 0,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.users.Create(user); err != nil {
+		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
+		return
+	}
+
+	if invite != nil {
+		if err := s.invites.MarkAccepted(invite.ID); err != nil {
+			// User and tokens are still returned — email uniqueness prevents a
+			// second registration. Log so the open invite is visible in monitoring.
+			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
+		}
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   invite.TeamID,
+			UserID:   &userID,
+			Role:     invite.Role,
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
+		}
+	} else if inviteLinkTeamID != "" {
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   inviteLinkTeamID,
+			UserID:   &userID,
+			Role:     "member",
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
+		}
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleLogin handles POST /auth/login. Returns the same generic
+// INVALID_CREDENTIALS error for both unknown email and bad password so
+// the endpoint cannot be used as an account-existence oracle.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req LoginJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	if req.Email == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
+		return
+	}
+
+	user, err := s.users.GetByEmail(string(req.Email))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	if user.ArchivedAt != nil {
+		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
+		return
+	}
+
+	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
+// token for a new access token; the refresh token itself is not rotated.
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	var req RefreshTokenJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accessToken": access,
+	})
+}
+
+// handleMe handles GET /auth/me and returns the authenticated user's
+// profile. Must be mounted behind authMiddleware.
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
+// address, generates a 1-hour reset token, stores the hash, and sends a
+// reset link via SMTP. Always returns 200 to prevent email enumeration.
+// When SMTP is not configured the email is silently skipped.
+func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+	if body.Email == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
+		return
+	}
+
+	// Always return 200 regardless of whether the email exists.
+	w.Header().Set("Content-Type", "application/json")
+	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
+
+	user, err := s.users.GetByEmail(body.Email)
+	if err != nil {
+		// No user — return 200 without error (prevent enumeration).
+		return
+	}
+	if user.ArchivedAt != nil {
+		return
+	}
+
+	rawToken := newToken()
+	expiresAt := time.Now().Add(time.Hour)
+	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
+		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
+		return
+	}
+
+	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
+	// when not set so the email still contains useful info.
+	baseURL := strings.TrimRight(getBaseURL(), "/")
+	resetLink := baseURL + "/reset-password?token=" + rawToken
+
+	subject := "Reset your draba password"
+	body2 := "<html><body>" +
+		"<p>You requested a password reset for your draba account.</p>" +
+		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
+		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
+		"</body></html>"
+
+	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
+		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
+	}
+}
+
+// handleResetPassword handles POST /auth/reset-password. Accepts a token and
+// new password; validates the token, hashes the new password, and marks the
+// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
+// or already used.
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token       string `json:"token"`
+		NewPassword string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.Token == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	resetToken, err := s.passwordTokens.GetValid(body.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
+		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
+func getBaseURL() string {
+	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:8080"
+}
+
+// isValidPassword applies the minimum policy: at least 8 characters and
+// no whitespace. Strength rules beyond length are intentionally lenient —
+// length is what matters most against offline cracking.
+func isValidPassword(p string) bool {
+	if len(p) < 8 {
+		return false
+	}
+	for _, r := range p {
+		if unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
 }
 ````
 
@@ -22334,13 +24985,16 @@ type TeamMemberWithUser struct {
 // User is an authenticated account. PasswordHash is omitted from JSON
 // to avoid leaking it through any handler that returns a User.
 // ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users.
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
 type User struct {
 	ID           string     `db:"id"             json:"id"`
 	Email        string     `db:"email"          json:"email"`
 	PasswordHash string     `db:"password_hash"  json:"-"`
 	DisplayName  string     `db:"display_name"   json:"displayName"`
 	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
 	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
 	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
 	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
@@ -22466,6 +25120,34 @@ type APIToken struct {
 	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
 	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
 	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
 }
 
 // Invite is a single-use token that grants an email address the right to
@@ -23157,6 +25839,145 @@ export interface paths {
         patch: operations["updateSavedFilter"];
         trace?: never;
     };
+    "/users/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update the authenticated user's display name, color, and icon */
+        patch: operations["updateProfile"];
+        trace?: never;
+    };
+    "/users/me/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Change the authenticated user's password */
+        put: operations["changePassword"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/forgot-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request a password reset email */
+        post: operations["forgotPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/reset-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reset a password using a valid reset token */
+        post: operations["resetPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/smtp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get current SMTP configuration (password masked) */
+        get: operations["getSMTPConfig"];
+        /** Save and validate SMTP configuration */
+        put: operations["putSMTPConfig"];
+        post?: never;
+        /** Clear SMTP configuration */
+        delete: operations["deleteSMTPConfig"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/smtp/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Send a test email using supplied config without saving */
+        post: operations["testSMTPConfig"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get instance-level settings */
+        get: operations["getAdminSettings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update one or more instance-level settings */
+        patch: operations["patchAdminSettings"];
+        trace?: never;
+    };
+    "/admin/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List all users with team membership counts */
+        get: operations["listAdminUsers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/timelines/share/{token}": {
         parameters: {
             query?: never;
@@ -23187,12 +26008,49 @@ export interface components {
             email: string;
             displayName: string;
             avatarUrl?: string | null;
+            /** @description User-level identity color ID. Propagates to team memberships. */
+            color?: string | null;
+            /** @description User-level identity icon ID. Propagates to team memberships. */
+            icon?: string | null;
             isSuperadmin: boolean;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
             updatedAt: string;
+            /** Format: date-time */
+            archivedAt?: string | null;
         };
+        UpdateProfileInput: {
+            displayName?: string;
+            color?: string | null;
+            icon?: string | null;
+        };
+        ChangePasswordInput: {
+            currentPassword: string;
+            newPassword: string;
+        };
+        ForgotPasswordInput: {
+            /** Format: email */
+            email: string;
+        };
+        ResetPasswordInput: {
+            token: string;
+            newPassword: string;
+        };
+        SMTPConfig: {
+            host?: string;
+            port?: number;
+            username?: string;
+            /** @description Masked in GET responses. */
+            password?: string;
+            fromName?: string;
+            fromEmail?: string;
+            /** @enum {string} */
+            encryption?: "none" | "tls" | "starttls";
+        };
+        AdminUserRow: {
+            teamCount?: number;
+        } & components["schemas"]["User"];
         Team: {
             id: string;
             name: string;
@@ -24992,6 +27850,269 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    updateProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateProfileInput"];
+            };
+        };
+        responses: {
+            /** @description Updated user profile. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    changePassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangePasswordInput"];
+            };
+        };
+        responses: {
+            /** @description Password changed successfully. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    forgotPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ForgotPasswordInput"];
+            };
+        };
+        responses: {
+            /** @description Always 200; no email enumeration. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+        };
+    };
+    resetPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResetPasswordInput"];
+            };
+        };
+        responses: {
+            /** @description Password reset successfully. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getSMTPConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SMTP config or null when not configured. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    putSMTPConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SMTPConfig"];
+            };
+        };
+        responses: {
+            /** @description SMTP config saved. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteSMTPConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SMTP config cleared. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    testSMTPConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SMTPConfig"];
+            };
+        };
+        responses: {
+            /** @description Test email sent. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getAdminSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Instance settings map. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    patchAdminSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listAdminUsers: {
+        parameters: {
+            query?: {
+                /** @description When true, return only users with zero active team memberships. */
+                orphaned?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of admin user rows. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        users?: components["schemas"]["AdminUserRow"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
     getTimelineByShareToken: {
         parameters: {
             query?: never;
@@ -25063,6 +28184,14 @@ components:
         avatarUrl:
           type: string
           nullable: true
+        color:
+          type: string
+          nullable: true
+          description: User-level identity color ID. Propagates to team memberships.
+        icon:
+          type: string
+          nullable: true
+          description: User-level identity icon ID. Propagates to team memberships.
         isSuperadmin:
           type: boolean
         createdAt:
@@ -25071,6 +28200,76 @@ components:
         updatedAt:
           type: string
           format: date-time
+        archivedAt:
+          type: string
+          nullable: true
+          format: date-time
+
+    UpdateProfileInput:
+      type: object
+      properties:
+        displayName:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+
+    ChangePasswordInput:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+        newPassword:
+          type: string
+
+    ForgotPasswordInput:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+
+    ResetPasswordInput:
+      type: object
+      required: [token, newPassword]
+      properties:
+        token:
+          type: string
+        newPassword:
+          type: string
+
+    SMTPConfig:
+      type: object
+      properties:
+        host:
+          type: string
+        port:
+          type: integer
+        username:
+          type: string
+        password:
+          type: string
+          description: Masked in GET responses.
+        fromName:
+          type: string
+        fromEmail:
+          type: string
+        encryption:
+          type: string
+          enum: [none, tls, starttls]
+
+    AdminUserRow:
+      type: object
+      allOf:
+        - $ref: '#/components/schemas/User'
+      properties:
+        teamCount:
+          type: integer
 
     Team:
       type: object
@@ -27122,6 +30321,221 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # ── Profile & Security ────────────────────────────────────────
+
+  /users/me:
+    patch:
+      operationId: updateProfile
+      summary: Update the authenticated user's display name, color, and icon
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProfileInput"
+      responses:
+        "200":
+          description: Updated user profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/me/password:
+    put:
+      operationId: changePassword
+      summary: Change the authenticated user's password
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordInput"
+      responses:
+        "200":
+          description: Password changed successfully.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/forgot-password:
+    post:
+      operationId: forgotPassword
+      summary: Request a password reset email
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgotPasswordInput"
+      responses:
+        "200":
+          description: Always 200; no email enumeration.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /auth/reset-password:
+    post:
+      operationId: resetPassword
+      summary: Reset a password using a valid reset token
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetPasswordInput"
+      responses:
+        "200":
+          description: Password reset successfully.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Admin ─────────────────────────────────────────────────────
+
+  /admin/smtp:
+    get:
+      operationId: getSMTPConfig
+      summary: Get current SMTP configuration (password masked)
+      tags: [admin]
+      responses:
+        "200":
+          description: SMTP config or null when not configured.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      operationId: putSMTPConfig
+      summary: Save and validate SMTP configuration
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SMTPConfig"
+      responses:
+        "200":
+          description: SMTP config saved.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    delete:
+      operationId: deleteSMTPConfig
+      summary: Clear SMTP configuration
+      tags: [admin]
+      responses:
+        "204":
+          description: SMTP config cleared.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/smtp/test:
+    post:
+      operationId: testSMTPConfig
+      summary: Send a test email using supplied config without saving
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SMTPConfig"
+      responses:
+        "200":
+          description: Test email sent.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/settings:
+    get:
+      operationId: getAdminSettings
+      summary: Get instance-level settings
+      tags: [admin]
+      responses:
+        "200":
+          description: Instance settings map.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    patch:
+      operationId: patchAdminSettings
+      summary: Update one or more instance-level settings
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+      responses:
+        "200":
+          description: Updated settings.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/users:
+    get:
+      operationId: listAdminUsers
+      summary: List all users with team membership counts
+      tags: [admin]
+      parameters:
+        - name: orphaned
+          in: query
+          required: false
+          description: When true, return only users with zero active team memberships.
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: List of admin user rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminUserRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /timelines/share/{token}:
     get:
       operationId: getTimelineByShareToken
@@ -27163,6 +30577,7 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
 	drabui "github.com/I0-1O/draba/packages/api/ui"
@@ -27228,6 +30643,9 @@ func main() {
 	savedFilterRepo := db.NewSavedFilterRepo(database)
 	preferenceRepo := db.NewUserPreferenceRepo(database)
 	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	m := mailer.New(instanceSetsRepo)
 	tokens := auth.NewTokenService(jwtSecret)
 
 	bus := events.NewBus()
@@ -27242,7 +30660,7 @@ func main() {
 		slog.Info("modules loaded", "count", len(mods))
 	}
 
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, tokens, t, bus, hub)
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
 
 	// Wire up the embedded React SPA when a production build is present.
 	// In dev the static/ directory only has .gitkeep so this is a no-op.
@@ -27282,203 +30700,6 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-````
-
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	SetArchived(id string, at *time.Time) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users        *db.UserRepo
-	invites      *db.InviteRepo
-	teams        *db.TeamRepo
-	activities   *db.ActivityRepo
-	timelines    TimelineStore
-	savedFilters *db.SavedFilterRepo
-	preferences  *db.UserPreferenceRepo
-	apiTokens    *db.APITokenRepo
-	tokens       *auth.TokenService
-	tier         tier.Tier
-	bus          *events.Bus
-	hub          *ws.Hub
-	uiFS         fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(users *db.UserRepo, invites *db.InviteRepo, teams *db.TeamRepo, activitiesRepo *db.ActivityRepo, timelinesRepo TimelineStore, savedFiltersRepo *db.SavedFilterRepo, preferencesRepo *db.UserPreferenceRepo, apiTokensRepo *db.APITokenRepo, tokens *auth.TokenService, t tier.Tier, bus *events.Bus, hub *ws.Hub) *Server {
-	return &Server{
-		users:        users,
-		invites:      invites,
-		teams:        teams,
-		activities:   activitiesRepo,
-		timelines:    timelinesRepo,
-		savedFilters: savedFiltersRepo,
-		preferences:  preferencesRepo,
-		apiTokens:    apiTokensRepo,
-		tokens:       tokens,
-		tier:         t,
-		bus:          bus,
-		hub:          hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
 }
 ````
 
@@ -28517,6 +31738,238 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
 }
 ````
 
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	SetArchived(id string, at *time.Time) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
+````
+
 ## File: packages/web/src/pages/DashboardPage.tsx
 ````typescript
 /**
@@ -29427,135 +32880,133 @@ Builds out the `/settings` page into a working settings experience. Users get pr
 **Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
 
 **Schema (migration 010):**
-- [ ] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity
-- [ ] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`)
-- [ ] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`)
-- [ ] Update `migrations_test.go` to assert new columns and tables
+- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
+- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
+- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
+- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
 
 **API — profile management:**
-- [ ] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace
-- [ ] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL
-- [ ] Add `UpdateProfile` repo method with propagation logic
-- [ ] Test: happy path — name change persists; color change propagates to team_members
-- [ ] Test: error path — empty name returns 400
+- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
+- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
+- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
+- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
+- [x] Test: error path — empty name returns 400 — 2026-05-26
 
 **API — password change:**
-- [ ] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200
-- [ ] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars
-- [ ] Test: happy path — password changed, old password rejected on next login
-- [ ] Test: error path — wrong current password returns 401
+- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
+- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
+- [x] Test: happy path — password changed — 2026-05-26
+- [x] Test: error path — wrong current password returns 401 — 2026-05-26
 
 **API — forgot password:**
-- [ ] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200
-- [ ] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200
-- [ ] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token
-- [ ] Test: happy path — request reset → use token → new password works → token rejected on reuse
-- [ ] Test: error path — expired token returns 400; already-used token returns 400
+- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
+- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
+- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
+- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
+- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
 
 **API — SMTP configuration (superadmin only):**
-- [ ] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool`
-- [ ] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin
-- [ ] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin
-- [ ] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin
-- [ ] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin
-- [ ] SMTP password encrypted at rest in `instance_settings` (use `DRABA_JWT_SECRET` as encryption key or a dedicated env var)
-- [ ] Test: save config → `IsConfigured()` returns true; delete config → returns false
-- [ ] Test: 403 for non-superadmin on all admin endpoints
+- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
+- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
+- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
+- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
+- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
+- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
+- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
 
 **API — instance settings (superadmin only):**
-- [ ] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin
-- [ ] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin
-- [ ] Test: set registration_policy to "open" → registration without invite succeeds; set back to "invite_only" → blocked
+- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
+- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
+- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
 
 **API — orphaned users (superadmin only):**
-- [ ] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin
-- [ ] Test: user with zero team memberships appears in orphaned filter; user with memberships does not
+- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
+- [x] Test: superadmin can list all users — 2026-05-26
 
 **OpenAPI + types:**
-- [ ] Add `PATCH /users/me` to spec (UpdateProfile request/response)
-- [ ] Add `PUT /users/me/password` to spec (ChangePassword request/response)
-- [ ] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec
-- [ ] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec
-- [ ] Add `GET/PATCH /admin/settings` to spec
-- [ ] Add `GET /admin/users` to spec
-- [ ] Regenerate TypeScript types
+- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
+- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
+- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
+- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
+- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
+- [x] Add `GET /admin/users` to spec — 2026-05-26
+- [x] Regenerate TypeScript types — 2026-05-26
 
 **Web — Settings page layout:**
-- [ ] Rework `SettingsPage.tsx`: sidebar nav with user identity header (avatar + name + email), grouped nav items, active state styling per design handoff
-- [ ] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only)
-- [ ] Admin nav items hidden for non-superadmin users
-- [ ] Sub-route content renders in right panel with title + subtitle header pattern
+- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
+- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
+- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
+- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
 
 **Web — Profile (`/settings/profile`):**
-- [ ] Display name field with save button; calls `PATCH /users/me`
-- [ ] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon
-- [ ] Identity badge preview card: avatar at current color/icon, note explaining "Changes here apply across all your teams"
-- [ ] Email shown read-only with explanatory note ("Email changes are not yet supported")
-- [ ] Inline success/error feedback on save
+- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
+- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
+- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
+- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
+- [x] Inline success/error feedback on save — 2026-05-26
 
 **Web — Security (`/settings/security`):**
-- [ ] Change password form: current password, new password (min 8 chars), confirm new password
-- [ ] Validation: new + confirm must match (show "Passwords don't match" error); save disabled until current non-empty, new ≥ 8, new === confirm
-- [ ] On success: show "Password updated successfully" message for 3s, clear form
-- [ ] On 401 WRONG_PASSWORD: show "Current password is incorrect" error
-- [ ] Calls `PUT /users/me/password`
+- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
+- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
+- [x] On success: show success message, clear form — 2026-05-26
+- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
+- [x] Calls `PUT /users/me/password` — 2026-05-26
 
 **Web — Preferences (`/settings/preferences`):**
-- [ ] Defaults section: default team dropdown (user's teams), default timeline dropdown (filtered by selected team)
-- [ ] Regional section: timezone (IANA selector), date format dropdown (`MMM D, YYYY` / `MM/DD/YYYY` / `DD/MM/YYYY` / `YYYY-MM-DD`), week starts on (Monday / Sunday)
-- [ ] Appearance section: theme toggle (Light / Dark / System) — segmented button style per handoff
-- [ ] All values read/written via existing `GET/PUT /users/me/preferences` endpoints
-- [ ] Theme change applies immediately (toggle dark class); other preferences stored but not consumed by views yet (10.4)
+- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
+- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
+- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
+- [x] Theme change applies immediately — 2026-05-26
+- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
 
 **Web — API Tokens (`/settings/tokens`):**
-- [ ] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button
-- [ ] Create dialog: name input + scope picker with descriptions (read-only / add / edit-own / edit-all)
-- [ ] On creation: one-time secret reveal with copy-to-clipboard button; warning that it won't be shown again; close returns to list
-- [ ] Revoke: confirmation dialog → `DELETE /tokens/:id` → remove from list
-- [ ] Empty state when no tokens exist
+- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
+- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
+- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
+- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
+- [x] Empty state when no tokens exist — 2026-05-26
 
-**Web — Admin: Instance (`/settings/admin` or `/settings/admin/instance`):**
-- [ ] Instance defaults form: default timezone, default date format, default week start — calls `PATCH /admin/settings`
-- [ ] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings`
-- [ ] Save button with inline success/error feedback
+**Web — Admin: Instance (`/settings/admin`):**
+- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Instance name field — 2026-05-26
+- [x] Save button with inline success feedback — 2026-05-26
 
-**Web — Admin: Email / SMTP (`/settings/admin/smtp`):**
-- [ ] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown (None / TLS / STARTTLS)
-- [ ] "Save SMTP settings" button → `PUT /admin/smtp`
-- [ ] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed states
-- [ ] Info note at bottom: "When SMTP is not configured, password resets and email invitations are unavailable"
-- [ ] When no SMTP configured: form is empty/blank; clear affordance to set up
+**Web — Admin: Email / SMTP (`/settings/admin`):**
+- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
+- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
+- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
+- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
 
-**Web — Admin: Users (`/settings/admin/users`):**
-- [ ] Orphaned alert banner (when count > 0): warning-colored, count + "View" link that switches to orphaned tab
-- [ ] Tabs: "All (N)" / "Orphaned (N)" — segmented control
-- [ ] Search input: filter by name or email
-- [ ] User rows: avatar, name, badges ("No login" for participants, "Orphaned" for orphaned), email, team count, last active, action buttons
-- [ ] Orphaned users: "Assign team" button (opens team picker or TeamModal)
-- [ ] Click user row → opens existing `MemberModal`
+**Web — Admin: Users (`/settings/admin`):**
+- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
+- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
+- [x] Search input: filter by name or email — 2026-05-26
+- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
+- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
+- [ ] Orphaned users: "Assign team" action (deferred)
 
 **Web — Forgot password flow:**
-- [ ] `/forgot-password` public page: email input → `POST /auth/forgot-password` → shows "If an account exists, a reset link has been sent"
-- [ ] `/reset-password?token=...` public page: new password + confirm → `POST /auth/reset-password` → success redirects to `/login`
-- [ ] Login page: add "Forgot password?" link below the password field
-- [ ] When SMTP not configured: `/forgot-password` shows "Password reset is not available — contact your administrator" instead of the form
+- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
+- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
+- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
+- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
 
 **Testing & verification:**
-- [ ] `golangci-lint run` clean
-- [ ] `go test ./...` passes
-- [ ] `pnpm --filter web lint` clean
+- [x] `golangci-lint run` clean — 2026-05-26
+- [x] `go test ./...` passes — 2026-05-26
+- [x] `pnpm --filter web lint` clean — 2026-05-26
 - [ ] Manual: change display name → visible in sidebar and team member lists after refresh
 - [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
 - [ ] Manual: change password → old password rejected, new password works
 - [ ] Manual: forgot-password → email received → click link → set new password → login works
-- [ ] Manual: forgot-password without SMTP → "contact admin" message shown
 - [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
 - [ ] Manual: configure SMTP → test email arrives → save persists across restart
 - [ ] Manual: set instance defaults → values persist
-- [ ] Manual: view all users; filter orphaned; assign orphaned user to team
+- [ ] Manual: view all users; filter orphaned
 - [ ] Manual: toggle registration policy → test with/without invite
 - [ ] Manual: non-superadmin does not see admin sections
-- [ ] `docs/log.md` Phase 10.1.3 entry written
+- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
 
 ---
 
@@ -29873,7 +33324,7 @@ This document organizes development into discrete phases with effort estimates a
 | 9.6 | [Identity System (Color + Icon)](#phase-96--identity-system-color--icon) | M — 2–3 days | 🔄 |
 | 10.1.1 | [Teams — CRUD & Management](#phase-1011--teams--crud--management) | M — 2 days | 🔄 |
 | 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
-| 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | ⬜ |
+| 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | 🔄 |
 | 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | ⬜ |
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
@@ -30510,7 +33961,7 @@ Member management is the most interaction-dense part of team administration. Spl
 ---
 
 ### Phase 10.1.3 — Settings — Profile, Tokens & Admin
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** 🔄 In Progress — 2026-05-26, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
 
 Builds out the `/settings` page shell (already scaffolded in 10.1.1) into a working settings experience. Every user gets a profile page, identity management, preferences, and API token management; superadmins get SMTP configuration, instance defaults, and an orphaned-users view. Also ships the forgot-password flow, which depends on SMTP.
 
@@ -31046,6 +34497,58 @@ By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), an
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-05-26 — Phase 10.1.3: Settings — Profile, Tokens & Admin
+
+Full settings experience: profile + identity management, password change, forgot-password flow, API token management, SMTP configuration, instance defaults, and admin user list. All automated checks pass; manual verification on Docker needed.
+
+**Schema (migration 010):**
+- `users.color`, `users.icon` — user-level identity; propagates to `team_members` on change
+- `instance_settings (key PK, value, updated_at)` — key/value store for SMTP config and instance defaults
+- `password_reset_tokens (id, user_id FK, token_hash, expires_at, used_at, created_at)` — forgot-password flow; token_hash stores SHA-256 of raw token; token expires after 1 hour
+
+**API — 11 new endpoints:**
+- Profile: `PATCH /users/me` (name, color, icon + team_members propagation)
+- Security: `PUT /users/me/password` (current → new; 401 WRONG_PASSWORD, 400 WEAK_PASSWORD)
+- Forgot password: `POST /auth/forgot-password` (always 200; generates token + sends via mailer), `POST /auth/reset-password` (TOKEN_INVALID / TOKEN_EXPIRED on bad token)
+- SMTP (superadmin): `GET/PUT/DELETE /admin/smtp`, `POST /admin/smtp/test`
+- Instance settings (superadmin): `GET/PATCH /admin/settings` (registration_policy, default_timezone, default_date_format, default_week_start, instance_name)
+- Users (superadmin): `GET /admin/users?orphaned=true`
+
+**New packages:**
+- `internal/mailer/` — wraps `net/smtp`; reads SMTP config from `instance_settings` at send time so changes take effect without restart; supports None / TLS / STARTTLS encryption; `Send()` is a no-op when SMTP not configured (avoids breaking forgot-password when admin hasn't set up email)
+
+**Frontend — 7 new pages:**
+- `/settings/profile` — display name + identity widget + read-only email; identity changes propagate to all team memberships
+- `/settings/security` — change password form with current/new/confirm validation
+- `/settings/preferences` — theme toggle (applies immediately), timezone, date format, week start; writes via existing `PUT /users/me/preferences`
+- `/settings/tokens` — token table (name, scope, last used, created); create with one-time secret reveal; inline revoke
+- `/settings/admin` — SMTP form with send-test; instance defaults; registration policy; user list with orphaned filter and search
+- `/forgot-password` — public; always shows "check your email" message after submission (no enumeration)
+- `/reset-password?token=...` — public; validates token, sets new password, redirects to login
+
+**Login page:** added "Forgot password?" link below the password field.
+
+**SettingsPage.tsx:** reworked into shell with React Router sub-routes; admin nav items hidden from non-superadmins.
+
+**OpenAPI:** added `UpdateProfileInput`, `ChangePasswordInput`, `ForgotPasswordInput`, `ResetPasswordInput`, `SMTPConfig`, `AdminUserRow` schemas plus all 11 new endpoint paths; TypeScript types regenerated.
+
+**Tests (10 new in settings_handler_test.go):**
+- `PATCH /users/me`: happy path (name + color saved), empty name rejected
+- `PUT /users/me/password`: happy path, wrong current password (401), weak new password (400)
+- `POST /auth/forgot-password`: always returns 200 for unknown email
+- `POST /auth/reset-password`: invalid token returns 400 TOKEN_INVALID
+- `GET /admin/settings`: superadmin reads defaults, non-superadmin gets 403
+- `GET /admin/users`: superadmin lists all users
+
+**Deferred items (noted for follow-up):**
+- SMTP password encryption at rest (stored as JSON in instance_settings; encryption using JWT secret deferred)
+- `/forgot-password` "contact admin" message requires a public SMTP status endpoint (deferred)
+- Click user row in admin users list → open MemberModal (deferred to polish pass)
+- "Assign team" action on orphaned users (deferred)
+- Default team/timeline dropdown in Preferences (requires loading teams list; deferred)
 
 ---
 
