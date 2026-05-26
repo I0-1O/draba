@@ -19,6 +19,8 @@ import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
 import { useMyTeams, useTeamTimelines, useTeamActivitySync, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities'
 import TeamModal from '@/components/TeamModal'
 import MemberModal from '@/components/MemberModal'
@@ -99,12 +101,10 @@ function DashboardShell() {
 
   const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
   const email = (user as { email?: string } | null)?.email ?? ''
-  const initials = displayName
-    .split(' ')
-    .map((n: string) => n[0])
-    .slice(0, 2)
-    .join('')
-    .toUpperCase()
+  const userIdentity: Identity = {
+    color: (user as { color?: string } | null)?.color ?? '#288C9B',
+    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+  }
 
   // Global preferences — restored on login to seed team/timeline selection.
   const { isSuccess: globalPrefsSettled } = usePreferences()
@@ -265,23 +265,10 @@ function DashboardShell() {
             <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
               <button
                 onClick={() => setProfileOpen(o => !o)}
-                style={{
-                  width: 28,
-                  height: 28,
-                  borderRadius: '50%',
-                  background: 'var(--primary)',
-                  border: 'none',
-                  color: 'white',
-                  fontSize: 11,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontFamily: 'var(--font-sans)',
-                }}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                title={displayName}
               >
-                {initials}
+                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
               </button>
 
               {profileOpen && (

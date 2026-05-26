@@ -2,6 +2,14 @@
 
 ---
 
+## 2026-05-26 — /test-phase 10.1.3
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (8/8)
+- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` before run)
+
+---
+
 ## 2026-05-26 — Phase 10.1.3: Settings — Profile, Tokens & Admin
 
 Full settings experience: profile + identity management, password change, forgot-password flow, API token management, SMTP configuration, instance defaults, and admin user list. All automated checks pass; manual verification on Docker needed.

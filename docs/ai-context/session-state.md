@@ -33,13 +33,20 @@ Next phase to build: **10.1.4** — Member Access & Data Lifecycle (FK enforceme
 - `GET /admin/users?orphaned=true` — all users with team counts (superadmin only)
 
 **Frontend:**
-- `SettingsPage.tsx` reworked as shell with React Router sub-routes (`/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin`)
-- Admin nav items hidden for non-superadmins
-- `/settings/profile` — name + IdentityWidget + read-only email
+- `SettingsPage.tsx` — Account section (Profile, Security, Preferences, API Tokens); Organization section (superadmin only): Organization, Communication, Users, AI Keys
+- `AuthContext.tsx` — added `patchUser()` so profile updates propagate to the auth user object instantly
+- `useSettings.ts` — `useUpdateProfile` now calls `patchUser` on success; fixes profile changes not reflected until page reload
+- `DashboardPage.tsx` — top-right user button now renders `Badge` with user's color/icon instead of plain initials
+- `/settings/profile` — name + IdentityWidget + read-only email (Save button was already present)
 - `/settings/security` — password change form
-- `/settings/preferences` — theme, timezone, date format, week start via existing preferences API
+- `/settings/preferences` — theme (instant), language stub, timezone, date format, week start; explicit Save button
 - `/settings/tokens` — token table, create (one-time secret reveal), inline revoke
-- `/settings/admin` — SMTP form, instance defaults, user list with orphaned filter
+- `/settings/organization` — organization name, registration policy, system defaults (language stub, timezone, week start)
+- `/settings/communication` — SMTP/email configuration
+- `/settings/users` — all-users table with orphaned filter
+- `/settings/ai` — AI/LLM API key stubs (Anthropic, OpenAI, Gemini, custom)
+- `/settings/admin/*` — redirects to `/settings/organization` (backwards compat)
+- Teams section removed from settings nav (managed via main app)
 - `/forgot-password`, `/reset-password` — public pages for the forgot-password flow
 - Login page: "Forgot password?" link added
 
@@ -107,10 +114,12 @@ These were found during manual testing of 10.1.2 and fixed 2026-05-25:
 - [ ] Preferences: change timezone/date format/week start → values persist across logout/login
 - [ ] Preferences: toggle theme → applies immediately; persists across reload
 - [ ] Tokens: create token → secret shown once → copy → `curl -H "Authorization: Bearer <token>" /auth/me` returns 200; revoke → rejected
-- [ ] Admin SMTP: configure SMTP (use MailHog or real mail server) → "Send test email" arrives; save → reload page → config persists
-- [ ] Admin Settings: toggle registration_policy to "open" → register without invite; toggle back to "invite_only" → blocked
-- [ ] Admin Settings: set instance_name → reload login page → name appears in browser tab
-- [ ] Admin Users: view all users; filter to orphaned; search by name/email
+- [ ] Preferences: language stub visible and disabled; Save button saves timezone/date/week_start
+- [ ] Organization: set org name → reload login page → name appears in browser tab; toggle registration policy
+- [ ] Communication: configure SMTP → "Send test email" arrives; save → reload → config persists
+- [ ] Users: view all users; filter to orphaned; search by name/email
+- [ ] AI Keys: stub page visible (no save functionality yet)
+- [ ] Profile: update name/color/icon → topbar Badge updates immediately (no reload needed); go back to settings → change still shown
 - [ ] Forgot password (with SMTP): request reset → email arrives → click link → set new password → login works with new password; old fails
 - [ ] Forgot password (without SMTP): request reset → API returns 200; no email sent (check mailer logs)
 - [ ] Non-superadmin: admin nav items not visible; direct navigation to /settings/admin redirects

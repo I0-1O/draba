@@ -69,8 +69,19 @@ export default function ProfilePage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24 }}>
           <Badge identity={identity} name={displayName} size={48} shape="circle" />
           <div>
-            <div style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>
-              {displayName || 'Your Name'}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>
+                {displayName || 'Your Name'}
+              </span>
+              {user?.isSuperadmin && (
+                <span style={{
+                  fontSize: 11, padding: '2px 8px', borderRadius: 4,
+                  background: 'rgba(88,166,255,0.15)', color: '#58a6ff',
+                  fontWeight: 600, letterSpacing: '0.3px',
+                }}>
+                  Superadmin
+                </span>
+              )}
             </div>
             <div style={{ fontSize: 12, color: '#8b949e', marginTop: 2 }}>
               Identity preview — shown in sidebar and Gantt

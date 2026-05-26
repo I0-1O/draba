@@ -41,6 +41,8 @@ interface AuthContextValue extends AuthState {
    *  avoiding a race against the async setState that follows. */
   register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
   logout: () => void
+  /** Merges fields into the current user object — used after profile updates. */
+  patchUser: (patch: Partial<User>) => void
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -135,9 +137,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setState({ user: null, accessToken: null, initializing: false })
   }, [])
 
+  const patchUser = useCallback((patch: Partial<User>) => {
+    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
+  }, [])
+
   const value = useMemo<AuthContextValue>(
-    () => ({ ...state, getAccessToken, login, register, logout }),
-    [state, getAccessToken, login, register, logout],
+    () => ({ ...state, getAccessToken, login, register, logout, patchUser }),
+    [state, getAccessToken, login, register, logout, patchUser],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

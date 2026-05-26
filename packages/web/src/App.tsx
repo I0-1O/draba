@@ -37,7 +37,6 @@ export default function App() {
             {/* Protected routes */}
             <Route element={<ProtectedRoute />}>
               <Route path="/" element={<DashboardPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
               <Route path="/settings/*" element={<SettingsPage />} />
             </Route>
 

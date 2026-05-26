@@ -15,7 +15,7 @@ type SMTPConfig = components['schemas']['SMTPConfig']
 // ── Profile ──────────────────────────────────────────────────────────────────
 
 export function useUpdateProfile() {
-  const { getAccessToken } = useAuth()
+  const { getAccessToken, patchUser } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
   const qc = useQueryClient()
 
@@ -27,6 +27,9 @@ export function useUpdateProfile() {
       }),
     onSuccess: (updated) => {
       qc.setQueryData(['me'], updated)
+      patchUser(updated)
+      // Invalidate all team member lists so the sidebar reflects the new color/icon.
+      void qc.invalidateQueries({ queryKey: ['teams'] })
     },
   })
 }

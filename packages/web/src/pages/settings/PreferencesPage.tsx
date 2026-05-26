@@ -1,12 +1,13 @@
 /**
  * /settings/preferences — Regional settings, appearance theme, default team/timeline.
  * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * View consumption (Gantt date format, week start, etc.) is deferred to Phase 10.4.
+ * View consumption (Gantt date format, etc.) is deferred to Phase 10.4.
  */
 
 import { useState, useEffect } from 'react'
 import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
 import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
 
 const sectionStyle: React.CSSProperties = {
   background: '#21262d',
@@ -68,7 +69,7 @@ export default function PreferencesPage() {
   const [timezone, setTimezone] = useState('UTC')
   const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
   const [weekStart, setWeekStart] = useState('monday')
-  const [feedback, setFeedback] = useState<string | null>(null)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
   useEffect(() => {
     setTheme((prefMap['theme'] as string | undefined) ?? 'system')
@@ -77,16 +78,7 @@ export default function PreferencesPage() {
     setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
   }, [JSON.stringify(prefMap)])
 
-  async function save(key: string, value: string) {
-    setFeedback(null)
-    await upsert.mutateAsync({ key, value })
-    setFeedback('Saved.')
-    setTimeout(() => setFeedback(null), 2000)
-  }
-
-  function handleThemeChange(value: string) {
-    setTheme(value)
-    // Apply immediately to the document.
+  function applyTheme(value: string) {
     const html = document.documentElement
     if (value === 'dark') {
       html.classList.add('dark')
@@ -99,14 +91,35 @@ export default function PreferencesPage() {
         html.classList.remove('dark')
       }
     }
-    void save('theme', value)
+  }
+
+  function handleThemeChange(value: string) {
+    setTheme(value)
+    // Apply visually right away so the user sees the change, but only persist on Save.
+    applyTheme(value)
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'theme', value: theme }),
+        upsert.mutateAsync({ key: 'timezone', value: timezone }),
+        upsert.mutateAsync({ key: 'date_format', value: dateFormat }),
+        upsert.mutateAsync({ key: 'week_start', value: weekStart }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
   }
 
   return (
     <div>
       <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Preferences</h2>
       <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Regional and appearance settings. View consumption (Gantt date format, etc.) is enabled in a future phase.
+        Personal appearance and regional settings.
       </p>
 
       {/* Appearance */}
@@ -137,6 +150,7 @@ export default function PreferencesPage() {
               </button>
             ))}
           </div>
+          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>Preview applies immediately; saved when you click Save.</p>
         </div>
       </div>
 
@@ -147,10 +161,20 @@ export default function PreferencesPage() {
         </h3>
 
         <div style={fieldStyle}>
+          <Label style={{ color: '#e6edf3' }}>Language</Label>
+          <select style={{ ...selectStyle, opacity: 0.6, cursor: 'not-allowed' }} disabled>
+            <option value="en">English (en)</option>
+          </select>
+          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
+            Additional languages coming in a future release.
+          </p>
+        </div>
+
+        <div style={fieldStyle}>
           <Label style={{ color: '#e6edf3' }}>Timezone</Label>
           <select
             value={timezone}
-            onChange={e => { setTimezone(e.target.value); void save('timezone', e.target.value) }}
+            onChange={e => setTimezone(e.target.value)}
             style={selectStyle}
           >
             {TIMEZONES.map(tz => (
@@ -163,7 +187,7 @@ export default function PreferencesPage() {
           <Label style={{ color: '#e6edf3' }}>Date format</Label>
           <select
             value={dateFormat}
-            onChange={e => { setDateFormat(e.target.value); void save('date_format', e.target.value) }}
+            onChange={e => setDateFormat(e.target.value)}
             style={selectStyle}
           >
             {DATE_FORMATS.map(f => (
@@ -178,7 +202,7 @@ export default function PreferencesPage() {
             {(['monday', 'sunday'] as const).map(d => (
               <button
                 key={d}
-                onClick={() => { setWeekStart(d); void save('week_start', d) }}
+                onClick={() => setWeekStart(d)}
                 style={{
                   padding: '6px 16px',
                   borderRadius: 6,
@@ -199,8 +223,14 @@ export default function PreferencesPage() {
       </div>
 
       {feedback && (
-        <p style={{ fontSize: 13, color: '#3fb950', marginTop: -8, marginBottom: 8 }}>{feedback}</p>
+        <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
+          {feedback.msg}
+        </p>
       )}
+
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
     </div>
   )
 }

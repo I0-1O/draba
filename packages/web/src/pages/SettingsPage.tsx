@@ -2,20 +2,23 @@
  * SettingsPage — shell with left-nav and nested sub-routes.
  *
  * Phase 10.1.1: initial shell + Teams link.
- * Phase 10.1.3: full settings experience — Profile, Security, Preferences,
- * API Tokens, and Admin (superadmin only).
+ * Phase 10.1.3: full settings — Profile, Security, Preferences, API Tokens,
+ * and Organization section (superadmin only): Organization, Communication,
+ * Users, AI Keys.
  */
 
-import { Link, useLocation, Navigate } from 'react-router-dom'
-import { ArrowLeft, User, Shield as ShieldIcon, Settings, Key, Users, Lock } from 'lucide-react'
+import { Link, useLocation, Navigate, Routes, Route } from 'react-router-dom'
+import { ArrowLeft, User, Settings, Key, Lock, MessageSquare, Users, Sparkles, Building2 } from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
 import { useNavigate } from 'react-router-dom'
 import ProfilePage from '@/pages/settings/ProfilePage'
 import SecurityPage from '@/pages/settings/SecurityPage'
 import PreferencesPage from '@/pages/settings/PreferencesPage'
 import TokensPage from '@/pages/settings/TokensPage'
-import AdminPage from '@/pages/settings/AdminPage'
-import { Routes, Route } from 'react-router-dom'
+import OrganizationPage from '@/pages/settings/OrganizationPage'
+import CommunicationPage from '@/pages/settings/CommunicationPage'
+import AdminUsersPage from '@/pages/settings/AdminUsersPage'
+import AiKeysPage from '@/pages/settings/AiKeysPage'
 
 const navLinkStyle = (active: boolean): React.CSSProperties => ({
   display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
@@ -24,6 +27,12 @@ const navLinkStyle = (active: boolean): React.CSSProperties => ({
   cursor: 'pointer', border: 'none', width: '100%', fontFamily: 'inherit',
   fontWeight: active ? 500 : 400,
 })
+
+const navSectionLabel: React.CSSProperties = {
+  fontSize: 11, fontWeight: 600, color: '#484f58',
+  letterSpacing: '0.5px', textTransform: 'uppercase',
+  padding: '4px 12px', marginTop: 12,
+}
 
 export default function SettingsPage() {
   const { user } = useAuth()
@@ -47,9 +56,7 @@ export default function SettingsPage() {
           Back to app
         </button>
 
-        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 4 }}>
-          Account
-        </div>
+        <div style={navSectionLabel}>Account</div>
 
         <Link to="/settings/profile" style={navLinkStyle(isActive('/settings/profile'))}>
           <User size={14} /> Profile
@@ -64,20 +71,20 @@ export default function SettingsPage() {
           <Key size={14} /> API Tokens
         </Link>
 
-        <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
-          Teams
-        </div>
-        <Link to="/settings/teams" style={navLinkStyle(isActive('/settings/teams'))}>
-          <Users size={14} /> Manage teams
-        </Link>
-
         {user?.isSuperadmin && (
           <>
-            <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.5px', textTransform: 'uppercase', padding: '4px 12px', marginTop: 12 }}>
-              Administration
-            </div>
-            <Link to="/settings/admin" style={navLinkStyle(isActive('/settings/admin'))}>
-              <ShieldIcon size={14} /> Admin
+            <div style={navSectionLabel}>Organization</div>
+            <Link to="/settings/organization" style={navLinkStyle(isActive('/settings/organization'))}>
+              <Building2 size={14} /> Organization
+            </Link>
+            <Link to="/settings/communication" style={navLinkStyle(isActive('/settings/communication'))}>
+              <MessageSquare size={14} /> Communication
+            </Link>
+            <Link to="/settings/users" style={navLinkStyle(isActive('/settings/users'))}>
+              <Users size={14} /> Users
+            </Link>
+            <Link to="/settings/ai" style={navLinkStyle(isActive('/settings/ai'))}>
+              <Sparkles size={14} /> AI Keys
             </Link>
           </>
         )}
@@ -90,23 +97,16 @@ export default function SettingsPage() {
           <Route path="security" element={<SecurityPage />} />
           <Route path="preferences" element={<PreferencesPage />} />
           <Route path="tokens" element={<TokensPage />} />
-          <Route path="admin/*" element={user?.isSuperadmin ? <AdminPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="teams" element={<TeamsPlaceholder />} />
+          <Route path="organization" element={user?.isSuperadmin ? <OrganizationPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="communication" element={user?.isSuperadmin ? <CommunicationPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="users" element={user?.isSuperadmin ? <AdminUsersPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="ai" element={user?.isSuperadmin ? <AiKeysPage /> : <Navigate to="/settings/profile" replace />} />
+          {/* Legacy redirect: old /settings/admin deep links fall to organization */}
+          <Route path="admin/*" element={user?.isSuperadmin ? <Navigate to="/settings/organization" replace /> : <Navigate to="/settings/profile" replace />} />
           <Route index element={<Navigate to="/settings/profile" replace />} />
           <Route path="*" element={<Navigate to="/settings/profile" replace />} />
         </Routes>
       </div>
-    </div>
-  )
-}
-
-function TeamsPlaceholder() {
-  return (
-    <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Manage Teams</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
-        Use the team picker in the main app to create or edit teams.
-      </p>
     </div>
   )
 }

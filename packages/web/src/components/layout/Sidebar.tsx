@@ -345,11 +345,12 @@ function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
 interface MemberSidebarRowProps {
   displayName: string;
   color: string;
+  icon?: string | null;
   isInactive?: boolean;
   onEdit?: () => void;
 }
 
-function MemberSidebarRow({ displayName, color, isInactive = false, onEdit }: MemberSidebarRowProps) {
+function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
   const [hovered, setHovered] = useState(false);
   return (
     <div
@@ -363,7 +364,7 @@ function MemberSidebarRow({ displayName, color, isInactive = false, onEdit }: Me
       }}
     >
       <Badge
-        identity={{ color, icon: '__name_words__' }}
+        identity={{ color, icon: icon ?? '__name_words__' }}
         name={displayName}
         shape="circle"
         size={20}
@@ -738,12 +739,14 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                     {(apiMembers ?? DEMO_MEMBERS.map(m => ({ id: m.id, teamId: '', userId: null, displayName: m.name, role: 'member', color: m.color, icon: null, joinedAt: '', email: '', avatarUrl: null }))).map(m => {
                       const displayName = (m as TeamMemberWithUser).displayName || m.id;
                       const color = m.color ?? '#8b949e';
+                      const icon = (m as TeamMemberWithUser).icon ?? null;
                       const isReal = Boolean(apiMembers);
                       return (
                         <MemberSidebarRow
                           key={m.id}
                           displayName={displayName}
                           color={color}
+                          icon={icon}
                           isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
                           onEdit={isReal && onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
                             ? () => onEditMember(m as TeamMemberWithUser)
