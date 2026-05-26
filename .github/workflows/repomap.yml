@@ -4,6 +4,10 @@ on:
   push:
     branches: [ "master" ]
 
+# Explicitly grant the bot permission to push commits
+permissions:
+  contents: write
+
 jobs:
   update-map:
     runs-on: ubuntu-latest
@@ -11,7 +15,7 @@ jobs:
       - name: Checkout codebase
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Ensures full history for accurate mapping
+          fetch-depth: 0 
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -20,11 +24,7 @@ jobs:
 
       - name: Generate Map
         run: |
-          # Install the open-source mapping tool
           npm install -g repomix
-          
-          # Generate the map, outputting to a dedicated AI context folder
-          # This automatically parses your Go structs and React components
           repomix --style markdown --output docs/ai-context/repomap.md
 
       - name: Commit Updated Map
