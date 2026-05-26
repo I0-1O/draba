@@ -30,10 +30,13 @@ export default defineConfig(({ mode }) => {
         '/setup': { target: apiTarget, changeOrigin: true },
         '/auth': { target: apiTarget, changeOrigin: true },
         '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
         '/teams': { target: apiTarget, changeOrigin: true },
         '/timelines': { target: apiTarget, changeOrigin: true },
         '/activities': { target: apiTarget, changeOrigin: true },
         '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
         '/ws': {
           target: apiTarget.replace(/^http/, 'ws'),
           changeOrigin: true,
