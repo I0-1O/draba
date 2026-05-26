@@ -7,7 +7,6 @@
 import { useState, useEffect } from 'react'
 import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
 import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
 
 const sectionStyle: React.CSSProperties = {
   background: '#21262d',

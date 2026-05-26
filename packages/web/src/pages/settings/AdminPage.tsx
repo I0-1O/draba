@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
 import { Eye, EyeOff, AlertTriangle } from 'lucide-react'
 
 type SMTPConfig = components['schemas']['SMTPConfig']
@@ -408,7 +409,7 @@ function UsersSection() {
             {displayed.map(u => (
               <tr key={u.id} style={{ borderTop: '1px solid #21262d' }}>
                 <td style={{ padding: '10px 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <Badge color={u.color ?? undefined} icon={u.icon ?? undefined} size={28} shape="circle" />
+                  <Badge identity={{ color: u.color ?? '#288C9B', icon: u.icon ?? '__none__' } satisfies Identity} name={u.displayName} size={28} shape="circle" />
                   <span style={{ fontSize: 13, color: '#e6edf3' }}>{u.displayName}</span>
                   {u.isSuperadmin && (
                     <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'rgba(88,166,255,0.15)', color: '#58a6ff' }}>

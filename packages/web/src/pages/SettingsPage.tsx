@@ -6,7 +6,7 @@
  * API Tokens, and Admin (superadmin only).
  */
 
-import { Link, useLocation, Outlet, Navigate } from 'react-router-dom'
+import { Link, useLocation, Navigate } from 'react-router-dom'
 import { ArrowLeft, User, Shield as ShieldIcon, Settings, Key, Users, Lock } from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
 import { useNavigate } from 'react-router-dom'

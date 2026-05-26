@@ -7,6 +7,7 @@ import { useAuth } from '@/contexts/AuthContext'
 import { useUpdateProfile } from '@/hooks/useSettings'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
 import { ApiError } from '@/lib/api'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -32,22 +33,23 @@ export default function ProfilePage() {
   const updateProfile = useUpdateProfile()
 
   const [displayName, setDisplayName] = useState(user?.displayName ?? '')
-  const [color, setColor] = useState<string | null>(user?.color ?? null)
-  const [icon, setIcon] = useState<string | null>(user?.icon ?? null)
+  const [identity, setIdentity] = useState<Identity>({
+    color: user?.color ?? '#288C9B',
+    icon: user?.icon ?? '__none__',
+  })
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
   useEffect(() => {
     if (user) {
       setDisplayName(user.displayName)
-      setColor(user.color ?? null)
-      setIcon(user.icon ?? null)
+      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
     }
   }, [user])
 
   async function handleSave() {
     setFeedback(null)
     try {
-      await updateProfile.mutateAsync({ displayName, color, icon })
+      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
       setFeedback({ type: 'success', msg: 'Profile updated.' })
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
@@ -65,7 +67,7 @@ export default function ProfilePage() {
       <div style={sectionStyle}>
         {/* Identity preview */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24 }}>
-          <Badge color={color ?? undefined} icon={icon ?? undefined} size={48} shape="circle" />
+          <Badge identity={identity} name={displayName} size={48} shape="circle" />
           <div>
             <div style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>
               {displayName || 'Your Name'}
@@ -80,10 +82,10 @@ export default function ProfilePage() {
         <div style={fieldStyle}>
           <Label style={{ color: '#e6edf3' }}>Color & Icon</Label>
           <IdentityWidget
-            color={color ?? undefined}
-            icon={icon ?? undefined}
+            identity={identity}
+            name={displayName}
             shape="circle"
-            onChange={(c, i) => { setColor(c ?? null); setIcon(i ?? null) }}
+            onChange={(next) => setIdentity(next)}
           />
         </div>
 
