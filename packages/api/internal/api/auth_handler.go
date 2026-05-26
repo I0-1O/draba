@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -281,7 +282,7 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
 	// when not set so the email still contains useful info.
 	baseURL := strings.TrimRight(getBaseURL(), "/")
-	resetLink := baseURL + "/reset-password?token=" + rawToken
+	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
 
 	subject := "Reset your draba password"
 	body2 := "<html><body>" +

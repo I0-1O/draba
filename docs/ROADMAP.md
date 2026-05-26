@@ -41,6 +41,9 @@ This document organizes development into discrete phases with effort estimates a
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
 | 10.4 | [Preference Consumption, Branding & Backup](#phase-104--preference-consumption-branding--backup-admin) | S — 1 day | ⬜ |
+| 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
+| 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
+| 10.7 | [Localization & Language Support](#phase-107--localization--language-support) | L — 3–5 days | ⬜ |
 | 11.1 | [Web — List / Spreadsheet View](#phase-111--web--list--spreadsheet-view) | M — 2–3 days | ⬜ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
@@ -931,6 +934,96 @@ Wires the user and instance preferences stored in 10.1.3 into the rest of the sy
 - A superadmin can set an accent color override; the change applies globally
 - Backup status section shows the current DB path and last-modified time
 - Settings persist across container restarts
+
+---
+
+### Phase 10.5 — Communications Testing
+**Status:** ⬜ | **Effort:** S (1 day)
+
+Comprehensive automated tests for every outbound email flow. No new features; this phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production.
+
+**Scope:**
+
+*Flows to cover (one integration test each):*
+- Invite email: `POST /teams/:id/invites` → mailer.SendInvite called with correct recipient and link
+- Password reset request: `POST /auth/forgot-password` with a known-SMTP server → email delivered; token stored hashed
+- Password reset confirm: `POST /auth/reset-password` → password updated; token marked used; second attempt rejected
+- SMTP validation: `PUT /admin/smtp` with a valid test server → test email sent before config is persisted
+- SMTP test: `POST /admin/smtp/test` → email sent to caller; no config persisted
+
+*Mailer unit tests:*
+- `SaveConfig` → password is encrypted before storage (sentinel prefix present)
+- `LoadConfig` → encrypted password is decrypted on read; plaintext fallback for legacy values
+- `Send` with no config → no-op (returns nil)
+- `encryptPassword` / `decryptPassword` round-trip
+
+*Test infrastructure:*
+- Add a `newTestSMTPServer(t)` helper using `net/smtp` or a simple TCP listener to capture outbound SMTP without a real mail server
+
+**Exit criteria — safe to pause when:**
+- All flows above have at least one passing integration test
+- `SaveConfig`/`LoadConfig` encryption round-trip has a unit test
+- `go test ./...` passes clean
+
+---
+
+### Phase 10.6 — AI Key Management
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Ships the AI/LLM key configuration surface stubbed in Phase 10.1.3. Adds encrypted storage, model routing, and a usage log so superadmins can connect AI providers and see which features are consuming tokens.
+
+**Scope:**
+
+*API:*
+- New table `ai_provider_keys`: id, provider (anthropic | openai | google | custom), api_key (encrypted AES-256-GCM, same pattern as SMTP password), model_override, created_at, updated_at
+- `GET /admin/ai/keys` — list configured providers (key masked); superadmin only
+- `PUT /admin/ai/keys/:provider` — upsert a provider key; validates by making a lightweight test call; superadmin only
+- `DELETE /admin/ai/keys/:provider` — remove a provider key; superadmin only
+
+*Web — `/settings/ai` (replaces current stub):*
+- Real form replacing the placeholder cards: provider selector, API key input (masked), model override field
+- "Test connection" button calls a test endpoint before saving
+- Usage log section (read-only): last 10 AI requests with timestamp, provider, model, token count
+
+*Encryption:*
+- Reuse the AES-256-GCM pattern introduced for SMTP passwords in Phase 10.1.3
+
+**Exit criteria — safe to pause when:**
+- A superadmin can configure an Anthropic key and verify via the test connection button
+- The key is stored encrypted and masked in the GET response
+- Removing a key clears it from the DB
+- `golangci-lint run` clean; `go test ./...` passes
+
+---
+
+### Phase 10.7 — Localization & Language Support
+**Status:** ⬜ | **Effort:** L (3–5 days)
+
+Adds i18n infrastructure and ships the first non-English locale. The "Default language" fields in `/settings/preferences` and `/settings/organization` (currently disabled stubs) become functional.
+
+**Scope:**
+
+*Infrastructure:*
+- Adopt `react-i18next` (or equivalent) for the web client
+- Extract all user-facing strings from React components into locale JSON files
+- Add a `language` column to `user_preferences` (per-user) and a `default_language` key to `instance_settings`
+- `PATCH /users/me/preferences` accepts `language` key; `PATCH /admin/settings` accepts `default_language`
+
+*Locales:*
+- `en` — English (extracted from existing strings; the baseline)
+- Ship at least one additional locale to validate the pipeline (e.g. `es` — Spanish, or `fr` — French)
+
+*Web — settings surfaces:*
+- Enable the "Language" dropdown in `/settings/preferences` (user-level)
+- Enable the "Default language" dropdown in `/settings/organization` (instance-level)
+- Language change takes effect on next page load (no hard reload required)
+
+**Exit criteria — safe to pause when:**
+- Switching to the second locale changes all UI strings in the web app
+- User language preference persists across logout/login
+- Instance default language is used when the user has no preference set
+- Adding a new locale requires only a new JSON file (no code changes)
+- `pnpm --filter web lint` clean
 
 ---
 

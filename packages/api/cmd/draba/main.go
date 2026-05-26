@@ -83,7 +83,7 @@ func main() {
 	apiTokenRepo := db.NewAPITokenRepo(database)
 	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
 	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	m := mailer.New(instanceSetsRepo)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
 	tokens := auth.NewTokenService(jwtSecret)
 
 	bus := events.NewBus()

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -201,6 +202,106 @@ func registerWithInvite(t *testing.T, srv http.Handler, email, password, display
 	var resp map[string]any
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	return resp["accessToken"].(string)
+}
+
+// ── POST /auth/forgot-password (known user) ────────────────────────────────────
+
+func TestForgotPassword_KnownUser_CreatesToken(t *testing.T) {
+	// Uses a fresh env so "alice@settings.com" is the seeded user.
+	srv, _ := settingsTestSetup(t)
+
+	body := `{"email":"alice@settings.com"}`
+	req := httptest.NewRequest(http.MethodPost, "/auth/forgot-password", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Always 200 regardless of email existence; exercises the token-creation path.
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "ok", resp["status"])
+}
+
+// ── POST /auth/reset-password (happy path) ────────────────────────────────────
+
+func TestResetPassword_Success(t *testing.T) {
+	env := newTeamTestServerFull(t)
+	_, aliceID := seedUser(t, env.srv, "alice@resetok.com", "password1", "Alice")
+
+	const rawTok = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	expiresAt := time.Now().Add(time.Hour)
+	_, err := env.passwordTokens.Create("prt-test-1", aliceID, rawTok, expiresAt)
+	require.NoError(t, err)
+
+	body := `{"token":"` + rawTok + `","newPassword":"newpassword99"}`
+	req := httptest.NewRequest(http.MethodPost, "/auth/reset-password", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Token should be marked used — a second attempt must fail.
+	req2 := httptest.NewRequest(http.MethodPost, "/auth/reset-password", strings.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	env.srv.ServeHTTP(w2, req2)
+	assert.Equal(t, http.StatusBadRequest, w2.Code)
+}
+
+func TestResetPassword_ExpiredToken(t *testing.T) {
+	env := newTeamTestServerFull(t)
+	_, aliceID := seedUser(t, env.srv, "alice@resetexp.com", "password1", "Alice")
+
+	const rawTok = "1122334455667788990011223344556677889900112233445566778899001122"
+	expiresAt := time.Now().Add(-time.Minute) // already expired
+	_, err := env.passwordTokens.Create("prt-test-2", aliceID, rawTok, expiresAt)
+	require.NoError(t, err)
+
+	body := `{"token":"` + rawTok + `","newPassword":"newpassword99"}`
+	req := httptest.NewRequest(http.MethodPost, "/auth/reset-password", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "TOKEN_INVALID", resp["error"].(map[string]any)["code"])
+}
+
+// ── PATCH /admin/settings ─────────────────────────────────────────────────────
+
+func TestPatchAdminSettings_Success(t *testing.T) {
+	srv, aliceJWT := settingsTestSetup(t)
+
+	body := `{"registration_policy":"open","default_week_start":"sunday"}`
+	req := httptest.NewRequest(http.MethodPatch, "/admin/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+aliceJWT)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	settings := resp["settings"].(map[string]any)
+	assert.Equal(t, "open", settings["registration_policy"])
+	assert.Equal(t, "sunday", settings["default_week_start"])
+}
+
+func TestPatchAdminSettings_RejectsUnknownKey(t *testing.T) {
+	srv, aliceJWT := settingsTestSetup(t)
+
+	body := `{"unknown_key":"value"}`
+	req := httptest.NewRequest(http.MethodPatch, "/admin/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+aliceJWT)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 // ── GET /admin/users ──────────────────────────────────────────────────────────

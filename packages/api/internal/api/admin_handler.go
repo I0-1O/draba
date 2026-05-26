@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/I0-1O/draba/packages/api/internal/mailer"
@@ -75,7 +76,8 @@ func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
 
 	// Validate by sending a test email before persisting.
 	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed: "+err.Error())
+		slog.Warn("smtp validation failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
 		return
 	}
 
@@ -112,7 +114,8 @@ func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed: "+err.Error())
+		slog.Warn("smtp test failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
 		return
 	}
 

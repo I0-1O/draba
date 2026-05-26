@@ -9,21 +9,6 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
 export default function SecurityPage() {
   const changePassword = useChangePassword()
 
@@ -60,63 +45,59 @@ export default function SecurityPage() {
 
   return (
     <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Security</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Security</h2>
+      <p className="text-sm text-muted-foreground mb-6">
         Update your password. You'll need to enter your current password to confirm the change.
       </p>
 
-      <div style={sectionStyle}>
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
         <form onSubmit={handleSubmit}>
-          <div style={fieldStyle}>
-            <Label htmlFor="currentPw" style={{ color: '#e6edf3' }}>Current password</Label>
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="currentPw">Current password</Label>
             <Input
               id="currentPw"
               type="password"
               value={current}
               onChange={e => setCurrent(e.target.value)}
               autoComplete="current-password"
-              style={{ maxWidth: 360 }}
+              className="max-w-[360px]"
             />
           </div>
 
-          <div style={fieldStyle}>
-            <Label htmlFor="newPw" style={{ color: '#e6edf3' }}>New password</Label>
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="newPw">New password</Label>
             <Input
               id="newPw"
               type="password"
               value={next}
               onChange={e => setNext(e.target.value)}
               autoComplete="new-password"
-              style={{ maxWidth: 360, borderColor: tooShort ? '#f85149' : undefined }}
+              className={`max-w-[360px]${tooShort ? ' border-destructive' : ''}`}
             />
             {tooShort && (
-              <p style={{ fontSize: 12, color: '#f85149', margin: 0 }}>
+              <p className="text-xs text-destructive m-0">
                 Password must be at least 8 characters.
               </p>
             )}
           </div>
 
-          <div style={fieldStyle}>
-            <Label htmlFor="confirmPw" style={{ color: '#e6edf3' }}>Confirm new password</Label>
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="confirmPw">Confirm new password</Label>
             <Input
               id="confirmPw"
               type="password"
               value={confirm}
               onChange={e => setConfirm(e.target.value)}
               autoComplete="new-password"
-              style={{ maxWidth: 360, borderColor: mismatch ? '#f85149' : undefined }}
+              className={`max-w-[360px]${mismatch ? ' border-destructive' : ''}`}
             />
             {mismatch && (
-              <p style={{ fontSize: 12, color: '#f85149', margin: 0 }}>Passwords don't match.</p>
+              <p className="text-xs text-destructive m-0">Passwords don't match.</p>
             )}
           </div>
 
           {feedback && (
-            <p style={{
-              fontSize: 13,
-              color: feedback.type === 'success' ? '#3fb950' : '#f85149',
-              marginBottom: 12,
-            }}>
+            <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
               {feedback.msg}
             </p>
           )}

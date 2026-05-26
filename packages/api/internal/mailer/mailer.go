@@ -6,20 +6,31 @@
 package mailer
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/smtp"
 	"strings"
 )
+
+// encPrefix marks values encrypted with AES-256-GCM so LoadConfig can
+// distinguish them from legacy plaintext values written before encryption
+// was introduced.
+const encPrefix = "enc:v1:"
 
 // SMTPConfig holds the full SMTP configuration for the instance.
 type SMTPConfig struct {
 	Host       string `json:"host"`
 	Port       int    `json:"port"`
 	Username   string `json:"username"`
-	Password   string `json:"password"` // stored encrypted in instance_settings; decrypted before use
+	Password   string `json:"password"` // stored encrypted at rest via AES-256-GCM
 	FromName   string `json:"fromName"`
 	FromEmail  string `json:"fromEmail"`
 	Encryption string `json:"encryption"` // "none" | "tls" | "starttls"
@@ -35,11 +46,19 @@ type SettingsReader interface {
 // unconfigured Mailer is a no-op.
 type Mailer struct {
 	settings SettingsReader
+	encKey   []byte // 32-byte AES-256 key derived from keyMaterial; nil disables encryption
 }
 
 // New returns a Mailer that reads config from settings at send time.
-func New(settings SettingsReader) *Mailer {
-	return &Mailer{settings: settings}
+// keyMaterial is used to derive an AES-256 key for encrypting stored SMTP
+// passwords. Pass nil to disable encryption (tests, zero-value usage).
+func New(settings SettingsReader, keyMaterial []byte) *Mailer {
+	var encKey []byte
+	if len(keyMaterial) > 0 {
+		k := sha256.Sum256(keyMaterial)
+		encKey = k[:]
+	}
+	return &Mailer{settings: settings, encKey: encKey}
 }
 
 // LoadConfig reads the SMTP configuration from instance_settings.
@@ -56,6 +75,13 @@ func (m *Mailer) LoadConfig() (*SMTPConfig, error) {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return nil, fmt.Errorf("parsing smtp config: %w", err)
 	}
+	if cfg.Password != "" {
+		dec, err := m.decryptPassword(cfg.Password)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting smtp password: %w", err)
+		}
+		cfg.Password = dec
+	}
 	return &cfg, nil
 }
 
@@ -66,8 +92,17 @@ func (m *Mailer) IsConfigured() bool {
 }
 
 // SaveConfig serialises cfg and stores it in instance_settings.
+// The password field is encrypted before storage when an encryption key is set.
 func (m *Mailer) SaveConfig(cfg *SMTPConfig) error {
-	b, err := json.Marshal(cfg)
+	toStore := *cfg
+	if cfg.Password != "" {
+		enc, err := m.encryptPassword(cfg.Password)
+		if err != nil {
+			return fmt.Errorf("encrypting smtp password: %w", err)
+		}
+		toStore.Password = enc
+	}
+	b, err := json.Marshal(toStore)
 	if err != nil {
 		return fmt.Errorf("serialising smtp config: %w", err)
 	}
@@ -88,7 +123,7 @@ func (m *Mailer) Send(to, subject, htmlBody string) error {
 		return nil
 	}
 	if cfg == nil || cfg.Host == "" {
-		slog.Debug("mailer: no smtp config — email skipped", "to", to, "subject", subject)
+		slog.Debug("mailer: no smtp config — email skipped", "subject", subject)
 		return nil
 	}
 
@@ -99,6 +134,62 @@ func (m *Mailer) Send(to, subject, htmlBody string) error {
 // config. Used by the SMTP test endpoint before saving.
 func SendWithConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
 	return sendViaConfig(cfg, to, subject, htmlBody)
+}
+
+// encryptPassword encrypts plaintext with AES-256-GCM and returns a
+// base64-encoded ciphertext prefixed with encPrefix. Returns plaintext
+// unchanged when no encryption key is set.
+func (m *Mailer) encryptPassword(plaintext string) (string, error) {
+	if len(m.encKey) == 0 {
+		return plaintext, nil
+	}
+	block, err := aes.NewCipher(m.encKey)
+	if err != nil {
+		return "", fmt.Errorf("creating cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("creating gcm: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", fmt.Errorf("generating nonce: %w", err)
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return encPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// decryptPassword reverses encryptPassword. Values without encPrefix are
+// returned as-is — this handles configs saved before encryption was added.
+func (m *Mailer) decryptPassword(encoded string) (string, error) {
+	if !strings.HasPrefix(encoded, encPrefix) {
+		// Plaintext fallback — encrypts on next SaveConfig call.
+		return encoded, nil
+	}
+	if len(m.encKey) == 0 {
+		return "", fmt.Errorf("encryption key not set; cannot decrypt smtp password")
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(encoded, encPrefix))
+	if err != nil {
+		return "", fmt.Errorf("decoding encrypted password: %w", err)
+	}
+	block, err := aes.NewCipher(m.encKey)
+	if err != nil {
+		return "", fmt.Errorf("creating cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("creating gcm: %w", err)
+	}
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	plain, err := gcm.Open(nil, data[:nonceSize], data[nonceSize:], nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypting password: %w", err)
+	}
+	return string(plain), nil
 }
 
 func sendViaConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {

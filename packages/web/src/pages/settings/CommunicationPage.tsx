@@ -13,31 +13,6 @@ import { Eye, EyeOff } from 'lucide-react'
 
 type SMTPConfig = components['schemas']['SMTPConfig']
 
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-const selectStyle: React.CSSProperties = {
-  background: '#161b22',
-  border: '1px solid #30363d',
-  borderRadius: 6,
-  color: '#e6edf3',
-  padding: '8px 12px',
-  fontSize: 13,
-  cursor: 'pointer',
-}
-
 export default function CommunicationPage() {
   const { data } = useAdminSMTP()
   const saveSMTP = useSaveSMTP()
@@ -105,35 +80,35 @@ export default function CommunicationPage() {
 
   return (
     <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Communication</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Communication</h2>
+      <p className="text-sm text-muted-foreground mb-6">
         Configure outbound email for password resets and invitations.
       </p>
 
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
           SMTP / Email
         </h3>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-          <div style={fieldStyle}>
-            <Label style={{ color: '#e6edf3' }}>SMTP host</Label>
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="flex flex-col gap-1.5">
+            <Label>SMTP host</Label>
             <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
           </div>
-          <div style={fieldStyle}>
-            <Label style={{ color: '#e6edf3' }}>Port</Label>
+          <div className="flex flex-col gap-1.5">
+            <Label>Port</Label>
             <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
           </div>
         </div>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Username</Label>
-          <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" style={{ maxWidth: 360 }} />
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Username</Label>
+          <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" className="max-w-[360px]" />
         </div>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Password</Label>
-          <div style={{ position: 'relative', maxWidth: 360 }}>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Password</Label>
+          <div className="relative max-w-[360px]">
             <Input
               type={showPw ? 'text' : 'password'}
               value={password}
@@ -142,30 +117,30 @@ export default function CommunicationPage() {
             />
             <button
               onClick={() => setShowPw(v => !v)}
-              style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer' }}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 bg-transparent border-none text-muted-foreground cursor-pointer"
             >
               {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
             </button>
           </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-          <div style={fieldStyle}>
-            <Label style={{ color: '#e6edf3' }}>From name</Label>
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="flex flex-col gap-1.5">
+            <Label>From name</Label>
             <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
           </div>
-          <div style={fieldStyle}>
-            <Label style={{ color: '#e6edf3' }}>From email</Label>
+          <div className="flex flex-col gap-1.5">
+            <Label>From email</Label>
             <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
           </div>
         </div>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Encryption</Label>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Encryption</Label>
           <select
             value={encryption}
             onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
-            style={{ ...selectStyle, maxWidth: 200 }}
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[200px]"
           >
             <option value="none">None</option>
             <option value="tls">TLS</option>
@@ -174,12 +149,12 @@ export default function CommunicationPage() {
         </div>
 
         {feedback && (
-          <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
+          <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
             {feedback.msg}
           </p>
         )}
 
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <div className="flex gap-2 flex-wrap">
           <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
             {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
           </Button>
@@ -187,12 +162,12 @@ export default function CommunicationPage() {
             {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
           </Button>
           {data?.smtp && (
-            <Button variant="ghost" style={{ color: '#f85149' }} onClick={handleDelete}>
+            <Button variant="ghost" className="text-destructive" onClick={handleDelete}>
               Clear config
             </Button>
           )}
         </div>
-        <p style={{ fontSize: 12, color: '#8b949e', marginTop: 12 }}>
+        <p className="text-xs text-muted-foreground mt-3">
           When SMTP is not configured, password resets and email invitations are unavailable.
         </p>
       </div>

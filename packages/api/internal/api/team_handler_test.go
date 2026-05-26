@@ -40,8 +40,39 @@ func newTeamTestServer(t *testing.T) (http.Handler, *auth.TokenService) {
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
 	isr := db.NewInstanceSettingsRepo(database)
-	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), mailer.New(isr), tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
 	return srv, tokens
+}
+
+// testServerEnv holds a test server and the repos that tests need to inject
+// state directly (e.g. password reset tokens).
+type testServerEnv struct {
+	srv            http.Handler
+	toks           *auth.TokenService
+	passwordTokens *db.PasswordResetTokenRepo
+}
+
+// newTeamTestServerFull is like newTeamTestServer but also exposes repos that
+// settings tests need to seed directly.
+func newTeamTestServerFull(t *testing.T) *testServerEnv {
+	t.Helper()
+	database, err := db.Open(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Migrate(database))
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activitiesRepo := db.NewActivityRepo(database)
+	timelinesRepo := db.NewTimelineRepo(database)
+	tokens := auth.NewTokenService("team-test-secret")
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
+
+	isr := db.NewInstanceSettingsRepo(database)
+	pwr := db.NewPasswordResetTokenRepo(database)
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, pwr, mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
+	return &testServerEnv{srv: srv, toks: tokens, passwordTokens: pwr}
 }
 
 // seedUser registers and logs in a user, returning their access token and user ID.
@@ -503,7 +534,7 @@ func TestTierTeamLimit(t *testing.T) {
 	srv := api.NewServer(
 		users, db.NewInviteRepo(database), teamsRepo, db.NewActivityRepo(database), db.NewTimelineRepo(database),
 		db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database),
-		isr2, db.NewPasswordResetTokenRepo(database), mailer.New(isr2), toks2, tier.Team, bus2, hub2,
+		isr2, db.NewPasswordResetTokenRepo(database), mailer.New(isr2, nil), toks2, tier.Team, bus2, hub2,
 	).Routes()
 
 	// Register first user (no invite needed).

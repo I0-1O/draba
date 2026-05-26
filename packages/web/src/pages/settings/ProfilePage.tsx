@@ -13,21 +13,6 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
 export default function ProfilePage() {
   const { user } = useAuth()
   const updateProfile = useUpdateProfile()
@@ -59,39 +44,35 @@ export default function ProfilePage() {
 
   return (
     <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Profile</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Profile</h2>
+      <p className="text-sm text-muted-foreground mb-6">
         Changes to your name and identity propagate across all your team memberships.
       </p>
 
-      <div style={sectionStyle}>
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
         {/* Identity preview */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24 }}>
+        <div className="flex items-center gap-4 mb-6">
           <Badge identity={identity} name={displayName} size={48} shape="circle" />
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>
+            <div className="flex items-center gap-2">
+              <span className="text-[15px] font-semibold text-foreground">
                 {displayName || 'Your Name'}
               </span>
               {user?.isSuperadmin && (
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 4,
-                  background: 'rgba(88,166,255,0.15)', color: '#58a6ff',
-                  fontWeight: 600, letterSpacing: '0.3px',
-                }}>
+                <span className="text-[11px] px-2 py-0.5 rounded bg-primary/15 text-primary font-semibold tracking-wide">
                   Superadmin
                 </span>
               )}
             </div>
-            <div style={{ fontSize: 12, color: '#8b949e', marginTop: 2 }}>
+            <div className="text-xs text-muted-foreground mt-0.5">
               Identity preview — shown in sidebar and Gantt
             </div>
           </div>
         </div>
 
         {/* Identity picker */}
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Color & Icon</Label>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Color & Icon</Label>
           <IdentityWidget
             identity={identity}
             name={displayName}
@@ -101,36 +82,32 @@ export default function ProfilePage() {
         </div>
 
         {/* Display name */}
-        <div style={fieldStyle}>
-          <Label htmlFor="displayName" style={{ color: '#e6edf3' }}>Display name</Label>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label htmlFor="displayName">Display name</Label>
           <Input
             id="displayName"
             value={displayName}
             onChange={e => setDisplayName(e.target.value)}
             placeholder="Your name"
-            style={{ maxWidth: 360 }}
+            className="max-w-[360px]"
           />
         </div>
 
         {/* Email (read-only) */}
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Email</Label>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Email</Label>
           <Input
             value={user?.email ?? ''}
             disabled
-            style={{ maxWidth: 360, opacity: 0.6 }}
+            className="max-w-[360px] opacity-60"
           />
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
+          <p className="text-xs text-muted-foreground m-0">
             Email changes are not yet supported.
           </p>
         </div>
 
         {feedback && (
-          <p style={{
-            fontSize: 13,
-            color: feedback.type === 'success' ? '#3fb950' : '#f85149',
-            marginBottom: 12,
-          }}>
+          <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
             {feedback.msg}
           </p>
         )}

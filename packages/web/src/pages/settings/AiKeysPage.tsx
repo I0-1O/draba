@@ -1,58 +1,42 @@
 /**
  * /settings/ai — Superadmin: AI / LLM API key configuration.
- * Stub for Phase 10.1.3 — key storage and model wiring are deferred.
+ * Stub for Phase 10.6 — AI Key Management. Key storage, model routing, and
+ * usage tracking are deferred to that phase.
  */
 
 import { Sparkles } from 'lucide-react'
 
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
 export default function AiKeysPage() {
   return (
     <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>AI / LLM Keys</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">AI / LLM Keys</h2>
+      <p className="text-sm text-muted-foreground mb-6">
         Connect AI providers to enable AI-assisted features in draba.
       </p>
 
-      <div style={sectionStyle}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-          <div style={{ width: 40, height: 40, borderRadius: 10, background: 'rgba(88,166,255,0.1)', border: '1px solid rgba(88,166,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Sparkles size={18} style={{ color: '#58a6ff' }} />
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-10 h-10 rounded-[10px] bg-primary/10 border border-primary/20 flex items-center justify-center">
+            <Sparkles size={18} className="text-primary" />
           </div>
           <div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>AI features coming soon</div>
-            <div style={{ fontSize: 12, color: '#8b949e', marginTop: 2 }}>Configure an API key when AI functionality is available.</div>
+            <div className="text-sm font-semibold text-foreground">AI features coming in Phase 10.6</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Configure an API key when AI functionality is available.</div>
           </div>
         </div>
 
-        <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 16 }}>
+        <p className="text-[13px] text-muted-foreground mb-4">
           When AI features are enabled, you'll be able to add API keys for providers such as Anthropic, OpenAI, and others. Keys are stored encrypted and used only for organization-wide AI requests.
         </p>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div className="flex flex-col gap-2">
           {['Anthropic (Claude)', 'OpenAI (GPT)', 'Google (Gemini)', 'Custom / self-hosted'].map(provider => (
             <div
               key={provider}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '12px 16px',
-                borderRadius: 8,
-                border: '1px solid #30363d',
-                background: '#161b22',
-                opacity: 0.5,
-              }}
+              className="flex items-center justify-between px-4 py-3 rounded-lg border border-border bg-background opacity-50"
             >
-              <span style={{ fontSize: 13, color: '#e6edf3' }}>{provider}</span>
-              <span style={{ fontSize: 11, color: '#8b949e', padding: '2px 8px', borderRadius: 4, border: '1px solid #30363d' }}>
+              <span className="text-[13px] text-foreground">{provider}</span>
+              <span className="text-[11px] text-muted-foreground px-2 py-0.5 rounded border border-border">
                 Not configured
               </span>
             </div>

@@ -2,6 +2,36 @@
 
 ---
 
+## 2026-05-26 — /review-phase 10.1.3 — fixes applied
+
+Post-review fixes across security, tests, conventions, and ROADMAP:
+
+**Security:**
+- `mailer.go`: SMTP password now encrypted at rest with AES-256-GCM (key derived from `DRABA_JWT_SECRET`); `enc:v1:` prefix distinguishes encrypted from legacy plaintext values
+- `main.go`: passes `[]byte(jwtSecret)` to `mailer.New()`
+- `auth_handler.go`: password reset link uses `url.QueryEscape(rawToken)` (was raw concatenation)
+- `admin_handler.go`: SMTP validation/test errors logged at Warn; generic message returned to caller (was leaking internal error detail)
+- `mailer.go`: removed recipient email from debug-skip log line
+
+**Tests added:**
+- `settings_handler_test.go`: `TestForgotPassword_KnownUser_CreatesToken`, `TestResetPassword_Success`, `TestResetPassword_ExpiredToken`, `TestPatchAdminSettings_Success`, `TestPatchAdminSettings_RejectsUnknownKey`
+- `password_reset_token_repo_test.go`: Create/GetValid/expired/MarkUsed
+- `instance_settings_repo_test.go`: Get missing/Set/Upsert/Delete
+- `team_handler_test.go`: added `testServerEnv` + `newTeamTestServerFull()` helper for direct repo access in tests
+
+**Frontend:**
+- `AdminPage.tsx`: deleted (dead code — not routed; split pages are the active routes)
+- All settings pages converted from inline `style` objects to Tailwind utility classes using design-system tokens (`bg-card`, `text-foreground`, `text-muted-foreground`, `border-border`, etc.)
+- Token hooks (`useTokens`, `useCreateToken`, `useRevokeToken`) extracted from `TokensPage.tsx` to `useSettings.ts`
+- `AiKeysPage.tsx`: file-header comment updated to reference Phase 10.6; language placeholders in `PreferencesPage` and `OrganizationPage` now reference Phase 10.7
+
+**ROADMAP:**
+- Added Phase 10.5 — Communications Testing (SMTP + mailer integration/unit tests)
+- Added Phase 10.6 — AI Key Management (replaces AiKeysPage stub)
+- Added Phase 10.7 — Localization & Language Support (language dropdowns become functional)
+
+---
+
 ## 2026-05-26 — /test-phase 10.1.3
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

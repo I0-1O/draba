@@ -4,7 +4,7 @@
  * Phase 10.1.1: initial shell + Teams link.
  * Phase 10.1.3: full settings — Profile, Security, Preferences, API Tokens,
  * and Organization section (superadmin only): Organization, Communication,
- * Users, AI Keys.
+ * Users, AI Keys (Phase 10.6 stub).
  */
 
 import { Link, useLocation, Navigate, Routes, Route } from 'react-router-dom'
@@ -20,18 +20,19 @@ import CommunicationPage from '@/pages/settings/CommunicationPage'
 import AdminUsersPage from '@/pages/settings/AdminUsersPage'
 import AiKeysPage from '@/pages/settings/AiKeysPage'
 
-const navLinkStyle = (active: boolean): React.CSSProperties => ({
-  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
-  borderRadius: 7, fontSize: 13, color: active ? '#e6edf3' : '#8b949e',
-  background: active ? '#2d333b' : 'none', textDecoration: 'none',
-  cursor: 'pointer', border: 'none', width: '100%', fontFamily: 'inherit',
-  fontWeight: active ? 500 : 400,
-})
-
-const navSectionLabel: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, color: '#484f58',
-  letterSpacing: '0.5px', textTransform: 'uppercase',
-  padding: '4px 12px', marginTop: 12,
+function NavLink({ to, active, children }: { to: string; active: boolean; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] no-underline cursor-pointer ${
+        active
+          ? 'bg-muted text-foreground font-medium'
+          : 'text-muted-foreground font-normal hover:text-foreground'
+      }`}
+    >
+      {children}
+    </Link>
+  )
 }
 
 export default function SettingsPage() {
@@ -45,53 +46,57 @@ export default function SettingsPage() {
   }
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', background: '#0d1117', color: '#e6edf3', fontFamily: 'var(--font-sans, Inter, sans-serif)' }}>
+    <div className="flex min-h-screen bg-background text-foreground font-sans">
       {/* Left nav */}
-      <div style={{ width: 220, borderRight: '1px solid #30363d', padding: '16px 12px', display: 'flex', flexDirection: 'column', gap: 2, flexShrink: 0 }}>
+      <div className="w-[220px] border-r border-border px-3 py-4 flex flex-col gap-0.5 shrink-0">
         <button
           onClick={() => navigate('/')}
-          style={{ ...navLinkStyle(false), marginBottom: 12, color: '#8b949e' }}
+          className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] text-muted-foreground mb-3 bg-transparent border-none cursor-pointer w-full font-inherit hover:text-foreground"
         >
           <ArrowLeft size={14} />
           Back to app
         </button>
 
-        <div style={navSectionLabel}>Account</div>
+        <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
+          Account
+        </div>
 
-        <Link to="/settings/profile" style={navLinkStyle(isActive('/settings/profile'))}>
+        <NavLink to="/settings/profile" active={isActive('/settings/profile')}>
           <User size={14} /> Profile
-        </Link>
-        <Link to="/settings/security" style={navLinkStyle(isActive('/settings/security'))}>
+        </NavLink>
+        <NavLink to="/settings/security" active={isActive('/settings/security')}>
           <Lock size={14} /> Security
-        </Link>
-        <Link to="/settings/preferences" style={navLinkStyle(isActive('/settings/preferences'))}>
+        </NavLink>
+        <NavLink to="/settings/preferences" active={isActive('/settings/preferences')}>
           <Settings size={14} /> Preferences
-        </Link>
-        <Link to="/settings/tokens" style={navLinkStyle(isActive('/settings/tokens'))}>
+        </NavLink>
+        <NavLink to="/settings/tokens" active={isActive('/settings/tokens')}>
           <Key size={14} /> API Tokens
-        </Link>
+        </NavLink>
 
         {user?.isSuperadmin && (
           <>
-            <div style={navSectionLabel}>Organization</div>
-            <Link to="/settings/organization" style={navLinkStyle(isActive('/settings/organization'))}>
+            <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
+              Organization
+            </div>
+            <NavLink to="/settings/organization" active={isActive('/settings/organization')}>
               <Building2 size={14} /> Organization
-            </Link>
-            <Link to="/settings/communication" style={navLinkStyle(isActive('/settings/communication'))}>
+            </NavLink>
+            <NavLink to="/settings/communication" active={isActive('/settings/communication')}>
               <MessageSquare size={14} /> Communication
-            </Link>
-            <Link to="/settings/users" style={navLinkStyle(isActive('/settings/users'))}>
+            </NavLink>
+            <NavLink to="/settings/users" active={isActive('/settings/users')}>
               <Users size={14} /> Users
-            </Link>
-            <Link to="/settings/ai" style={navLinkStyle(isActive('/settings/ai'))}>
+            </NavLink>
+            <NavLink to="/settings/ai" active={isActive('/settings/ai')}>
               <Sparkles size={14} /> AI Keys
-            </Link>
+            </NavLink>
           </>
         )}
       </div>
 
       {/* Content area */}
-      <div style={{ flex: 1, padding: '32px 40px', maxWidth: 800, minWidth: 0 }}>
+      <div className="flex-1 px-10 py-8 max-w-[800px] min-w-0">
         <Routes>
           <Route path="profile" element={<ProfilePage />} />
           <Route path="security" element={<SecurityPage />} />

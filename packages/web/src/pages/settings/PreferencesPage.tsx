@@ -9,32 +9,6 @@ import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-const selectStyle: React.CSSProperties = {
-  background: '#161b22',
-  border: '1px solid #30363d',
-  borderRadius: 6,
-  color: '#e6edf3',
-  padding: '8px 12px',
-  fontSize: 13,
-  maxWidth: 320,
-  cursor: 'pointer',
-}
-
 const TIMEZONES = [
   'UTC',
   'America/New_York',
@@ -61,52 +35,30 @@ const DATE_FORMATS = [
   { value: 'YYYY-MM-DD', label: '2026-01-05' },
 ]
 
+const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
+
 export default function PreferencesPage() {
   const prefMap = usePreferenceMap()
   const upsert = useUpsertPreference()
 
-  const [theme, setTheme] = useState('system')
   const [timezone, setTimezone] = useState('UTC')
   const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
   const [weekStart, setWeekStart] = useState('monday')
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
   useEffect(() => {
-    setTheme((prefMap['theme'] as string | undefined) ?? 'system')
     setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
     setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
     setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
   }, [JSON.stringify(prefMap)])
 
-  function applyTheme(value: string) {
-    const html = document.documentElement
-    if (value === 'dark') {
-      html.classList.add('dark')
-    } else if (value === 'light') {
-      html.classList.remove('dark')
-    } else {
-      if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-        html.classList.add('dark')
-      } else {
-        html.classList.remove('dark')
-      }
-    }
-  }
-
-  function handleThemeChange(value: string) {
-    setTheme(value)
-    // Apply visually right away so the user sees the change, but only persist on Save.
-    applyTheme(value)
-  }
-
   async function handleSave() {
     setFeedback(null)
     try {
       await Promise.all([
-        upsert.mutateAsync({ key: 'theme', value: theme }),
-        upsert.mutateAsync({ key: 'timezone', value: timezone }),
-        upsert.mutateAsync({ key: 'date_format', value: dateFormat }),
-        upsert.mutateAsync({ key: 'week_start', value: weekStart }),
+        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
+        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
+        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
       ])
       setFeedback({ type: 'success', msg: 'Preferences saved.' })
       setTimeout(() => setFeedback(null), 2000)
@@ -117,103 +69,58 @@ export default function PreferencesPage() {
 
   return (
     <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Preferences</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
+      <p className="text-sm text-muted-foreground mb-6">
         Personal appearance and regional settings.
       </p>
 
-      {/* Appearance */}
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
-          Appearance
-        </h3>
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Theme</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {(['light', 'dark', 'system'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  fontSize: 13,
-                  border: '1px solid',
-                  borderColor: theme === t ? '#58a6ff' : '#30363d',
-                  background: theme === t ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: theme === t ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer',
-                  textTransform: 'capitalize',
-                }}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>Preview applies immediately; saved when you click Save.</p>
-        </div>
-      </div>
-
       {/* Regional */}
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
           Regional
         </h3>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Language</Label>
-          <select style={{ ...selectStyle, opacity: 0.6, cursor: 'not-allowed' }} disabled>
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Language</Label>
+          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
             <option value="en">English (en)</option>
           </select>
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
-            Additional languages coming in a future release.
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
           </p>
         </div>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Timezone</Label>
-          <select
-            value={timezone}
-            onChange={e => setTimezone(e.target.value)}
-            style={selectStyle}
-          >
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
             {TIMEZONES.map(tz => (
               <option key={tz} value={tz}>{tz}</option>
             ))}
           </select>
         </div>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Date format</Label>
-          <select
-            value={dateFormat}
-            onChange={e => setDateFormat(e.target.value)}
-            style={selectStyle}
-          >
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Date format</Label>
+          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
             {DATE_FORMATS.map(f => (
               <option key={f.value} value={f.value}>{f.label}</option>
             ))}
           </select>
         </div>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Week starts on</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Week starts on</Label>
+          <div className="flex gap-2">
             {(['monday', 'sunday'] as const).map(d => (
               <button
                 key={d}
                 onClick={() => setWeekStart(d)}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  fontSize: 13,
-                  border: '1px solid',
-                  borderColor: weekStart === d ? '#58a6ff' : '#30363d',
-                  background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: weekStart === d ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer',
-                  textTransform: 'capitalize',
-                }}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
               >
                 {d}
               </button>
@@ -223,7 +130,7 @@ export default function PreferencesPage() {
       </div>
 
       {feedback && (
-        <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
           {feedback.msg}
         </p>
       )}

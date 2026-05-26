@@ -4,58 +4,12 @@
  */
 
 import { useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { createAuthFetch, ApiError } from '@/lib/api'
-import type { components } from '@draba/shared'
+import { useTokens, useCreateToken, useRevokeToken } from '@/hooks/useSettings'
+import { ApiError } from '@/lib/api'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 import { Key, Copy, Check, Trash2 } from 'lucide-react'
-
-type APIToken = components['schemas']['APIToken']
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-function useTokens() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: ['tokens'],
-    queryFn: () => authFetch<APIToken[]>('/tokens'),
-  })
-}
-
-function useCreateToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (data: { name: string; scope: string }) =>
-      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
-
-function useRevokeToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) =>
-      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
 
 const SCOPES: { value: string; label: string; desc: string }[] = [
   { value: 'read', label: 'Read-only', desc: 'Can read data but not create or modify.' },
@@ -116,26 +70,22 @@ export default function TokensPage() {
 
   return (
     <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>API Tokens</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">API Tokens</h2>
+      <p className="text-sm text-muted-foreground mb-6">
         Long-lived tokens for programmatic access. The raw value is shown once — copy it before closing.
       </p>
 
       {/* One-time secret reveal */}
       {newSecret && (
-        <div style={{ ...sectionStyle, borderColor: '#238636', background: 'rgba(35,134,54,0.1)', marginBottom: 20 }}>
-          <p style={{ fontSize: 13, color: '#3fb950', marginBottom: 12, fontWeight: 600 }}>
+        <div className="bg-success/10 border border-success/30 rounded-[10px] p-6 mb-5">
+          <p className="text-sm text-success font-semibold mb-3">
             Token created — copy it now, it won't be shown again.
           </p>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <code style={{
-              flex: 1, padding: '8px 12px', background: '#0d1117',
-              borderRadius: 6, fontSize: 12, color: '#e6edf3',
-              border: '1px solid #30363d', wordBreak: 'break-all',
-            }}>
+          <div className="flex gap-2 items-center">
+            <code className="flex-1 px-3 py-2 bg-background rounded-md text-xs text-foreground border border-border break-all">
               {newSecret}
             </code>
-            <Button size="sm" variant="outline" onClick={handleCopy} style={{ gap: 6, minWidth: 80 }}>
+            <Button size="sm" variant="outline" onClick={handleCopy} className="gap-1.5 min-w-[80px]">
               {copied ? <Check size={14} /> : <Copy size={14} />}
               {copied ? 'Copied!' : 'Copy'}
             </Button>
@@ -143,7 +93,7 @@ export default function TokensPage() {
           <Button
             size="sm"
             variant="ghost"
-            style={{ marginTop: 12, color: '#8b949e' }}
+            className="mt-3 text-muted-foreground"
             onClick={() => setNewSecret(null)}
           >
             Dismiss
@@ -152,20 +102,20 @@ export default function TokensPage() {
       )}
 
       {/* Token list */}
-      <div style={sectionStyle}>
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
         {isLoading ? (
-          <p style={{ fontSize: 13, color: '#8b949e' }}>Loading…</p>
+          <p className="text-sm text-muted-foreground">Loading…</p>
         ) : activeTokens.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '24px 0' }}>
-            <Key size={32} style={{ color: '#30363d', marginBottom: 12 }} />
-            <p style={{ fontSize: 13, color: '#8b949e' }}>No API tokens yet.</p>
+          <div className="text-center py-6">
+            <Key size={32} className="text-border mx-auto mb-3" />
+            <p className="text-sm text-muted-foreground">No API tokens yet.</p>
           </div>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <table className="w-full border-collapse">
             <thead>
               <tr>
                 {['Name', 'Scope', 'Last used', 'Created', ''].map(h => (
-                  <th key={h} style={{ textAlign: 'left', fontSize: 11, color: '#8b949e', fontWeight: 600, padding: '0 0 10px', letterSpacing: '0.4px' }}>
+                  <th key={h} className="text-left text-[11px] text-muted-foreground font-semibold pb-2.5 tracking-[0.4px]">
                     {h.toUpperCase()}
                   </th>
                 ))}
@@ -173,35 +123,32 @@ export default function TokensPage() {
             </thead>
             <tbody>
               {activeTokens.map(tok => (
-                <tr key={tok.id} style={{ borderTop: '1px solid #21262d' }}>
-                  <td style={{ padding: '12px 0', fontSize: 13, color: '#e6edf3', fontWeight: 500 }}>{tok.name}</td>
-                  <td style={{ padding: '12px 8px', fontSize: 12 }}>
-                    <span style={{
-                      padding: '2px 8px', borderRadius: 4,
-                      background: '#30363d', color: '#8b949e',
-                    }}>
+                <tr key={tok.id} className="border-t border-card">
+                  <td className="py-3 text-[13px] text-foreground font-medium">{tok.name}</td>
+                  <td className="py-3 px-2 text-xs">
+                    <span className="px-2 py-0.5 rounded bg-muted text-muted-foreground">
                       {tok.scope}
                     </span>
                   </td>
-                  <td style={{ padding: '12px 8px', fontSize: 13, color: '#8b949e' }}>
+                  <td className="py-3 px-2 text-[13px] text-muted-foreground">
                     {tok.lastUsedAt ? relativeTime(tok.lastUsedAt) : 'Never'}
                   </td>
-                  <td style={{ padding: '12px 8px', fontSize: 13, color: '#8b949e' }}>
+                  <td className="py-3 px-2 text-[13px] text-muted-foreground">
                     {relativeTime(tok.createdAt)}
                   </td>
-                  <td style={{ padding: '12px 0', textAlign: 'right' }}>
+                  <td className="py-3 text-right">
                     {confirmRevoke === tok.id ? (
-                      <span style={{ fontSize: 12, display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center' }}>
-                        <span style={{ color: '#f85149' }}>Revoke?</span>
+                      <span className="text-xs flex gap-2 justify-end items-center">
+                        <span className="text-destructive">Revoke?</span>
                         <button
                           onClick={() => void handleRevoke(tok.id)}
-                          style={{ color: '#f85149', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0 }}
+                          className="text-destructive bg-transparent border-none cursor-pointer text-xs p-0"
                         >
                           Yes
                         </button>
                         <button
                           onClick={() => setConfirmRevoke(null)}
-                          style={{ color: '#8b949e', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0 }}
+                          className="text-muted-foreground bg-transparent border-none cursor-pointer text-xs p-0"
                         >
                           Cancel
                         </button>
@@ -209,7 +156,7 @@ export default function TokensPage() {
                     ) : (
                       <button
                         onClick={() => setConfirmRevoke(tok.id)}
-                        style={{ color: '#8b949e', background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}
+                        className="text-muted-foreground bg-transparent border-none cursor-pointer p-1"
                         title="Revoke"
                       >
                         <Trash2 size={14} />
@@ -225,43 +172,43 @@ export default function TokensPage() {
         <Button
           size="sm"
           variant="outline"
-          style={{ marginTop: activeTokens.length > 0 ? 16 : 0 }}
+          className={activeTokens.length > 0 ? 'mt-4' : ''}
           onClick={() => setShowCreate(v => !v)}
         >
           {showCreate ? 'Cancel' : 'New token'}
         </Button>
 
         {showCreate && (
-          <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid #30363d' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
-              <Label style={{ color: '#e6edf3' }}>Token name</Label>
+          <div className="mt-4 pt-4 border-t border-border">
+            <div className="flex flex-col gap-1.5 mb-4">
+              <Label>Token name</Label>
               <Input
                 value={name}
                 onChange={e => setName(e.target.value)}
                 placeholder="e.g. CI bot, personal script"
-                style={{ maxWidth: 320 }}
+                className="max-w-xs"
               />
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-              <Label style={{ color: '#e6edf3' }}>Scope</Label>
+            <div className="flex flex-col gap-2 mb-4">
+              <Label>Scope</Label>
               {SCOPES.map(s => (
-                <label key={s.value} style={{ display: 'flex', gap: 10, cursor: 'pointer', alignItems: 'flex-start' }}>
+                <label key={s.value} className="flex gap-2.5 cursor-pointer items-start">
                   <input
                     type="radio"
                     name="scope"
                     value={s.value}
                     checked={scope === s.value}
                     onChange={() => setScope(s.value)}
-                    style={{ marginTop: 2 }}
+                    className="mt-0.5"
                   />
                   <span>
-                    <span style={{ fontSize: 13, color: '#e6edf3', fontWeight: 500 }}>{s.label}</span>
-                    <span style={{ fontSize: 12, color: '#8b949e', display: 'block' }}>{s.desc}</span>
+                    <span className="text-[13px] text-foreground font-medium">{s.label}</span>
+                    <span className="text-xs text-muted-foreground block">{s.desc}</span>
                   </span>
                 </label>
               ))}
             </div>
-            {error && <p style={{ fontSize: 13, color: '#f85149', marginBottom: 12 }}>{error}</p>}
+            {error && <p className="text-[13px] text-destructive mb-3">{error}</p>}
             <Button
               size="sm"
               onClick={handleCreate}

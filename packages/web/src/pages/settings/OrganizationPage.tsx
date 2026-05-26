@@ -1,6 +1,7 @@
 /**
  * /settings/organization — Superadmin: organization name, registration policy,
- * and system-wide defaults (language, timezone, week start).
+ * and system-wide defaults (language placeholder, timezone, week start).
+ * Language support is deferred to Phase 10.7 — Localization & Language Support.
  */
 
 import { useState, useEffect } from 'react'
@@ -8,31 +9,6 @@ import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
-
-const sectionStyle: React.CSSProperties = {
-  background: '#21262d',
-  border: '1px solid #30363d',
-  borderRadius: 10,
-  padding: '24px',
-  marginBottom: 20,
-}
-
-const fieldStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  marginBottom: 16,
-}
-
-const selectStyle: React.CSSProperties = {
-  background: '#161b22',
-  border: '1px solid #30363d',
-  borderRadius: 6,
-  color: '#e6edf3',
-  padding: '8px 12px',
-  fontSize: 13,
-  cursor: 'pointer',
-}
 
 export default function OrganizationPage() {
   const { data } = useAdminSettings()
@@ -70,32 +46,32 @@ export default function OrganizationPage() {
 
   return (
     <div>
-      <h2 style={{ fontSize: 17, fontWeight: 600, color: '#e6edf3', marginBottom: 4 }}>Organization</h2>
-      <p style={{ fontSize: 13, color: '#8b949e', marginBottom: 24 }}>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
+      <p className="text-sm text-muted-foreground mb-6">
         System-wide identity and defaults for this draba installation.
       </p>
 
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
           Identity
         </h3>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Organization name</Label>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Organization name</Label>
           <Input
             value={orgName}
             onChange={e => setOrgName(e.target.value)}
             placeholder="My Company"
-            style={{ maxWidth: 320 }}
+            className="max-w-xs"
           />
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
+          <p className="text-xs text-muted-foreground m-0">
             Shown in the browser tab title and login page.
           </p>
         </div>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Registration policy</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Registration policy</Label>
+          <div className="flex gap-2">
             {[
               { v: 'invite_only', label: 'Invite only' },
               { v: 'open', label: 'Open registration' },
@@ -103,13 +79,11 @@ export default function OrganizationPage() {
               <button
                 key={v}
                 onClick={() => setRegPolicy(v)}
-                style={{
-                  padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
-                  borderColor: regPolicy === v ? '#58a6ff' : '#30363d',
-                  background: regPolicy === v ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: regPolicy === v ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer',
-                }}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
+                  regPolicy === v
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
               >
                 {label}
               </button>
@@ -118,27 +92,35 @@ export default function OrganizationPage() {
         </div>
       </div>
 
-      <div style={sectionStyle}>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 16 }}>
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
           System defaults
         </h3>
-        <p style={{ fontSize: 12, color: '#8b949e', marginBottom: 16 }}>
+        <p className="text-xs text-muted-foreground mb-4">
           Applied to new accounts when the user hasn't set their own preference.
         </p>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Default language</Label>
-          <select style={{ ...selectStyle, maxWidth: 240, opacity: 0.6, cursor: 'not-allowed' }} disabled>
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default language</Label>
+          <select
+            disabled
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
+          >
             <option value="en">English (en)</option>
           </select>
-          <p style={{ fontSize: 12, color: '#8b949e', margin: 0 }}>
-            Additional languages coming in a future release.
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
           </p>
         </div>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Default timezone</Label>
-          <select value={timezone} onChange={e => setTimezone(e.target.value)} style={{ ...selectStyle, maxWidth: 280 }}>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default timezone</Label>
+          <select
+            value={timezone}
+            onChange={e => setTimezone(e.target.value)}
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
+          >
             {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
               'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
               <option key={tz} value={tz}>{tz}</option>
@@ -146,20 +128,18 @@ export default function OrganizationPage() {
           </select>
         </div>
 
-        <div style={fieldStyle}>
-          <Label style={{ color: '#e6edf3' }}>Default week starts on</Label>
-          <div style={{ display: 'flex', gap: 8 }}>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default week starts on</Label>
+          <div className="flex gap-2">
             {(['monday', 'sunday'] as const).map(d => (
               <button
                 key={d}
                 onClick={() => setWeekStart(d)}
-                style={{
-                  padding: '6px 14px', borderRadius: 6, fontSize: 13, border: '1px solid',
-                  borderColor: weekStart === d ? '#58a6ff' : '#30363d',
-                  background: weekStart === d ? 'rgba(88,166,255,0.1)' : '#161b22',
-                  color: weekStart === d ? '#58a6ff' : '#8b949e',
-                  cursor: 'pointer', textTransform: 'capitalize',
-                }}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
               >
                 {d}
               </button>
@@ -169,7 +149,7 @@ export default function OrganizationPage() {
       </div>
 
       {feedback && (
-        <p style={{ fontSize: 13, color: feedback.type === 'success' ? '#3fb950' : '#f85149', marginBottom: 12 }}>
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
           {feedback.msg}
         </p>
       )}
