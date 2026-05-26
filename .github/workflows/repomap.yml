@@ -1,0 +1,34 @@
+name: Generate AI Repomap
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  update-map:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Ensures full history for accurate mapping
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Generate Map
+        run: |
+          # Install the open-source mapping tool
+          npm install -g repomix
+          
+          # Generate the map, outputting to a dedicated AI context folder
+          # This automatically parses your Go structs and React components
+          repomix --style markdown --output docs/ai-context/repomap.md
+
+      - name: Commit Updated Map
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update automated AI repomap [skip ci]"
+          file_pattern: docs/ai-context/repomap.md

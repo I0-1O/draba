@@ -36,6 +36,7 @@ This document organizes development into discrete phases with effort estimates a
 | 9.6 | [Identity System (Color + Icon)](#phase-96--identity-system-color--icon) | M — 2–3 days | 🔄 |
 | 10.1.1 | [Teams — CRUD & Management](#phase-1011--teams--crud--management) | M — 2 days | 🔄 |
 | 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
+| 10.1.3 | [Member Access & Data Lifecycle](#phase-1013--member-access--data-lifecycle) | S–M — 1–2 days | ⬜ |
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
 | 10.4 | [Profile, Tokens & Admin Settings (Web)](#phase-104--profile-tokens--admin-settings-web) | S — 1 day | ⬜ |
@@ -664,6 +665,68 @@ Member management is the most interaction-dense part of team administration. Spl
 - A non-admin member sees member list in read-only form (no role changes, no add/remove)
 - Removing the last admin from a team returns a validation error
 - Password reset button is present but shows "SMTP not configured" state
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 10.1.3 — Member Access & Data Lifecycle
+**Status:** ⬜ | **Effort:** S–M (1–2 days)
+
+Closes the data-integrity and access-revocation gaps left open by 10.1.2. Defines explicit semantics for every lifecycle state a member can be in and ensures that activity data is never silently orphaned or destroyed.
+
+**The problem 10.1.2 leaves open:**
+- `DELETE /teams/:id/members/:memberId` attempts to hard-delete the `team_members` row. If the member has `activity_assignments`, SQLite FK behavior (RESTRICT, CASCADE, or no-op depending on pragma state) is undefined and may leave orphaned assignment rows or silently destroy assignment history.
+- There is no UI affordance to distinguish *"this member can be fully removed"* from *"this member has history — inactivate instead."*
+- The three access states (active → inactivated membership → deactivated account) are implemented but not clearly surfaced or documented in the UI.
+- There is no single "revoke all access" operation for superadmins — today they would need to inactivate the user account and individually inactivate each team membership in separate steps across potentially many modals.
+
+**Lifecycle states defined:**
+
+| State | `users.archived_at` | `team_members.archived_at` | Can log in? | Data preserved? |
+|-------|---------------------|-----------------------------|-------------|-----------------|
+| Active member | NULL | NULL | ✅ | ✅ |
+| Inactivated membership | NULL | set | ✅ (other teams) | ✅ |
+| Deactivated account | set | any | ❌ | ✅ |
+| Removed from team | — | row deleted | ✅ (other teams) | ✅ only if zero assignments |
+
+Hard-delete of a `team_members` row is only ever permitted when the member has zero `activity_assignments`. All other cases must use inactivation (soft delete). This invariant protects historical activity data unconditionally.
+
+**Scope:**
+
+*Schema (migration 010):*
+- Verify `activity_assignments.team_member_id` FK is declared with `ON DELETE RESTRICT`; add an explicit constraint migration if not
+- Same for `timeline_access.team_member_id`
+- Enable `PRAGMA foreign_keys = ON` in the DB initialization path (currently SQLite defaults to off) to enforce the constraint at runtime
+
+*API — removal guard:*
+- `DELETE /teams/:id/members/:memberId` — before deleting, count `activity_assignments` for the member; if count > 0, respond 409 `MEMBER_HAS_ASSIGNMENTS` with `{ assignmentCount: N }` in the error body; direct the caller to use archive/inactivate instead
+- Hard-delete proceeds only when assignment count is 0 — no behavior change for clean removals
+
+*API — full revoke (superadmin only):*
+- `POST /users/:id/revoke` — new endpoint; atomically: (1) sets `users.archived_at` (blocks login everywhere), (2) sets `archived_at` on every `team_members` row for the user (inactivates all memberships), (3) hard-deletes any `team_members` rows where assignment count is 0 (cleans up zero-history memberships); returns `{ accountDeactivated: true, membershipsInactivated: N, membershipsRemoved: N }`
+- Superadmin only; no-op if user is already fully archived; 403 if caller is not superadmin
+
+*Web — TeamModal Members tab:*
+- Remove (×) button: on 409 `MEMBER_HAS_ASSIGNMENTS`, show an inline error beneath the member row: *"N assignment(s) found — [Inactivate instead]"* where the bracketed text is a direct action button that calls the archive endpoint
+- On success, replace the error with confirmation and re-fetch the member list
+
+*Web — MemberModal:*
+- Add **"Revoke all access"** button to the Super Admin Actions section (red, below Inactivate); opens a confirmation dialog that lists the three effects (account deactivated, all memberships inactivated, zero-history memberships removed), shows the return summary once complete
+- After confirmation, calls `POST /users/:id/revoke`, then closes the modal and invalidates relevant query cache
+- Button is hidden if the user is already fully inactivated (`users.archived_at` set AND all `team_members.archived_at` set)
+
+*Web — activity display:*
+- Inactivated members: already shown at 50% opacity in sidebar and member list; no change needed
+- Gantt bars and detail panels: assignee badge continues to render using the preserved `team_members` row data (name + color/icon); no display change — historical data reads accurately
+- Removed members (zero-assignment clean removals): those `activity_assignments` rows don't exist, so no badge to render; this is already correct behavior
+
+**Exit criteria — safe to pause when:**
+- Attempting to remove a member with existing assignments returns 409 with assignment count; the TeamModal shows *"N assignment(s) — Inactivate instead"* with a one-click inactivate action
+- Removing a member with zero assignments succeeds as before
+- `POST /users/:id/revoke` atomically deactivates account + inactivates all memberships + cleans zero-assignment memberships; returns the summary breakdown
+- MemberModal "Revoke all access" confirmation dialog shows the three effects and calls the endpoint on confirm
+- `PRAGMA foreign_keys = ON` is in effect at startup; attempting a raw FK violation in a test is rejected
+- Inactivated members' avatars still render correctly on existing Gantt bars (data preserved, no orphaned rows)
 - `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
 
 ---
