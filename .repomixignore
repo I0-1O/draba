@@ -8,6 +8,7 @@ public/
 docs/assets/
 *.svg
 *.png
+session-state.md
 
 # Ignore tests if you only want architectural context
 **/*.test.tsx
