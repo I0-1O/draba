@@ -591,6 +591,7 @@ Member management is the most interaction-dense part of team administration. Spl
 
 *API — member CRUD:*
 - `GET /teams/:id/members/:memberId` — full member detail including stats (timeline counts, activity counts by date status)
+- `GET /teams/:id/members/:memberId/stats` — lightweight stat-only endpoint (same data as the stats object in the detail response)
 - `POST /teams/:id/members` — add existing registered user by `userId` (admin only)
 - `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; member can set own display name/color/icon)
 - `DELETE /teams/:id/members/:memberId` — remove member from team; reject if last admin
@@ -606,6 +607,7 @@ Member management is the most interaction-dense part of team administration. Spl
 - `DELETE /teams/:id/invites/:inviteId` — revoke/cancel a pending invite
 - `POST /teams/:id/invites` already exists (Phase 3) — verified working
 - `POST /teams/:id/invite-link` — generate or regenerate a reusable team invite link token
+- `POST /teams/:id/invite-link/reset` — alias for regenerate (invalidates old token); stub for now, wired to email-sending sub-phase
 - `GET /teams/:id/invite-link` — get the current invite link (or null if none)
 - `DELETE /teams/:id/invite-link` — revoke the current invite link
 - `POST /auth/register` — update to accept reusable invite link tokens (in addition to existing one-time invite tokens)

@@ -514,3 +514,300 @@ func TestTierTeamLimit(t *testing.T) {
 	errObj := resp["error"].(map[string]any)
 	assert.Equal(t, "TIER_TEAM_LIMIT", errObj["code"])
 }
+
+// ── Member management tests ───────────────────────────────────────────────────
+
+// memberTestSetup returns a server, Alice's admin token, Bob's member token,
+// and the shared team ID.
+func memberTestSetup(t *testing.T) (srv http.Handler, aliceToken, bobToken, teamID string) {
+	t.Helper()
+	srv, _ = newTeamTestServer(t)
+	aliceToken, _ = seedUser(t, srv, "alice@member.com", "password1", "Alice")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Acme"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+	teamID = team["id"].(string)
+
+	bobToken = addTeamMember(t, srv, aliceToken, teamID, "bob@member.com", "Bob")
+	return srv, aliceToken, bobToken, teamID
+}
+
+func TestUpdateMember_RoleChange_AdminOnly(t *testing.T) {
+	srv, aliceToken, bobToken, teamID := memberTestSetup(t)
+
+	// Bob lists members to find his own member ID.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	var members []map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&members))
+
+	var bobMemberID string
+	for _, m := range members {
+		if m["email"] == "bob@member.com" {
+			bobMemberID = m["id"].(string)
+		}
+	}
+	require.NotEmpty(t, bobMemberID)
+
+	// Bob (member) tries to change his own role — forbidden.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPatch, fmt.Sprintf("/teams/%s/members/%s", teamID, bobMemberID),
+		map[string]string{"role": "admin"}, bobToken))
+	assert.Equal(t, http.StatusForbidden, w2.Code)
+
+	// Alice (admin) can change Bob's role.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPatch, fmt.Sprintf("/teams/%s/members/%s", teamID, bobMemberID),
+		map[string]string{"role": "admin"}, aliceToken))
+	assert.Equal(t, http.StatusOK, w3.Code)
+	var updated map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&updated))
+	assert.Equal(t, "admin", updated["role"])
+}
+
+func TestDeleteMember_LastAdminBlocked(t *testing.T) {
+	srv, aliceToken, _, teamID := memberTestSetup(t)
+
+	// Get Alice's member ID.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	var members []map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&members))
+
+	var aliceMemberID string
+	for _, m := range members {
+		if m["role"] == "admin" {
+			aliceMemberID = m["id"].(string)
+		}
+	}
+	require.NotEmpty(t, aliceMemberID)
+
+	// Alice is the sole admin — deleting her should return LAST_ADMIN.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodDelete, fmt.Sprintf("/teams/%s/members/%s", teamID, aliceMemberID),
+		nil, aliceToken))
+	assert.Equal(t, http.StatusConflict, w2.Code)
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&body))
+	assert.Equal(t, "LAST_ADMIN", body["error"].(map[string]any)["code"])
+}
+
+func TestDeleteMember_Success(t *testing.T) {
+	srv, aliceToken, _, teamID := memberTestSetup(t)
+
+	// Find Bob's member ID.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	var members []map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&members))
+
+	var bobMemberID string
+	for _, m := range members {
+		if m["email"] == "bob@member.com" {
+			bobMemberID = m["id"].(string)
+		}
+	}
+	require.NotEmpty(t, bobMemberID)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodDelete, fmt.Sprintf("/teams/%s/members/%s", teamID, bobMemberID),
+		nil, aliceToken))
+	assert.Equal(t, http.StatusNoContent, w2.Code)
+
+	// Verify member count dropped.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, aliceToken))
+	var remaining []map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&remaining))
+	assert.Len(t, remaining, 1)
+}
+
+func TestArchiveMember_LastAdminBlocked(t *testing.T) {
+	srv, aliceToken, _, teamID := memberTestSetup(t)
+
+	// Get Alice's member ID (sole admin).
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	var members []map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&members))
+
+	var aliceMemberID string
+	for _, m := range members {
+		if m["role"] == "admin" {
+			aliceMemberID = m["id"].(string)
+		}
+	}
+	require.NotEmpty(t, aliceMemberID)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/members/%s/archive", teamID, aliceMemberID),
+		nil, aliceToken))
+	assert.Equal(t, http.StatusConflict, w2.Code)
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&body))
+	assert.Equal(t, "LAST_ADMIN", body["error"].(map[string]any)["code"])
+}
+
+func TestArchiveAndUnarchiveMember(t *testing.T) {
+	srv, aliceToken, _, teamID := memberTestSetup(t)
+
+	// Find Bob's member ID.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	var members []map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&members))
+
+	var bobMemberID string
+	for _, m := range members {
+		if m["email"] == "bob@member.com" {
+			bobMemberID = m["id"].(string)
+		}
+	}
+	require.NotEmpty(t, bobMemberID)
+
+	// Archive Bob.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/members/%s/archive", teamID, bobMemberID),
+		nil, aliceToken))
+	assert.Equal(t, http.StatusOK, w2.Code)
+	var archived map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&archived))
+	assert.NotNil(t, archived["archivedAt"])
+
+	// Unarchive Bob.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/members/%s/unarchive", teamID, bobMemberID),
+		nil, aliceToken))
+	assert.Equal(t, http.StatusOK, w3.Code)
+	var reactivated map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&reactivated))
+	assert.Nil(t, reactivated["archivedAt"])
+}
+
+func TestGetMemberStats_Success(t *testing.T) {
+	srv, aliceToken, _, teamID := memberTestSetup(t)
+
+	// Get Bob's member ID.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	var members []map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&members))
+
+	var bobMemberID string
+	for _, m := range members {
+		if m["email"] == "bob@member.com" {
+			bobMemberID = m["id"].(string)
+		}
+	}
+	require.NotEmpty(t, bobMemberID)
+
+	// Standalone stats endpoint.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members/%s/stats", teamID, bobMemberID),
+		nil, aliceToken))
+	assert.Equal(t, http.StatusOK, w2.Code)
+	var stats map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&stats))
+	// All stat fields present and numeric.
+	assert.Contains(t, stats, "activeTimelines")
+	assert.Contains(t, stats, "running")
+	assert.Contains(t, stats, "upcoming")
+	assert.Contains(t, stats, "pastDue")
+}
+
+// ── Invite-link tests ─────────────────────────────────────────────────────────
+
+func TestInviteLink_CreateGetReset(t *testing.T) {
+	srv, aliceToken, bobToken, teamID := memberTestSetup(t)
+
+	// No link yet — GET returns null token field.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/invite-link", teamID), nil, aliceToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var linkResp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&linkResp))
+	assert.Nil(t, linkResp["token"])
+
+	// Create the invite link.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invite-link", teamID), nil, aliceToken))
+	assert.Equal(t, http.StatusOK, w2.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&created))
+	firstToken, ok := created["token"].(string)
+	require.True(t, ok)
+	assert.NotEmpty(t, firstToken)
+	// Token should be 64 hex chars (256 bits).
+	assert.Len(t, firstToken, 64)
+
+	// Reset replaces the token.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invite-link/reset", teamID), nil, aliceToken))
+	assert.Equal(t, http.StatusOK, w3.Code)
+	var reset map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&reset))
+	secondToken := reset["token"].(string)
+	assert.NotEmpty(t, secondToken)
+	assert.NotEqual(t, firstToken, secondToken, "reset must generate a new token")
+
+	// Non-admin cannot manage the invite link.
+	w4 := httptest.NewRecorder()
+	srv.ServeHTTP(w4, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invite-link", teamID), nil, bobToken))
+	assert.Equal(t, http.StatusForbidden, w4.Code)
+}
+
+func TestInviteLink_Revoke(t *testing.T) {
+	srv, aliceToken, _, teamID := memberTestSetup(t)
+
+	// Create then revoke.
+	wCreate := httptest.NewRecorder()
+	srv.ServeHTTP(wCreate, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invite-link", teamID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, wCreate.Code)
+
+	wDel := httptest.NewRecorder()
+	srv.ServeHTTP(wDel, authReq(http.MethodDelete, fmt.Sprintf("/teams/%s/invite-link", teamID), nil, aliceToken))
+	assert.Equal(t, http.StatusNoContent, wDel.Code)
+
+	// Token should be null after revocation.
+	wGet := httptest.NewRecorder()
+	srv.ServeHTTP(wGet, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/invite-link", teamID), nil, aliceToken))
+	assert.Equal(t, http.StatusOK, wGet.Code)
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(wGet.Body).Decode(&body))
+	assert.Nil(t, body["token"])
+}
+
+// ── User search tests ─────────────────────────────────────────────────────────
+
+func TestSearchUsers_SafeFields(t *testing.T) {
+	srv, aliceToken, _, teamID := memberTestSetup(t)
+	_ = teamID
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, "/users/search?q=bob", nil, aliceToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var results []map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&results))
+	require.NotEmpty(t, results)
+
+	for _, r := range results {
+		assert.Contains(t, r, "id")
+		assert.Contains(t, r, "email")
+		assert.Contains(t, r, "displayName")
+		// Sensitive or internal fields must not be present.
+		assert.NotContains(t, r, "isSuperadmin")
+		assert.NotContains(t, r, "archivedAt")
+		assert.NotContains(t, r, "createdAt")
+		assert.NotContains(t, r, "updatedAt")
+		assert.NotContains(t, r, "passwordHash")
+	}
+}

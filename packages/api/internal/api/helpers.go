@@ -35,3 +35,13 @@ func newID() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+// newToken returns a 64-character hex token derived from 32 random bytes
+// (256 bits). Use for invite tokens and other secrets; newID is for record IDs.
+// The longer length makes tokens visually distinct from IDs and raises the
+// brute-force bar.
+func newToken() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}

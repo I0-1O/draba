@@ -132,7 +132,7 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		ID:        newID(),
 		TeamID:    teamID,
 		Email:     email,
-		Token:     newID(),
+		Token:     newToken(),
 		Role:      role,
 		InvitedBy: claims.UserID,
 		ExpiresAt: now.Add(7 * 24 * time.Hour),
@@ -841,6 +841,12 @@ func (s *Server) handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
 
 // handleCreateInviteLink generates or regenerates the reusable invite link
 // token for the team. Each call replaces the previous token.
+//
+// Design decision: tokens have no server-side expiry and are valid until an
+// admin explicitly revokes (DELETE) or resets (POST /reset) them. This keeps
+// the URL stable for onboarding docs and Slack pins. If time-bounded links are
+// needed, add an invite_link_expires_at column to teams and check it in the
+// registration handler.
 func (s *Server) handleCreateInviteLink(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
@@ -859,7 +865,7 @@ func (s *Server) handleCreateInviteLink(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	token := newID()
+	token := newToken()
 	if err := s.teams.SetInviteLinkToken(teamID, &token); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite link")
 		return
@@ -901,6 +907,13 @@ func (s *Server) handleGetInviteLink(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"token": team.InviteLinkToken})
 }
 
+// handleResetInviteLink invalidates the current token and generates a fresh one.
+// Semantically identical to POST /invite-link; the distinct URL makes client
+// intent (reset vs. first-time create) explicit without a separate code path.
+func (s *Server) handleResetInviteLink(w http.ResponseWriter, r *http.Request) {
+	s.handleCreateInviteLink(w, r)
+}
+
 // handleDeleteInviteLink revokes the current invite link by clearing the token.
 func (s *Server) handleDeleteInviteLink(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
@@ -927,6 +940,16 @@ func (s *Server) handleDeleteInviteLink(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// userSearchResult is the safe public projection returned by GET /users/search.
+// It intentionally omits isSuperadmin, archivedAt, createdAt, updatedAt, and
+// passwordHash so that search results are safe to expose to any team member.
+type userSearchResult struct {
+	ID          string  `json:"id"`
+	Email       string  `json:"email"`
+	DisplayName string  `json:"displayName"`
+	AvatarURL   *string `json:"avatarUrl,omitempty"`
+}
+
 // handleSearchUsers handles GET /users/search?q= and returns matching users.
 func (s *Server) handleSearchUsers(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -939,7 +962,55 @@ func (s *Server) handleSearchUsers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, users)
+	results := make([]userSearchResult, len(users))
+	for i, u := range users {
+		results[i] = userSearchResult{
+			ID:          u.ID,
+			Email:       u.Email,
+			DisplayName: u.DisplayName,
+			AvatarURL:   u.AvatarURL,
+		}
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+// handleGetMemberStats returns computed activity and timeline counts for a
+// single team member. The full MemberDetail (with teams list) is available via
+// GET /teams/:id/members/:memberId; this endpoint is for lightweight stat polling.
+func (s *Server) handleGetMemberStats(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member stats")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member stats")
+		return
+	}
+	if m.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	stats, err := s.teams.GetMemberStats(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to compute member stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 
 // flatten converts a nil slice to an empty slice for clean JSON serialisation.

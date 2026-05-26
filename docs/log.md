@@ -2,6 +2,19 @@
 
 ---
 
+## 2026-05-25 — Phase 10.1.2: Members — Management & Editing (review fixes)
+
+Post-review fixes applied: security hardening, token entropy, new routes, full test suite.
+
+- **Security**: `GET /users/search` now returns a safe `userSearchResult` projection (id, email, displayName, avatarUrl only) — `isSuperadmin`, `archivedAt`, timestamps excluded.
+- **Token entropy**: invite and invite-link tokens now use `newToken()` (256 bits / 64 hex chars) instead of `newID()` (128 bits). `newToken()` added to `helpers.go`.
+- **New routes**: `GET /teams/:id/members/:memberId/stats` (standalone stat endpoint) and `POST /teams/:id/invite-link/reset` (alias for regenerate) registered in `server.go`.
+- **Design decision documented**: reusable invite-link tokens have no expiry — valid until admin revokes/resets. Rationale in handler comment.
+- **Tests**: 11 new tests in `team_handler_test.go` covering member CRUD, last-admin protection, archive/unarchive, stats endpoint, invite-link create/reset/revoke, and safe-fields assertion for user search.
+- **Superadmin gating confirmed correct**: `onNewTeam` and `onEditMember` in `DashboardPage.tsx` are already gated on `isSuperadmin`; no frontend changes required.
+
+---
+
 ## 2026-05-25 — Phase 10.1.2: Members — Management & Editing
 
 Full member lifecycle: add, edit, roles, participants, invites, reusable invite links, inactivation, and superadmin actions. All automated checks pass; manual UI verification on Docker still needed.
