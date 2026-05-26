@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short._
 
-**Last updated:** 2026-05-25
+**Last updated:** 2026-05-26
 
 ---
 
@@ -13,10 +13,41 @@ _Updated after each significant work session. Read this first to orient — it i
 | 9.6 | Identity System | ✅ | ⬜ needs Docker verification |
 | 10.1.1 | Teams CRUD | ✅ | ⬜ needs Docker verification |
 | 10.1.2 | Members Management | ✅ | ⬜ needs Docker verification |
-| 10.1.3 | Settings — Profile, Tokens & Admin | ⬜ not started | — |
+| 10.1.3 | Settings — Profile, Tokens & Admin | ✅ | ⬜ needs Docker verification |
 | 10.1.4 | Member Access & Data Lifecycle | ⬜ not started | — |
 
-Next phase to build: **10.1.3** — Settings (profile + identity, security, preferences, API tokens, forgot-password, SMTP config, instance defaults, orphaned users admin view). See ROADMAP.md for full spec.
+Next phase to build: **10.1.4** — Member Access & Data Lifecycle (FK enforcement, removal guard, "Revoke all access" superadmin action).
+
+---
+
+## Phase 10.1.3 Implemented (2026-05-26 — not yet Docker-verified)
+
+**Backend:**
+- Migration 010: `users.color`, `users.icon`; `instance_settings` table; `password_reset_tokens` table
+- `PATCH /users/me` — profile update with identity propagation to `team_members`
+- `PUT /users/me/password` — password change (WRONG_PASSWORD, WEAK_PASSWORD)
+- `POST /auth/forgot-password`, `POST /auth/reset-password` — full forgot-password flow
+- `internal/mailer/` — net/smtp wrapper; reads config from `instance_settings`; Send() is no-op when unconfigured
+- `GET/PUT/POST/DELETE /admin/smtp` — SMTP config management (superadmin only)
+- `GET/PATCH /admin/settings` — instance defaults (registration_policy, timezone, date format, week start, instance name)
+- `GET /admin/users?orphaned=true` — all users with team counts (superadmin only)
+
+**Frontend:**
+- `SettingsPage.tsx` reworked as shell with React Router sub-routes (`/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin`)
+- Admin nav items hidden for non-superadmins
+- `/settings/profile` — name + IdentityWidget + read-only email
+- `/settings/security` — password change form
+- `/settings/preferences` — theme, timezone, date format, week start via existing preferences API
+- `/settings/tokens` — token table, create (one-time secret reveal), inline revoke
+- `/settings/admin` — SMTP form, instance defaults, user list with orphaned filter
+- `/forgot-password`, `/reset-password` — public pages for the forgot-password flow
+- Login page: "Forgot password?" link added
+
+**Deferred:**
+- SMTP password encryption at rest
+- `/forgot-password` "contact admin" message (needs public SMTP status endpoint)
+- Click admin user row → MemberModal
+- Default team/timeline dropdowns in Preferences
 
 ---
 
@@ -67,6 +98,22 @@ These were found during manual testing of 10.1.2 and fixed 2026-05-25:
 - **repomap.md usage:** Use Grep on it for targeted symbol lookups; do not read it wholesale (1.3 MB, exceeds Read tool limit).
 
 ---
+
+## Manual Verification Checklist for 10.1.3 (against epcot.lan:8081)
+
+- [ ] Profile: change display name → visible in sidebar and team member lists after reload
+- [ ] Profile: change identity color/icon → propagated to team memberships; visible on Gantt bars
+- [ ] Security: change password → old password rejected, new password works on login
+- [ ] Preferences: change timezone/date format/week start → values persist across logout/login
+- [ ] Preferences: toggle theme → applies immediately; persists across reload
+- [ ] Tokens: create token → secret shown once → copy → `curl -H "Authorization: Bearer <token>" /auth/me` returns 200; revoke → rejected
+- [ ] Admin SMTP: configure SMTP (use MailHog or real mail server) → "Send test email" arrives; save → reload page → config persists
+- [ ] Admin Settings: toggle registration_policy to "open" → register without invite; toggle back to "invite_only" → blocked
+- [ ] Admin Settings: set instance_name → reload login page → name appears in browser tab
+- [ ] Admin Users: view all users; filter to orphaned; search by name/email
+- [ ] Forgot password (with SMTP): request reset → email arrives → click link → set new password → login works with new password; old fails
+- [ ] Forgot password (without SMTP): request reset → API returns 200; no email sent (check mailer logs)
+- [ ] Non-superadmin: admin nav items not visible; direct navigation to /settings/admin redirects
 
 ## Manual Verification Checklist for 10.1.2 (against epcot.lan:8081)
 

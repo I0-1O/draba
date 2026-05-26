@@ -136,3 +136,105 @@ func (r *UserRepo) Delete(id string) error {
 	}
 	return nil
 }
+
+// UpdateProfile sets display_name, color, and icon on a user. When color or
+// icon changes, the new value is propagated to all team_members rows for the
+// user where the member's value currently matches the user's old value or is NULL
+// (i.e. has not been explicitly overridden by a team admin).
+func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
+	// Fetch old values for propagation comparison.
+	var old models.User
+	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("fetching user for profile update: %w", err)
+	}
+
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning profile update transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Exec(
+		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		displayName, color, icon, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating user profile: %w", err)
+	}
+
+	// Propagate color if changed: update team_members rows where color matches
+	// the old value or is NULL (not explicitly overridden).
+	if !ptrEqual(old.Color, color) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
+			color, id, old.Color,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating color to team_members: %w", err)
+		}
+	}
+
+	if !ptrEqual(old.Icon, icon) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
+			icon, id, old.Icon,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating icon to team_members: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing profile update: %w", err)
+	}
+	return nil
+}
+
+// UpdatePassword sets the password_hash on a user.
+func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		passwordHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	return nil
+}
+
+// ListAll returns all users with their active team membership count.
+// When orphanedOnly is true, only users with zero active memberships are returned.
+func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
+	q := `
+		SELECT u.*,
+		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
+		FROM users u
+		ORDER BY u.display_name ASC
+	`
+	if orphanedOnly {
+		q = `
+			SELECT u.*,
+			       0 AS team_count
+			FROM users u
+			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
+			ORDER BY u.display_name ASC
+		`
+	}
+	var rows []*models.AdminUserRow
+	if err := r.db.Select(&rows, q); err != nil {
+		return nil, fmt.Errorf("listing admin users: %w", err)
+	}
+	return rows, nil
+}
+
+// ptrEqual reports whether two string pointers point to equal values,
+// treating nil and a pointer to "" as distinct.
+func ptrEqual(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}

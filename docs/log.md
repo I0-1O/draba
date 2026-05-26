@@ -2,6 +2,58 @@
 
 ---
 
+## 2026-05-26 — Phase 10.1.3: Settings — Profile, Tokens & Admin
+
+Full settings experience: profile + identity management, password change, forgot-password flow, API token management, SMTP configuration, instance defaults, and admin user list. All automated checks pass; manual verification on Docker needed.
+
+**Schema (migration 010):**
+- `users.color`, `users.icon` — user-level identity; propagates to `team_members` on change
+- `instance_settings (key PK, value, updated_at)` — key/value store for SMTP config and instance defaults
+- `password_reset_tokens (id, user_id FK, token_hash, expires_at, used_at, created_at)` — forgot-password flow; token_hash stores SHA-256 of raw token; token expires after 1 hour
+
+**API — 11 new endpoints:**
+- Profile: `PATCH /users/me` (name, color, icon + team_members propagation)
+- Security: `PUT /users/me/password` (current → new; 401 WRONG_PASSWORD, 400 WEAK_PASSWORD)
+- Forgot password: `POST /auth/forgot-password` (always 200; generates token + sends via mailer), `POST /auth/reset-password` (TOKEN_INVALID / TOKEN_EXPIRED on bad token)
+- SMTP (superadmin): `GET/PUT/DELETE /admin/smtp`, `POST /admin/smtp/test`
+- Instance settings (superadmin): `GET/PATCH /admin/settings` (registration_policy, default_timezone, default_date_format, default_week_start, instance_name)
+- Users (superadmin): `GET /admin/users?orphaned=true`
+
+**New packages:**
+- `internal/mailer/` — wraps `net/smtp`; reads SMTP config from `instance_settings` at send time so changes take effect without restart; supports None / TLS / STARTTLS encryption; `Send()` is a no-op when SMTP not configured (avoids breaking forgot-password when admin hasn't set up email)
+
+**Frontend — 7 new pages:**
+- `/settings/profile` — display name + identity widget + read-only email; identity changes propagate to all team memberships
+- `/settings/security` — change password form with current/new/confirm validation
+- `/settings/preferences` — theme toggle (applies immediately), timezone, date format, week start; writes via existing `PUT /users/me/preferences`
+- `/settings/tokens` — token table (name, scope, last used, created); create with one-time secret reveal; inline revoke
+- `/settings/admin` — SMTP form with send-test; instance defaults; registration policy; user list with orphaned filter and search
+- `/forgot-password` — public; always shows "check your email" message after submission (no enumeration)
+- `/reset-password?token=...` — public; validates token, sets new password, redirects to login
+
+**Login page:** added "Forgot password?" link below the password field.
+
+**SettingsPage.tsx:** reworked into shell with React Router sub-routes; admin nav items hidden from non-superadmins.
+
+**OpenAPI:** added `UpdateProfileInput`, `ChangePasswordInput`, `ForgotPasswordInput`, `ResetPasswordInput`, `SMTPConfig`, `AdminUserRow` schemas plus all 11 new endpoint paths; TypeScript types regenerated.
+
+**Tests (10 new in settings_handler_test.go):**
+- `PATCH /users/me`: happy path (name + color saved), empty name rejected
+- `PUT /users/me/password`: happy path, wrong current password (401), weak new password (400)
+- `POST /auth/forgot-password`: always returns 200 for unknown email
+- `POST /auth/reset-password`: invalid token returns 400 TOKEN_INVALID
+- `GET /admin/settings`: superadmin reads defaults, non-superadmin gets 403
+- `GET /admin/users`: superadmin lists all users
+
+**Deferred items (noted for follow-up):**
+- SMTP password encryption at rest (stored as JSON in instance_settings; encryption using JWT secret deferred)
+- `/forgot-password` "contact admin" message requires a public SMTP status endpoint (deferred)
+- Click user row in admin users list → open MemberModal (deferred to polish pass)
+- "Assign team" action on orphaned users (deferred)
+- Default team/timeline dropdown in Preferences (requires loading teams list; deferred)
+
+---
+
 ## 2026-05-25 — Phase 10.1.2: Members — Management & Editing (review fixes)
 
 Post-review fixes applied: security hardening, token entropy, new routes, full test suite.

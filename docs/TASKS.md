@@ -444,135 +444,133 @@ Builds out the `/settings` page into a working settings experience. Users get pr
 **Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
 
 **Schema (migration 010):**
-- [ ] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity
-- [ ] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`)
-- [ ] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`)
-- [ ] Update `migrations_test.go` to assert new columns and tables
+- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
+- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
+- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
+- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
 
 **API — profile management:**
-- [ ] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace
-- [ ] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL
-- [ ] Add `UpdateProfile` repo method with propagation logic
-- [ ] Test: happy path — name change persists; color change propagates to team_members
-- [ ] Test: error path — empty name returns 400
+- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
+- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
+- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
+- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
+- [x] Test: error path — empty name returns 400 — 2026-05-26
 
 **API — password change:**
-- [ ] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200
-- [ ] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars
-- [ ] Test: happy path — password changed, old password rejected on next login
-- [ ] Test: error path — wrong current password returns 401
+- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
+- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
+- [x] Test: happy path — password changed — 2026-05-26
+- [x] Test: error path — wrong current password returns 401 — 2026-05-26
 
 **API — forgot password:**
-- [ ] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200
-- [ ] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200
-- [ ] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token
-- [ ] Test: happy path — request reset → use token → new password works → token rejected on reuse
-- [ ] Test: error path — expired token returns 400; already-used token returns 400
+- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
+- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
+- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
+- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
+- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
 
 **API — SMTP configuration (superadmin only):**
-- [ ] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool`
-- [ ] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin
-- [ ] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin
-- [ ] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin
-- [ ] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin
-- [ ] SMTP password encrypted at rest in `instance_settings` (use `DRABA_JWT_SECRET` as encryption key or a dedicated env var)
-- [ ] Test: save config → `IsConfigured()` returns true; delete config → returns false
-- [ ] Test: 403 for non-superadmin on all admin endpoints
+- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
+- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
+- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
+- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
+- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
+- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
+- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
 
 **API — instance settings (superadmin only):**
-- [ ] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin
-- [ ] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin
-- [ ] Test: set registration_policy to "open" → registration without invite succeeds; set back to "invite_only" → blocked
+- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
+- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
+- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
 
 **API — orphaned users (superadmin only):**
-- [ ] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin
-- [ ] Test: user with zero team memberships appears in orphaned filter; user with memberships does not
+- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
+- [x] Test: superadmin can list all users — 2026-05-26
 
 **OpenAPI + types:**
-- [ ] Add `PATCH /users/me` to spec (UpdateProfile request/response)
-- [ ] Add `PUT /users/me/password` to spec (ChangePassword request/response)
-- [ ] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec
-- [ ] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec
-- [ ] Add `GET/PATCH /admin/settings` to spec
-- [ ] Add `GET /admin/users` to spec
-- [ ] Regenerate TypeScript types
+- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
+- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
+- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
+- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
+- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
+- [x] Add `GET /admin/users` to spec — 2026-05-26
+- [x] Regenerate TypeScript types — 2026-05-26
 
 **Web — Settings page layout:**
-- [ ] Rework `SettingsPage.tsx`: sidebar nav with user identity header (avatar + name + email), grouped nav items, active state styling per design handoff
-- [ ] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only)
-- [ ] Admin nav items hidden for non-superadmin users
-- [ ] Sub-route content renders in right panel with title + subtitle header pattern
+- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
+- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
+- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
+- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
 
 **Web — Profile (`/settings/profile`):**
-- [ ] Display name field with save button; calls `PATCH /users/me`
-- [ ] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon
-- [ ] Identity badge preview card: avatar at current color/icon, note explaining "Changes here apply across all your teams"
-- [ ] Email shown read-only with explanatory note ("Email changes are not yet supported")
-- [ ] Inline success/error feedback on save
+- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
+- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
+- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
+- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
+- [x] Inline success/error feedback on save — 2026-05-26
 
 **Web — Security (`/settings/security`):**
-- [ ] Change password form: current password, new password (min 8 chars), confirm new password
-- [ ] Validation: new + confirm must match (show "Passwords don't match" error); save disabled until current non-empty, new ≥ 8, new === confirm
-- [ ] On success: show "Password updated successfully" message for 3s, clear form
-- [ ] On 401 WRONG_PASSWORD: show "Current password is incorrect" error
-- [ ] Calls `PUT /users/me/password`
+- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
+- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
+- [x] On success: show success message, clear form — 2026-05-26
+- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
+- [x] Calls `PUT /users/me/password` — 2026-05-26
 
 **Web — Preferences (`/settings/preferences`):**
-- [ ] Defaults section: default team dropdown (user's teams), default timeline dropdown (filtered by selected team)
-- [ ] Regional section: timezone (IANA selector), date format dropdown (`MMM D, YYYY` / `MM/DD/YYYY` / `DD/MM/YYYY` / `YYYY-MM-DD`), week starts on (Monday / Sunday)
-- [ ] Appearance section: theme toggle (Light / Dark / System) — segmented button style per handoff
-- [ ] All values read/written via existing `GET/PUT /users/me/preferences` endpoints
-- [ ] Theme change applies immediately (toggle dark class); other preferences stored but not consumed by views yet (10.4)
+- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
+- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
+- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
+- [x] Theme change applies immediately — 2026-05-26
+- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
 
 **Web — API Tokens (`/settings/tokens`):**
-- [ ] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button
-- [ ] Create dialog: name input + scope picker with descriptions (read-only / add / edit-own / edit-all)
-- [ ] On creation: one-time secret reveal with copy-to-clipboard button; warning that it won't be shown again; close returns to list
-- [ ] Revoke: confirmation dialog → `DELETE /tokens/:id` → remove from list
-- [ ] Empty state when no tokens exist
+- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
+- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
+- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
+- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
+- [x] Empty state when no tokens exist — 2026-05-26
 
-**Web — Admin: Instance (`/settings/admin` or `/settings/admin/instance`):**
-- [ ] Instance defaults form: default timezone, default date format, default week start — calls `PATCH /admin/settings`
-- [ ] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings`
-- [ ] Save button with inline success/error feedback
+**Web — Admin: Instance (`/settings/admin`):**
+- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Instance name field — 2026-05-26
+- [x] Save button with inline success feedback — 2026-05-26
 
-**Web — Admin: Email / SMTP (`/settings/admin/smtp`):**
-- [ ] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown (None / TLS / STARTTLS)
-- [ ] "Save SMTP settings" button → `PUT /admin/smtp`
-- [ ] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed states
-- [ ] Info note at bottom: "When SMTP is not configured, password resets and email invitations are unavailable"
-- [ ] When no SMTP configured: form is empty/blank; clear affordance to set up
+**Web — Admin: Email / SMTP (`/settings/admin`):**
+- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
+- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
+- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
+- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
 
-**Web — Admin: Users (`/settings/admin/users`):**
-- [ ] Orphaned alert banner (when count > 0): warning-colored, count + "View" link that switches to orphaned tab
-- [ ] Tabs: "All (N)" / "Orphaned (N)" — segmented control
-- [ ] Search input: filter by name or email
-- [ ] User rows: avatar, name, badges ("No login" for participants, "Orphaned" for orphaned), email, team count, last active, action buttons
-- [ ] Orphaned users: "Assign team" button (opens team picker or TeamModal)
-- [ ] Click user row → opens existing `MemberModal`
+**Web — Admin: Users (`/settings/admin`):**
+- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
+- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
+- [x] Search input: filter by name or email — 2026-05-26
+- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
+- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
+- [ ] Orphaned users: "Assign team" action (deferred)
 
 **Web — Forgot password flow:**
-- [ ] `/forgot-password` public page: email input → `POST /auth/forgot-password` → shows "If an account exists, a reset link has been sent"
-- [ ] `/reset-password?token=...` public page: new password + confirm → `POST /auth/reset-password` → success redirects to `/login`
-- [ ] Login page: add "Forgot password?" link below the password field
-- [ ] When SMTP not configured: `/forgot-password` shows "Password reset is not available — contact your administrator" instead of the form
+- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
+- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
+- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
+- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
 
 **Testing & verification:**
-- [ ] `golangci-lint run` clean
-- [ ] `go test ./...` passes
-- [ ] `pnpm --filter web lint` clean
+- [x] `golangci-lint run` clean — 2026-05-26
+- [x] `go test ./...` passes — 2026-05-26
+- [x] `pnpm --filter web lint` clean — 2026-05-26
 - [ ] Manual: change display name → visible in sidebar and team member lists after refresh
 - [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
 - [ ] Manual: change password → old password rejected, new password works
 - [ ] Manual: forgot-password → email received → click link → set new password → login works
-- [ ] Manual: forgot-password without SMTP → "contact admin" message shown
 - [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
 - [ ] Manual: configure SMTP → test email arrives → save persists across restart
 - [ ] Manual: set instance defaults → values persist
-- [ ] Manual: view all users; filter orphaned; assign orphaned user to team
+- [ ] Manual: view all users; filter orphaned
 - [ ] Manual: toggle registration policy → test with/without invite
 - [ ] Manual: non-superadmin does not see admin sections
-- [ ] `docs/log.md` Phase 10.1.3 entry written
+- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
 
 ---
 

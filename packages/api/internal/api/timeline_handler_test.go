@@ -16,6 +16,7 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
 	"github.com/I0-1O/draba/packages/api/internal/models"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
@@ -70,7 +71,8 @@ func timelineTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID strin
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+	isrTl := db.NewInstanceSettingsRepo(database)
+	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrTl, db.NewPasswordResetTokenRepo(database), mailer.New(isrTl), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@timeline.com", "password1", "Alice")
 
@@ -300,8 +302,9 @@ func TestGetTimeline_MemberGrantedAccessAllowed(t *testing.T) {
 	tokens := auth.NewTokenService("access-test-secret")
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
+	isrAcc := db.NewInstanceSettingsRepo(database)
 	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo,
-		db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+		db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrAcc, db.NewPasswordResetTokenRepo(database), mailer.New(isrAcc), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ := seedUser(t, srv, "alice@access.com", "password1", "Alice")
 
@@ -437,7 +440,8 @@ func TestCreateTimeline_RestrictedGrantAccessError(t *testing.T) {
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv := api.NewServer(users, invites, teams, activitiesRepo, fake, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+	isrFake := db.NewInstanceSettingsRepo(database)
+	srv := api.NewServer(users, invites, teams, activitiesRepo, fake, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrFake, db.NewPasswordResetTokenRepo(database), mailer.New(isrFake), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ := seedUser(t, srv, "alice@granterr.com", "password1", "Alice")
 
@@ -471,7 +475,8 @@ func TestCreateTimeline_PublishesBusMessage(t *testing.T) {
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+	isrBus := db.NewInstanceSettingsRepo(database)
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrBus, db.NewPasswordResetTokenRepo(database), mailer.New(isrBus), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ := seedUser(t, srv, "alice@tlbus.com", "password1", "Alice")
 

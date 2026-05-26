@@ -72,6 +72,26 @@ func TestMigrate_Idempotent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, colCount, "column %q.%q should exist after migration 009", tc.table, tc.col)
 	}
+
+	// Verify settings and password reset tables added by migration 010.
+	m010Tables := []string{"instance_settings", "password_reset_tokens"}
+	for _, tbl := range m010Tables {
+		var tblCount int
+		err := database.Get(&tblCount,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl)
+		require.NoError(t, err)
+		assert.Equal(t, 1, tblCount, "table %q should exist after migration 010", tbl)
+	}
+
+	// Verify user-level identity columns added by migration 010.
+	m010UserCols := []string{"color", "icon"}
+	for _, col := range m010UserCols {
+		var colCount int
+		err := database.Get(&colCount,
+			`SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = ?`, col)
+		require.NoError(t, err)
+		assert.Equal(t, 1, colCount, "column users.%q should exist after migration 010", col)
+	}
 }
 
 // TestMigrate_006_007_ColorConversion verifies the two-step color conversion:

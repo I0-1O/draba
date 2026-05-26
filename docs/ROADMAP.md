@@ -36,7 +36,7 @@ This document organizes development into discrete phases with effort estimates a
 | 9.6 | [Identity System (Color + Icon)](#phase-96--identity-system-color--icon) | M — 2–3 days | 🔄 |
 | 10.1.1 | [Teams — CRUD & Management](#phase-1011--teams--crud--management) | M — 2 days | 🔄 |
 | 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
-| 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | ⬜ |
+| 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | 🔄 |
 | 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | ⬜ |
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
@@ -673,7 +673,7 @@ Member management is the most interaction-dense part of team administration. Spl
 ---
 
 ### Phase 10.1.3 — Settings — Profile, Tokens & Admin
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** 🔄 In Progress — 2026-05-26, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
 
 Builds out the `/settings` page shell (already scaffolded in 10.1.1) into a working settings experience. Every user gets a profile page, identity management, preferences, and API token management; superadmins get SMTP configuration, instance defaults, and an orphaned-users view. Also ships the forgot-password flow, which depends on SMTP.
 

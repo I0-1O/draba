@@ -15,6 +15,7 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
 )
@@ -36,7 +37,8 @@ func activityTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID strin
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+	isr := db.NewInstanceSettingsRepo(database)
+	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), mailer.New(isr), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@activity.com", "password1", "Alice")
 
@@ -265,7 +267,8 @@ func activityTestSetupWithBus(t *testing.T) (srv http.Handler, aliceToken, teamI
 	bus = events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+	isr := db.NewInstanceSettingsRepo(database)
+	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), mailer.New(isr), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@bustest.com", "password1", "Alice")
 

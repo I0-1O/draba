@@ -16,6 +16,7 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
 	"github.com/I0-1O/draba/packages/api/internal/models"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
@@ -38,7 +39,8 @@ func newTeamTestServer(t *testing.T) (http.Handler, *auth.TokenService) {
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
-	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), tokens, tier.Unlimited, bus, hub).Routes()
+	isr := db.NewInstanceSettingsRepo(database)
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), mailer.New(isr), tokens, tier.Unlimited, bus, hub).Routes()
 	return srv, tokens
 }
 
@@ -497,9 +499,11 @@ func TestTierTeamLimit(t *testing.T) {
 	toks2 := auth.NewTokenService("test-secret")
 	bus2 := events.NewBus()
 	hub2 := ws.NewHub(bus2, toks2, func(_, _ string) error { return nil })
+	isr2 := db.NewInstanceSettingsRepo(database)
 	srv := api.NewServer(
 		users, db.NewInviteRepo(database), teamsRepo, db.NewActivityRepo(database), db.NewTimelineRepo(database),
-		db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), toks2, tier.Team, bus2, hub2,
+		db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database),
+		isr2, db.NewPasswordResetTokenRepo(database), mailer.New(isr2), toks2, tier.Team, bus2, hub2,
 	).Routes()
 
 	// Register first user (no invite needed).

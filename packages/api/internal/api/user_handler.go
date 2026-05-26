@@ -2,10 +2,140 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
 )
+
+// handleUpdateProfile handles PATCH /users/me. Updates display_name, color,
+// and icon for the authenticated user. Color/icon changes propagate to all
+// team_members rows that have not been explicitly overridden.
+func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var body struct {
+		DisplayName *string `json:"displayName"`
+		Color       *string `json:"color"`
+		Icon        *string `json:"icon"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	// Apply changes only for fields that were provided.
+	displayName := user.DisplayName
+	if body.DisplayName != nil {
+		displayName = strings.TrimSpace(*body.DisplayName)
+		if displayName == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "displayName cannot be empty")
+			return
+		}
+	}
+
+	color := user.Color
+	if body.Color != nil {
+		color = body.Color
+	}
+	icon := user.Icon
+	if body.Icon != nil {
+		icon = body.Icon
+	}
+
+	if err := s.users.UpdateProfile(user.ID, displayName, color, icon); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	user.DisplayName = displayName
+	user.Color = color
+	user.Icon = icon
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleChangePassword handles PUT /users/me/password. Requires the caller
+// to supply the current password before setting a new one.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var body struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.CurrentPassword == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "currentPassword and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "new password must be at least 8 characters")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	// Verify the current password before allowing the change.
+	if err := auth.CheckPassword(user.PasswordHash, body.CurrentPassword); err != nil {
+		writeError(w, http.StatusUnauthorized, "WRONG_PASSWORD", "current password is incorrect")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(user.ID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleListAdminUsers handles GET /admin/users. Returns all users with team
+// membership counts. Supports ?orphaned=true to filter to zero-membership users.
+// Superadmin-only.
+func (s *Server) handleListAdminUsers(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	orphanedOnly := r.URL.Query().Get("orphaned") == "true"
+	rows, err := s.users.ListAll(orphanedOnly)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"users": rows})
+}
 
 // handlePromoteUser sets is_superadmin=true on a user. Superadmin-only.
 // Participants (no user account) cannot be promoted.

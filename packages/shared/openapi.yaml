@@ -39,6 +39,14 @@ components:
         avatarUrl:
           type: string
           nullable: true
+        color:
+          type: string
+          nullable: true
+          description: User-level identity color ID. Propagates to team memberships.
+        icon:
+          type: string
+          nullable: true
+          description: User-level identity icon ID. Propagates to team memberships.
         isSuperadmin:
           type: boolean
         createdAt:
@@ -47,6 +55,76 @@ components:
         updatedAt:
           type: string
           format: date-time
+        archivedAt:
+          type: string
+          nullable: true
+          format: date-time
+
+    UpdateProfileInput:
+      type: object
+      properties:
+        displayName:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+
+    ChangePasswordInput:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+        newPassword:
+          type: string
+
+    ForgotPasswordInput:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+
+    ResetPasswordInput:
+      type: object
+      required: [token, newPassword]
+      properties:
+        token:
+          type: string
+        newPassword:
+          type: string
+
+    SMTPConfig:
+      type: object
+      properties:
+        host:
+          type: string
+        port:
+          type: integer
+        username:
+          type: string
+        password:
+          type: string
+          description: Masked in GET responses.
+        fromName:
+          type: string
+        fromEmail:
+          type: string
+        encryption:
+          type: string
+          enum: [none, tls, starttls]
+
+    AdminUserRow:
+      type: object
+      allOf:
+        - $ref: '#/components/schemas/User'
+      properties:
+        teamCount:
+          type: integer
 
     Team:
       type: object
@@ -2097,6 +2175,221 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  # ── Profile & Security ────────────────────────────────────────
+
+  /users/me:
+    patch:
+      operationId: updateProfile
+      summary: Update the authenticated user's display name, color, and icon
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProfileInput"
+      responses:
+        "200":
+          description: Updated user profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/me/password:
+    put:
+      operationId: changePassword
+      summary: Change the authenticated user's password
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordInput"
+      responses:
+        "200":
+          description: Password changed successfully.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/forgot-password:
+    post:
+      operationId: forgotPassword
+      summary: Request a password reset email
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgotPasswordInput"
+      responses:
+        "200":
+          description: Always 200; no email enumeration.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /auth/reset-password:
+    post:
+      operationId: resetPassword
+      summary: Reset a password using a valid reset token
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetPasswordInput"
+      responses:
+        "200":
+          description: Password reset successfully.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Admin ─────────────────────────────────────────────────────
+
+  /admin/smtp:
+    get:
+      operationId: getSMTPConfig
+      summary: Get current SMTP configuration (password masked)
+      tags: [admin]
+      responses:
+        "200":
+          description: SMTP config or null when not configured.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      operationId: putSMTPConfig
+      summary: Save and validate SMTP configuration
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SMTPConfig"
+      responses:
+        "200":
+          description: SMTP config saved.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    delete:
+      operationId: deleteSMTPConfig
+      summary: Clear SMTP configuration
+      tags: [admin]
+      responses:
+        "204":
+          description: SMTP config cleared.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/smtp/test:
+    post:
+      operationId: testSMTPConfig
+      summary: Send a test email using supplied config without saving
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SMTPConfig"
+      responses:
+        "200":
+          description: Test email sent.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/settings:
+    get:
+      operationId: getAdminSettings
+      summary: Get instance-level settings
+      tags: [admin]
+      responses:
+        "200":
+          description: Instance settings map.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    patch:
+      operationId: patchAdminSettings
+      summary: Update one or more instance-level settings
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+      responses:
+        "200":
+          description: Updated settings.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/users:
+    get:
+      operationId: listAdminUsers
+      summary: List all users with team membership counts
+      tags: [admin]
+      parameters:
+        - name: orphaned
+          in: query
+          required: false
+          description: When true, return only users with zero active team memberships.
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: List of admin user rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminUserRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /timelines/share/{token}:
     get:

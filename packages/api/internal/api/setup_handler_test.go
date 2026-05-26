@@ -14,6 +14,7 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
 	"github.com/I0-1O/draba/packages/api/internal/models"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
@@ -51,6 +52,7 @@ func TestSetupStatus_NoSetupNeeded(t *testing.T) {
 	toks := auth.NewTokenService("setup-test-secret")
 	bus := events.NewBus()
 	hub := ws.NewHub(bus, toks, func(_, _ string) error { return nil })
+	isrSetup := db.NewInstanceSettingsRepo(database)
 	srv := api.NewServer(
 		usersRepo,
 		db.NewInviteRepo(database),
@@ -60,6 +62,9 @@ func TestSetupStatus_NoSetupNeeded(t *testing.T) {
 		db.NewSavedFilterRepo(database),
 		db.NewUserPreferenceRepo(database),
 		db.NewAPITokenRepo(database),
+		isrSetup,
+		db.NewPasswordResetTokenRepo(database),
+		mailer.New(isrSetup),
 		toks, tier.Unlimited, bus, hub,
 	).Routes()
 

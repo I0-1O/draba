@@ -54,13 +54,16 @@ type TeamMemberWithUser struct {
 // User is an authenticated account. PasswordHash is omitted from JSON
 // to avoid leaking it through any handler that returns a User.
 // ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users.
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
 type User struct {
 	ID           string     `db:"id"             json:"id"`
 	Email        string     `db:"email"          json:"email"`
 	PasswordHash string     `db:"password_hash"  json:"-"`
 	DisplayName  string     `db:"display_name"   json:"displayName"`
 	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
 	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
 	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
 	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
@@ -186,6 +189,34 @@ type APIToken struct {
 	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
 	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
 	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
 }
 
 // Invite is a single-use token that grants an email address the right to

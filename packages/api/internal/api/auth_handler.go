@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -237,6 +238,115 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, user)
+}
+
+// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
+// address, generates a 1-hour reset token, stores the hash, and sends a
+// reset link via SMTP. Always returns 200 to prevent email enumeration.
+// When SMTP is not configured the email is silently skipped.
+func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+	if body.Email == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
+		return
+	}
+
+	// Always return 200 regardless of whether the email exists.
+	w.Header().Set("Content-Type", "application/json")
+	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
+
+	user, err := s.users.GetByEmail(body.Email)
+	if err != nil {
+		// No user — return 200 without error (prevent enumeration).
+		return
+	}
+	if user.ArchivedAt != nil {
+		return
+	}
+
+	rawToken := newToken()
+	expiresAt := time.Now().Add(time.Hour)
+	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
+		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
+		return
+	}
+
+	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
+	// when not set so the email still contains useful info.
+	baseURL := strings.TrimRight(getBaseURL(), "/")
+	resetLink := baseURL + "/reset-password?token=" + rawToken
+
+	subject := "Reset your draba password"
+	body2 := "<html><body>" +
+		"<p>You requested a password reset for your draba account.</p>" +
+		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
+		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
+		"</body></html>"
+
+	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
+		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
+	}
+}
+
+// handleResetPassword handles POST /auth/reset-password. Accepts a token and
+// new password; validates the token, hashes the new password, and marks the
+// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
+// or already used.
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token       string `json:"token"`
+		NewPassword string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.Token == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	resetToken, err := s.passwordTokens.GetValid(body.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
+		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
+func getBaseURL() string {
+	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:8080"
 }
 
 // isValidPassword applies the minimum policy: at least 8 characters and

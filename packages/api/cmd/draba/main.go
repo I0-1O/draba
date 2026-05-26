@@ -15,6 +15,7 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
 	drabui "github.com/I0-1O/draba/packages/api/ui"
@@ -80,6 +81,9 @@ func main() {
 	savedFilterRepo := db.NewSavedFilterRepo(database)
 	preferenceRepo := db.NewUserPreferenceRepo(database)
 	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	m := mailer.New(instanceSetsRepo)
 	tokens := auth.NewTokenService(jwtSecret)
 
 	bus := events.NewBus()
@@ -94,7 +98,7 @@ func main() {
 		slog.Info("modules loaded", "count", len(mods))
 	}
 
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, tokens, t, bus, hub)
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
 
 	// Wire up the embedded React SPA when a production build is present.
 	// In dev the static/ directory only has .gitkeep so this is a no-op.
