@@ -12,7 +12,6 @@ import { Plus, Trash2, ChevronDown, ChevronRight, Check, X } from 'lucide-react'
 import {
   useStatusTemplates,
   useCreateStatusTemplate,
-  useUpdateStatusTemplate,
   useDeleteStatusTemplate,
   useCreateTemplateItem,
   useUpdateTemplateItem,
