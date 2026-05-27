@@ -425,8 +425,9 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
                         Delete
                       </button>
                     )}
-                    {/* Revoke all access — hidden once the account is already deactivated */}
-                    {!isInactivated && (
+                    {/* Hidden once the account itself is deactivated — membership-level
+                        inactivation alone still leaves the account active on other teams */}
+                    {!detail.userArchivedAt && (
                       <button
                         onClick={() => setConfirm('revoke')}
                         style={{ fontSize: 12, color: '#EF4444', background: '#EF444414', border: '1px solid #EF444444', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}

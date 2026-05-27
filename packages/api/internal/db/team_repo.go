@@ -249,7 +249,7 @@ func (r *TeamRepo) DeleteMember(memberID string) error {
 }
 
 // CountMemberAssignments returns how many activity_assignments rows reference
-// this team member. Used to enforce the removal guard (10.1.4).
+// this team member. Callers use this count to block hard-delete when history exists.
 func (r *TeamRepo) CountMemberAssignments(memberID string) (int, error) {
 	var count int
 	err := r.db.Get(&count, `
@@ -262,9 +262,8 @@ func (r *TeamRepo) CountMemberAssignments(memberID string) (int, error) {
 }
 
 // DeleteMemberTimelineAccess removes all timeline_access entries for a member.
-// Must be called before DeleteMember when the member has no activity_assignments
-// (the RESTRICT FK on timeline_access.team_member_id would otherwise block the
-// team_members deletion even for clean removals).
+// Must be called before DeleteMember; the RESTRICT FK on
+// timeline_access.team_member_id blocks the team_members deletion otherwise.
 func (r *TeamRepo) DeleteMemberTimelineAccess(memberID string) error {
 	_, err := r.db.Exec(`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID)
 	if err != nil {

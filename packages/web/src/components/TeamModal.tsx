@@ -176,6 +176,12 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
     if (mode === 'new') setNameEditing(true);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Stale 409 errors belong to a specific member row; clear them when the
+  // search changes because the member list may reorder or filter differently.
+  useEffect(() => {
+    setRemoveErrors({});
+  }, [searchQ]);
+
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {

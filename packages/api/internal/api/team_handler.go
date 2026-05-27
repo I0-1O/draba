@@ -416,11 +416,21 @@ func (s *Server) handleGetMember(w http.ResponseWriter, r *http.Request) {
 	activeActivities := stats.PastDue + stats.Running + stats.Upcoming + stats.Unscheduled
 	deletable := activeActivities == 0 && len(teams) <= 1
 
+	// Expose users.archived_at separately from team_members.archived_at so the
+	// client can distinguish account deactivation from membership inactivation.
+	var userArchivedAt *time.Time
+	if m.UserID != nil {
+		if u, err := s.users.GetByID(*m.UserID); err == nil {
+			userArchivedAt = u.ArchivedAt
+		}
+	}
+
 	detail := &models.MemberDetail{
 		TeamMemberWithUser: *m,
 		Stats:              *stats,
 		Teams:              flatten(teams),
 		Deletable:          deletable,
+		UserArchivedAt:     userArchivedAt,
 	}
 	writeJSON(w, http.StatusOK, detail)
 }
@@ -575,7 +585,7 @@ func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteMember removes a team member row. Rejects if the member is the
-// last admin or has existing activity assignments (10.1.4 removal guard).
+// last admin or has activity assignments (to prevent data loss on hard-delete).
 func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	memberID := r.PathValue("memberId")
@@ -621,7 +631,9 @@ func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Removal guard: reject if the member has activity assignments (10.1.4).
+	// Reject hard-delete when assignments exist: the RESTRICT FK would block it
+	// anyway, but we surface a 409 with the count so the UI can offer
+	// "Inactivate instead" rather than a generic error.
 	assignCount, err := s.teams.CountMemberAssignments(memberID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")

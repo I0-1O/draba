@@ -122,11 +122,14 @@ type MemberStats struct {
 
 // MemberDetail combines a TeamMemberWithUser with computed stats and the
 // member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
 type MemberDetail struct {
 	TeamMemberWithUser
-	Stats     MemberStats          `json:"stats"`
-	Teams     []TeamMemberWithUser `json:"teams"`
-	Deletable bool                 `json:"deletable"`
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
 }
 
 // Timeline is a named date range over a team's events. It is not a data
@@ -219,7 +222,7 @@ type AdminUserRow struct {
 	TeamCount int `db:"team_count" json:"teamCount"`
 }
 
-// RevokeUserResult summarises the outcome of POST /users/:id/revoke.
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
 // The three counters let the caller show a meaningful summary in the UI.
 type RevokeUserResult struct {
 	AccountDeactivated     bool `json:"accountDeactivated"`

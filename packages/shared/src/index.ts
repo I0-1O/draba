@@ -961,6 +961,11 @@ export interface components {
             teams: components["schemas"]["TeamMemberWithUser"][];
             /** @description True when the member can be hard-deleted (no active activities, single team). */
             deletable: boolean;
+            /**
+             * Format: date-time
+             * @description Set when the user account is deactivated (users.archived_at). Null for active accounts and participants.
+             */
+            userArchivedAt?: string | null;
         };
         Invite: {
             id: string;
@@ -2208,7 +2213,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application\\json": components["schemas"]["RevokeUserResult"];
+                    "application/json": components["schemas"]["RevokeUserResult"];
                 };
             };
             401: components["responses"]["Unauthorized"];

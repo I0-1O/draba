@@ -663,6 +663,50 @@ func TestDeleteMember_Success(t *testing.T) {
 	assert.Len(t, remaining, 1)
 }
 
+func TestDeleteMember_HasAssignments_Returns409(t *testing.T) {
+	srv, aliceToken, _, teamID := memberTestSetup(t)
+
+	// Find Bob's member ID.
+	wList := httptest.NewRecorder()
+	srv.ServeHTTP(wList, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, wList.Code)
+	var members []map[string]any
+	require.NoError(t, json.NewDecoder(wList.Body).Decode(&members))
+	var bobMemberID string
+	for _, m := range members {
+		if m["email"] == "bob@member.com" {
+			bobMemberID = m["id"].(string)
+		}
+	}
+	require.NotEmpty(t, bobMemberID)
+
+	// Create an activity and assign it to Bob.
+	wAct := httptest.NewRecorder()
+	srv.ServeHTTP(wAct, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), map[string]any{
+		"title":   "Assigned Work",
+		"startAt": "2026-06-01T09:00:00Z",
+		"endAt":   "2026-06-01T17:00:00Z",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, wAct.Code)
+	var act map[string]any
+	require.NoError(t, json.NewDecoder(wAct.Body).Decode(&act))
+
+	wAssign := httptest.NewRecorder()
+	srv.ServeHTTP(wAssign, authReq(http.MethodPatch, fmt.Sprintf("/activities/%s", act["id"].(string)),
+		map[string]any{"assignedMemberIds": []string{bobMemberID}}, aliceToken))
+	require.Equal(t, http.StatusOK, wAssign.Code)
+
+	// Removing Bob must be rejected with 409 and include the assignment count.
+	wDel := httptest.NewRecorder()
+	srv.ServeHTTP(wDel, authReq(http.MethodDelete, fmt.Sprintf("/teams/%s/members/%s", teamID, bobMemberID),
+		nil, aliceToken))
+	assert.Equal(t, http.StatusConflict, wDel.Code)
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(wDel.Body).Decode(&body))
+	assert.Equal(t, "MEMBER_HAS_ASSIGNMENTS", body["error"].(map[string]any)["code"])
+	assert.Equal(t, float64(1), body["assignmentCount"])
+}
+
 func TestArchiveMember_LastAdminBlocked(t *testing.T) {
 	srv, aliceToken, _, teamID := memberTestSetup(t)
 

@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short._
 
-**Last updated:** 2026-05-27
+**Last updated:** 2026-05-27 (post-review fixes)
 
 ---
 
@@ -20,15 +20,21 @@ Next phase to build: **10.2** — Team Statuses & Member Colors (API + UI).
 
 ---
 
-## Phase 10.1.4 Implemented (2026-05-27 — not yet Docker-verified)
+## Phase 10.1.4 Implemented + Post-Review Fixes (2026-05-27 — not yet Docker-verified)
 
 **Backend:**
 - Migration 011: rebuilt `activity_assignments` and `timeline_access` with `ON DELETE RESTRICT` on `team_member_id` FK (was CASCADE)
 - `CountMemberAssignments`, `DeleteMemberTimelineAccess` added to `team_repo.go`
 - `handleDeleteMember` now guards removal: 409 `MEMBER_HAS_ASSIGNMENTS` if count > 0; deletes `timeline_access` first for clean removals
 - `RevokeUser(userID)` in `user_repo.go`: atomic transaction — archive user + inactivate/remove all memberships
-- `handleRevokeUser` handler + `POST /users/{id}/revoke` route (superadmin only)
+- `handleRevokeUser` handler + `POST /users/{id}/revoke` route (superadmin only); self-revoke blocked with `CANNOT_SELF_REVOKE`
 - `RevokeUserResult` model + OpenAPI schema + regenerated TS types
+- `MemberDetail` now includes `UserArchivedAt` (account-level deactivation, separate from membership `archivedAt`)
+
+**Tests (post-review additions):**
+- `revoke_user_test.go`: 403/400/404/200 handler paths + assignment-history path
+- `user_repo_test.go`: RevokeUser transaction — inactivate-with-history, remove-zero-history, mixed-memberships
+- `team_handler_test.go`: `TestDeleteMember_HasAssignments_Returns409`
 
 **Frontend:**
 - `ApiError` extended with `data?: Record<string, unknown>`; `parseError` extracts extra response fields

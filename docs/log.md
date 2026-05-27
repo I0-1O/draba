@@ -2,6 +2,39 @@
 
 ---
 
+## 2026-05-27 — /review-phase 10.1.4 — fixes applied
+
+Post-review fixes across security, tests, spec, and conventions:
+
+**Security:**
+- `user_handler.go` — added self-revoke guard (`CANNOT_SELF_REVOKE` 400) to `handleRevokeUser`; prevents a superadmin from locking themselves out
+
+**Spec / types:**
+- `openapi.yaml` — fixed `application\json` typo (backslash) → `application/json` in `POST /users/{id}/revoke` 200 response
+- `openapi.yaml` — added `userArchivedAt` field to `MemberDetail` schema (account-level deactivation, distinct from membership-level `archivedAt`)
+- `models.go` — added `UserArchivedAt *time.Time` to `MemberDetail`; updated doc comment
+- `team_handler.go` — `handleGetMember` now populates `UserArchivedAt` from `users.archived_at`
+- Regenerated `packages/shared/src/index.ts`
+
+**Tests (new):**
+- `revoke_user_test.go` — handler tests: 403 non-superadmin, 400 self-revoke, 404 not found, 200 success (zero-history + with-assignments paths)
+- `user_repo_test.go` — repo tests: inactivates memberships with history, removes zero-history memberships, handles mixed-membership users
+- `team_handler_test.go` — `TestDeleteMember_HasAssignments_Returns409` tests 409 path with `assignmentCount` in response
+
+**Conventions:**
+- Removed phase number references from doc/inline comments in `team_handler.go`, `team_repo.go`; replaced with WHY explanations
+- Fixed "summarises" → "summarizes" in `models.go`
+
+**Frontend:**
+- `MemberModal.tsx` — "Revoke all access" button now hides when `userArchivedAt` is set (account-level deactivation) rather than when the team membership is inactivated; updated comment to explain the distinction
+- `TeamModal.tsx` — added `useEffect` to clear `removeErrors` when `searchQ` changes
+
+**Needs manual Docker verification:**
+- Revoke all access on a user who has mixed memberships (some with history, some without)
+- "Revoke all access" button hidden for already-deactivated accounts but visible for inactivated-only memberships
+
+---
+
 ## 2026-05-27 — Phase 10.1.4 — Member Access & Data Lifecycle
 
 **Backend:**
@@ -35,6 +68,14 @@
 - Remove member with assignments → 409 + inline error + "Inactivate instead" one-click
 - Remove member with zero assignments → success
 - "Revoke all access" → account deactivated, login rejected, Gantt bars still show avatar
+
+---
+
+## 2026-05-27 — /test-phase 10.1.4
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (8/8)
+- Smoke target: http://epcot.lan:8081
 
 ---
 

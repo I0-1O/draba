@@ -246,6 +246,11 @@ components:
             deletable:
               type: boolean
               description: True when the member can be hard-deleted (no active activities, single team).
+            userArchivedAt:
+              type: string
+              format: date-time
+              nullable: true
+              description: Set when the user account is deactivated (users.archived_at). Null for active accounts and participants.
 
     Invite:
       type: object
@@ -1649,7 +1654,7 @@ paths:
         "200":
           description: Revocation summary.
           content:
-            application\json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/RevokeUserResult"
         "401":

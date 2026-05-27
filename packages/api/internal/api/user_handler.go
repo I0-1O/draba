@@ -259,9 +259,7 @@ func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRevokeUser atomically revokes all access for a user. Superadmin-only.
-// Sets users.archived_at (blocks login), sets archived_at on all team_members
-// rows for the user that have activity assignments, and hard-deletes rows with
-// zero assignments. Returns a summary of the actions taken.
+// Self-revoke is blocked to prevent a superadmin from locking themselves out.
 func (s *Server) handleRevokeUser(w http.ResponseWriter, r *http.Request) {
 	userID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
@@ -273,6 +271,10 @@ func (s *Server) handleRevokeUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if !caller.IsSuperadmin {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_REVOKE", "cannot revoke your own account")
 		return
 	}
 

@@ -818,7 +818,8 @@ Hard-delete of a `team_members` row is only ever permitted when the member has z
 
 *API — full revoke (superadmin only):*
 - `POST /users/:id/revoke` — new endpoint; atomically: (1) sets `users.archived_at` (blocks login everywhere), (2) sets `archived_at` on every `team_members` row for the user (inactivates all memberships), (3) hard-deletes any `team_members` rows where assignment count is 0 (cleans up zero-history memberships); returns `{ accountDeactivated: true, membershipsInactivated: N, membershipsRemoved: N }`
-- Superadmin only; no-op if user is already fully archived; 403 if caller is not superadmin
+- Superadmin only; 403 if caller is not superadmin; 400 `CANNOT_SELF_REVOKE` if caller targets their own account
+- Note: the original spec listed a 409 for participant targets. This is unreachable — participants have no `users` row so `/users/:id/revoke` returns 404 naturally; no separate guard is needed.
 
 *Web — TeamModal Members tab:*
 - Remove (×) button: on 409 `MEMBER_HAS_ASSIGNMENTS`, show an inline error beneath the member row: *"N assignment(s) found — [Inactivate instead]"* where the bracketed text is a direct action button that calls the archive endpoint
