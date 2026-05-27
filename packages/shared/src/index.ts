@@ -456,6 +456,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/{id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Atomically revoke all access for a user (superadmin only)
+         * @description Sets users.archived_at (blocks login everywhere), inactivates all team memberships that have activity assignments, and hard-deletes memberships with zero assignments. Returns a summary of the three operations.
+         */
+        post: operations["revokeUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users/{id}": {
         parameters: {
             query?: never;
@@ -1074,6 +1094,11 @@ export interface components {
                 code: string;
                 message: string;
             };
+        };
+        RevokeUserResult: {
+            accountDeactivated: boolean;
+            membershipsInactivated: number;
+            membershipsRemoved: number;
         };
     };
     responses: {
@@ -2158,6 +2183,32 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["User"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    revokeUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revocation summary. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application\\json": components["schemas"]["RevokeUserResult"];
                 };
             };
             401: components["responses"]["Unauthorized"];

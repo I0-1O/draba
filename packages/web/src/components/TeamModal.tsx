@@ -9,6 +9,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Archive, Mail, Link2, Copy, Check, Plus, Minus, RefreshCw, UserMinus } from 'lucide-react';
+import { ApiError } from '@/lib/api';
 import { IdentityWidget } from '@/components/identity/IdentityWidget';
 import { Badge } from '@/components/identity/Badge';
 import type { Identity } from '@/components/identity/identity-constants';
@@ -149,6 +150,8 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
 
   const [searchQ, setSearchQ] = useState('');
   const [showParticipantForm, setShowParticipantForm] = useState(false);
+  // Maps memberId → assignmentCount when a 409 MEMBER_HAS_ASSIGNMENTS is returned.
+  const [removeErrors, setRemoveErrors] = useState<Record<string, number>>({});
   const [participantName, setParticipantName] = useState('');
   const [participantIdentity, setParticipantIdentity] = useState<Identity>({ color: IDENTITY_COLORS[3].hex, icon: '__name_1__' });
   const [copyLinkLabel, setCopyLinkLabel] = useState<'copy' | 'copied'>('copy');
@@ -533,73 +536,100 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
                     const isParticipant = !m.userId;
                     const isInactive = Boolean(m.archivedAt);
                     const memberRole: MemberRole = isParticipant ? 'participant' : (m.role as MemberRole);
+                    const removeError = removeErrors[m.id];
                     return (
-                      <div
-                        key={m.id}
-                        style={{
-                          display: 'flex', alignItems: 'center', gap: 10,
-                          padding: '7px 10px', borderRadius: 7,
-                          background: isInactive ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)',
-                          opacity: isInactive ? 0.5 : 1,
-                        }}
-                      >
-                        <div style={{ flexShrink: 0, border: isParticipant ? '1.5px dashed #484f58' : 'none', borderRadius: '50%' }}>
-                          <Badge
-                            identity={{ color: m.color ?? '#8b949e', icon: m.icon ?? '__name_words__' }}
-                            name={m.displayName}
-                            shape="circle"
-                            size={24}
-                          />
-                        </div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <span style={{ fontSize: 13, color: '#e6edf3', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.displayName}</span>
-                            {isParticipant && <span style={{ fontSize: 10, fontWeight: 600, background: '#F59E0B20', border: '1px solid #F59E0B44', color: '#F59E0B', borderRadius: 99, padding: '0px 5px', flexShrink: 0 }}>No login</span>}
+                      <div key={m.id}>
+                        <div
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 10,
+                            padding: '7px 10px', borderRadius: 7,
+                            background: isInactive ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)',
+                            opacity: isInactive ? 0.5 : 1,
+                          }}
+                        >
+                          <div style={{ flexShrink: 0, border: isParticipant ? '1.5px dashed #484f58' : 'none', borderRadius: '50%' }}>
+                            <Badge
+                              identity={{ color: m.color ?? '#8b949e', icon: m.icon ?? '__name_words__' }}
+                              name={m.displayName}
+                              shape="circle"
+                              size={24}
+                            />
                           </div>
-                          {!isParticipant && <div style={{ fontSize: 11, color: '#484f58', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ fontSize: 13, color: '#e6edf3', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.displayName}</span>
+                              {isParticipant && <span style={{ fontSize: 10, fontWeight: 600, background: '#F59E0B20', border: '1px solid #F59E0B44', color: '#F59E0B', borderRadius: 99, padding: '0px 5px', flexShrink: 0 }}>No login</span>}
+                            </div>
+                            {!isParticipant && <div style={{ fontSize: 11, color: '#484f58', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>}
+                          </div>
+                          {isAdmin && (
+                            <RoleDropdown
+                              value={memberRole}
+                              onChange={role => {
+                                if (isParticipant || role === 'participant') return;
+                                updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
+                              }}
+                              disabled={isParticipant || m.userId === currentUserId}
+                              hideParticipant={!isParticipant}
+                            />
+                          )}
+                          {isAdmin && (
+                            <div style={{ display: 'flex', gap: 4 }}>
+                              {isInactive ? (
+                                <button
+                                  title="Reactivate member"
+                                  onClick={() => unarchiveMember.mutate(m.id)}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
+                                  onMouseEnter={e => (e.currentTarget.style.color = '#1A97A2')}
+                                  onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
+                                >
+                                  <RefreshCw size={13} />
+                                </button>
+                              ) : (
+                                <button
+                                  title="Inactivate member"
+                                  onClick={() => archiveMember.mutate(m.id)}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
+                                  onMouseEnter={e => (e.currentTarget.style.color = '#F59E0B')}
+                                  onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
+                                >
+                                  <UserMinus size={13} />
+                                </button>
+                              )}
+                              <button
+                                title="Remove from team"
+                                onClick={() => {
+                                  setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; });
+                                  deleteMember.mutate(m.id, {
+                                    onError: (err) => {
+                                      if (err instanceof ApiError && err.code === 'MEMBER_HAS_ASSIGNMENTS') {
+                                        const count = (err.data?.assignmentCount as number) ?? 0;
+                                        setRemoveErrors(prev => ({ ...prev, [m.id]: count }));
+                                      }
+                                    },
+                                  });
+                                }}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
+                                onMouseEnter={e => (e.currentTarget.style.color = '#EF4444')}
+                                onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
+                              >
+                                <Minus size={13} />
+                              </button>
+                            </div>
+                          )}
                         </div>
-                        {isAdmin && (
-                          <RoleDropdown
-                            value={memberRole}
-                            onChange={role => {
-                              if (isParticipant || role === 'participant') return;
-                              updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
-                            }}
-                            disabled={isParticipant || m.userId === currentUserId}
-                            hideParticipant={!isParticipant}
-                          />
-                        )}
-                        {isAdmin && (
-                          <div style={{ display: 'flex', gap: 4 }}>
-                            {isInactive ? (
-                              <button
-                                title="Reactivate member"
-                                onClick={() => unarchiveMember.mutate(m.id)}
-                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
-                                onMouseEnter={e => (e.currentTarget.style.color = '#1A97A2')}
-                                onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
-                              >
-                                <RefreshCw size={13} />
-                              </button>
-                            ) : (
-                              <button
-                                title="Inactivate member"
-                                onClick={() => archiveMember.mutate(m.id)}
-                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
-                                onMouseEnter={e => (e.currentTarget.style.color = '#F59E0B')}
-                                onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
-                              >
-                                <UserMinus size={13} />
-                              </button>
-                            )}
+                        {removeError !== undefined && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#F59E0B', padding: '4px 10px 4px 44px' }}>
+                            <span>{removeError} assignment{removeError === 1 ? '' : 's'} — can't remove.</span>
                             <button
-                              title="Remove from team"
-                              onClick={() => deleteMember.mutate(m.id)}
-                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
-                              onMouseEnter={e => (e.currentTarget.style.color = '#EF4444')}
-                              onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
+                              onClick={() => {
+                                archiveMember.mutate(m.id, {
+                                  onSuccess: () => setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; }),
+                                });
+                              }}
+                              style={{ fontSize: 12, color: '#F59E0B', background: 'none', border: '1px solid #F59E0B66', borderRadius: 5, padding: '2px 8px', cursor: 'pointer', fontFamily: 'inherit' }}
                             >
-                              <Minus size={13} />
+                              Inactivate instead
                             </button>
                           </div>
                         )}

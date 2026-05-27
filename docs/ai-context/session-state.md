@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short._
 
-**Last updated:** 2026-05-26
+**Last updated:** 2026-05-27
 
 ---
 
@@ -14,9 +14,27 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.1.1 | Teams CRUD | ✅ | ⬜ needs Docker verification |
 | 10.1.2 | Members Management | ✅ | ⬜ needs Docker verification |
 | 10.1.3 | Settings — Profile, Tokens & Admin | ✅ | ⬜ needs Docker verification |
-| 10.1.4 | Member Access & Data Lifecycle | ⬜ not started | — |
+| 10.1.4 | Member Access & Data Lifecycle | ✅ | ⬜ needs Docker verification |
 
-Next phase to build: **10.1.4** — Member Access & Data Lifecycle (FK enforcement, removal guard, "Revoke all access" superadmin action).
+Next phase to build: **10.2** — Team Statuses & Member Colors (API + UI).
+
+---
+
+## Phase 10.1.4 Implemented (2026-05-27 — not yet Docker-verified)
+
+**Backend:**
+- Migration 011: rebuilt `activity_assignments` and `timeline_access` with `ON DELETE RESTRICT` on `team_member_id` FK (was CASCADE)
+- `CountMemberAssignments`, `DeleteMemberTimelineAccess` added to `team_repo.go`
+- `handleDeleteMember` now guards removal: 409 `MEMBER_HAS_ASSIGNMENTS` if count > 0; deletes `timeline_access` first for clean removals
+- `RevokeUser(userID)` in `user_repo.go`: atomic transaction — archive user + inactivate/remove all memberships
+- `handleRevokeUser` handler + `POST /users/{id}/revoke` route (superadmin only)
+- `RevokeUserResult` model + OpenAPI schema + regenerated TS types
+
+**Frontend:**
+- `ApiError` extended with `data?: Record<string, unknown>`; `parseError` extracts extra response fields
+- `useRevokeUser` hook added to `useMemberManagement.ts`
+- `TeamModal.tsx`: remove button handles 409 with inline "N assignments — can't remove" error + "Inactivate instead" one-click action
+- `MemberModal.tsx`: "Revoke all access" button + confirmation dialog in Super Admin Actions; shows result summary before closing
 
 ---
 
@@ -105,6 +123,17 @@ These were found during manual testing of 10.1.2 and fixed 2026-05-25:
 - **repomap.md usage:** Use Grep on it for targeted symbol lookups; do not read it wholesale (1.3 MB, exceeds Read tool limit).
 
 ---
+
+## Manual Verification Checklist for 10.1.4 (against epcot.lan:8081)
+
+- [ ] Remove a member who has activity assignments → 409; inline error "N assignments — can't remove" appears beneath the member row
+- [ ] Click "Inactivate instead" from the inline error → member becomes inactive; error clears
+- [ ] Remove a member with zero assignments → success (member removed immediately)
+- [ ] Superadmin: open MemberModal for an active user → "Revoke all access" button visible in Super Admin Actions
+- [ ] Click "Revoke all access" → confirmation dialog shows the three effects
+- [ ] Confirm → user cannot log in; result summary chip shows counts; modal closes after 2s
+- [ ] Gantt bars that were assigned to the revoked/inactivated member still show their avatar/name (data preserved)
+- [ ] "Revoke all access" button hidden for already-deactivated accounts
 
 ## Manual Verification Checklist for 10.1.3 (against epcot.lan:8081)
 

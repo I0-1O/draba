@@ -575,7 +575,7 @@ func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteMember removes a team member row. Rejects if the member is the
-// last admin.
+// last admin or has existing activity assignments (10.1.4 removal guard).
 func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	memberID := r.PathValue("memberId")
@@ -619,6 +619,31 @@ func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot remove the last admin")
 			return
 		}
+	}
+
+	// Removal guard: reject if the member has activity assignments (10.1.4).
+	assignCount, err := s.teams.CountMemberAssignments(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+	if assignCount > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]string{
+				"code":    "MEMBER_HAS_ASSIGNMENTS",
+				"message": "member has activity assignments; inactivate instead of removing",
+			},
+			"assignmentCount": assignCount,
+		})
+		return
+	}
+
+	// Delete timeline_access first so the RESTRICT FK on team_members is satisfied.
+	if err := s.teams.DeleteMemberTimelineAccess(memberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
 	}
 
 	if err := s.teams.DeleteMember(memberID); err != nil {

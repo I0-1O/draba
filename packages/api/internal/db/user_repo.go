@@ -227,6 +227,79 @@ func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
 	return rows, nil
 }
 
+// RevokeUser atomically revokes all access for a user:
+//  1. Sets users.archived_at (blocks login everywhere).
+//  2. For each team_members row for the user:
+//     – if assignment count is 0: deletes timeline_access then the row.
+//     – otherwise: sets team_members.archived_at (inactivates without data loss).
+//
+// Returns a summary of the actions taken. The caller must ensure the user
+// exists and is not a participant before calling.
+func (r *UserRepo) RevokeUser(userID string) (*models.RevokeUserResult, error) {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return nil, fmt.Errorf("beginning revoke transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now()
+
+	// Step 1: deactivate the account.
+	if _, err := tx.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		now, userID,
+	); err != nil {
+		return nil, fmt.Errorf("deactivating user account: %w", err)
+	}
+
+	// Step 2: collect all team_members rows for the user.
+	var memberIDs []string
+	if err := tx.Select(&memberIDs,
+		`SELECT id FROM team_members WHERE user_id = ?`, userID,
+	); err != nil {
+		return nil, fmt.Errorf("listing memberships: %w", err)
+	}
+
+	result := &models.RevokeUserResult{AccountDeactivated: true}
+
+	for _, memberID := range memberIDs {
+		var assignCount int
+		if err := tx.Get(&assignCount,
+			`SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?`, memberID,
+		); err != nil {
+			return nil, fmt.Errorf("counting assignments for member %s: %w", memberID, err)
+		}
+
+		if assignCount == 0 {
+			// No history — delete timeline_access then the member row.
+			if _, err := tx.Exec(
+				`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("deleting timeline access for member %s: %w", memberID, err)
+			}
+			if _, err := tx.Exec(
+				`DELETE FROM team_members WHERE id = ?`, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("deleting member %s: %w", memberID, err)
+			}
+			result.MembershipsRemoved++
+		} else {
+			// Has activity history — inactivate without deleting.
+			if _, err := tx.Exec(
+				`UPDATE team_members SET archived_at = ? WHERE id = ?`, now, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("inactivating member %s: %w", memberID, err)
+			}
+			result.MembershipsInactivated++
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing revoke transaction: %w", err)
+	}
+	return result, nil
+}
+
 // ptrEqual reports whether two string pointers point to equal values,
 // treating nil and a pointer to "" as distinct.
 func ptrEqual(a, b *string) bool {

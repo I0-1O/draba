@@ -517,6 +517,17 @@ components:
             message:
               type: string
 
+    RevokeUserResult:
+      type: object
+      required: [accountDeactivated, membershipsInactivated, membershipsRemoved]
+      properties:
+        accountDeactivated:
+          type: boolean
+        membershipsInactivated:
+          type: integer
+        membershipsRemoved:
+          type: integer
+
   # ────────────────────────────────────────────────────────────
   # Reusable responses
   # ────────────────────────────────────────────────────────────
@@ -1610,6 +1621,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/{id}/revoke:
+    post:
+      operationId: revokeUser
+      summary: Atomically revoke all access for a user (superadmin only)
+      description: >
+        Sets users.archived_at (blocks login everywhere), inactivates all team
+        memberships that have activity assignments, and hard-deletes memberships
+        with zero assignments. Returns a summary of the three operations.
+      tags: [users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Revocation summary.
+          content:
+            application\json:
+              schema:
+                $ref: "#/components/schemas/RevokeUserResult"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

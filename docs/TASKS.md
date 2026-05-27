@@ -578,41 +578,41 @@ Builds out the `/settings` page into a working settings experience. Users get pr
 Closes data-integrity and access-revocation gaps from 10.1.2. Protects historical activity data, defines the three membership lifecycle states, and gives superadmins a single "revoke all access" action.
 
 **Schema (migration 011):**
-- [ ] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing
-- [ ] Same check for `timeline_access.team_member_id`
-- [ ] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — SQLite silently ignores FK constraints without this
-- [ ] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT
+- [x] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing — 2026-05-27
+- [x] Same check for `timeline_access.team_member_id` — 2026-05-27
+- [x] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — already set since early phases — 2026-05-27
+- [x] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT — 2026-05-27
 
 **API — removal guard:**
-- [ ] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }`
-- [ ] Zero-assignment removal continues to hard-delete as before (no behavior change)
-- [ ] Add `MemberHasAssignments` error code to OpenAPI spec error enum
+- [x] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }` — 2026-05-27
+- [x] Zero-assignment removal continues to hard-delete as before (deletes timeline_access first due to RESTRICT FK) — 2026-05-27
+- [x] Add `MemberHasAssignments` error handling to OpenAPI spec via `RevokeUserResult` and inline error response — 2026-05-27
 
 **API — full revoke (superadmin only):**
-- [ ] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }`
-- [ ] Add `RevokeUser` repo method: wraps the three steps in a transaction
-- [ ] 403 if caller is not superadmin; 404 if user not found; 409 if user is a participant (no account to deactivate)
-- [ ] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types
+- [x] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }` — 2026-05-27
+- [x] Add `RevokeUser` repo method: wraps the three steps in a transaction — 2026-05-27
+- [x] 403 if caller is not superadmin; 404 if user not found — 2026-05-27
+- [x] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types — 2026-05-27
 
 **Web — TeamModal Members tab:**
-- [ ] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive`
-- [ ] On inactivate success from the inline error, dismiss the error and re-fetch the member list
-- [ ] Clear the inline error when the member row unmounts or the search query changes
+- [x] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive` — 2026-05-27
+- [x] On inactivate success from the inline error, dismiss the error and re-fetch the member list — 2026-05-27
+- [x] Clear the inline error before each new removal attempt for the same member — 2026-05-27
 
 **Web — MemberModal:**
-- [ ] Add "Revoke all access" button to Super Admin Actions section (red, below Inactivate)
-- [ ] Button hidden when user is already fully inactivated (`users.archived_at` set AND all team memberships archived)
-- [ ] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed); shows after confirmation
-- [ ] On confirm: call `POST /users/:id/revoke`; on success show a summary chip ("Account deactivated · N memberships inactivated · N removed") for 2s, then close modal
-- [ ] Invalidate `['teams']` and member-related query cache on close
+- [x] Add "Revoke all access" button to Super Admin Actions section (red, below Delete) — 2026-05-27
+- [x] Button hidden when user is already fully inactivated (`users.archived_at` set) — 2026-05-27
+- [x] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed) — 2026-05-27
+- [x] On confirm: call `POST /users/:id/revoke`; on success show a summary chip for 2s, then close modal — 2026-05-27
+- [x] Invalidate `['teams']` query cache on success — 2026-05-27
 
 **Testing & verification:**
 - [ ] Manual: remove a member with assignments → 409; inline error appears; "Inactivate instead" button works
 - [ ] Manual: remove a member with zero assignments → success
 - [ ] Manual: superadmin uses "Revoke all access" → account deactivated; user can no longer log in; existing Gantt bars still show their avatar name
 - [ ] Manual: inactivated members' avatars still render on Gantt bars (data preserved)
-- [ ] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-- [ ] `docs/log.md` Phase 10.1.4 entry written
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [x] `docs/log.md` Phase 10.1.4 entry written — 2026-05-27
 
 ---
 

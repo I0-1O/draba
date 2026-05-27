@@ -37,7 +37,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.1.1 | [Teams — CRUD & Management](#phase-1011--teams--crud--management) | M — 2 days | 🔄 |
 | 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
 | 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | 🔄 |
-| 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | ⬜ |
+| 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | 🔄 |
 | 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
 | 10.4 | [Preference Consumption, Branding & Backup](#phase-104--preference-consumption-branding--backup-admin) | S — 1 day | ⬜ |
@@ -784,7 +784,7 @@ Builds out the `/settings` page shell (already scaffolded in 10.1.1) into a work
 ---
 
 ### Phase 10.1.4 — Member Access & Data Lifecycle
-**Status:** ⬜ | **Effort:** S–M (1–2 days)
+**Status:** 🔄 In Progress — 2026-05-27, all automated checks pass; manual Docker verification still needed | **Effort:** S–M (1–2 days)
 
 Closes the data-integrity and access-revocation gaps left open by 10.1.2. Defines explicit semantics for every lifecycle state a member can be in and ensures that activity data is never silently orphaned or destroyed.
 

@@ -157,6 +157,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
 	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
 	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
 	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
 	mux.HandleFunc("POST /teams/{id}/activities", chain(s.handleCreateActivity, s.authMiddleware))
 	mux.HandleFunc("GET /teams/{id}/activities", chain(s.handleListActivities, s.authMiddleware))

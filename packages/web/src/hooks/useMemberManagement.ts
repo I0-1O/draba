@@ -15,6 +15,7 @@ type MemberDetail = components['schemas']['MemberDetail']
 type Invite = components['schemas']['Invite']
 type InviteLink = components['schemas']['InviteLink']
 type User = components['schemas']['User']
+type RevokeUserResult = components['schemas']['RevokeUserResult']
 
 // ── Query keys ─────────────────────────────────────────────────────────────
 
@@ -282,5 +283,24 @@ export function useDeleteUser() {
   return useMutation({
     mutationFn: (userId: string) =>
       authFetch<void>(`/users/${userId}`, { method: 'DELETE' }),
+  })
+}
+
+/**
+ * Atomically revokes all access for a user (superadmin only).
+ * Deactivates the account, inactivates memberships with assignments, and
+ * removes memberships with zero assignments.
+ */
+export function useRevokeUser() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (userId: string) =>
+      authFetch<RevokeUserResult>(`/users/${userId}/revoke`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
   })
 }

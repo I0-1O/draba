@@ -219,6 +219,14 @@ type AdminUserRow struct {
 	TeamCount int `db:"team_count" json:"teamCount"`
 }
 
+// RevokeUserResult summarises the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
+
 // Invite is a single-use token that grants an email address the right to
 // join a Team. AcceptedAt is non-nil once consumed; expired or accepted
 // invites are rejected by the registration handler.

@@ -258,6 +258,42 @@ func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, target)
 }
 
+// handleRevokeUser atomically revokes all access for a user. Superadmin-only.
+// Sets users.archived_at (blocks login), sets archived_at on all team_members
+// rows for the user that have activity assignments, and hard-deletes rows with
+// zero assignments. Returns a summary of the actions taken.
+func (s *Server) handleRevokeUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+
+	result, err := s.users.RevokeUser(target.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 // handleDeleteUser hard-deletes a user. Superadmin-only. Only permitted when
 // the user has no active activity assignments and belongs to a single team.
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {

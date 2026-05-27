@@ -27,6 +27,8 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    /** Extra fields from the error response body (e.g. assignmentCount on 409). */
+    public readonly data?: Record<string, unknown>,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -50,8 +52,10 @@ export function clearStoredRefreshToken(): void {
 
 async function parseError(res: Response): Promise<ApiError> {
   try {
-    const body = (await res.json()) as ApiErrorBody
-    return new ApiError(res.status, body.error.code, body.error.message)
+    const body = (await res.json()) as ApiErrorBody & Record<string, unknown>
+    const { error, ...rest } = body
+    const data = Object.keys(rest).length > 0 ? (rest as Record<string, unknown>) : undefined
+    return new ApiError(res.status, error.code, error.message, data)
   } catch {
     return new ApiError(res.status, 'UNKNOWN', res.statusText)
   }

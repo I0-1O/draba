@@ -2,6 +2,42 @@
 
 ---
 
+## 2026-05-27 — Phase 10.1.4 — Member Access & Data Lifecycle
+
+**Backend:**
+- `011_fk_restrict.sql` — rebuilt `activity_assignments` and `timeline_access` with `ON DELETE RESTRICT` on `team_member_id` FK (was CASCADE); prevents silent data destruction when a member row is deleted
+- `PRAGMA foreign_keys = ON` was already set in `db.Open()` since Phase 8.0; verified and documented
+- `team_repo.go` — added `CountMemberAssignments(memberID)` and `DeleteMemberTimelineAccess(memberID)` methods
+- `team_handler.go` — `handleDeleteMember` now counts `activity_assignments` before deleting; if count > 0 returns 409 `MEMBER_HAS_ASSIGNMENTS` with `assignmentCount` in the response body; deletes `timeline_access` rows before deleting the `team_members` row (required by new RESTRICT FK)
+- `user_repo.go` — added `RevokeUser(userID)`: atomically archives the user, inactivates memberships with assignments, hard-deletes memberships with zero assignments; wrapped in a single transaction
+- `user_handler.go` — added `handleRevokeUser` (superadmin only); wires `RevokeUser` and returns `RevokeUserResult`
+- `server.go` — registered `POST /users/{id}/revoke`
+- `models.go` — added `RevokeUserResult` struct
+- `migrations_test.go` — added assertions: `PRAGMA foreign_keys = 1`; `activity_assignments.team_member_id` FK is `RESTRICT`; `timeline_access.team_member_id` FK is `RESTRICT`
+
+**OpenAPI + types:**
+- Added `RevokeUserResult` schema to spec
+- Added `POST /users/{id}/revoke` endpoint to spec
+- Regenerated TypeScript types
+
+**Frontend:**
+- `api.ts` — extended `ApiError` with optional `data?: Record<string, unknown>`; `parseError` now extracts extra fields from the error response body (used to surface `assignmentCount` from 409)
+- `useMemberManagement.ts` — added `useRevokeUser` hook (invalidates `['teams']` on success)
+- `TeamModal.tsx` — remove (×) button now handles 409 `MEMBER_HAS_ASSIGNMENTS`; shows inline error "N assignments — can't remove" with an "Inactivate instead" one-click action; clears on next removal attempt
+- `MemberModal.tsx` — added "Revoke all access" button (red, hidden when account already deactivated); confirmation dialog lists all three effects; on success shows summary chip and closes after 2s
+
+**Verified (automated):**
+- `go test ./...` — all pass including new migration assertions
+- `golangci-lint run` — clean
+- `pnpm --filter web lint` — clean
+
+**Needs manual Docker verification:**
+- Remove member with assignments → 409 + inline error + "Inactivate instead" one-click
+- Remove member with zero assignments → success
+- "Revoke all access" → account deactivated, login rejected, Gantt bars still show avatar
+
+---
+
 ## 2026-05-26 — /review-phase 10.1.3 — fixes applied
 
 Post-review fixes across security, tests, conventions, and ROADMAP:

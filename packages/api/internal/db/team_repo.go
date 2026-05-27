@@ -238,11 +238,37 @@ func (r *TeamRepo) UpdateMember(memberID string, displayName, color, icon, role 
 }
 
 // DeleteMember removes a team_members row. The caller is responsible for
-// verifying that the member is not the last admin before calling this.
+// verifying that the member is not the last admin before calling this, and
+// must delete the member's timeline_access rows first (RESTRICT FK).
 func (r *TeamRepo) DeleteMember(memberID string) error {
 	_, err := r.db.Exec(`DELETE FROM team_members WHERE id = ?`, memberID)
 	if err != nil {
 		return fmt.Errorf("deleting team member: %w", err)
+	}
+	return nil
+}
+
+// CountMemberAssignments returns how many activity_assignments rows reference
+// this team member. Used to enforce the removal guard (10.1.4).
+func (r *TeamRepo) CountMemberAssignments(memberID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?
+	`, memberID)
+	if err != nil {
+		return 0, fmt.Errorf("counting member assignments: %w", err)
+	}
+	return count, nil
+}
+
+// DeleteMemberTimelineAccess removes all timeline_access entries for a member.
+// Must be called before DeleteMember when the member has no activity_assignments
+// (the RESTRICT FK on timeline_access.team_member_id would otherwise block the
+// team_members deletion even for clean removals).
+func (r *TeamRepo) DeleteMemberTimelineAccess(memberID string) error {
+	_, err := r.db.Exec(`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID)
+	if err != nil {
+		return fmt.Errorf("deleting member timeline access: %w", err)
 	}
 	return nil
 }

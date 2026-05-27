@@ -9,11 +9,11 @@
 
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users } from 'lucide-react'
+import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users, ShieldOff } from 'lucide-react'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import type { Identity } from '@/components/identity/identity-constants'
 import { Badge } from '@/components/identity/Badge'
-import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser } from '@/hooks/useMemberManagement'
+import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
 import { useAuth } from '@/contexts/AuthContext'
 import type { components } from '@draba/shared'
 
@@ -92,10 +92,12 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
   const archiveUser = useArchiveUser()
   const unarchiveUser = useUnarchiveUser()
   const deleteUser = useDeleteUser()
+  const revokeUser = useRevokeUser()
 
   const [identity, setIdentity] = useState<Identity | null>(null)
   const [displayName, setDisplayName] = useState<string | null>(null)
-  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | null>(null)
+  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | 'revoke' | null>(null)
+  const [revokeResult, setRevokeResult] = useState<{ membershipsInactivated: number; membershipsRemoved: number } | null>(null)
 
   if (isLoading || isError || !detail) {
     return createPortal(
@@ -132,7 +134,7 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
   const stats = detail.stats
   const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
 
-  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending
+  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending || revokeUser.isPending
 
   // detail is guaranteed non-null here (early return above handles loading/undefined).
   // Non-null assertions in callbacks are safe because they only fire when the
@@ -157,6 +159,18 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
   function handleReactivate() {
     if (!detail!.userId) return
     unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
+  }
+
+  function handleRevoke() {
+    if (!detail!.userId) return
+    revokeUser.mutate(detail!.userId, {
+      onSuccess: (result) => {
+        setConfirm(null)
+        setRevokeResult({ membershipsInactivated: result.membershipsInactivated, membershipsRemoved: result.membershipsRemoved })
+        // Close the modal after a short delay so the user can see the summary.
+        setTimeout(onClose, 2000)
+      },
+    })
   }
 
   function handleDelete() {
@@ -208,6 +222,18 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
             busy={busy}
             onCancel={() => setConfirm(null)}
             onConfirm={handleDelete}
+          />
+        )}
+        {confirm === 'revoke' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<ShieldOff size={22} color="#EF4444" />}
+            title={`Revoke all access for ${effectiveName}?`}
+            body="This will: (1) deactivate the account — the user cannot log in anywhere; (2) inactivate all team memberships that have activity history; (3) permanently remove memberships with no activity history. Activity data is always preserved."
+            confirmLabel="Revoke all access"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleRevoke}
           />
         )}
 
@@ -399,10 +425,25 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
                         Delete
                       </button>
                     )}
+                    {/* Revoke all access — hidden once the account is already deactivated */}
+                    {!isInactivated && (
+                      <button
+                        onClick={() => setConfirm('revoke')}
+                        style={{ fontSize: 12, color: '#EF4444', background: '#EF444414', border: '1px solid #EF444444', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <ShieldOff size={13} />
+                        Revoke all access
+                      </button>
+                    )}
                   </div>
                   {activeActivityCount > 0 && (
                     <div style={{ fontSize: 11, color: '#484f58', marginTop: 8 }}>
                       Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
+                    </div>
+                  )}
+                  {revokeResult && (
+                    <div style={{ fontSize: 12, color: '#e6edf3', background: '#EF444414', border: '1px solid #EF444433', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
+                      Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
                     </div>
                   )}
                 </div>

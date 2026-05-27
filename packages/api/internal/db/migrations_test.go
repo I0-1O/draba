@@ -92,6 +92,44 @@ func TestMigrate_Idempotent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, colCount, "column users.%q should exist after migration 010", col)
 	}
+
+	// Verify PRAGMA foreign_keys is ON (set in db.Open, but assert for documentation).
+	var fkPragma int
+	require.NoError(t, database.Get(&fkPragma, `PRAGMA foreign_keys`))
+	assert.Equal(t, 1, fkPragma, "PRAGMA foreign_keys should be ON")
+
+	// Verify migration 011: activity_assignments.team_member_id uses ON DELETE RESTRICT.
+	// PRAGMA foreign_key_list returns one row per FK; "on_delete" column holds the action.
+	type fkInfo struct {
+		OnDelete string `db:"on_delete"`
+		Table    string `db:"table"`
+		From     string `db:"from"`
+	}
+	var aaFKs []fkInfo
+	require.NoError(t, database.Select(&aaFKs,
+		`SELECT "table", "from", on_delete FROM pragma_foreign_key_list('activity_assignments')`))
+	var foundAARestrict bool
+	for _, fk := range aaFKs {
+		if fk.From == "team_member_id" {
+			assert.Equal(t, "RESTRICT", fk.OnDelete,
+				"activity_assignments.team_member_id FK should be ON DELETE RESTRICT")
+			foundAARestrict = true
+		}
+	}
+	assert.True(t, foundAARestrict, "activity_assignments.team_member_id FK should exist")
+
+	var taFKs []fkInfo
+	require.NoError(t, database.Select(&taFKs,
+		`SELECT "table", "from", on_delete FROM pragma_foreign_key_list('timeline_access')`))
+	var foundTARestrict bool
+	for _, fk := range taFKs {
+		if fk.From == "team_member_id" {
+			assert.Equal(t, "RESTRICT", fk.OnDelete,
+				"timeline_access.team_member_id FK should be ON DELETE RESTRICT")
+			foundTARestrict = true
+		}
+	}
+	assert.True(t, foundTARestrict, "timeline_access.team_member_id FK should exist")
 }
 
 // TestMigrate_006_007_ColorConversion verifies the two-step color conversion:
