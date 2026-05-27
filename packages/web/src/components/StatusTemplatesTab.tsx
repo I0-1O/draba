@@ -17,6 +17,9 @@ import {
   useUpdateTemplateItem,
   useDeleteTemplateItem,
 } from '@/hooks/useStatusTemplates'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
 import type { components } from '@draba/shared'
 
 type StatusTemplate = components['schemas']['StatusTemplate']
@@ -27,13 +30,6 @@ interface Props {
   isAdmin: boolean
   teamColor: string
 }
-
-// ── Colour swatches shown in the item editor ────────────────────────────────
-
-const ITEM_COLORS = [
-  '#3B82F6', '#22C55E', '#F59E0B', '#EF4444', '#8B5CF6',
-  '#14B8A6', '#F97316', '#EC4899', '#6B7280', '#e6edf3',
-]
 
 // ── Item row ─────────────────────────────────────────────────────────────────
 
@@ -46,7 +42,7 @@ interface ItemRowProps {
 function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState(item.name)
-  const [color, setColor] = useState(item.color)
+  const [identity, setIdentity] = useState<Identity>({ color: item.color, icon: item.icon ?? '' })
   const [isClosed, setIsClosed] = useState(item.isClosed)
   const updateItem = useUpdateTemplateItem(teamId)
   const deleteItem = useDeleteTemplateItem(teamId)
@@ -55,7 +51,7 @@ function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
   function handleSave() {
     if (!name.trim()) { setError('Name is required'); return }
     updateItem.mutate(
-      { id: item.id, name: name.trim(), color, isClosed },
+      { id: item.id, name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
       {
         onSuccess: () => setEditing(false),
         onError: () => setError('Failed to save'),
@@ -77,7 +73,7 @@ function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
     return (
       <div style={{ background: '#2d333b', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ width: 16, height: 16, borderRadius: 4, background: color, flexShrink: 0 }} />
+          <IdentityWidget identity={identity} name={name || 'Status'} shape="square" onChange={setIdentity} />
           <input
             autoFocus
             value={name}
@@ -92,20 +88,6 @@ function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
             <X size={15} />
           </button>
         </div>
-        {/* Colour swatches */}
-        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-          {ITEM_COLORS.map(c => (
-            <button
-              key={c}
-              onClick={() => setColor(c)}
-              style={{
-                width: 20, height: 20, borderRadius: 4, background: c, border: 'none', cursor: 'pointer',
-                outline: color === c ? `2px solid ${c}` : 'none', outlineOffset: 2,
-              }}
-            />
-          ))}
-        </div>
-        {/* is_closed toggle */}
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
           <input
             type="checkbox"
@@ -125,7 +107,7 @@ function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
       display: 'flex', alignItems: 'center', gap: 8, padding: '7px 4px',
       borderRadius: 6,
     }}>
-      <div style={{ width: 12, height: 12, borderRadius: 3, background: item.color, flexShrink: 0 }} />
+      <Badge identity={{ color: item.color, icon: item.icon ?? '' }} name={item.name} size={16} />
       <span
         onClick={() => setEditing(true)}
         style={{ flex: 1, fontSize: 13, color: '#e6edf3', cursor: 'pointer' }}
@@ -167,7 +149,8 @@ function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: Templ
   const [expanded, setExpanded] = useState(true)
   const [addingItem, setAddingItem] = useState(false)
   const [newItemName, setNewItemName] = useState('')
-  const [newItemColor, setNewItemColor] = useState('#3B82F6')
+  const [newItemIdentity, setNewItemIdentity] = useState<Identity>({ color: '#3B82F6', icon: '' })
+  const [newItemIsClosed, setNewItemIsClosed] = useState(false)
   const [itemError, setItemError] = useState('')
   const [deleteError, setDeleteError] = useState('')
 
@@ -177,12 +160,31 @@ function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: Templ
   function handleAddItem() {
     if (!newItemName.trim()) { setItemError('Name is required'); return }
     createItem.mutate(
-      { templateId: template.id, name: newItemName.trim(), color: newItemColor },
       {
-        onSuccess: () => { setNewItemName(''); setNewItemColor('#3B82F6'); setAddingItem(false) },
+        templateId: template.id,
+        name: newItemName.trim(),
+        color: newItemIdentity.color,
+        icon: newItemIdentity.icon || null,
+        isClosed: newItemIsClosed,
+      },
+      {
+        onSuccess: () => {
+          setNewItemName('')
+          setNewItemIdentity({ color: '#3B82F6', icon: '' })
+          setNewItemIsClosed(false)
+          setAddingItem(false)
+        },
         onError: () => setItemError('Failed to add item'),
       }
     )
+  }
+
+  function handleCancelAddItem() {
+    setAddingItem(false)
+    setNewItemName('')
+    setNewItemIdentity({ color: '#3B82F6', icon: '' })
+    setNewItemIsClosed(false)
+    setItemError('')
   }
 
   function handleDeleteTemplate() {
@@ -207,12 +209,16 @@ function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: Templ
         </button>
         <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>{template.name}</span>
         <span style={{ fontSize: 11, color: '#484f58' }}>{template.items.length} item{template.items.length !== 1 ? 's' : ''}</span>
-        {isAdmin && canDelete && (
+        {isAdmin && (
           <button
             onClick={handleDeleteTemplate}
-            disabled={deleteTemplate.isPending}
-            title="Delete template"
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}
+            disabled={deleteTemplate.isPending || !canDelete}
+            title={canDelete ? 'Delete template' : 'Cannot delete the last template'}
+            style={{
+              background: 'none', border: 'none', padding: 2, display: 'flex',
+              cursor: canDelete ? 'pointer' : 'not-allowed',
+              color: '#484f58', opacity: canDelete ? 1 : 0.35,
+            }}
           >
             <Trash2 size={14} />
           </button>
@@ -242,35 +248,37 @@ function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: Templ
             addingItem ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div style={{ width: 12, height: 12, borderRadius: 3, background: newItemColor, flexShrink: 0 }} />
+                  <IdentityWidget
+                    identity={newItemIdentity}
+                    name={newItemName || 'New status'}
+                    shape="square"
+                    onChange={setNewItemIdentity}
+                  />
                   <input
                     autoFocus
                     value={newItemName}
                     onChange={e => { setNewItemName(e.target.value); setItemError('') }}
-                    onKeyDown={e => { if (e.key === 'Enter') handleAddItem(); if (e.key === 'Escape') setAddingItem(false) }}
+                    onKeyDown={e => { if (e.key === 'Enter') handleAddItem(); if (e.key === 'Escape') handleCancelAddItem() }}
                     placeholder="Status name…"
                     style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
                   />
                   <button onClick={handleAddItem} disabled={createItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: teamColor, display: 'flex', padding: 2 }}>
                     <Check size={15} />
                   </button>
-                  <button onClick={() => setAddingItem(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
+                  <button onClick={handleCancelAddItem} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
                     <X size={15} />
                   </button>
                 </div>
-                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', paddingLeft: 20 }}>
-                  {ITEM_COLORS.map(c => (
-                    <button
-                      key={c}
-                      onClick={() => setNewItemColor(c)}
-                      style={{
-                        width: 18, height: 18, borderRadius: 3, background: c, border: 'none', cursor: 'pointer',
-                        outline: newItemColor === c ? `2px solid ${c}` : 'none', outlineOffset: 2,
-                      }}
-                    />
-                  ))}
-                </div>
-                {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 20 }}>{itemError}</div>}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+                  <input
+                    type="checkbox"
+                    checked={newItemIsClosed}
+                    onChange={e => setNewItemIsClosed(e.target.checked)}
+                    style={{ accentColor: '#3B82F6' }}
+                  />
+                  Closed status (hides from active views when "Hide closed" filter is on)
+                </label>
+                {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 26 }}>{itemError}</div>}
               </div>
             ) : (
               <button

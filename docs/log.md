@@ -2,6 +2,13 @@
 
 ---
 
+## 2026-05-27 — /test-phase 10.2
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 partial-skip (ws-smoke: heartbeat full 3-cycle skipped per time budget; unit tests cover at speed)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-05-27 — Phase 10.2 — Status Templates & Timeline Statuses
 
 **Backend:**

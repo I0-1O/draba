@@ -187,15 +187,15 @@ func (r *StatusRepo) DeleteTemplateItem(id string) error {
 
 // ── Seeding ───────────────────────────────────────────────────────────────────
 
-// SeedDefaultTemplate creates the "Simple" template (Planned / In Progress / Done)
-// for a newly created team. Done is marked is_closed = true.
+// SeedDefaultTemplate creates the "Default" template (Planning / In Progress / Complete)
+// for a newly created team. Complete is marked is_closed = true.
 func (r *StatusRepo) SeedDefaultTemplate(teamID, createdBy string) error {
 	now := time.Now()
 	templateID := newRepoID()
 	t := &models.StatusTemplate{
 		ID:        templateID,
 		TeamID:    teamID,
-		Name:      "Simple",
+		Name:      "Default",
 		Position:  0,
 		CreatedBy: createdBy,
 		CreatedAt: now,
@@ -211,9 +211,9 @@ func (r *StatusRepo) SeedDefaultTemplate(teamID, createdBy string) error {
 		isClosed bool
 	}
 	seeds := []seed{
-		{"Planned", "#3B82F6", false},
+		{"Planning", "#3B82F6", false},
 		{"In Progress", "#F59E0B", false},
-		{"Done", "#22C55E", true},
+		{"Complete", "#22C55E", true},
 	}
 	for i, s := range seeds {
 		item := &models.StatusTemplateItem{
