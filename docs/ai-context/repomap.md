@@ -59,6 +59,7 @@ docs/
       team-modal/
         README.md
         Team Modal.html
+      login-redesign.zip
       settings-modal.zip
     preview/
       colors-brand.html
@@ -1063,6 +1064,136 @@ Used by `/review-phase` (and human reviewers) when evaluating the diff for a com
 `/review-phase` should report findings as a table grouped by severity: **blocker / suggestion / nit**. Each finding cites a `file:line` and a one-line rationale. Empty categories are omitted.
 ````
 
+## File: packages/api/internal/auth/jwt.go
+````go
+package auth
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+)
+
+// Token TTLs. Access tokens are short-lived so revocation latency is bounded;
+// refresh tokens are long enough to survive a typical work week.
+const (
+	accessTokenTTL  = 15 * time.Minute
+	refreshTokenTTL = 7 * 24 * time.Hour
+)
+
+// Claims is the JWT payload used for both access and refresh tokens.
+// The Type field discriminates the two so a refresh token cannot be
+// presented in place of an access token (and vice versa).
+type Claims struct {
+	UserID string `json:"uid"`
+	Email  string `json:"email"`
+	Type   string `json:"type"` // "access" or "refresh"
+	jwt.RegisteredClaims
+}
+
+// TokenService signs and validates JWTs with a shared HMAC secret.
+type TokenService struct {
+	secret []byte
+}
+
+// NewTokenService returns a TokenService that signs with secret.
+// The secret must be kept private; rotating it invalidates every issued token.
+func NewTokenService(secret string) *TokenService {
+	return &TokenService{secret: []byte(secret)}
+}
+
+// IssueAccessToken returns a signed short-lived access token for the user.
+func (s *TokenService) IssueAccessToken(userID, email string) (string, error) {
+	return s.sign(userID, email, "access", accessTokenTTL)
+}
+
+// IssueRefreshToken returns a signed long-lived refresh token. Refresh tokens
+// are exchanged at /auth/refresh for new access tokens.
+func (s *TokenService) IssueRefreshToken(userID, email string) (string, error) {
+	return s.sign(userID, email, "refresh", refreshTokenTTL)
+}
+
+// sign builds and serializes a Claims-bearing HS256 JWT.
+func (s *TokenService) sign(userID, email, tokenType string, ttl time.Duration) (string, error) {
+	claims := Claims{
+		UserID: userID,
+		Email:  email,
+		Type:   tokenType,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(s.secret)
+	if err != nil {
+		return "", fmt.Errorf("signing token: %w", err)
+	}
+	return signed, nil
+}
+
+// Validate parses and verifies tokenStr, returning its claims when the
+// signature is valid, the token has not expired, and its Type matches
+// expectedType ("access" or "refresh"). Any failure returns an error and
+// nil claims.
+func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
+		// Reject any token not signed with HMAC — guards against the
+		// classic "alg=none" / algorithm-confusion attack.
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return s.secret, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("parsing token: %w", err)
+	}
+	claims, ok := token.Claims.(*Claims)
+	if !ok || !token.Valid {
+		return nil, fmt.Errorf("invalid token")
+	}
+	if claims.Type != expectedType {
+		return nil, fmt.Errorf("wrong token type")
+	}
+	return claims, nil
+}
+````
+
+## File: packages/api/internal/auth/password.go
+````go
+// Package auth provides password hashing and JWT issuance/validation
+// for access and refresh tokens used by the HTTP API.
+package auth
+
+import (
+	"fmt"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+// bcryptCost is the work factor for password hashing. 12 is the project
+// baseline — raise only after benchmarking on the slowest deployment target.
+const bcryptCost = 12
+
+// HashPassword returns a bcrypt hash of password using bcryptCost.
+func HashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	if err != nil {
+		return "", fmt.Errorf("hashing password: %w", err)
+	}
+	return string(hash), nil
+}
+
+// CheckPassword returns nil when password matches hash. A non-nil result
+// (typically bcrypt.ErrMismatchedHashAndPassword) means the password is wrong;
+// callers should treat any error as authentication failure without leaking
+// which case occurred.
+func CheckPassword(hash, password string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
+````
+
 ## File: packages/api/internal/db/migrations/001_initial_schema.sql
 ````sql
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1198,6 +1329,45 @@ CREATE TABLE IF NOT EXISTS calendar_connections (
 );
 ````
 
+## File: packages/api/internal/db/db.go
+````go
+// Package db provides the database connection, schema migrations,
+// and repository types backing the API server. The default driver is
+// SQLite (modernc.org/sqlite, a pure-Go build to avoid cgo); MySQL and
+// Postgres are planned per docs/ARCHITECTURE.md.
+package db
+
+import (
+	"fmt"
+
+	"github.com/jmoiron/sqlx"
+	_ "modernc.org/sqlite"
+)
+
+// Open opens and configures a SQLite database at the given path.
+func Open(dsn string) (*sqlx.DB, error) {
+	database, err := sqlx.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening database: %w", err)
+	}
+
+	// SQLite performs better with a single writer connection.
+	database.SetMaxOpenConns(1)
+
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+	}
+	for _, p := range pragmas {
+		if _, err = database.Exec(p); err != nil {
+			return nil, fmt.Errorf("configuring database (%s): %w", p, err)
+		}
+	}
+
+	return database, nil
+}
+````
+
 ## File: packages/api/internal/db/migrations.go
 ````go
 package db
@@ -1276,6 +1446,38 @@ func Migrate(database *sqlx.DB) error {
 }
 ````
 
+## File: packages/api/internal/tier/enforce.go
+````go
+package tier
+
+import "errors"
+
+// Sentinel errors returned when a tier limit would be exceeded. Handlers
+// translate these into HTTP 402 (Payment Required) responses.
+var (
+	ErrUserLimitReached = errors.New("user limit reached for current tier")
+	ErrTeamLimitReached = errors.New("team limit reached for current tier")
+)
+
+// CheckUserLimit returns ErrUserLimitReached when adding one more user
+// would exceed this tier's MaxUsers. A MaxUsers of 0 is unlimited.
+func (t Tier) CheckUserLimit(currentCount int) error {
+	if l := t.Limits(); l.MaxUsers != 0 && currentCount >= l.MaxUsers {
+		return ErrUserLimitReached
+	}
+	return nil
+}
+
+// CheckTeamLimit returns ErrTeamLimitReached when adding one more team
+// would exceed this tier's MaxTeams. A MaxTeams of 0 is unlimited.
+func (t Tier) CheckTeamLimit(currentCount int) error {
+	if l := t.Limits(); l.MaxTeams != 0 && currentCount >= l.MaxTeams {
+		return ErrTeamLimitReached
+	}
+	return nil
+}
+````
+
 ## File: packages/api/internal/tier/registry.go
 ````go
 package tier
@@ -1308,6 +1510,87 @@ func Register(m Module) {
 // Registered returns all modules added via Register.
 func Registered() []Module {
 	return registered
+}
+````
+
+## File: packages/api/internal/tier/tier.go
+````go
+// Package tier defines the deployment tiers (Unlimited, Team, Business,
+// Enterprise) and the per-tier limits and capability gates the API enforces.
+// Pro modules register through this package so they can read the active Tier
+// at startup. See registry.go for the module registration contract.
+package tier
+
+import (
+	"fmt"
+	"os"
+)
+
+// Tier is a deployment tier identifier. The zero value (empty string) is
+// Unlimited, which is what self-hosted/free installs run as.
+type Tier string
+
+const (
+	Unlimited  Tier = ""
+	Team       Tier = "team"
+	Business   Tier = "business"
+	Enterprise Tier = "enterprise"
+)
+
+// Limits holds the maximums for a tier. 0 means unlimited.
+type Limits struct {
+	MaxUsers int
+	MaxTeams int
+}
+
+var tierLimits = map[Tier]Limits{
+	Unlimited:  {MaxUsers: 0, MaxTeams: 0},
+	Team:       {MaxUsers: 5, MaxTeams: 1},
+	Business:   {MaxUsers: 15, MaxTeams: 3},
+	Enterprise: {MaxUsers: 0, MaxTeams: 0},
+}
+
+// tierOrder is used by AtLeast to compare capability levels.
+var tierOrder = map[Tier]int{
+	Unlimited:  0,
+	Team:       1,
+	Business:   2,
+	Enterprise: 3,
+}
+
+// Load reads DRABA_TIER from the environment. Unset returns Unlimited.
+// An unrecognised value is an error — fail closed, don't silently default.
+func Load() (Tier, error) {
+	v := os.Getenv("DRABA_TIER")
+	if v == "" {
+		return Unlimited, nil
+	}
+	t := Tier(v)
+	if _, ok := tierLimits[t]; !ok {
+		return "", fmt.Errorf("unknown DRABA_TIER %q: must be team, business, or enterprise", v)
+	}
+	return t, nil
+}
+
+// Limits returns the user/team caps for this tier. Unknown tiers return
+// the zero value, which is interpreted as "unlimited".
+func (t Tier) Limits() Limits {
+	return tierLimits[t]
+}
+
+// AtLeast reports whether t is at least as capable as other.
+// Unlimited (self-host, free) is the lowest; Enterprise is the highest.
+func (t Tier) AtLeast(other Tier) bool {
+	return tierOrder[t] >= tierOrder[other]
+}
+
+// String returns the tier name for logs and error messages. Unlimited
+// renders as "unlimited" rather than the empty string.
+func (t Tier) String() string {
+	if t == Unlimited {
+		return "unlimited"
+	}
+	return string(t)
 }
 ````
 
@@ -1555,6 +1838,275 @@ CMD ["pnpm", "dev", "--host"]
   },
   "include": ["vite.config.ts"]
 }
+````
+
+## File: skills/go-comments.md
+````markdown
+# Go Comment Conventions
+
+Apply this whenever generating, editing, or reviewing Go code in `packages/api/`.
+Run `golangci-lint run` (which includes `revive`'s comment rules) before committing.
+
+## The rules
+
+### 1. Package header — exactly one per package
+
+Every package must have a package comment on **one** file (conventionally
+the file matching the package name, or `doc.go` for very large packages).
+Other files in the package start with a bare `package x` line, no comment.
+
+The header begins with `Package x ` and explains what the package is *for*,
+not how it works internally.
+
+```go
+// Package tier defines the deployment tiers (Unlimited, Team, Business,
+// Enterprise) and the per-tier limits and capability gates the API enforces.
+package tier
+```
+
+For `package main`, lead with `Command <name> ...`:
+
+```go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server.
+package main
+```
+
+### 2. Exported identifiers — doc comment required, starts with the name
+
+Every exported (capitalized) func, type, var, const, and method gets a
+doc comment that **starts with the identifier's name**. This is what `go doc`
+and pkg.go.dev render.
+
+```go
+// HashPassword returns a bcrypt hash of password using bcryptCost.
+func HashPassword(password string) (string, error) { ... }
+
+// TokenService signs and validates JWTs with a shared HMAC secret.
+type TokenService struct { ... }
+
+// ErrUserLimitReached is returned when a tier's MaxUsers cap would be exceeded.
+var ErrUserLimitReached = errors.New("user limit reached for current tier")
+```
+
+Method receivers can be omitted from the leading phrase:
+
+```go
+// Validate parses and verifies tokenStr, returning its claims when ...
+func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error)
+```
+
+A grouped `var (...)` or `const (...)` block can have a single comment
+above the block when the group is cohesive; otherwise comment each entry.
+
+### 3. Unexported identifiers — comment only when not obvious
+
+Skip the doc comment when a well-named unexported func is self-evident
+(`getenv`, `newID`). Add a one-line comment when the name doesn't fully
+convey purpose, when there's a non-obvious constraint, or when the function
+is the implementation half of an exported pair.
+
+```go
+// sign builds and serializes a Claims-bearing HS256 JWT.
+func (s *TokenService) sign(...) (string, error) { ... }
+```
+
+### 4. Inline comments — only for the WHY
+
+Inline comments explain *why*, not *what*. Reserve them for:
+
+- Hidden constraints (`// SQLite performs better with a single writer connection.`)
+- Non-obvious security choices (`// Reject any token not signed with HMAC — guards against alg=none.`)
+- Workarounds for specific bugs or quirks
+- Surprising invariants
+
+Do not narrate the code, restate the function name, or reference the
+current task/PR/ticket. If removing the comment wouldn't confuse a future
+reader, don't write it.
+
+### 5. Style mechanics
+
+- Doc comments are `// line` style, immediately above the declaration, no blank line between.
+- Wrap at ~80 cols. Use complete sentences with a period.
+- Refer to other identifiers bare (`See Routes.`), not in backticks.
+- Code samples in doc comments are indented one tab (godoc renders them as `<pre>`).
+- Mark deprecations with a `Deprecated:` paragraph at the end of the doc comment.
+
+```go
+// OldThing does X.
+//
+// Deprecated: use NewThing instead.
+func OldThing() {}
+```
+
+### 6. What NOT to comment
+
+- `// Package foo` followed by nothing useful — drop it or write something real.
+- Restating the signature (`// Foo takes a string and returns an int.`).
+- Change-log style comments (`// Added in v2`, `// Fixed bug #123`) — that's git's job.
+- TODOs without an owner and a concrete trigger condition.
+
+## Checklist before committing Go code
+
+- [ ] Each package has exactly one package comment, on one file, beginning `Package x ` (or `Command x ` for main).
+- [ ] Every exported identifier has a doc comment that starts with its name.
+- [ ] Unexported helpers either have a self-evident name or a one-line comment.
+- [ ] Inline comments explain *why*, not *what*; none restate the code.
+- [ ] No stale comments referring to removed code, prior implementations, or the task that produced the change.
+- [ ] `golangci-lint run` passes.
+````
+
+## File: skills/ts-comments.md
+````markdown
+# TypeScript / React Comment Conventions
+
+Apply this whenever generating, editing, or reviewing TypeScript, TSX,
+or JavaScript code in `packages/web/` (and any future TS packages).
+Run `pnpm --filter web lint` and `pnpm --filter web build` before committing.
+
+The philosophy is the same as for Go: **comment the *why*, not the *what*.**
+Well-named identifiers and a glance at the signature already tell the reader
+*what*. Comments earn their place by explaining intent, constraints,
+trade-offs, and surprises.
+
+## The rules
+
+### 1. File-level header — only when it adds orientation
+
+A short JSDoc at the top of a non-trivial file helps a reader who has just
+opened it. Skip it for tiny components (one-liner avatars, app entry points,
+config files). Use it when the file owns a meaningful pattern, has a
+non-obvious editing/lifecycle model, or coordinates multiple concerns.
+
+```tsx
+/**
+ * Right-side detail panel for a selected timeline event.
+ *
+ * Editing model:
+ *  - `title` and `notes` use local state and commit on blur, so we don't
+ *    fire an `onChange` for every keystroke.
+ *  - `status` and `color` commit immediately (single discrete choice).
+ */
+export default function EventPanel(...) { ... }
+```
+
+A "header" can live on the default-exported component itself rather than
+above the imports — wherever it reads most naturally for that file.
+
+### 2. Exported types, interfaces, components, and functions — TSDoc
+
+Use `/** ... */` (TSDoc/JSDoc) on every exported declaration that isn't
+trivially obvious from its name and shape. Editors surface these on hover
+and in autocomplete, which is the main payoff.
+
+```ts
+/** Lifecycle of a single event on the timeline. */
+export type EventStatus = 'planned' | 'in-progress' | 'done';
+
+/**
+ * A scheduled chunk of work shown as a block on the timeline.
+ *
+ * `startCol` and `span` are derived view-state, not stored on the server —
+ * they're recomputed by the parent whenever the visible date range changes.
+ */
+export interface DrabaEvent { ... }
+```
+
+For interface fields, prefer per-field TSDoc (`/** ... */`) over trailing
+`// ...` so the doc shows up in editor hover-cards.
+
+Skip the doc when the name fully says it: `interface Props { ... }`,
+`function IconBtn(...)`, a one-line `Member` interface — let the code speak.
+
+### 3. Components — what to put in the doc
+
+Aim for a 1–4 line summary that covers any of:
+- What the component is *for* (one sentence).
+- Who owns its state (the component, the parent, a context).
+- The editing/commit model if non-obvious (debounce, on-blur, optimistic).
+- Required parents / context providers.
+
+Don't list every prop — the `Props` interface already does that.
+
+### 4. Inline comments — only for the WHY
+
+Reserve inline `//` comments for:
+
+- **Magic numbers and tuning constants.** State the reasoning, not the value.
+  ```ts
+  // Tuned by eye: 38% of diameter keeps two-letter initials inside the
+  // circle at every size we use (22–32px) without per-size overrides.
+  const fontSize = Math.round(size * 0.38);
+  ```
+- **Non-obvious effect dependencies / lifecycle behaviour.**
+  ```ts
+  // Reset local edits when the panel switches to a different event.
+  useEffect(() => { ... }, [event.id]);
+  ```
+- **Hidden coupling** (e.g. "stays in sync with `--col-width` in index.css").
+- **Workarounds** for a specific browser bug or library quirk — link the issue.
+- **Placeholder code** that will be replaced when an integration lands
+  (`// Placeholder timelines — replaced when API layer is wired`).
+
+Do not narrate the code, restate the prop name, or comment "for clarity".
+If removing the comment wouldn't confuse a future reader, don't write it.
+
+### 5. `any`, `as`, `@ts-expect-error` — comment is required
+
+Per `docs/CONVENTIONS.md`:
+- Every `any` needs a `// reason:` comment explaining why a precise type
+  isn't possible.
+- Every type assertion (`x as Y`) needs a comment explaining why the cast
+  is sound.
+- Every `@ts-expect-error` / `@ts-ignore` needs a comment with the
+  underlying issue and a removal trigger.
+
+```ts
+// reason: third-party lib emits an untyped event payload; shape is checked at runtime in handleEvent
+const data: any = ev.detail;
+```
+
+### 6. JSX section comments — light touch
+
+Short `{/* Header */}` / `{/* Body */}` markers are fine for long render
+trees (TopBar, Sidebar, EventPanel). Don't put logic explanations inside
+JSX — extract to a variable or sub-component instead.
+
+### 7. Style mechanics
+
+- TSDoc uses `/** ... */`, terminated on its own `*/` line for multi-line.
+- Wrap at ~90 cols. Use complete sentences with a period.
+- Refer to other identifiers in backticks (`` `useEffect` ``, `` `Props` ``).
+- Mark deprecations with `@deprecated`; editors render this with a strikethrough.
+  ```ts
+  /** @deprecated use {@link NewThing} instead. */
+  ```
+- Use `@param` / `@returns` only when they add detail beyond the type
+  signature — otherwise they're just noise that goes stale.
+
+### 8. What NOT to comment
+
+- Re-stating the signature (`/** Takes a string and returns a number. */`).
+- Explaining standard React patterns (`// useState for the title`).
+- Listing imports or what a file imports.
+- Change-log style comments (`// added in PR #123`, `// new in v2`) —
+  that's git's job.
+- TODOs without an owner and a concrete trigger condition.
+- File-level headers that just paraphrase the export name.
+
+## Checklist before committing TS/React code
+
+- [ ] Each non-trivial file has a one-paragraph header *or* a TSDoc on its
+      default export — whichever orients a cold reader faster.
+- [ ] Every exported type, interface, component, and function has a TSDoc
+      unless its name plus signature is fully self-explanatory.
+- [ ] Inline comments explain *why*, not *what*; none restate the code
+      or describe standard React idioms.
+- [ ] Every `any`, `as`, and `@ts-expect-error` carries the required
+      reason comment per `docs/CONVENTIONS.md`.
+- [ ] No stale comments referring to removed code, prior implementations,
+      or the task that produced the change.
+- [ ] `pnpm --filter web lint` and `pnpm --filter web build` pass.
 ````
 
 ## File: .golangci.yml
@@ -6886,6 +7438,57 @@ func (s *Server) handleDeleteAPIToken(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
+## File: packages/api/internal/api/helpers.go
+````go
+package api
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+)
+
+// writeJSON sends v as a JSON response with the given status. Encoder
+// errors are ignored: the headers are already on the wire by the time
+// encoding happens, so there is nothing useful to do with the error.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeError writes the standard {error: {code, message}} envelope used
+// across the API. code is a stable machine identifier; message is a
+// human-readable explanation safe to surface to end users.
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+	})
+}
+
+// newID returns a 32-character hex ID derived from 16 random bytes
+// (128 bits — enough entropy that collisions are not a concern).
+func newID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// newToken returns a 64-character hex token derived from 32 random bytes
+// (256 bits). Use for invite tokens and other secrets; newID is for record IDs.
+// The longer length makes tokens visually distinct from IDs and raises the
+// brute-force bar.
+func newToken() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+````
+
 ## File: packages/api/internal/api/saved_filter_handler.go
 ````go
 package api
@@ -7109,136 +7712,6 @@ func HashAPIToken(raw string) string {
 // middleware to pick the correct validator.
 func LooksLikeAPIToken(raw string) bool {
 	return strings.HasPrefix(raw, APITokenPrefix)
-}
-````
-
-## File: packages/api/internal/auth/jwt.go
-````go
-package auth
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/golang-jwt/jwt/v5"
-)
-
-// Token TTLs. Access tokens are short-lived so revocation latency is bounded;
-// refresh tokens are long enough to survive a typical work week.
-const (
-	accessTokenTTL  = 15 * time.Minute
-	refreshTokenTTL = 7 * 24 * time.Hour
-)
-
-// Claims is the JWT payload used for both access and refresh tokens.
-// The Type field discriminates the two so a refresh token cannot be
-// presented in place of an access token (and vice versa).
-type Claims struct {
-	UserID string `json:"uid"`
-	Email  string `json:"email"`
-	Type   string `json:"type"` // "access" or "refresh"
-	jwt.RegisteredClaims
-}
-
-// TokenService signs and validates JWTs with a shared HMAC secret.
-type TokenService struct {
-	secret []byte
-}
-
-// NewTokenService returns a TokenService that signs with secret.
-// The secret must be kept private; rotating it invalidates every issued token.
-func NewTokenService(secret string) *TokenService {
-	return &TokenService{secret: []byte(secret)}
-}
-
-// IssueAccessToken returns a signed short-lived access token for the user.
-func (s *TokenService) IssueAccessToken(userID, email string) (string, error) {
-	return s.sign(userID, email, "access", accessTokenTTL)
-}
-
-// IssueRefreshToken returns a signed long-lived refresh token. Refresh tokens
-// are exchanged at /auth/refresh for new access tokens.
-func (s *TokenService) IssueRefreshToken(userID, email string) (string, error) {
-	return s.sign(userID, email, "refresh", refreshTokenTTL)
-}
-
-// sign builds and serializes a Claims-bearing HS256 JWT.
-func (s *TokenService) sign(userID, email, tokenType string, ttl time.Duration) (string, error) {
-	claims := Claims{
-		UserID: userID,
-		Email:  email,
-		Type:   tokenType,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-		},
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString(s.secret)
-	if err != nil {
-		return "", fmt.Errorf("signing token: %w", err)
-	}
-	return signed, nil
-}
-
-// Validate parses and verifies tokenStr, returning its claims when the
-// signature is valid, the token has not expired, and its Type matches
-// expectedType ("access" or "refresh"). Any failure returns an error and
-// nil claims.
-func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error) {
-	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
-		// Reject any token not signed with HMAC — guards against the
-		// classic "alg=none" / algorithm-confusion attack.
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-		}
-		return s.secret, nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("parsing token: %w", err)
-	}
-	claims, ok := token.Claims.(*Claims)
-	if !ok || !token.Valid {
-		return nil, fmt.Errorf("invalid token")
-	}
-	if claims.Type != expectedType {
-		return nil, fmt.Errorf("wrong token type")
-	}
-	return claims, nil
-}
-````
-
-## File: packages/api/internal/auth/password.go
-````go
-// Package auth provides password hashing and JWT issuance/validation
-// for access and refresh tokens used by the HTTP API.
-package auth
-
-import (
-	"fmt"
-
-	"golang.org/x/crypto/bcrypt"
-)
-
-// bcryptCost is the work factor for password hashing. 12 is the project
-// baseline — raise only after benchmarking on the slowest deployment target.
-const bcryptCost = 12
-
-// HashPassword returns a bcrypt hash of password using bcryptCost.
-func HashPassword(password string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
-	if err != nil {
-		return "", fmt.Errorf("hashing password: %w", err)
-	}
-	return string(hash), nil
-}
-
-// CheckPassword returns nil when password matches hash. A non-nil result
-// (typically bcrypt.ErrMismatchedHashAndPassword) means the password is wrong;
-// callers should treat any error as authentication failure without leaking
-// which case occurred.
-func CheckPassword(hash, password string) error {
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 ````
 
@@ -7857,45 +8330,6 @@ func (r *APITokenRepo) TouchLastUsed(id string) error {
 }
 ````
 
-## File: packages/api/internal/db/db.go
-````go
-// Package db provides the database connection, schema migrations,
-// and repository types backing the API server. The default driver is
-// SQLite (modernc.org/sqlite, a pure-Go build to avoid cgo); MySQL and
-// Postgres are planned per docs/ARCHITECTURE.md.
-package db
-
-import (
-	"fmt"
-
-	"github.com/jmoiron/sqlx"
-	_ "modernc.org/sqlite"
-)
-
-// Open opens and configures a SQLite database at the given path.
-func Open(dsn string) (*sqlx.DB, error) {
-	database, err := sqlx.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("opening database: %w", err)
-	}
-
-	// SQLite performs better with a single writer connection.
-	database.SetMaxOpenConns(1)
-
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA foreign_keys=ON",
-	}
-	for _, p := range pragmas {
-		if _, err = database.Exec(p); err != nil {
-			return nil, fmt.Errorf("configuring database (%s): %w", p, err)
-		}
-	}
-
-	return database, nil
-}
-````
-
 ## File: packages/api/internal/db/instance_settings_repo.go
 ````go
 package db
@@ -7975,6 +8409,104 @@ func (r *InstanceSettingsRepo) List() ([]*models.InstanceSetting, error) {
 		return nil, fmt.Errorf("listing instance settings: %w", err)
 	}
 	return rows, nil
+}
+````
+
+## File: packages/api/internal/db/invite_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// InviteRepo is the persistence layer for team invitation tokens.
+type InviteRepo struct {
+	db *sqlx.DB
+}
+
+// NewInviteRepo returns an InviteRepo backed by db.
+func NewInviteRepo(db *sqlx.DB) *InviteRepo {
+	return &InviteRepo{db: db}
+}
+
+// Create inserts an invite row. The caller is responsible for generating
+// the token and setting an appropriate ExpiresAt.
+func (r *InviteRepo) Create(inv *models.Invite) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at, created_at)
+		VALUES (:id, :team_id, :email, :token, :role, :invited_by, :expires_at, :created_at)
+	`, inv)
+	if err != nil {
+		return fmt.Errorf("creating invite: %w", err)
+	}
+	return nil
+}
+
+// GetValid returns an invite that is not expired and not yet accepted.
+func (r *InviteRepo) GetValid(token string) (*models.Invite, error) {
+	var inv models.Invite
+	err := r.db.Get(&inv, `
+		SELECT * FROM invites
+		WHERE token = ? AND accepted_at IS NULL AND expires_at > ?
+	`, token, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("getting invite: %w", err)
+	}
+	return &inv, nil
+}
+
+// MarkAccepted stamps accepted_at on the invite. Idempotent at the DB layer:
+// re-marking simply overwrites the timestamp.
+func (r *InviteRepo) MarkAccepted(id string) error {
+	now := time.Now()
+	_, err := r.db.Exec(`UPDATE invites SET accepted_at = ? WHERE id = ?`, now, id)
+	if err != nil {
+		return fmt.Errorf("marking invite accepted: %w", err)
+	}
+	return nil
+}
+
+// ListByTeam returns all pending (not yet accepted, not expired) invites for a
+// team, ordered by creation date descending so the newest invite is first.
+func (r *InviteRepo) ListByTeam(teamID string) ([]*models.Invite, error) {
+	var invites []*models.Invite
+	err := r.db.Select(&invites, `
+		SELECT * FROM invites
+		WHERE team_id = ? AND accepted_at IS NULL
+		ORDER BY created_at DESC
+	`, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("listing invites: %w", err)
+	}
+	return invites, nil
+}
+
+// DeleteByID hard-deletes an invite row. Used by admins to revoke a pending
+// invite before it is accepted.
+func (r *InviteRepo) DeleteByID(id string) error {
+	_, err := r.db.Exec(`DELETE FROM invites WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting invite: %w", err)
+	}
+	return nil
+}
+
+// GetByToken fetches an invite by its token field regardless of expiry or
+// accepted status. Used for invite-link validation where the caller needs to
+// check freshness itself.
+func (r *InviteRepo) GetByToken(token string) (*models.Invite, error) {
+	var inv models.Invite
+	err := r.db.Get(&inv, `SELECT * FROM invites WHERE token = ?`, token)
+	if err != nil {
+		return nil, fmt.Errorf("getting invite by token: %w", err)
+	}
+	return &inv, nil
 }
 ````
 
@@ -8203,119 +8735,6 @@ func (r *UserPreferenceRepo) Upsert(p *models.UserPreference) error {
 }
 ````
 
-## File: packages/api/internal/tier/enforce.go
-````go
-package tier
-
-import "errors"
-
-// Sentinel errors returned when a tier limit would be exceeded. Handlers
-// translate these into HTTP 402 (Payment Required) responses.
-var (
-	ErrUserLimitReached = errors.New("user limit reached for current tier")
-	ErrTeamLimitReached = errors.New("team limit reached for current tier")
-)
-
-// CheckUserLimit returns ErrUserLimitReached when adding one more user
-// would exceed this tier's MaxUsers. A MaxUsers of 0 is unlimited.
-func (t Tier) CheckUserLimit(currentCount int) error {
-	if l := t.Limits(); l.MaxUsers != 0 && currentCount >= l.MaxUsers {
-		return ErrUserLimitReached
-	}
-	return nil
-}
-
-// CheckTeamLimit returns ErrTeamLimitReached when adding one more team
-// would exceed this tier's MaxTeams. A MaxTeams of 0 is unlimited.
-func (t Tier) CheckTeamLimit(currentCount int) error {
-	if l := t.Limits(); l.MaxTeams != 0 && currentCount >= l.MaxTeams {
-		return ErrTeamLimitReached
-	}
-	return nil
-}
-````
-
-## File: packages/api/internal/tier/tier.go
-````go
-// Package tier defines the deployment tiers (Unlimited, Team, Business,
-// Enterprise) and the per-tier limits and capability gates the API enforces.
-// Pro modules register through this package so they can read the active Tier
-// at startup. See registry.go for the module registration contract.
-package tier
-
-import (
-	"fmt"
-	"os"
-)
-
-// Tier is a deployment tier identifier. The zero value (empty string) is
-// Unlimited, which is what self-hosted/free installs run as.
-type Tier string
-
-const (
-	Unlimited  Tier = ""
-	Team       Tier = "team"
-	Business   Tier = "business"
-	Enterprise Tier = "enterprise"
-)
-
-// Limits holds the maximums for a tier. 0 means unlimited.
-type Limits struct {
-	MaxUsers int
-	MaxTeams int
-}
-
-var tierLimits = map[Tier]Limits{
-	Unlimited:  {MaxUsers: 0, MaxTeams: 0},
-	Team:       {MaxUsers: 5, MaxTeams: 1},
-	Business:   {MaxUsers: 15, MaxTeams: 3},
-	Enterprise: {MaxUsers: 0, MaxTeams: 0},
-}
-
-// tierOrder is used by AtLeast to compare capability levels.
-var tierOrder = map[Tier]int{
-	Unlimited:  0,
-	Team:       1,
-	Business:   2,
-	Enterprise: 3,
-}
-
-// Load reads DRABA_TIER from the environment. Unset returns Unlimited.
-// An unrecognised value is an error — fail closed, don't silently default.
-func Load() (Tier, error) {
-	v := os.Getenv("DRABA_TIER")
-	if v == "" {
-		return Unlimited, nil
-	}
-	t := Tier(v)
-	if _, ok := tierLimits[t]; !ok {
-		return "", fmt.Errorf("unknown DRABA_TIER %q: must be team, business, or enterprise", v)
-	}
-	return t, nil
-}
-
-// Limits returns the user/team caps for this tier. Unknown tiers return
-// the zero value, which is interpreted as "unlimited".
-func (t Tier) Limits() Limits {
-	return tierLimits[t]
-}
-
-// AtLeast reports whether t is at least as capable as other.
-// Unlimited (self-host, free) is the lowest; Enterprise is the highest.
-func (t Tier) AtLeast(other Tier) bool {
-	return tierOrder[t] >= tierOrder[other]
-}
-
-// String returns the tier name for logs and error messages. Unlimited
-// renders as "unlimited" rather than the empty string.
-func (t Tier) String() string {
-	if t == Unlimited {
-		return "unlimited"
-	}
-	return string(t)
-}
-````
-
 ## File: packages/api/ui/static/.gitkeep
 ````
 
@@ -8333,6 +8752,58 @@ import "embed"
 
 //go:embed all:static
 var FS embed.FS
+````
+
+## File: packages/api/CLAUDE.md
+````markdown
+# packages/api
+
+This is the draba API server. Go, REST + WebSocket, with a built-in CalDAV server.
+
+## Entry Points
+- `cmd/draba/main.go` — wires dependencies, starts HTTP server
+- `migrations/` — SQL migration files, run automatically on startup
+
+## Key Internal Packages
+- `internal/api/` — HTTP handlers and routing (thin — no business logic)
+- `internal/auth/` — JWT, invite tokens, password hashing
+- `internal/caldav/` — built-in CalDAV server implementation
+- `internal/calendar/` — Google Calendar OAuth + sync; CalDAV outbound sync
+- `internal/db/` — repository layer; adapters for SQLite, MySQL, Postgres
+- `internal/events/` — internal event bus (pub/sub for state changes)
+- `internal/models/` — domain types shared across packages
+- `internal/ws/` — WebSocket hub and broadcaster
+
+## Run
+```bash
+go run ./cmd/draba
+```
+
+## Test
+```bash
+go test ./...
+```
+
+## Lint
+```bash
+golangci-lint run
+```
+
+## Environment Variables
+```
+DRABA_DB_DRIVER=sqlite          # sqlite | mysql | postgres
+DRABA_DB_DSN=./draba.db         # file path for SQLite, connection string for others
+DRABA_JWT_SECRET=               # required — random secret for signing JWTs
+DRABA_PORT=8080                 # default 8080
+DRABA_LOG_LEVEL=info            # debug | info | warn | error (default info; set debug in docker-compose for dev)
+DRABA_GOOGLE_CLIENT_ID=         # required for Google Calendar sync
+DRABA_GOOGLE_CLIENT_SECRET=     # required for Google Calendar sync
+DRABA_BASE_URL=                 # public URL of the server (used for OAuth callbacks, CalDAV URLs)
+```
+
+## Conventions
+See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
+See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
 ````
 
 ## File: packages/shared/CLAUDE.md
@@ -9746,6 +10217,71 @@ export default function ResetPasswordPage() {
 }
 ````
 
+## File: packages/web/CLAUDE.md
+````markdown
+# packages/web
+
+This is the draba web frontend. React + TypeScript + Vite.
+
+## Key Directories
+- `src/components/` — shared UI components
+- `src/pages/` — top-level route pages
+- `src/hooks/` — custom hooks (data fetching, WebSocket, drag-and-drop)
+- `src/lib/` — API client, utilities
+- `src/types/` — re-exports from generated types in `packages/shared/`
+
+## Run
+
+**Against local API (default):**
+```bash
+pnpm --filter web dev
+```
+Proxies `/api` and `/ws` to `http://localhost:8080`.
+
+**Against Docker (e.g. epcot.lan):**
+Create `packages/web/.env.local` (gitignored):
+```
+VITE_API_TARGET=http://epcot.lan:8081
+```
+Then run the same command. The dev server at `localhost:5173` transparently forwards all API and WebSocket traffic to the Docker container — no CORS config needed.
+
+## Build
+```bash
+pnpm --filter web build
+```
+
+## Test
+```bash
+pnpm --filter web test
+```
+
+## Lint
+```bash
+pnpm --filter web lint
+```
+
+## Key Dependencies (intended)
+- `@tanstack/react-query` — server state (fetching, caching, mutations)
+- `react-router-dom` — routing
+- `tailwindcss` — utility-first CSS
+- shadcn/ui components — live in `src/components/ui/` (copy-paste, not a runtime dep)
+- `openapi-typescript` generated types from `packages/shared/openapi.yaml`
+
+## shadcn/ui
+- Add components via CLI: `pnpm dlx shadcn@latest add <component>`
+- Components land in `src/components/ui/` — edit them freely, they're owned by the repo
+- Design tokens live in `src/index.css` as CSS custom properties (HSL values)
+- Dark mode: class-based (`dark` on `<html>`)
+
+## Conventions
+See `docs/CONVENTIONS.md` for React, TypeScript, and component patterns.
+See `skills/ts-comments.md` for comment conventions (file-level headers, TSDoc on exported declarations, when to add inline why-comments, mandatory comments on `any`/`as`/`@ts-expect-error`). Apply these whenever writing or editing TS/TSX.
+
+## Notes
+- In production, the built static files are embedded in the Go binary — no separate static server
+- All API types come from generated types in `packages/shared/` — do not hand-write API response types
+````
+
 ## File: packages/web/components.json
 ````json
 {
@@ -9919,273 +10455,68 @@ COMMIT;
 -- );
 ````
 
-## File: skills/go-comments.md
+## File: CLAUDE.md
 ````markdown
-# Go Comment Conventions
+# draba
 
-Apply this whenever generating, editing, or reviewing Go code in `packages/api/`.
-Run `golangci-lint run` (which includes `revive`'s comment rules) before committing.
+## Overview
+draba is a team coordination and planning tool for small-to-medium teams. It occupies the space between a shared calendar (too simple) and a full project management suite (too complex). The core mental model is **Person + Time Range + Work** — teams see who is working on what, at a glance, in a shared timeline view.
 
-## The rules
+## Context Loading Protocol
 
-### 1. Package header — exactly one per package
+**At the start of a session** — read `docs/ai-context/session-state.md` first. It is a short snapshot of current phase status, recent unfiled bug fixes, known open issues, and the recommended starting point. This replaces reading TASKS.md + log.md + ROADMAP.md from scratch.
 
-Every package must have a package comment on **one** file (conventionally
-the file matching the package name, or `doc.go` for very large packages).
-Other files in the package start with a bare `package x` line, no comment.
-
-The header begins with `Package x ` and explains what the package is *for*,
-not how it works internally.
-
-```go
-// Package tier defines the deployment tiers (Unlimited, Team, Business,
-// Enterprise) and the per-tier limits and capability gates the API enforces.
-package tier
+**Looking up a type, struct field, or component prop** — grep `docs/ai-context/repomap.md` for the symbol name instead of a full codebase search. Do not read the file wholesale; it is 1.3 MB and exceeds the Read tool's limit. Use targeted lookups only:
+```
+Grep("MemberDetail", "docs/ai-context/repomap.md", output_mode="content")
 ```
 
-For `package main`, lead with `Command <name> ...`:
+**Before writing code** — if the file in question is listed in the repomap directory structure, read it directly with the Read tool before editing. Do not infer signatures from memory.
 
-```go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server.
-package main
-```
+## Tech Stack
+- Backend: Go (single binary, self-hosted first)
+- Frontend: React (TypeScript) + shadcn/ui + Tailwind CSS
+- Database: SQLite (default), MySQL/MariaDB, Postgres (configurable)
+- Calendar sync: Google Calendar API, CalDAV (iOS/macOS) — Microsoft/Outlook is v2
+- Deployment: Docker (primary), direct binary install
+- Real-time: WebSockets
 
-### 2. Exported identifiers — doc comment required, starts with the name
+## Key Principles
+- **Ruthlessly resist feature creep.** The product succeeds by doing one thing extremely well.
+- **API-first.** Every client (web, CLI, MCP) is a consumer of the same API.
+- **Event-driven.** Every state change emits an internal event. Calendar sync, WebSocket broadcast, and notifications are all event consumers.
+- **Self-hosted by default.** The product must run as a single Docker container with zero external dependencies.
+- **The app is the source of truth.** Calendars are read projections, not the data store.
+- **No paid dependencies without approval.**
 
-Every exported (capitalized) func, type, var, const, and method gets a
-doc comment that **starts with the identifier's name**. This is what `go doc`
-and pkg.go.dev render.
+## Project Structure
+- `packages/api/` — Go API server (REST + WebSocket)
+- `packages/web/` — React web frontend
+- `packages/shared/` — OpenAPI spec + generated TypeScript types
+- `docs/` — Architecture, requirements, design, tasks
+- `skills/` — Reference docs for Claude (how to do things)
+- `.claude/commands/` — Reusable slash commands
 
-```go
-// HashPassword returns a bcrypt hash of password using bcryptCost.
-func HashPassword(password string) (string, error) { ... }
+## Working Agreements
+- Always run `golangci-lint run` before committing Go code
+- Always run `pnpm --filter web lint` before committing frontend code
+- Always run `pnpm --filter api test` after changes to the API
+- Read `docs/REQUIREMENTS.md` before starting new features
+- Read `docs/ARCHITECTURE.md` before making structural changes
+- Check `docs/TASKS.md` for current priorities
+- Check `docs/ROADMAP.md` to understand which phase we're in and what the exit criteria are
 
-// TokenService signs and validates JWTs with a shared HMAC secret.
-type TokenService struct { ... }
-
-// ErrUserLimitReached is returned when a tier's MaxUsers cap would be exceeded.
-var ErrUserLimitReached = errors.New("user limit reached for current tier")
-```
-
-Method receivers can be omitted from the leading phrase:
-
-```go
-// Validate parses and verifies tokenStr, returning its claims when ...
-func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error)
-```
-
-A grouped `var (...)` or `const (...)` block can have a single comment
-above the block when the group is cohesive; otherwise comment each entry.
-
-### 3. Unexported identifiers — comment only when not obvious
-
-Skip the doc comment when a well-named unexported func is self-evident
-(`getenv`, `newID`). Add a one-line comment when the name doesn't fully
-convey purpose, when there's a non-obvious constraint, or when the function
-is the implementation half of an exported pair.
-
-```go
-// sign builds and serializes a Claims-bearing HS256 JWT.
-func (s *TokenService) sign(...) (string, error) { ... }
-```
-
-### 4. Inline comments — only for the WHY
-
-Inline comments explain *why*, not *what*. Reserve them for:
-
-- Hidden constraints (`// SQLite performs better with a single writer connection.`)
-- Non-obvious security choices (`// Reject any token not signed with HMAC — guards against alg=none.`)
-- Workarounds for specific bugs or quirks
-- Surprising invariants
-
-Do not narrate the code, restate the function name, or reference the
-current task/PR/ticket. If removing the comment wouldn't confuse a future
-reader, don't write it.
-
-### 5. Style mechanics
-
-- Doc comments are `// line` style, immediately above the declaration, no blank line between.
-- Wrap at ~80 cols. Use complete sentences with a period.
-- Refer to other identifiers bare (`See Routes.`), not in backticks.
-- Code samples in doc comments are indented one tab (godoc renders them as `<pre>`).
-- Mark deprecations with a `Deprecated:` paragraph at the end of the doc comment.
-
-```go
-// OldThing does X.
-//
-// Deprecated: use NewThing instead.
-func OldThing() {}
-```
-
-### 6. What NOT to comment
-
-- `// Package foo` followed by nothing useful — drop it or write something real.
-- Restating the signature (`// Foo takes a string and returns an int.`).
-- Change-log style comments (`// Added in v2`, `// Fixed bug #123`) — that's git's job.
-- TODOs without an owner and a concrete trigger condition.
-
-## Checklist before committing Go code
-
-- [ ] Each package has exactly one package comment, on one file, beginning `Package x ` (or `Command x ` for main).
-- [ ] Every exported identifier has a doc comment that starts with its name.
-- [ ] Unexported helpers either have a self-evident name or a one-line comment.
-- [ ] Inline comments explain *why*, not *what*; none restate the code.
-- [ ] No stale comments referring to removed code, prior implementations, or the task that produced the change.
-- [ ] `golangci-lint run` passes.
-````
-
-## File: skills/ts-comments.md
-````markdown
-# TypeScript / React Comment Conventions
-
-Apply this whenever generating, editing, or reviewing TypeScript, TSX,
-or JavaScript code in `packages/web/` (and any future TS packages).
-Run `pnpm --filter web lint` and `pnpm --filter web build` before committing.
-
-The philosophy is the same as for Go: **comment the *why*, not the *what*.**
-Well-named identifiers and a glance at the signature already tell the reader
-*what*. Comments earn their place by explaining intent, constraints,
-trade-offs, and surprises.
-
-## The rules
-
-### 1. File-level header — only when it adds orientation
-
-A short JSDoc at the top of a non-trivial file helps a reader who has just
-opened it. Skip it for tiny components (one-liner avatars, app entry points,
-config files). Use it when the file owns a meaningful pattern, has a
-non-obvious editing/lifecycle model, or coordinates multiple concerns.
-
-```tsx
-/**
- * Right-side detail panel for a selected timeline event.
- *
- * Editing model:
- *  - `title` and `notes` use local state and commit on blur, so we don't
- *    fire an `onChange` for every keystroke.
- *  - `status` and `color` commit immediately (single discrete choice).
- */
-export default function EventPanel(...) { ... }
-```
-
-A "header" can live on the default-exported component itself rather than
-above the imports — wherever it reads most naturally for that file.
-
-### 2. Exported types, interfaces, components, and functions — TSDoc
-
-Use `/** ... */` (TSDoc/JSDoc) on every exported declaration that isn't
-trivially obvious from its name and shape. Editors surface these on hover
-and in autocomplete, which is the main payoff.
-
-```ts
-/** Lifecycle of a single event on the timeline. */
-export type EventStatus = 'planned' | 'in-progress' | 'done';
-
-/**
- * A scheduled chunk of work shown as a block on the timeline.
- *
- * `startCol` and `span` are derived view-state, not stored on the server —
- * they're recomputed by the parent whenever the visible date range changes.
- */
-export interface DrabaEvent { ... }
-```
-
-For interface fields, prefer per-field TSDoc (`/** ... */`) over trailing
-`// ...` so the doc shows up in editor hover-cards.
-
-Skip the doc when the name fully says it: `interface Props { ... }`,
-`function IconBtn(...)`, a one-line `Member` interface — let the code speak.
-
-### 3. Components — what to put in the doc
-
-Aim for a 1–4 line summary that covers any of:
-- What the component is *for* (one sentence).
-- Who owns its state (the component, the parent, a context).
-- The editing/commit model if non-obvious (debounce, on-blur, optimistic).
-- Required parents / context providers.
-
-Don't list every prop — the `Props` interface already does that.
-
-### 4. Inline comments — only for the WHY
-
-Reserve inline `//` comments for:
-
-- **Magic numbers and tuning constants.** State the reasoning, not the value.
-  ```ts
-  // Tuned by eye: 38% of diameter keeps two-letter initials inside the
-  // circle at every size we use (22–32px) without per-size overrides.
-  const fontSize = Math.round(size * 0.38);
-  ```
-- **Non-obvious effect dependencies / lifecycle behaviour.**
-  ```ts
-  // Reset local edits when the panel switches to a different event.
-  useEffect(() => { ... }, [event.id]);
-  ```
-- **Hidden coupling** (e.g. "stays in sync with `--col-width` in index.css").
-- **Workarounds** for a specific browser bug or library quirk — link the issue.
-- **Placeholder code** that will be replaced when an integration lands
-  (`// Placeholder timelines — replaced when API layer is wired`).
-
-Do not narrate the code, restate the prop name, or comment "for clarity".
-If removing the comment wouldn't confuse a future reader, don't write it.
-
-### 5. `any`, `as`, `@ts-expect-error` — comment is required
-
-Per `docs/CONVENTIONS.md`:
-- Every `any` needs a `// reason:` comment explaining why a precise type
-  isn't possible.
-- Every type assertion (`x as Y`) needs a comment explaining why the cast
-  is sound.
-- Every `@ts-expect-error` / `@ts-ignore` needs a comment with the
-  underlying issue and a removal trigger.
-
-```ts
-// reason: third-party lib emits an untyped event payload; shape is checked at runtime in handleEvent
-const data: any = ev.detail;
-```
-
-### 6. JSX section comments — light touch
-
-Short `{/* Header */}` / `{/* Body */}` markers are fine for long render
-trees (TopBar, Sidebar, EventPanel). Don't put logic explanations inside
-JSX — extract to a variable or sub-component instead.
-
-### 7. Style mechanics
-
-- TSDoc uses `/** ... */`, terminated on its own `*/` line for multi-line.
-- Wrap at ~90 cols. Use complete sentences with a period.
-- Refer to other identifiers in backticks (`` `useEffect` ``, `` `Props` ``).
-- Mark deprecations with `@deprecated`; editors render this with a strikethrough.
-  ```ts
-  /** @deprecated use {@link NewThing} instead. */
-  ```
-- Use `@param` / `@returns` only when they add detail beyond the type
-  signature — otherwise they're just noise that goes stale.
-
-### 8. What NOT to comment
-
-- Re-stating the signature (`/** Takes a string and returns a number. */`).
-- Explaining standard React patterns (`// useState for the title`).
-- Listing imports or what a file imports.
-- Change-log style comments (`// added in PR #123`, `// new in v2`) —
-  that's git's job.
-- TODOs without an owner and a concrete trigger condition.
-- File-level headers that just paraphrase the export name.
-
-## Checklist before committing TS/React code
-
-- [ ] Each non-trivial file has a one-paragraph header *or* a TSDoc on its
-      default export — whichever orients a cold reader faster.
-- [ ] Every exported type, interface, component, and function has a TSDoc
-      unless its name plus signature is fully self-explanatory.
-- [ ] Inline comments explain *why*, not *what*; none restate the code
-      or describe standard React idioms.
-- [ ] Every `any`, `as`, and `@ts-expect-error` carries the required
-      reason comment per `docs/CONVENTIONS.md`.
-- [ ] No stale comments referring to removed code, prior implementations,
-      or the task that produced the change.
-- [ ] `pnpm --filter web lint` and `pnpm --filter web build` pass.
+## References
+- [docs/ai-context/session-state.md](docs/ai-context/session-state.md) — **Read first.** Current phase status, recent fixes, open issues, next steps
+- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — What the app does
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — How the system is built
+- [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — Code style and patterns
+- [docs/TASKS.md](docs/TASKS.md) — Current backlog and priorities
+- [docs/ROADMAP.md](docs/ROADMAP.md) — Phased development timeline with effort estimates and exit criteria
+- [docs/design/DESIGN_SYSTEM.md](docs/design/DESIGN_SYSTEM.md) — Visual design tokens
+- [docs/design/UX_PATTERNS.md](docs/design/UX_PATTERNS.md) — Interaction patterns
+- [skills/go-comments.md](skills/go-comments.md) — Go comment conventions (package headers, exported doc comments, inline why-comments)
+- [skills/ts-comments.md](skills/ts-comments.md) — TypeScript/React comment conventions (file headers, TSDoc on exports, inline why-comments)
 ````
 
 ## File: package.json
@@ -10691,354 +11022,6 @@ func smtpTestBody() string {
 }
 ````
 
-## File: packages/api/internal/api/helpers.go
-````go
-package api
-
-import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"net/http"
-)
-
-// writeJSON sends v as a JSON response with the given status. Encoder
-// errors are ignored: the headers are already on the wire by the time
-// encoding happens, so there is nothing useful to do with the error.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// writeError writes the standard {error: {code, message}} envelope used
-// across the API. code is a stable machine identifier; message is a
-// human-readable explanation safe to surface to end users.
-func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]any{
-		"error": map[string]string{
-			"code":    code,
-			"message": message,
-		},
-	})
-}
-
-// newID returns a 32-character hex ID derived from 16 random bytes
-// (128 bits — enough entropy that collisions are not a concern).
-func newID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// newToken returns a 64-character hex token derived from 32 random bytes
-// (256 bits). Use for invite tokens and other secrets; newID is for record IDs.
-// The longer length makes tokens visually distinct from IDs and raises the
-// brute-force bar.
-func newToken() string {
-	b := make([]byte, 32)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-````
-
-## File: packages/api/internal/api/user_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-)
-
-// handleUpdateProfile handles PATCH /users/me. Updates display_name, color,
-// and icon for the authenticated user. Color/icon changes propagate to all
-// team_members rows that have not been explicitly overridden.
-func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	var body struct {
-		DisplayName *string `json:"displayName"`
-		Color       *string `json:"color"`
-		Icon        *string `json:"icon"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
-		return
-	}
-
-	// Apply changes only for fields that were provided.
-	displayName := user.DisplayName
-	if body.DisplayName != nil {
-		displayName = strings.TrimSpace(*body.DisplayName)
-		if displayName == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "displayName cannot be empty")
-			return
-		}
-	}
-
-	color := user.Color
-	if body.Color != nil {
-		color = body.Color
-	}
-	icon := user.Icon
-	if body.Icon != nil {
-		icon = body.Icon
-	}
-
-	if err := s.users.UpdateProfile(user.ID, displayName, color, icon); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
-		return
-	}
-
-	user.DisplayName = displayName
-	user.Color = color
-	user.Icon = icon
-	writeJSON(w, http.StatusOK, user)
-}
-
-// handleChangePassword handles PUT /users/me/password. Requires the caller
-// to supply the current password before setting a new one.
-func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	var body struct {
-		CurrentPassword string `json:"currentPassword"`
-		NewPassword     string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if body.CurrentPassword == "" || body.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "currentPassword and newPassword are required")
-		return
-	}
-	if !isValidPassword(body.NewPassword) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "new password must be at least 8 characters")
-		return
-	}
-
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	// Verify the current password before allowing the change.
-	if err := auth.CheckPassword(user.PasswordHash, body.CurrentPassword); err != nil {
-		writeError(w, http.StatusUnauthorized, "WRONG_PASSWORD", "current password is incorrect")
-		return
-	}
-
-	hash, err := auth.HashPassword(body.NewPassword)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	if err := s.users.UpdatePassword(user.ID, hash); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// handleListAdminUsers handles GET /admin/users. Returns all users with team
-// membership counts. Supports ?orphaned=true to filter to zero-membership users.
-// Superadmin-only.
-func (s *Server) handleListAdminUsers(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	orphanedOnly := r.URL.Query().Get("orphaned") == "true"
-	rows, err := s.users.ListAll(orphanedOnly)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"users": rows})
-}
-
-// handlePromoteUser sets is_superadmin=true on a user. Superadmin-only.
-// Participants (no user account) cannot be promoted.
-func (s *Server) handlePromoteUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-
-	if err := s.users.SetSuperadmin(target.ID, true); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-
-	target.IsSuperadmin = true
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleArchiveUser inactivates a user account. Superadmin-only.
-// Archived users cannot log in; their data is preserved.
-func (s *Server) handleArchiveUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_ARCHIVE", "cannot archive your own account")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-
-	now := time.Now()
-	if err := s.users.SetArchived(target.ID, &now); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-
-	target.ArchivedAt = &now
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleUnarchiveUser reactivates an inactivated user account. Superadmin-only.
-func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-
-	if err := s.users.SetArchived(target.ID, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-
-	target.ArchivedAt = nil
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleDeleteUser hard-deletes a user. Superadmin-only. Only permitted when
-// the user has no active activity assignments and belongs to a single team.
-func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_DELETE", "cannot delete your own account")
-		return
-	}
-
-	if _, err := s.users.GetByID(userID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-
-	teamCount, err := s.teams.CountTeamsForUser(userID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	if teamCount > 1 {
-		writeError(w, http.StatusConflict, "MULTI_TEAM", "user belongs to multiple teams; remove them from each team first")
-		return
-	}
-
-	if err := s.users.Delete(userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
 ## File: packages/api/internal/api/user_preference_handler.go
 ````go
 package api
@@ -11144,104 +11127,6 @@ ALTER TABLE event_assignments RENAME TO activity_assignments;
 ALTER TABLE activities RENAME COLUMN parent_event_id TO parent_activity_id;
 ALTER TABLE activity_tags RENAME COLUMN event_id TO activity_id;
 ALTER TABLE activity_assignments RENAME COLUMN event_id TO activity_id;
-````
-
-## File: packages/api/internal/db/invite_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// InviteRepo is the persistence layer for team invitation tokens.
-type InviteRepo struct {
-	db *sqlx.DB
-}
-
-// NewInviteRepo returns an InviteRepo backed by db.
-func NewInviteRepo(db *sqlx.DB) *InviteRepo {
-	return &InviteRepo{db: db}
-}
-
-// Create inserts an invite row. The caller is responsible for generating
-// the token and setting an appropriate ExpiresAt.
-func (r *InviteRepo) Create(inv *models.Invite) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at, created_at)
-		VALUES (:id, :team_id, :email, :token, :role, :invited_by, :expires_at, :created_at)
-	`, inv)
-	if err != nil {
-		return fmt.Errorf("creating invite: %w", err)
-	}
-	return nil
-}
-
-// GetValid returns an invite that is not expired and not yet accepted.
-func (r *InviteRepo) GetValid(token string) (*models.Invite, error) {
-	var inv models.Invite
-	err := r.db.Get(&inv, `
-		SELECT * FROM invites
-		WHERE token = ? AND accepted_at IS NULL AND expires_at > ?
-	`, token, time.Now())
-	if err != nil {
-		return nil, fmt.Errorf("getting invite: %w", err)
-	}
-	return &inv, nil
-}
-
-// MarkAccepted stamps accepted_at on the invite. Idempotent at the DB layer:
-// re-marking simply overwrites the timestamp.
-func (r *InviteRepo) MarkAccepted(id string) error {
-	now := time.Now()
-	_, err := r.db.Exec(`UPDATE invites SET accepted_at = ? WHERE id = ?`, now, id)
-	if err != nil {
-		return fmt.Errorf("marking invite accepted: %w", err)
-	}
-	return nil
-}
-
-// ListByTeam returns all pending (not yet accepted, not expired) invites for a
-// team, ordered by creation date descending so the newest invite is first.
-func (r *InviteRepo) ListByTeam(teamID string) ([]*models.Invite, error) {
-	var invites []*models.Invite
-	err := r.db.Select(&invites, `
-		SELECT * FROM invites
-		WHERE team_id = ? AND accepted_at IS NULL
-		ORDER BY created_at DESC
-	`, teamID)
-	if err != nil {
-		return nil, fmt.Errorf("listing invites: %w", err)
-	}
-	return invites, nil
-}
-
-// DeleteByID hard-deletes an invite row. Used by admins to revoke a pending
-// invite before it is accepted.
-func (r *InviteRepo) DeleteByID(id string) error {
-	_, err := r.db.Exec(`DELETE FROM invites WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting invite: %w", err)
-	}
-	return nil
-}
-
-// GetByToken fetches an invite by its token field regardless of expiry or
-// accepted status. Used for invite-link validation where the caller needs to
-// check freshness itself.
-func (r *InviteRepo) GetByToken(token string) (*models.Invite, error) {
-	var inv models.Invite
-	err := r.db.Get(&inv, `SELECT * FROM invites WHERE token = ?`, token)
-	if err != nil {
-		return nil, fmt.Errorf("getting invite by token: %w", err)
-	}
-	return &inv, nil
-}
 ````
 
 ## File: packages/api/internal/mailer/mailer.go
@@ -11537,58 +11422,6 @@ func doSend(c *smtp.Client, from, to, msg string) error {
 	}
 	return w.Close()
 }
-````
-
-## File: packages/api/CLAUDE.md
-````markdown
-# packages/api
-
-This is the draba API server. Go, REST + WebSocket, with a built-in CalDAV server.
-
-## Entry Points
-- `cmd/draba/main.go` — wires dependencies, starts HTTP server
-- `migrations/` — SQL migration files, run automatically on startup
-
-## Key Internal Packages
-- `internal/api/` — HTTP handlers and routing (thin — no business logic)
-- `internal/auth/` — JWT, invite tokens, password hashing
-- `internal/caldav/` — built-in CalDAV server implementation
-- `internal/calendar/` — Google Calendar OAuth + sync; CalDAV outbound sync
-- `internal/db/` — repository layer; adapters for SQLite, MySQL, Postgres
-- `internal/events/` — internal event bus (pub/sub for state changes)
-- `internal/models/` — domain types shared across packages
-- `internal/ws/` — WebSocket hub and broadcaster
-
-## Run
-```bash
-go run ./cmd/draba
-```
-
-## Test
-```bash
-go test ./...
-```
-
-## Lint
-```bash
-golangci-lint run
-```
-
-## Environment Variables
-```
-DRABA_DB_DRIVER=sqlite          # sqlite | mysql | postgres
-DRABA_DB_DSN=./draba.db         # file path for SQLite, connection string for others
-DRABA_JWT_SECRET=               # required — random secret for signing JWTs
-DRABA_PORT=8080                 # default 8080
-DRABA_LOG_LEVEL=info            # debug | info | warn | error (default info; set debug in docker-compose for dev)
-DRABA_GOOGLE_CLIENT_ID=         # required for Google Calendar sync
-DRABA_GOOGLE_CLIENT_SECRET=     # required for Google Calendar sync
-DRABA_BASE_URL=                 # public URL of the server (used for OAuth callbacks, CalDAV URLs)
-```
-
-## Conventions
-See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
-See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
 ````
 
 ## File: packages/web/src/components/identity/Badge.tsx
@@ -12320,6 +12153,53 @@ export default function EmptyState({ icon, message, description }: EmptyStatePro
         </span>
       )}
     </div>
+  );
+}
+````
+
+## File: packages/web/src/components/MemberAvatar.tsx
+````typescript
+/**
+ * MemberAvatar — circular member badge using the identity system.
+ *
+ * Delegates to Badge internally so it inherits all identity rendering rules
+ * (name initials, Lucide icons, color resolution). The external prop API is
+ * unchanged so all existing call sites continue to work without modification.
+ */
+
+import { Badge } from './identity/Badge';
+import type { Member } from '../types';
+
+interface Props {
+  member: Member | undefined;
+  size?: number;
+  className?: string;
+}
+
+export default function MemberAvatar({ member, size = 28, className }: Props) {
+  if (!member) {
+    return (
+      <div
+        className={className}
+        style={{
+          width: size,
+          height: size,
+          borderRadius: '50%',
+          background: 'var(--muted)',
+          flexShrink: 0,
+        }}
+      />
+    );
+  }
+
+  return (
+    <Badge
+      identity={{ color: member.color, icon: '__name_words__' }}
+      name={member.name}
+      shape="circle"
+      size={size}
+      className={className}
+    />
   );
 }
 ````
@@ -14284,71 +14164,6 @@ code, pre {
 }
 ````
 
-## File: packages/web/CLAUDE.md
-````markdown
-# packages/web
-
-This is the draba web frontend. React + TypeScript + Vite.
-
-## Key Directories
-- `src/components/` — shared UI components
-- `src/pages/` — top-level route pages
-- `src/hooks/` — custom hooks (data fetching, WebSocket, drag-and-drop)
-- `src/lib/` — API client, utilities
-- `src/types/` — re-exports from generated types in `packages/shared/`
-
-## Run
-
-**Against local API (default):**
-```bash
-pnpm --filter web dev
-```
-Proxies `/api` and `/ws` to `http://localhost:8080`.
-
-**Against Docker (e.g. epcot.lan):**
-Create `packages/web/.env.local` (gitignored):
-```
-VITE_API_TARGET=http://epcot.lan:8081
-```
-Then run the same command. The dev server at `localhost:5173` transparently forwards all API and WebSocket traffic to the Docker container — no CORS config needed.
-
-## Build
-```bash
-pnpm --filter web build
-```
-
-## Test
-```bash
-pnpm --filter web test
-```
-
-## Lint
-```bash
-pnpm --filter web lint
-```
-
-## Key Dependencies (intended)
-- `@tanstack/react-query` — server state (fetching, caching, mutations)
-- `react-router-dom` — routing
-- `tailwindcss` — utility-first CSS
-- shadcn/ui components — live in `src/components/ui/` (copy-paste, not a runtime dep)
-- `openapi-typescript` generated types from `packages/shared/openapi.yaml`
-
-## shadcn/ui
-- Add components via CLI: `pnpm dlx shadcn@latest add <component>`
-- Components land in `src/components/ui/` — edit them freely, they're owned by the repo
-- Design tokens live in `src/index.css` as CSS custom properties (HSL values)
-- Dark mode: class-based (`dark` on `<html>`)
-
-## Conventions
-See `docs/CONVENTIONS.md` for React, TypeScript, and component patterns.
-See `skills/ts-comments.md` for comment conventions (file-level headers, TSDoc on exported declarations, when to add inline why-comments, mandatory comments on `any`/`as`/`@ts-expect-error`). Apply these whenever writing or editing TS/TSX.
-
-## Notes
-- In production, the built static files are embedded in the Go binary — no separate static server
-- All API types come from generated types in `packages/shared/` — do not hand-write API response types
-````
-
 ## File: packages/web/tsconfig.app.json
 ````json
 {
@@ -14508,70 +14323,6 @@ session-state.md
 *_test.go
 ````
 
-## File: CLAUDE.md
-````markdown
-# draba
-
-## Overview
-draba is a team coordination and planning tool for small-to-medium teams. It occupies the space between a shared calendar (too simple) and a full project management suite (too complex). The core mental model is **Person + Time Range + Work** — teams see who is working on what, at a glance, in a shared timeline view.
-
-## Context Loading Protocol
-
-**At the start of a session** — read `docs/ai-context/session-state.md` first. It is a short snapshot of current phase status, recent unfiled bug fixes, known open issues, and the recommended starting point. This replaces reading TASKS.md + log.md + ROADMAP.md from scratch.
-
-**Looking up a type, struct field, or component prop** — grep `docs/ai-context/repomap.md` for the symbol name instead of a full codebase search. Do not read the file wholesale; it is 1.3 MB and exceeds the Read tool's limit. Use targeted lookups only:
-```
-Grep("MemberDetail", "docs/ai-context/repomap.md", output_mode="content")
-```
-
-**Before writing code** — if the file in question is listed in the repomap directory structure, read it directly with the Read tool before editing. Do not infer signatures from memory.
-
-## Tech Stack
-- Backend: Go (single binary, self-hosted first)
-- Frontend: React (TypeScript) + shadcn/ui + Tailwind CSS
-- Database: SQLite (default), MySQL/MariaDB, Postgres (configurable)
-- Calendar sync: Google Calendar API, CalDAV (iOS/macOS) — Microsoft/Outlook is v2
-- Deployment: Docker (primary), direct binary install
-- Real-time: WebSockets
-
-## Key Principles
-- **Ruthlessly resist feature creep.** The product succeeds by doing one thing extremely well.
-- **API-first.** Every client (web, CLI, MCP) is a consumer of the same API.
-- **Event-driven.** Every state change emits an internal event. Calendar sync, WebSocket broadcast, and notifications are all event consumers.
-- **Self-hosted by default.** The product must run as a single Docker container with zero external dependencies.
-- **The app is the source of truth.** Calendars are read projections, not the data store.
-- **No paid dependencies without approval.**
-
-## Project Structure
-- `packages/api/` — Go API server (REST + WebSocket)
-- `packages/web/` — React web frontend
-- `packages/shared/` — OpenAPI spec + generated TypeScript types
-- `docs/` — Architecture, requirements, design, tasks
-- `skills/` — Reference docs for Claude (how to do things)
-- `.claude/commands/` — Reusable slash commands
-
-## Working Agreements
-- Always run `golangci-lint run` before committing Go code
-- Always run `pnpm --filter web lint` before committing frontend code
-- Always run `pnpm --filter api test` after changes to the API
-- Read `docs/REQUIREMENTS.md` before starting new features
-- Read `docs/ARCHITECTURE.md` before making structural changes
-- Check `docs/TASKS.md` for current priorities
-- Check `docs/ROADMAP.md` to understand which phase we're in and what the exit criteria are
-
-## References
-- [docs/ai-context/session-state.md](docs/ai-context/session-state.md) — **Read first.** Current phase status, recent fixes, open issues, next steps
-- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — What the app does
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — How the system is built
-- [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — Code style and patterns
-- [docs/TASKS.md](docs/TASKS.md) — Current backlog and priorities
-- [docs/ROADMAP.md](docs/ROADMAP.md) — Phased development timeline with effort estimates and exit criteria
-- [docs/design/DESIGN_SYSTEM.md](docs/design/DESIGN_SYSTEM.md) — Visual design tokens
-- [docs/design/UX_PATTERNS.md](docs/design/UX_PATTERNS.md) — Interaction patterns
-- [skills/go-comments.md](skills/go-comments.md) — Go comment conventions (package headers, exported doc comments, inline why-comments)
-- [skills/ts-comments.md](skills/ts-comments.md) — TypeScript/React comment conventions (file headers, TSDoc on exports, inline why-comments)
-````
-
 ## File: docker-compose.yml
 ````yaml
 services:
@@ -14643,6 +14394,315 @@ jobs:
         with:
           commit_message: "chore: update automated AI repomap [skip ci]"
           file_pattern: docs/ai-context/repomap.md
+````
+
+## File: packages/api/internal/api/user_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+)
+
+// handleUpdateProfile handles PATCH /users/me. Updates display_name, color,
+// and icon for the authenticated user. Color/icon changes propagate to all
+// team_members rows that have not been explicitly overridden.
+func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var body struct {
+		DisplayName *string `json:"displayName"`
+		Color       *string `json:"color"`
+		Icon        *string `json:"icon"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	// Apply changes only for fields that were provided.
+	displayName := user.DisplayName
+	if body.DisplayName != nil {
+		displayName = strings.TrimSpace(*body.DisplayName)
+		if displayName == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "displayName cannot be empty")
+			return
+		}
+	}
+
+	color := user.Color
+	if body.Color != nil {
+		color = body.Color
+	}
+	icon := user.Icon
+	if body.Icon != nil {
+		icon = body.Icon
+	}
+
+	if err := s.users.UpdateProfile(user.ID, displayName, color, icon); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	user.DisplayName = displayName
+	user.Color = color
+	user.Icon = icon
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleGetMyStats handles GET /users/me/stats. Returns aggregated activity and
+// timeline counts across all of the authenticated user's team memberships.
+func (s *Server) handleGetMyStats(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	stats, err := s.teams.GetUserStats(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleChangePassword handles PUT /users/me/password. Requires the caller
+// to supply the current password before setting a new one.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var body struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.CurrentPassword == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "currentPassword and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "new password must be at least 8 characters")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	// Verify the current password before allowing the change.
+	if err := auth.CheckPassword(user.PasswordHash, body.CurrentPassword); err != nil {
+		writeError(w, http.StatusUnauthorized, "WRONG_PASSWORD", "current password is incorrect")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(user.ID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleListAdminUsers handles GET /admin/users. Returns all users with team
+// membership counts. Supports ?orphaned=true to filter to zero-membership users.
+// Superadmin-only.
+func (s *Server) handleListAdminUsers(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	orphanedOnly := r.URL.Query().Get("orphaned") == "true"
+	rows, err := s.users.ListAll(orphanedOnly)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"users": rows})
+}
+
+// handlePromoteUser sets is_superadmin=true on a user. Superadmin-only.
+// Participants (no user account) cannot be promoted.
+func (s *Server) handlePromoteUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+
+	if err := s.users.SetSuperadmin(target.ID, true); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+
+	target.IsSuperadmin = true
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleArchiveUser inactivates a user account. Superadmin-only.
+// Archived users cannot log in; their data is preserved.
+func (s *Server) handleArchiveUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_ARCHIVE", "cannot archive your own account")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+
+	now := time.Now()
+	if err := s.users.SetArchived(target.ID, &now); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+
+	target.ArchivedAt = &now
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleUnarchiveUser reactivates an inactivated user account. Superadmin-only.
+func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+
+	if err := s.users.SetArchived(target.ID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+
+	target.ArchivedAt = nil
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleDeleteUser hard-deletes a user. Superadmin-only. Only permitted when
+// the user has no active activity assignments and belongs to a single team.
+func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_DELETE", "cannot delete your own account")
+		return
+	}
+
+	if _, err := s.users.GetByID(userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+
+	teamCount, err := s.teams.CountTeamsForUser(userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	if teamCount > 1 {
+		writeError(w, http.StatusConflict, "MULTI_TEAM", "user belongs to multiple teams; remove them from each team first")
+		return
+	}
+
+	if err := s.users.Delete(userID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
 ````
 
 ## File: packages/api/internal/db/timeline_repo.go
@@ -15810,260 +15870,6 @@ export function autoFitGranularity(
 }
 ````
 
-## File: packages/web/src/components/MemberAvatar.tsx
-````typescript
-/**
- * MemberAvatar — circular member badge using the identity system.
- *
- * Delegates to Badge internally so it inherits all identity rendering rules
- * (name initials, Lucide icons, color resolution). The external prop API is
- * unchanged so all existing call sites continue to work without modification.
- */
-
-import { Badge } from './identity/Badge';
-import type { Member } from '../types';
-
-interface Props {
-  member: Member | undefined;
-  size?: number;
-  className?: string;
-}
-
-export default function MemberAvatar({ member, size = 28, className }: Props) {
-  if (!member) {
-    return (
-      <div
-        className={className}
-        style={{
-          width: size,
-          height: size,
-          borderRadius: '50%',
-          background: 'var(--muted)',
-          flexShrink: 0,
-        }}
-      />
-    );
-  }
-
-  return (
-    <Badge
-      identity={{ color: member.color, icon: '__name_words__' }}
-      name={member.name}
-      shape="circle"
-      size={size}
-      className={className}
-    />
-  );
-}
-````
-
-## File: packages/web/src/hooks/useSettings.ts
-````typescript
-/**
- * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
- * profile, password change, forgot/reset password, SMTP config, instance
- * settings, and the admin user list.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { apiFetch, createAuthFetch } from '@/lib/api'
-import type { components } from '@draba/shared'
-
-type User = components['schemas']['User']
-type SMTPConfig = components['schemas']['SMTPConfig']
-type APIToken = components['schemas']['APIToken']
-
-// ── Profile ──────────────────────────────────────────────────────────────────
-
-export function useUpdateProfile() {
-  const { getAccessToken, patchUser } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
-      authFetch<User>('/users/me', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: (updated) => {
-      qc.setQueryData(['me'], updated)
-      patchUser(updated)
-      // Invalidate all team member lists so the sidebar reflects the new color/icon.
-      void qc.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-// ── Password ──────────────────────────────────────────────────────────────────
-
-export function useChangePassword() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
-      authFetch<{ status: string }>('/users/me/password', {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Forgot / reset password (public, no auth required) ───────────────────────
-
-export function useForgotPassword() {
-  return useMutation({
-    mutationFn: (email: string) =>
-      apiFetch<{ status: string }>('/auth/forgot-password', {
-        method: 'POST',
-        body: JSON.stringify({ email }),
-      }),
-  })
-}
-
-export function useResetPassword() {
-  return useMutation({
-    mutationFn: (data: { token: string; newPassword: string }) =>
-      apiFetch<{ status: string }>('/auth/reset-password', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Admin: SMTP ──────────────────────────────────────────────────────────────
-
-export function useAdminSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'smtp'],
-    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
-  })
-}
-
-export function useSaveSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
-        method: 'PUT',
-        body: JSON.stringify(cfg),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-export function useTestSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
-        method: 'POST',
-        body: JSON.stringify(cfg),
-      }),
-  })
-}
-
-export function useDeleteSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: () =>
-      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-// ── Admin: Instance settings ──────────────────────────────────────────────────
-
-export function useAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'settings'],
-    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
-  })
-}
-
-export function usePatchAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: Record<string, string>) =>
-      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
-  })
-}
-
-// ── API Tokens ────────────────────────────────────────────────────────────────
-
-export function useTokens() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: ['tokens'],
-    queryFn: () => authFetch<APIToken[]>('/tokens'),
-  })
-}
-
-export function useCreateToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (data: { name: string; scope: string }) =>
-      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
-
-export function useRevokeToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) =>
-      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
-
-// ── Admin: Users ──────────────────────────────────────────────────────────────
-
-export type AdminUserRow = User & { teamCount: number }
-
-export function useAdminUsers(orphanedOnly = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'users', { orphanedOnly }],
-    queryFn: () =>
-      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
-  })
-}
-````
-
 ## File: packages/web/src/hooks/useWebSocket.ts
 ````typescript
 /**
@@ -16323,637 +16129,6 @@ describe('matchActivities', () => {
 })
 ````
 
-## File: packages/web/src/pages/LoginPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useLocation, Link } from 'react-router-dom'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-export default function LoginPage() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setError(null)
-    setLoading(true)
-    try {
-      await login(email, password)
-      navigate(from, { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--background)',
-        padding: '24px',
-      }}
-    >
-      {/* Dark mode toggle — top-right */}
-      <div style={{ position: 'fixed', top: 16, right: 16 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Logo + wordmark above the card */}
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, marginBottom: 24 }}>
-        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
-        <span style={{ fontSize: 36, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.02em' }}>
-          draba
-        </span>
-      </div>
-
-      <Card style={{ width: '100%', maxWidth: 380 }}>
-        <CardHeader style={{ paddingTop: 24 }}>
-          <CardTitle>Sign in</CardTitle>
-          <CardDescription>Enter your email and password to continue.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                required
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Label htmlFor="password">Password</Label>
-                <Link to="/forgot-password" style={{ fontSize: 12, color: 'var(--muted-foreground)', textDecoration: 'none' }}>
-                  Forgot password?
-                </Link>
-              </div>
-              <Input
-                id="password"
-                type="password"
-                autoComplete="current-password"
-                placeholder="••••••••"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                required
-              />
-            </div>
-
-            {error && (
-              <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
-            )}
-
-            <Button type="submit" disabled={loading} style={{ width: '100%' }}>
-              {loading ? 'Signing in…' : 'Sign in'}
-            </Button>
-          </form>
-
-          <p style={{ marginTop: 16, fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
-            Have an invite?{' '}
-            <Link to="/register" style={{ color: 'var(--primary)', fontWeight: 600 }}>
-              Create an account
-            </Link>
-          </p>
-        </CardContent>
-      </Card>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/SetupPage.tsx
-````typescript
-/**
- * First-run setup wizard. Shown once when no users exist.
- * Collects account, team, and timeline details then creates all three on Finish.
- */
-
-import { useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { API_BASE, apiFetch, ApiError } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-type Step = 1 | 2 | 3
-
-interface WizardData {
-  displayName: string
-  email: string
-  password: string
-  teamName: string
-  timelineName: string
-  startDate: string
-  endDate: string
-}
-
-// ---------------------------------------------------------------------------
-// Step indicator
-// ---------------------------------------------------------------------------
-
-const STEP_LABELS: Record<Step, string> = {
-  1: 'Account',
-  2: 'Team',
-  3: 'Timeline',
-}
-
-function StepIndicator({ current }: { current: Step }) {
-  const steps: Step[] = [1, 2, 3]
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 0,
-        marginBottom: 32,
-      }}
-    >
-      {steps.map((n, i) => {
-        const done = n < current
-        const active = n === current
-        return (
-          <div key={n} style={{ display: 'flex', alignItems: 'center' }}>
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 4,
-              }}
-            >
-              <div
-                style={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: '50%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background:
-                    done || active ? 'var(--primary)' : 'transparent',
-                  border:
-                    done || active
-                      ? 'none'
-                      : '2px solid var(--border)',
-                  color:
-                    done || active
-                      ? 'var(--primary-foreground)'
-                      : 'var(--muted-foreground)',
-                  fontSize: 13,
-                  fontWeight: 700,
-                  transition: 'background 0.2s',
-                }}
-              >
-                {done ? '✓' : n}
-              </div>
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: active ? 600 : 400,
-                  color: active
-                    ? 'var(--foreground)'
-                    : 'var(--muted-foreground)',
-                }}
-              >
-                {STEP_LABELS[n]}
-              </span>
-            </div>
-
-            {i < steps.length - 1 && (
-              <div
-                style={{
-                  width: 48,
-                  height: 2,
-                  // Shift up to align with the circle, not the label
-                  marginBottom: 20,
-                  background: done ? 'var(--primary)' : 'var(--border)',
-                  transition: 'background 0.2s',
-                }}
-              />
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Step content
-// ---------------------------------------------------------------------------
-
-interface StepProps {
-  data: WizardData
-  onChange: (patch: Partial<WizardData>) => void
-}
-
-function Step1({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <p
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: 'var(--primary)',
-            margin: '0 0 4px',
-          }}
-        >
-          Welcome to draba!
-        </p>
-        <CardTitle>Create your account</CardTitle>
-        <CardDescription>
-          You're the first person here, so this account will have full admin
-          access — you'll be able to create teams, invite users, and manage the
-          workspace.
-        </CardDescription>
-      </CardHeader>
-      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="displayName">Your name</Label>
-          <Input
-            id="displayName"
-            placeholder="Jane Smith"
-            autoComplete="name"
-            value={data.displayName}
-            onChange={e => onChange({ displayName: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="email">Email</Label>
-          <Input
-            id="email"
-            type="email"
-            placeholder="you@example.com"
-            autoComplete="email"
-            value={data.email}
-            onChange={e => onChange({ email: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="password">Password</Label>
-          <Input
-            id="password"
-            type="password"
-            placeholder="At least 8 characters"
-            autoComplete="new-password"
-            value={data.password}
-            onChange={e => onChange({ password: e.target.value })}
-          />
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-function Step2({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <CardTitle>Name your team</CardTitle>
-        <CardDescription>
-          A team is your shared workspace. Everyone you invite will work within
-          it, and all your timelines and events live inside one. You can
-          customize and add members after setup.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="teamName">Team name</Label>
-          <Input
-            id="teamName"
-            placeholder="Product Marketing"
-            autoComplete="off"
-            value={data.teamName}
-            onChange={e => onChange({ teamName: e.target.value })}
-          />
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-function Step3({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <CardTitle>Your first timeline</CardTitle>
-        <CardDescription>
-          A timeline is a named date window over your team's events — it's how
-          you see who's working on what, and when. Pick a range that fits your
-          next planning horizon.
-        </CardDescription>
-      </CardHeader>
-      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="timelineName">Timeline name</Label>
-          <Input
-            id="timelineName"
-            placeholder="Q3 Roadmap"
-            autoComplete="off"
-            value={data.timelineName}
-            onChange={e => onChange({ timelineName: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', gap: 12 }}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="startDate">Start date</Label>
-            <Input
-              id="startDate"
-              type="date"
-              value={data.startDate}
-              onChange={e => onChange({ startDate: e.target.value })}
-            />
-          </div>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="endDate">End date</Label>
-            <Input
-              id="endDate"
-              type="date"
-              value={data.endDate}
-              onChange={e => onChange({ endDate: e.target.value })}
-            />
-          </div>
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
-
-function validateStep(step: Step, data: WizardData): string | null {
-  if (step === 1) {
-    if (!data.displayName.trim()) return 'Please enter your name.'
-    if (!data.email.trim()) return 'Please enter your email.'
-    if (data.password.length < 8) return 'Password must be at least 8 characters.'
-    if (/\s/.test(data.password)) return 'Password must not contain spaces.'
-  }
-  if (step === 2) {
-    if (!data.teamName.trim()) return 'Please enter a team name.'
-  }
-  if (step === 3) {
-    if (!data.timelineName.trim()) return 'Please enter a timeline name.'
-    if (!data.startDate) return 'Please choose a start date.'
-    if (!data.endDate) return 'Please choose an end date.'
-    if (data.endDate < data.startDate) return 'End date must be on or after the start date.'
-  }
-  return null
-}
-
-// ---------------------------------------------------------------------------
-// Date helpers
-// ---------------------------------------------------------------------------
-
-function toDateString(d: Date): string {
-  return d.toISOString().split('T')[0]
-}
-
-function defaultDates(): { startDate: string; endDate: string } {
-  const start = new Date()
-  const end = new Date()
-  end.setMonth(end.getMonth() + 3)
-  return { startDate: toDateString(start), endDate: toDateString(end) }
-}
-
-// ---------------------------------------------------------------------------
-// Main wizard
-// ---------------------------------------------------------------------------
-
-interface SetupStatus {
-  needsSetup: boolean
-}
-
-export default function SetupPage() {
-  const { register } = useAuth()
-  const navigate = useNavigate()
-  const queryClient = useQueryClient()
-
-  // If setup has already been completed redirect to login rather than showing
-  // a broken wizard (handles back-navigation and direct URL access after setup).
-  const { data: setupStatus, isLoading: statusLoading } = useQuery<SetupStatus>({
-    queryKey: ['setup-status'],
-    queryFn: () =>
-      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
-    staleTime: Infinity,
-  })
-
-  const [step, setStep] = useState<Step>(1)
-  const [data, setData] = useState<WizardData>({
-    displayName: '',
-    email: '',
-    password: '',
-    teamName: '',
-    timelineName: '',
-    ...defaultDates(),
-  })
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  // Wait for the status check before rendering anything.
-  if (statusLoading) return null
-
-  // Setup already done — send to login.
-  if (setupStatus && !setupStatus.needsSetup) {
-    return <Navigate to="/login" replace />
-  }
-
-  function handleChange(patch: Partial<WizardData>) {
-    setData(d => ({ ...d, ...patch }))
-    setError(null)
-  }
-
-  function handleBack() {
-    setError(null)
-    setStep(s => (s > 1 ? ((s - 1) as Step) : s))
-  }
-
-  function handleNext() {
-    const err = validateStep(step, data)
-    if (err) {
-      setError(err)
-      return
-    }
-    setError(null)
-    setStep(s => (s < 3 ? ((s + 1) as Step) : s))
-  }
-
-  async function handleFinish() {
-    const err = validateStep(3, data)
-    if (err) {
-      setError(err)
-      return
-    }
-
-    setError(null)
-    setLoading(true)
-
-    try {
-      // 1. Create account — returns token directly to avoid racing the async
-      //    setState inside register() before the next render cycle.
-      const token = await register(data.email, data.password, data.displayName)
-
-      // 2. Create team
-      const team = await apiFetch<{ id: string }>('/teams', {
-        method: 'POST',
-        body: JSON.stringify({ name: data.teamName }),
-        accessToken: token,
-      })
-
-      // 3. Create timeline
-      await apiFetch(`/teams/${team.id}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify({
-          name: data.timelineName,
-          startDate: data.startDate,
-          endDate: data.endDate,
-        }),
-        accessToken: token,
-      })
-
-      // Mark setup as done in the query cache so ProtectedRoute doesn't
-      // replay the stale needsSetup:true value after the user logs out.
-      queryClient.setQueryData<SetupStatus>(['setup-status'], { needsSetup: false })
-      navigate('/', { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--background)',
-        padding: '24px',
-      }}
-    >
-      <div style={{ position: 'fixed', top: 16, right: 16 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Logo */}
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: 2,
-          marginBottom: 24,
-        }}
-      >
-        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
-        <span
-          style={{
-            fontSize: 36,
-            fontWeight: 700,
-            color: 'var(--foreground)',
-            letterSpacing: '-0.02em',
-          }}
-        >
-          draba
-        </span>
-      </div>
-
-      <Card style={{ width: '100%', maxWidth: 440 }}>
-        <div style={{ padding: '24px 24px 0' }}>
-          <StepIndicator current={step} />
-        </div>
-
-        {step === 1 && <Step1 data={data} onChange={handleChange} />}
-        {step === 2 && <Step2 data={data} onChange={handleChange} />}
-        {step === 3 && <Step3 data={data} onChange={handleChange} />}
-
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 12,
-            padding: '0 24px 24px',
-          }}
-        >
-          {error && (
-            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>
-              {error}
-            </p>
-          )}
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Button
-              variant="outline"
-              onClick={handleBack}
-              disabled={step === 1 || loading}
-              style={{ flex: 1 }}
-            >
-              Back
-            </Button>
-
-            {step < 3 ? (
-              <Button onClick={handleNext} disabled={loading} style={{ flex: 1 }}>
-                Next
-              </Button>
-            ) : (
-              <Button onClick={handleFinish} disabled={loading} style={{ flex: 1 }}>
-                {loading ? 'Setting up…' : 'Finish'}
-              </Button>
-            )}
-          </div>
-        </div>
-      </Card>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/package.json
 ````json
 {
@@ -17069,6 +16244,408 @@ packages/api/ui/static/*
 GEMINI.md
 ````
 
+## File: packages/api/internal/api/middleware.go
+````go
+package api
+
+import (
+	"bufio"
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+)
+
+// contextKey is an unexported type to avoid collisions with other packages
+// using context.WithValue on the same request context.
+type contextKey string
+
+const (
+	claimsKey     contextKey = "claims"
+	tokenScopeKey contextKey = "tokenScope"
+)
+
+// Scope sentinels. tokenScopeFull is used for JWT-authenticated requests
+// where no scope restriction applies; the other values mirror the api_tokens
+// schema check constraint.
+const (
+	tokenScopeFull    = "full"
+	tokenScopeRead    = "read"
+	tokenScopeAdd     = "add"
+	tokenScopeEditOwn = "edit_own"
+	tokenScopeEditAll = "edit_all"
+)
+
+// authMiddleware enforces a Bearer credential on the request, attaches the
+// resolved Claims (and any API-token scope) to the request context, and
+// rejects unauthenticated or scope-violating requests.
+//
+// The Bearer value is either a JWT access token or an API token (prefix
+// auth.APITokenPrefix). Read-only API tokens are rejected on any non-GET
+// request — write scopes are accepted on all methods.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get("Authorization")
+		if !strings.HasPrefix(header, "Bearer ") {
+			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or invalid authorization header")
+			return
+		}
+		raw := strings.TrimPrefix(header, "Bearer ")
+
+		var (
+			claims *auth.Claims
+			scope  = tokenScopeFull
+		)
+
+		if auth.LooksLikeAPIToken(raw) {
+			tok, err := s.apiTokens.GetByHash(auth.HashAPIToken(raw))
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or revoked api token")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
+				return
+			}
+			if tok.Scope == tokenScopeRead && r.Method != http.MethodGet {
+				writeError(w, http.StatusForbidden, "FORBIDDEN", "read-only token cannot perform writes")
+				return
+			}
+			user, err := s.users.GetByID(tok.UserID)
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "token owner not found")
+				return
+			}
+			claims = &auth.Claims{UserID: user.ID, Email: user.Email, Type: "access"}
+			scope = tok.Scope
+			// Best-effort last-used touch; never block the request on a write failure.
+			if err := s.apiTokens.TouchLastUsed(tok.ID); err != nil {
+				slog.Debug("api token touch failed", "id", tok.ID, "err", err)
+			}
+		} else {
+			c, err := s.tokens.Validate(raw, "access")
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
+				return
+			}
+			// Verify the user still exists. A valid JWT for a deleted user (e.g.
+			// after a DB wipe) would otherwise pass signature validation but fail
+			// later at the FK layer, producing a confusing 500 instead of a 401.
+			if _, err := s.users.GetByID(c.UserID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
+				return
+			}
+			claims = c
+		}
+
+		ctx := context.WithValue(r.Context(), claimsKey, claims)
+		ctx = context.WithValue(ctx, tokenScopeKey, scope)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// claimsFromContext returns the Claims placed by authMiddleware, or nil
+// if the request did not pass through it. Handlers behind authMiddleware
+// can rely on a non-nil result.
+func claimsFromContext(ctx context.Context) *auth.Claims {
+	c, _ := ctx.Value(claimsKey).(*auth.Claims)
+	return c
+}
+
+// statusWriter wraps ResponseWriter to capture the status code written by
+// the handler, which is not otherwise readable after the fact.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker so that the WebSocket upgrader can take
+// over the connection. Without this, the statusWriter wrapper breaks WS upgrades.
+func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := sw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return h.Hijack()
+}
+
+// requestLogger wraps next and emits a debug-level log line for every
+// request: method, path, status code, and wall-clock duration in ms.
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		slog.Debug("http",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"ms", time.Since(start).Milliseconds(),
+		)
+	})
+}
+````
+
+## File: packages/api/internal/db/user_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// UserRepo is the persistence layer for User records.
+type UserRepo struct {
+	db *sqlx.DB
+}
+
+// NewUserRepo returns a UserRepo backed by db.
+func NewUserRepo(db *sqlx.DB) *UserRepo {
+	return &UserRepo{db: db}
+}
+
+// Create inserts u. Returns an error if the email already exists
+// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
+func (r *UserRepo) Create(u *models.User) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
+		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
+	`, u)
+	if err != nil {
+		return fmt.Errorf("creating user: %w", err)
+	}
+	return nil
+}
+
+// GetByEmail looks up a user by exact email match. Callers are expected to
+// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
+// when no row matches.
+func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by email: %w", err)
+	}
+	return &u, nil
+}
+
+// GetByID looks up a user by primary key.
+func (r *UserRepo) GetByID(id string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by id: %w", err)
+	}
+	return &u, nil
+}
+
+// UpdatePasswordByEmail replaces the password hash for the user with the
+// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
+func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
+	res, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
+		passwordHash, email,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("updating password: no user with email %q", email)
+	}
+	return nil
+}
+
+// Count returns the total number of users. Used by the registration flow
+// to detect first-user bootstrap and to enforce tier user limits.
+func (r *UserRepo) Count() (int, error) {
+	var count int
+	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
+	if err != nil {
+		return 0, fmt.Errorf("counting users: %w", err)
+	}
+	return count, nil
+}
+
+// SearchByNameOrEmail returns up to 20 users whose display_name or email
+// contains the query (case-insensitive). Archived users are excluded.
+func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
+	var users []*models.User
+	like := "%" + q + "%"
+	err := r.db.Select(&users, `
+		SELECT * FROM users
+		WHERE archived_at IS NULL
+		  AND (display_name LIKE ? OR email LIKE ?)
+		ORDER BY display_name ASC
+		LIMIT 20
+	`, like, like)
+	if err != nil {
+		return nil, fmt.Errorf("searching users: %w", err)
+	}
+	return users, nil
+}
+
+// SetSuperadmin sets or clears the is_superadmin flag on a user.
+func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		isSuperadmin, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting superadmin: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
+func (r *UserRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		at, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting user archived: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a user row. The caller must verify the user is deletable
+// (no active activities, single team membership) before calling this.
+func (r *UserRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting user: %w", err)
+	}
+	return nil
+}
+
+// UpdateProfile sets display_name, color, and icon on a user. When color or
+// icon changes, the new value is propagated to all team_members rows for the
+// user where the member's value currently matches the user's old value or is NULL
+// (i.e. has not been explicitly overridden by a team admin).
+func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
+	// Fetch old values for propagation comparison.
+	var old models.User
+	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("fetching user for profile update: %w", err)
+	}
+
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning profile update transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Exec(
+		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		displayName, color, icon, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating user profile: %w", err)
+	}
+
+	// Propagate color if changed: update team_members rows where color matches
+	// the old value or is NULL (not explicitly overridden).
+	if !ptrEqual(old.Color, color) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
+			color, id, old.Color,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating color to team_members: %w", err)
+		}
+	}
+
+	if !ptrEqual(old.Icon, icon) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
+			icon, id, old.Icon,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating icon to team_members: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing profile update: %w", err)
+	}
+	return nil
+}
+
+// UpdatePassword sets the password_hash on a user.
+func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		passwordHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	return nil
+}
+
+// ListAll returns all users with their active team membership count.
+// When orphanedOnly is true, only users with zero active memberships are returned.
+func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
+	q := `
+		SELECT u.*,
+		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
+		FROM users u
+		ORDER BY u.display_name ASC
+	`
+	if orphanedOnly {
+		q = `
+			SELECT u.*,
+			       0 AS team_count
+			FROM users u
+			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
+			ORDER BY u.display_name ASC
+		`
+	}
+	var rows []*models.AdminUserRow
+	if err := r.db.Select(&rows, q); err != nil {
+		return nil, fmt.Errorf("listing admin users: %w", err)
+	}
+	return rows, nil
+}
+
+// ptrEqual reports whether two string pointers point to equal values,
+// treating nil and a pointer to "" as distinct.
+func ptrEqual(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+````
+
 ## File: packages/api/internal/events/bus.go
 ````go
 // Package events provides the in-process pub/sub bus. Every write operation
@@ -17157,437 +16734,6 @@ func (b *Bus) Publish(msg Message) {
 			// Slow subscriber — drop rather than block the publisher.
 		}
 	}
-}
-````
-
-## File: packages/web/src/components/MemberModal.tsx
-````typescript
-/**
- * MemberModal — view and edit a team member's profile, identity, and role.
- *
- * Shows computed stats (timelines, activities by date status) and exposes
- * superadmin actions (promote, inactivate, delete) when the viewer is a
- * superadmin. Password reset is present but shows "SMTP not configured"
- * until Phase 14.
- */
-
-import { useState } from 'react'
-import { createPortal } from 'react-dom'
-import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users } from 'lucide-react'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import type { Identity } from '@/components/identity/identity-constants'
-import { Badge } from '@/components/identity/Badge'
-import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser } from '@/hooks/useMemberManagement'
-import { useAuth } from '@/contexts/AuthContext'
-import type { components } from '@draba/shared'
-
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-interface Props {
-  teamId: string
-  memberId: string
-  /** Whether the current viewer is a team admin. */
-  isAdmin: boolean
-  /** Whether the current viewer is a superadmin. */
-  isSuperadmin: boolean
-  onClose: () => void
-}
-
-// ── Small shared styles ───────────────────────────────────────────────────────
-
-const chipStyle = (color: string): React.CSSProperties => ({
-  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-  padding: '10px 16px', borderRadius: 8, flex: 1,
-  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
-  background: `${color}0a`, textAlign: 'center', minWidth: 0,
-})
-
-const cancelBtn: React.CSSProperties = {
-  background: 'none', border: '1px solid #30363d', color: '#8b949e',
-  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit',
-}
-
-interface ConfirmDialogProps {
-  variant: 'indigo' | 'amber' | 'red'
-  icon: React.ReactNode
-  title: string
-  body: string
-  confirmLabel: string
-  busy: boolean
-  onCancel: () => void
-  onConfirm: () => void
-}
-
-function ConfirmDialog({ variant, icon, title, body, confirmLabel, busy, onCancel, onConfirm }: ConfirmDialogProps) {
-  const colors = { indigo: '#6366F1', amber: '#F59E0B', red: '#EF4444' }
-  const c = colors[variant]
-  return (
-    <div style={{ padding: '28px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, textAlign: 'center' }}>
-      <div style={{ width: 48, height: 48, borderRadius: 12, background: `${c}20`, border: `1.5px solid ${c}44`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        {icon}
-      </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3' }}>{title}</div>
-      <div style={{ fontSize: 13, color: '#8b949e', lineHeight: 1.6, maxWidth: 340 }}>{body}</div>
-      <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
-        <button onClick={onCancel} disabled={busy} style={cancelBtn}>Cancel</button>
-        <button
-          onClick={onConfirm}
-          disabled={busy}
-          style={{
-            background: `${c}22`, border: `1px solid ${c}66`, color: c,
-            fontWeight: 600, fontSize: 13, padding: '7px 18px',
-            borderRadius: 7, cursor: 'pointer', opacity: busy ? 0.6 : 1, fontFamily: 'inherit',
-          }}
-        >
-          {busy ? 'Working…' : confirmLabel}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
-
-export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
-  const { user: currentUser } = useAuth()
-  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
-  const updateMember = useUpdateMember(teamId)
-  const promoteUser = usePromoteUser()
-  const archiveUser = useArchiveUser()
-  const unarchiveUser = useUnarchiveUser()
-  const deleteUser = useDeleteUser()
-
-  const [identity, setIdentity] = useState<Identity | null>(null)
-  const [displayName, setDisplayName] = useState<string | null>(null)
-  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | null>(null)
-
-  if (isLoading || isError || !detail) {
-    return createPortal(
-      <div
-        onClick={e => { if (e.target === e.currentTarget) onClose() }}
-        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-      >
-        <div style={{ width: 560, height: 300, background: '#21262d', border: '1px solid #30363d', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
-          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 4, display: 'flex' }}>
-            <X size={18} />
-          </button>
-          {isError ? (
-            <>
-              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
-              <button onClick={onClose} style={{ fontSize: 12, color: '#8b949e', background: 'none', border: '1px solid #30363d', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit' }}>Dismiss</button>
-            </>
-          ) : (
-            <span style={{ color: '#484f58', fontSize: 13 }}>Loading…</span>
-          )}
-        </div>
-      </div>,
-      document.body,
-    )
-  }
-
-  const effectiveIdentity: Identity = identity ?? {
-    color: detail.color ?? '#1A97A2',
-    icon: detail.icon ?? '__name_words__',
-  }
-  const effectiveName = displayName ?? detail.displayName
-
-  const isParticipant = !detail.userId
-  const isInactivated = Boolean(detail.archivedAt)
-  const stats = detail.stats
-  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
-
-  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending
-
-  // detail is guaranteed non-null here (early return above handles loading/undefined).
-  // Non-null assertions in callbacks are safe because they only fire when the
-  // rendered modal is interactive, which requires detail to be loaded.
-  function handleSave() {
-    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
-    if (displayName !== null) patch.displayName = displayName
-    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
-    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
-  }
-
-  function handlePromote() {
-    if (!detail!.userId) return
-    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
-  }
-
-  function handleInactivate() {
-    if (!detail!.userId) return
-    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  function handleReactivate() {
-    if (!detail!.userId) return
-    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
-  }
-
-  function handleDelete() {
-    if (!detail!.userId) return
-    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  const memberColor = effectiveIdentity.color
-
-  return createPortal(
-    <div
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-    >
-      <div style={{ width: 560, maxHeight: '90vh', background: '#21262d', border: '1px solid #30363d', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-        {/* Confirm overlays */}
-        {confirm === 'promote' && (
-          <ConfirmDialog
-            variant="indigo"
-            icon={<Shield size={22} color="#6366F1" />}
-            title="Promote to Super Admin?"
-            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
-            confirmLabel="Promote"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handlePromote}
-          />
-        )}
-        {confirm === 'inactivate' && (
-          <ConfirmDialog
-            variant="amber"
-            icon={<Archive size={22} color="#F59E0B" />}
-            title={`Inactivate ${effectiveName}?`}
-            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
-            confirmLabel="Inactivate"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleInactivate}
-          />
-        )}
-        {confirm === 'delete' && (
-          <ConfirmDialog
-            variant="red"
-            icon={<Trash2 size={22} color="#EF4444" />}
-            title={`Delete ${effectiveName}?`}
-            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
-            confirmLabel="Delete permanently"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleDelete}
-          />
-        )}
-
-        {confirm === null && (
-          <>
-            {/* Header */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid #30363d', flexShrink: 0 }}>
-              <div style={{ flexShrink: 0 }}>
-                <IdentityWidget
-                  identity={effectiveIdentity}
-                  name={effectiveName}
-                  shape="circle"
-                  onChange={setIdentity}
-                />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, color: '#484f58', fontWeight: 600, letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 3 }}>
-                  {isParticipant ? 'Participant' : 'Team Member'}
-                  {isInactivated && ' · Inactive'}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3' }}>{effectiveName}</span>
-                  {isParticipant && (
-                    <span style={{ fontSize: 11, fontWeight: 600, background: '#F59E0B20', border: '1px solid #F59E0B44', color: '#F59E0B', borderRadius: 99, padding: '1px 7px' }}>No login</span>
-                  )}
-                </div>
-              </div>
-              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 4, display: 'flex', flexShrink: 0 }}>
-                <X size={18} />
-              </button>
-            </div>
-
-            {/* Scrollable body */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-
-              {/* Name + email */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
-                <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Display Name</label>
-                  {(isAdmin || currentUser?.id === detail.userId) ? (
-                    <input
-                      value={displayName ?? detail.displayName}
-                      onChange={e => setDisplayName(e.target.value)}
-                      style={{ background: '#2d333b', border: '1px solid #30363d', borderRadius: 7, padding: '8px 12px', color: '#e6edf3', fontSize: 13, width: '100%', boxSizing: 'border-box', fontFamily: 'inherit' }}
-                    />
-                  ) : (
-                    <div style={{ fontSize: 13, color: '#8b949e', padding: '8px 0' }}>{detail.displayName}</div>
-                  )}
-                </div>
-                <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
-                  <div style={{ fontSize: 13, color: '#8b949e', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {isParticipant ? <em style={{ color: '#484f58' }}>No email — participant</em> : detail.email}
-                  </div>
-                </div>
-              </div>
-
-              {/* Timeline stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Timelines
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
-                    <span style={{ fontSize: 11, color: '#8b949e', marginTop: 2 }}>Active</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
-                    <span style={{ fontSize: 11, color: '#484f58', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Activity stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Activities
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
-                    <span style={{ fontSize: 10, color: '#8b949e', marginTop: 2 }}>Past due</span>
-                  </div>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
-                    <span style={{ fontSize: 10, color: '#8b949e', marginTop: 2 }}>Running</span>
-                  </div>
-                  <div style={chipStyle('#3B82F6')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
-                    <span style={{ fontSize: 10, color: '#8b949e', marginTop: 2 }}>Upcoming</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
-                    <span style={{ fontSize: 10, color: '#484f58', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Teams list */}
-              {detail.teams.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Teams ({detail.teams.length})
-                  </label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    {detail.teams.map((tm: TeamMemberWithUser) => (
-                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: '#2d333b', borderRadius: 7 }}>
-                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
-                        <span style={{ fontSize: 13, color: '#e6edf3', flex: 1 }}>{tm.teamId}</span>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : '#8b949e', background: tm.role === 'admin' ? '#1A97A220' : '#2d333b', border: `1px solid ${tm.role === 'admin' ? '#1A97A244' : '#30363d'}`, borderRadius: 99, padding: '1px 8px' }}>
-                          {tm.role}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Joined date */}
-              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: '#2d333b', borderRadius: 6, fontSize: 12, color: '#8b949e' }}>
-                  <Clock size={12} />
-                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
-                </div>
-              </div>
-
-              {/* Account section — non-participant only */}
-              {!isParticipant && isAdmin && (
-                <div style={{ borderTop: '1px solid #30363d', paddingTop: 16, marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
-                  <button
-                    style={{ fontSize: 12, color: '#484f58', background: 'none', border: '1px solid #30363d', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'inherit' }}
-                    title="SMTP is not configured"
-                    disabled
-                  >
-                    Reset password — SMTP not configured
-                  </button>
-                </div>
-              )}
-
-              {/* Superadmin actions */}
-              {isSuperadmin && !isParticipant && (
-                <div style={{ borderTop: '1px solid #30363d', paddingTop: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
-                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Super Admin Actions
-                  </label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                    {!isInactivated && (
-                      <button
-                        onClick={() => setConfirm('promote')}
-                        style={{ fontSize: 12, color: '#6366F1', background: '#6366F114', border: '1px solid #6366F144', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Shield size={13} />
-                        Promote to Super Admin
-                      </button>
-                    )}
-                    {isInactivated ? (
-                      <button
-                        onClick={handleReactivate}
-                        disabled={busy}
-                        style={{ fontSize: 12, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', opacity: busy ? 0.6 : 1 }}
-                      >
-                        Reactivate account
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setConfirm('inactivate')}
-                        style={{ fontSize: 12, color: '#F59E0B', background: '#F59E0B14', border: '1px solid #F59E0B44', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Archive size={13} />
-                        Inactivate
-                      </button>
-                    )}
-                    {detail.deletable && (
-                      <button
-                        onClick={() => setConfirm('delete')}
-                        style={{ fontSize: 12, color: '#EF4444', background: '#EF444414', border: '1px solid #EF444444', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Trash2 size={13} />
-                        Delete
-                      </button>
-                    )}
-                  </div>
-                  {activeActivityCount > 0 && (
-                    <div style={{ fontSize: 11, color: '#484f58', marginTop: 8 }}>
-                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Footer */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid #30363d', flexShrink: 0 }}>
-              <button onClick={onClose} style={cancelBtn}>Cancel</button>
-              {(isAdmin || currentUser?.id === detail.userId) && (
-                <button
-                  onClick={handleSave}
-                  disabled={busy}
-                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'inherit' }}
-                >
-                  {busy ? 'Saving…' : 'Save changes'}
-                </button>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-    </div>,
-    document.body,
-  )
 }
 ````
 
@@ -17749,6 +16895,234 @@ export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext)
   if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
   return ctx
+}
+````
+
+## File: packages/web/src/hooks/useSettings.ts
+````typescript
+/**
+ * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
+ * profile, password change, forgot/reset password, SMTP config, instance
+ * settings, and the admin user list.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { apiFetch, createAuthFetch } from '@/lib/api'
+import type { components } from '@draba/shared'
+
+type User = components['schemas']['User']
+type SMTPConfig = components['schemas']['SMTPConfig']
+type APIToken = components['schemas']['APIToken']
+
+// ── Profile ──────────────────────────────────────────────────────────────────
+
+export function useUpdateProfile() {
+  const { getAccessToken, patchUser } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
+      authFetch<User>('/users/me', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: (updated) => {
+      qc.setQueryData(['me'], updated)
+      patchUser(updated)
+      // Invalidate all team member lists so the sidebar reflects the new color/icon.
+      void qc.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+// ── My stats ──────────────────────────────────────────────────────────────────
+
+interface MemberStats {
+  activeTimelines: number
+  archivedTimelines: number
+  pastDue: number
+  running: number
+  upcoming: number
+  unscheduled: number
+  archivedActivities: number
+}
+
+export function useMyStats() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: ['me', 'stats'],
+    queryFn: () => authFetch<MemberStats>('/users/me/stats'),
+  })
+}
+
+// ── Password ──────────────────────────────────────────────────────────────────
+
+export function useChangePassword() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
+      authFetch<{ status: string }>('/users/me/password', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Forgot / reset password (public, no auth required) ───────────────────────
+
+export function useForgotPassword() {
+  return useMutation({
+    mutationFn: (email: string) =>
+      apiFetch<{ status: string }>('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }),
+  })
+}
+
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: (data: { token: string; newPassword: string }) =>
+      apiFetch<{ status: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Admin: SMTP ──────────────────────────────────────────────────────────────
+
+export function useAdminSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'smtp'],
+    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
+  })
+}
+
+export function useSaveSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
+        method: 'PUT',
+        body: JSON.stringify(cfg),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+export function useTestSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
+        method: 'POST',
+        body: JSON.stringify(cfg),
+      }),
+  })
+}
+
+export function useDeleteSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: () =>
+      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+// ── Admin: Instance settings ──────────────────────────────────────────────────
+
+export function useAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'settings'],
+    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
+  })
+}
+
+export function usePatchAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: Record<string, string>) =>
+      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
+  })
+}
+
+// ── API Tokens ────────────────────────────────────────────────────────────────
+
+export function useTokens() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: ['tokens'],
+    queryFn: () => authFetch<APIToken[]>('/tokens'),
+  })
+}
+
+export function useCreateToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { name: string; scope: string }) =>
+      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+export function useRevokeToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+// ── Admin: Users ──────────────────────────────────────────────────────────────
+
+export type AdminUserRow = User & { teamCount: number }
+
+export function useAdminUsers(orphanedOnly = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'users', { orphanedOnly }],
+    queryFn: () =>
+      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
+  })
 }
 ````
 
@@ -18240,132 +17614,693 @@ export default function PreferencesPage() {
 }
 ````
 
-## File: packages/web/src/pages/settings/ProfilePage.tsx
+## File: packages/web/src/pages/LoginPage.tsx
 ````typescript
-/**
- * /settings/profile — Display name, identity (color + icon), and read-only email.
- */
-
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { useAuth } from '@/contexts/AuthContext'
-import { useUpdateProfile } from '@/hooks/useSettings'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
 import { ApiError } from '@/lib/api'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
+import DarkModeToggle from '@/components/DarkModeToggle'
 
-export default function ProfilePage() {
-  const { user } = useAuth()
-  const updateProfile = useUpdateProfile()
+export default function LoginPage() {
+  const { login } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
 
-  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: user?.color ?? '#288C9B',
-    icon: user?.icon ?? '__none__',
-  })
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
 
-  useEffect(() => {
-    if (user) {
-      setDisplayName(user.displayName)
-      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
-    }
-  }, [user])
-
-  async function handleSave() {
-    setFeedback(null)
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    setLoading(true)
     try {
-      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
-      setFeedback({ type: 'success', msg: 'Profile updated.' })
+      await login(email, password)
+      navigate(from, { replace: true })
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
-      setFeedback({ type: 'error', msg })
+      if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
     }
   }
 
   return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Profile</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Changes to your name and identity propagate across all your team memberships.
-      </p>
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--background)',
+      padding: '24px',
+    }}>
+      {/* Dark mode toggle — top-right */}
+      <div style={{ position: 'fixed', top: 16, right: 16 }}>
+        <DarkModeToggle />
+      </div>
 
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        {/* Identity preview */}
-        <div className="flex items-center gap-4 mb-6">
-          <Badge identity={identity} name={displayName} size={48} shape="circle" />
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-[15px] font-semibold text-foreground">
-                {displayName || 'Your Name'}
-              </span>
-              {user?.isSuperadmin && (
-                <span className="text-[11px] px-2 py-0.5 rounded bg-primary/15 text-primary font-semibold tracking-wide">
-                  Superadmin
-                </span>
-              )}
-            </div>
-            <div className="text-xs text-muted-foreground mt-0.5">
-              Identity preview — shown in sidebar and Gantt
-            </div>
+      {/* Logo + wordmark */}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, marginBottom: 32 }}>
+        <img src="/logo.svg" alt="draba" style={{ width: 144, height: 144 }} />
+        <span style={{ fontSize: 36, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.02em' }}>
+          draba
+        </span>
+      </div>
+
+      {/* Sign-in card */}
+      <div style={{
+        width: '100%',
+        maxWidth: 400,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-lg)',
+        padding: '32px',
+        boxShadow: '0 4px 24px rgba(0,0,0,0.08)',
+      }}>
+        <h1 style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', margin: '0 0 4px' }}>
+          Sign in
+        </h1>
+        <p style={{ fontSize: 13, color: 'var(--muted-foreground)', margin: '0 0 24px' }}>
+          Enter your email and password to continue.
+        </p>
+
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="email">Email</Label>
+            <Input
+              id="email"
+              type="email"
+              autoComplete="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              required
+            />
           </div>
-        </div>
 
-        {/* Identity picker */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Color & Icon</Label>
-          <IdentityWidget
-            identity={identity}
-            name={displayName}
-            shape="circle"
-            onChange={(next) => setIdentity(next)}
-          />
-        </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="password">Password</Label>
+            <Input
+              id="password"
+              type="password"
+              autoComplete="current-password"
+              placeholder="••••••••"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              required
+            />
+            <Link
+              to="/forgot-password"
+              style={{ fontSize: 12, color: 'var(--muted-foreground)', textDecoration: 'none', alignSelf: 'flex-start' }}
+            >
+              Forgot password?
+            </Link>
+          </div>
 
-        {/* Display name */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label htmlFor="displayName">Display name</Label>
-          <Input
-            id="displayName"
-            value={displayName}
-            onChange={e => setDisplayName(e.target.value)}
-            placeholder="Your name"
-            className="max-w-[360px]"
-          />
-        </div>
+          {error && (
+            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
+          )}
 
-        {/* Email (read-only) */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Email</Label>
-          <Input
-            value={user?.email ?? ''}
-            disabled
-            className="max-w-[360px] opacity-60"
-          />
-          <p className="text-xs text-muted-foreground m-0">
-            Email changes are not yet supported.
-          </p>
-        </div>
+          <Button type="submit" disabled={loading} style={{ width: '100%', marginTop: 4 }}>
+            {loading ? 'Signing in…' : 'Sign in'}
+          </Button>
+        </form>
 
-        {feedback && (
-          <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-            {feedback.msg}
-          </p>
-        )}
-
-        <Button
-          onClick={handleSave}
-          disabled={updateProfile.isPending || !displayName.trim()}
-        >
-          {updateProfile.isPending ? 'Saving…' : 'Save profile'}
-        </Button>
+        <p style={{ marginTop: 20, fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
+          Have an invite?{' '}
+          <Link to="/register" style={{ color: 'var(--primary)', fontWeight: 600 }}>
+            Create an account
+          </Link>
+        </p>
       </div>
     </div>
   )
 }
+````
+
+## File: packages/web/src/pages/SetupPage.tsx
+````typescript
+/**
+ * First-run setup wizard. Shown once when no users exist.
+ * Collects account, team, and timeline details then creates all three on Finish.
+ */
+
+import { useState } from 'react'
+import { Navigate, useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { API_BASE, apiFetch, ApiError } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type Step = 1 | 2 | 3
+
+interface WizardData {
+  displayName: string
+  email: string
+  password: string
+  teamName: string
+  timelineName: string
+  startDate: string
+  endDate: string
+}
+
+// ---------------------------------------------------------------------------
+// Step indicator
+// ---------------------------------------------------------------------------
+
+const STEP_LABELS: Record<Step, string> = {
+  1: 'Account',
+  2: 'Team',
+  3: 'Timeline',
+}
+
+function StepIndicator({ current }: { current: Step }) {
+  const steps: Step[] = [1, 2, 3]
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 0,
+        marginBottom: 32,
+      }}
+    >
+      {steps.map((n, i) => {
+        const done = n < current
+        const active = n === current
+        return (
+          <div key={n} style={{ display: 'flex', alignItems: 'center' }}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 4,
+              }}
+            >
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background:
+                    done || active ? 'var(--primary)' : 'transparent',
+                  border:
+                    done || active
+                      ? 'none'
+                      : '2px solid var(--border)',
+                  color:
+                    done || active
+                      ? 'var(--primary-foreground)'
+                      : 'var(--muted-foreground)',
+                  fontSize: 13,
+                  fontWeight: 700,
+                  transition: 'background 0.2s',
+                }}
+              >
+                {done ? '✓' : n}
+              </div>
+              <span
+                style={{
+                  fontSize: 11,
+                  fontWeight: active ? 600 : 400,
+                  color: active
+                    ? 'var(--foreground)'
+                    : 'var(--muted-foreground)',
+                }}
+              >
+                {STEP_LABELS[n]}
+              </span>
+            </div>
+
+            {i < steps.length - 1 && (
+              <div
+                style={{
+                  width: 48,
+                  height: 2,
+                  // Shift up to align with the circle, not the label
+                  marginBottom: 20,
+                  background: done ? 'var(--primary)' : 'var(--border)',
+                  transition: 'background 0.2s',
+                }}
+              />
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Step content
+// ---------------------------------------------------------------------------
+
+interface StepProps {
+  data: WizardData
+  onChange: (patch: Partial<WizardData>) => void
+}
+
+function Step1({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <p
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: 'var(--primary)',
+            margin: '0 0 4px',
+          }}
+        >
+          Welcome to draba!
+        </p>
+        <CardTitle>Create your account</CardTitle>
+        <CardDescription>
+          You're the first person here, so this account will have full admin
+          access — you'll be able to create teams, invite users, and manage the
+          workspace.
+        </CardDescription>
+      </CardHeader>
+      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="displayName">Your name</Label>
+          <Input
+            id="displayName"
+            placeholder="Jane Smith"
+            autoComplete="name"
+            value={data.displayName}
+            onChange={e => onChange({ displayName: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="email">Email</Label>
+          <Input
+            id="email"
+            type="email"
+            placeholder="you@example.com"
+            autoComplete="email"
+            value={data.email}
+            onChange={e => onChange({ email: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="password">Password</Label>
+          <Input
+            id="password"
+            type="password"
+            placeholder="At least 8 characters"
+            autoComplete="new-password"
+            value={data.password}
+            onChange={e => onChange({ password: e.target.value })}
+          />
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+function Step2({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <CardTitle>Name your team</CardTitle>
+        <CardDescription>
+          A team is your shared workspace. Everyone you invite will work within
+          it, and all your timelines and events live inside one. You can
+          customize and add members after setup.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="teamName">Team name</Label>
+          <Input
+            id="teamName"
+            placeholder="Product Marketing"
+            autoComplete="off"
+            value={data.teamName}
+            onChange={e => onChange({ teamName: e.target.value })}
+          />
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+function Step3({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <CardTitle>Your first timeline</CardTitle>
+        <CardDescription>
+          A timeline is a named date window over your team's events — it's how
+          you see who's working on what, and when. Pick a range that fits your
+          next planning horizon.
+        </CardDescription>
+      </CardHeader>
+      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="timelineName">Timeline name</Label>
+          <Input
+            id="timelineName"
+            placeholder="Q3 Roadmap"
+            autoComplete="off"
+            value={data.timelineName}
+            onChange={e => onChange({ timelineName: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="startDate">Start date</Label>
+            <Input
+              id="startDate"
+              type="date"
+              value={data.startDate}
+              onChange={e => onChange({ startDate: e.target.value })}
+            />
+          </div>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="endDate">End date</Label>
+            <Input
+              id="endDate"
+              type="date"
+              value={data.endDate}
+              onChange={e => onChange({ endDate: e.target.value })}
+            />
+          </div>
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+function validateStep(step: Step, data: WizardData): string | null {
+  if (step === 1) {
+    if (!data.displayName.trim()) return 'Please enter your name.'
+    if (!data.email.trim()) return 'Please enter your email.'
+    if (data.password.length < 8) return 'Password must be at least 8 characters.'
+    if (/\s/.test(data.password)) return 'Password must not contain spaces.'
+  }
+  if (step === 2) {
+    if (!data.teamName.trim()) return 'Please enter a team name.'
+  }
+  if (step === 3) {
+    if (!data.timelineName.trim()) return 'Please enter a timeline name.'
+    if (!data.startDate) return 'Please choose a start date.'
+    if (!data.endDate) return 'Please choose an end date.'
+    if (data.endDate < data.startDate) return 'End date must be on or after the start date.'
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Date helpers
+// ---------------------------------------------------------------------------
+
+function toDateString(d: Date): string {
+  return d.toISOString().split('T')[0]
+}
+
+function defaultDates(): { startDate: string; endDate: string } {
+  const start = new Date()
+  const end = new Date()
+  end.setMonth(end.getMonth() + 3)
+  return { startDate: toDateString(start), endDate: toDateString(end) }
+}
+
+// ---------------------------------------------------------------------------
+// Main wizard
+// ---------------------------------------------------------------------------
+
+interface SetupStatus {
+  needsSetup: boolean
+}
+
+export default function SetupPage() {
+  const { register, user } = useAuth()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+
+  // If setup has already been completed redirect to login rather than showing
+  // a broken wizard (handles back-navigation and direct URL access after setup).
+  const { data: setupStatus, isLoading: statusLoading } = useQuery<SetupStatus>({
+    queryKey: ['setup-status'],
+    queryFn: () =>
+      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
+    staleTime: Infinity,
+  })
+
+  const [step, setStep] = useState<Step>(1)
+  const [data, setData] = useState<WizardData>({
+    displayName: '',
+    email: '',
+    password: '',
+    teamName: '',
+    timelineName: '',
+    ...defaultDates(),
+  })
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  // Wait for the status check before rendering anything.
+  if (statusLoading) return null
+
+  // Setup already done — logged-in users go home, others go to login.
+  if (setupStatus && !setupStatus.needsSetup) {
+    return <Navigate to={user ? '/' : '/login'} replace />
+  }
+
+  function handleChange(patch: Partial<WizardData>) {
+    setData(d => ({ ...d, ...patch }))
+    setError(null)
+  }
+
+  function handleBack() {
+    setError(null)
+    setStep(s => (s > 1 ? ((s - 1) as Step) : s))
+  }
+
+  function handleNext() {
+    const err = validateStep(step, data)
+    if (err) {
+      setError(err)
+      return
+    }
+    setError(null)
+    setStep(s => (s < 3 ? ((s + 1) as Step) : s))
+  }
+
+  async function handleFinish() {
+    const err = validateStep(3, data)
+    if (err) {
+      setError(err)
+      return
+    }
+
+    setError(null)
+    setLoading(true)
+
+    try {
+      // 1. Create account — returns token directly to avoid racing the async
+      //    setState inside register() before the next render cycle.
+      const token = await register(data.email, data.password, data.displayName)
+
+      // 2. Create team
+      const team = await apiFetch<{ id: string }>('/teams', {
+        method: 'POST',
+        body: JSON.stringify({ name: data.teamName }),
+        accessToken: token,
+      })
+
+      // 3. Create timeline
+      await apiFetch(`/teams/${team.id}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: data.timelineName,
+          startDate: data.startDate,
+          endDate: data.endDate,
+        }),
+        accessToken: token,
+      })
+
+      // Mark setup as done in the query cache so ProtectedRoute doesn't
+      // replay the stale needsSetup:true value after the user logs out.
+      queryClient.setQueryData<SetupStatus>(['setup-status'], { needsSetup: false })
+      navigate('/', { replace: true })
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--background)',
+        padding: '24px',
+      }}
+    >
+      <div style={{ position: 'fixed', top: 16, right: 16 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Logo */}
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 2,
+          marginBottom: 24,
+        }}
+      >
+        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
+        <span
+          style={{
+            fontSize: 36,
+            fontWeight: 700,
+            color: 'var(--foreground)',
+            letterSpacing: '-0.02em',
+          }}
+        >
+          draba
+        </span>
+      </div>
+
+      <Card style={{ width: '100%', maxWidth: 440 }}>
+        <div style={{ padding: '24px 24px 0' }}>
+          <StepIndicator current={step} />
+        </div>
+
+        {step === 1 && <Step1 data={data} onChange={handleChange} />}
+        {step === 2 && <Step2 data={data} onChange={handleChange} />}
+        {step === 3 && <Step3 data={data} onChange={handleChange} />}
+
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+            padding: '0 24px 24px',
+          }}
+        >
+          {error && (
+            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>
+              {error}
+            </p>
+          )}
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button
+              variant="outline"
+              onClick={handleBack}
+              disabled={step === 1 || loading}
+              style={{ flex: 1 }}
+            >
+              Back
+            </Button>
+
+            {step < 3 ? (
+              <Button onClick={handleNext} disabled={loading} style={{ flex: 1 }}>
+                Next
+              </Button>
+            ) : (
+              <Button onClick={handleFinish} disabled={loading} style={{ flex: 1 }}>
+                {loading ? 'Setting up…' : 'Finish'}
+              </Button>
+            )}
+          </div>
+        </div>
+      </Card>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/types/index.ts
+````typescript
+/**
+ * Local UI types and design-token palettes.
+ *
+ * Wire-format API types come from generated definitions in `packages/shared/`.
+ * Only view-state types (computed from API data) live here.
+ *
+ * ACTIVITY_COLORS and MEMBER_COLORS are now re-exported from identity-constants
+ * so there is a single source of truth for the 16-color palette.
+ */
+
+export { ACTIVITY_COLORS, MEMBER_COLORS } from '@/components/identity/identity-constants';
+
+/** A person who can be assigned to events on a timeline. */
+export interface Member {
+  id: string;
+  name: string;
+  initials: string;
+  /** Hex color for display (e.g. '#288C9B'). Falls back to palette slot when not set. */
+  color: string;
+}
+
+// ── Legacy types — kept for ActivityPanel until Phase 8.2 rewrites it ──────────
+
+/** @deprecated Phase 8.2 will replace this with the API Activity type. */
+export type ActivityStatus = 'planned' | 'in-progress' | 'done';
+
+/** @deprecated Phase 8.2 will replace this with the API Activity type. */
+export interface DrabaActivity {
+  id: string;
+  title: string;
+  memberId: string;
+  startDate: string;
+  endDate: string;
+  startCol: number;
+  span: number;
+  color: string;
+  status: ActivityStatus;
+  notes?: string;
+}
+
+/** @deprecated Phase 8.2 will replace this with resolved team_statuses labels. */
+export const STATUS_LABELS: Record<ActivityStatus, string> = {
+  'planned':     'Planned',
+  'in-progress': 'In progress',
+  'done':        'Done',
+};
 ````
 
 ## File: docs/ARCHITECTURE.md
@@ -18590,164 +18525,6 @@ packages/api/
 ### CI/CD
 
 - [TBD — GitHub Actions; build + test on PR; publish Docker image on tag]
-````
-
-## File: packages/api/internal/api/middleware.go
-````go
-package api
-
-import (
-	"bufio"
-	"context"
-	"database/sql"
-	"errors"
-	"fmt"
-	"log/slog"
-	"net"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-)
-
-// contextKey is an unexported type to avoid collisions with other packages
-// using context.WithValue on the same request context.
-type contextKey string
-
-const (
-	claimsKey     contextKey = "claims"
-	tokenScopeKey contextKey = "tokenScope"
-)
-
-// Scope sentinels. tokenScopeFull is used for JWT-authenticated requests
-// where no scope restriction applies; the other values mirror the api_tokens
-// schema check constraint.
-const (
-	tokenScopeFull    = "full"
-	tokenScopeRead    = "read"
-	tokenScopeAdd     = "add"
-	tokenScopeEditOwn = "edit_own"
-	tokenScopeEditAll = "edit_all"
-)
-
-// authMiddleware enforces a Bearer credential on the request, attaches the
-// resolved Claims (and any API-token scope) to the request context, and
-// rejects unauthenticated or scope-violating requests.
-//
-// The Bearer value is either a JWT access token or an API token (prefix
-// auth.APITokenPrefix). Read-only API tokens are rejected on any non-GET
-// request — write scopes are accepted on all methods.
-func (s *Server) authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") {
-			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or invalid authorization header")
-			return
-		}
-		raw := strings.TrimPrefix(header, "Bearer ")
-
-		var (
-			claims *auth.Claims
-			scope  = tokenScopeFull
-		)
-
-		if auth.LooksLikeAPIToken(raw) {
-			tok, err := s.apiTokens.GetByHash(auth.HashAPIToken(raw))
-			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or revoked api token")
-					return
-				}
-				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
-				return
-			}
-			if tok.Scope == tokenScopeRead && r.Method != http.MethodGet {
-				writeError(w, http.StatusForbidden, "FORBIDDEN", "read-only token cannot perform writes")
-				return
-			}
-			user, err := s.users.GetByID(tok.UserID)
-			if err != nil {
-				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "token owner not found")
-				return
-			}
-			claims = &auth.Claims{UserID: user.ID, Email: user.Email, Type: "access"}
-			scope = tok.Scope
-			// Best-effort last-used touch; never block the request on a write failure.
-			if err := s.apiTokens.TouchLastUsed(tok.ID); err != nil {
-				slog.Debug("api token touch failed", "id", tok.ID, "err", err)
-			}
-		} else {
-			c, err := s.tokens.Validate(raw, "access")
-			if err != nil {
-				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
-				return
-			}
-			// Verify the user still exists. A valid JWT for a deleted user (e.g.
-			// after a DB wipe) would otherwise pass signature validation but fail
-			// later at the FK layer, producing a confusing 500 instead of a 401.
-			if _, err := s.users.GetByID(c.UserID); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
-					return
-				}
-				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
-				return
-			}
-			claims = c
-		}
-
-		ctx := context.WithValue(r.Context(), claimsKey, claims)
-		ctx = context.WithValue(ctx, tokenScopeKey, scope)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-// claimsFromContext returns the Claims placed by authMiddleware, or nil
-// if the request did not pass through it. Handlers behind authMiddleware
-// can rely on a non-nil result.
-func claimsFromContext(ctx context.Context) *auth.Claims {
-	c, _ := ctx.Value(claimsKey).(*auth.Claims)
-	return c
-}
-
-// statusWriter wraps ResponseWriter to capture the status code written by
-// the handler, which is not otherwise readable after the fact.
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-}
-
-func (sw *statusWriter) WriteHeader(code int) {
-	sw.status = code
-	sw.ResponseWriter.WriteHeader(code)
-}
-
-// Hijack implements http.Hijacker so that the WebSocket upgrader can take
-// over the connection. Without this, the statusWriter wrapper breaks WS upgrades.
-func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	h, ok := sw.ResponseWriter.(http.Hijacker)
-	if !ok {
-		return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
-	}
-	return h.Hijack()
-}
-
-// requestLogger wraps next and emits a debug-level log line for every
-// request: method, path, status code, and wall-clock duration in ms.
-func requestLogger(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(sw, r)
-		slog.Debug("http",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", sw.status,
-			"ms", time.Since(start).Milliseconds(),
-		)
-	})
-}
 ````
 
 ## File: packages/api/internal/api/timeline_handler.go
@@ -18978,250 +18755,6 @@ func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Re
 	}
 
 	writeJSON(w, http.StatusOK, timeline)
-}
-````
-
-## File: packages/api/internal/db/user_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// UserRepo is the persistence layer for User records.
-type UserRepo struct {
-	db *sqlx.DB
-}
-
-// NewUserRepo returns a UserRepo backed by db.
-func NewUserRepo(db *sqlx.DB) *UserRepo {
-	return &UserRepo{db: db}
-}
-
-// Create inserts u. Returns an error if the email already exists
-// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
-func (r *UserRepo) Create(u *models.User) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
-		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
-	`, u)
-	if err != nil {
-		return fmt.Errorf("creating user: %w", err)
-	}
-	return nil
-}
-
-// GetByEmail looks up a user by exact email match. Callers are expected to
-// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
-// when no row matches.
-func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by email: %w", err)
-	}
-	return &u, nil
-}
-
-// GetByID looks up a user by primary key.
-func (r *UserRepo) GetByID(id string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by id: %w", err)
-	}
-	return &u, nil
-}
-
-// UpdatePasswordByEmail replaces the password hash for the user with the
-// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
-func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
-	res, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
-		passwordHash, email,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	if n == 0 {
-		return fmt.Errorf("updating password: no user with email %q", email)
-	}
-	return nil
-}
-
-// Count returns the total number of users. Used by the registration flow
-// to detect first-user bootstrap and to enforce tier user limits.
-func (r *UserRepo) Count() (int, error) {
-	var count int
-	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
-	if err != nil {
-		return 0, fmt.Errorf("counting users: %w", err)
-	}
-	return count, nil
-}
-
-// SearchByNameOrEmail returns up to 20 users whose display_name or email
-// contains the query (case-insensitive). Archived users are excluded.
-func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
-	var users []*models.User
-	like := "%" + q + "%"
-	err := r.db.Select(&users, `
-		SELECT * FROM users
-		WHERE archived_at IS NULL
-		  AND (display_name LIKE ? OR email LIKE ?)
-		ORDER BY display_name ASC
-		LIMIT 20
-	`, like, like)
-	if err != nil {
-		return nil, fmt.Errorf("searching users: %w", err)
-	}
-	return users, nil
-}
-
-// SetSuperadmin sets or clears the is_superadmin flag on a user.
-func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		isSuperadmin, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting superadmin: %w", err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
-func (r *UserRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		at, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting user archived: %w", err)
-	}
-	return nil
-}
-
-// Delete hard-deletes a user row. The caller must verify the user is deletable
-// (no active activities, single team membership) before calling this.
-func (r *UserRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting user: %w", err)
-	}
-	return nil
-}
-
-// UpdateProfile sets display_name, color, and icon on a user. When color or
-// icon changes, the new value is propagated to all team_members rows for the
-// user where the member's value currently matches the user's old value or is NULL
-// (i.e. has not been explicitly overridden by a team admin).
-func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
-	// Fetch old values for propagation comparison.
-	var old models.User
-	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("fetching user for profile update: %w", err)
-	}
-
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning profile update transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	_, err = tx.Exec(
-		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		displayName, color, icon, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating user profile: %w", err)
-	}
-
-	// Propagate color if changed: update team_members rows where color matches
-	// the old value or is NULL (not explicitly overridden).
-	if !ptrEqual(old.Color, color) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
-			color, id, old.Color,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating color to team_members: %w", err)
-		}
-	}
-
-	if !ptrEqual(old.Icon, icon) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
-			icon, id, old.Icon,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating icon to team_members: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing profile update: %w", err)
-	}
-	return nil
-}
-
-// UpdatePassword sets the password_hash on a user.
-func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		passwordHash, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	return nil
-}
-
-// ListAll returns all users with their active team membership count.
-// When orphanedOnly is true, only users with zero active memberships are returned.
-func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
-	q := `
-		SELECT u.*,
-		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
-		FROM users u
-		ORDER BY u.display_name ASC
-	`
-	if orphanedOnly {
-		q = `
-			SELECT u.*,
-			       0 AS team_count
-			FROM users u
-			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
-			ORDER BY u.display_name ASC
-		`
-	}
-	var rows []*models.AdminUserRow
-	if err := r.db.Select(&rows, q); err != nil {
-		return nil, fmt.Errorf("listing admin users: %w", err)
-	}
-	return rows, nil
-}
-
-// ptrEqual reports whether two string pointers point to equal values,
-// treating nil and a pointer to "" as distinct.
-func ptrEqual(a, b *string) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
 }
 ````
 
@@ -19537,6 +19070,441 @@ WORKDIR /data
 USER draba
 EXPOSE 8080
 CMD ["draba"]
+````
+
+## File: packages/web/src/components/MemberModal.tsx
+````typescript
+/**
+ * MemberModal — view and edit a team member's profile, identity, and role.
+ *
+ * Shows computed stats (timelines, activities by date status) and exposes
+ * superadmin actions (promote, inactivate, delete) when the viewer is a
+ * superadmin. Password reset is present but shows "SMTP not configured"
+ * until Phase 14.
+ */
+
+import { useState } from 'react'
+import { createPortal } from 'react-dom'
+import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users } from 'lucide-react'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
+import { Badge } from '@/components/identity/Badge'
+import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser } from '@/hooks/useMemberManagement'
+import { useAuth } from '@/contexts/AuthContext'
+import type { components } from '@draba/shared'
+
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+interface Props {
+  teamId: string
+  memberId: string
+  /** Whether the current viewer is a team admin. */
+  isAdmin: boolean
+  /** Whether the current viewer is a superadmin. */
+  isSuperadmin: boolean
+  onClose: () => void
+}
+
+// ── Small shared styles ───────────────────────────────────────────────────────
+
+const chipStyle = (color: string): React.CSSProperties => ({
+  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+  padding: '10px 16px', borderRadius: 8, flex: 1,
+  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
+  background: `${color}0a`, textAlign: 'center', minWidth: 0,
+})
+
+const cancelBtn: React.CSSProperties = {
+  background: 'none', border: '1px solid #30363d', color: '#8b949e',
+  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit',
+}
+
+interface ConfirmDialogProps {
+  variant: 'indigo' | 'amber' | 'red'
+  icon: React.ReactNode
+  title: string
+  body: string
+  confirmLabel: string
+  busy: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}
+
+function ConfirmDialog({ variant, icon, title, body, confirmLabel, busy, onCancel, onConfirm }: ConfirmDialogProps) {
+  const colors = { indigo: '#6366F1', amber: '#F59E0B', red: '#EF4444' }
+  const c = colors[variant]
+  return (
+    <div style={{ padding: '28px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, textAlign: 'center' }}>
+      <div style={{ width: 48, height: 48, borderRadius: 12, background: `${c}20`, border: `1.5px solid ${c}44`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        {icon}
+      </div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3' }}>{title}</div>
+      <div style={{ fontSize: 13, color: '#8b949e', lineHeight: 1.6, maxWidth: 340 }}>{body}</div>
+      <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+        <button onClick={onCancel} disabled={busy} style={cancelBtn}>Cancel</button>
+        <button
+          onClick={onConfirm}
+          disabled={busy}
+          style={{
+            background: `${c}22`, border: `1px solid ${c}66`, color: c,
+            fontWeight: 600, fontSize: 13, padding: '7px 18px',
+            borderRadius: 7, cursor: 'pointer', opacity: busy ? 0.6 : 1, fontFamily: 'inherit',
+          }}
+        >
+          {busy ? 'Working…' : confirmLabel}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+
+export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
+  const { user: currentUser } = useAuth()
+  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
+  const updateMember = useUpdateMember(teamId)
+  const promoteUser = usePromoteUser()
+  const archiveUser = useArchiveUser()
+  const unarchiveUser = useUnarchiveUser()
+  const deleteUser = useDeleteUser()
+
+  const [identity, setIdentity] = useState<Identity | null>(null)
+  const [displayName, setDisplayName] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | null>(null)
+
+  if (isLoading || isError || !detail) {
+    return createPortal(
+      <div
+        onClick={e => { if (e.target === e.currentTarget) onClose() }}
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+      >
+        <div style={{ width: 560, height: 300, background: '#21262d', border: '1px solid #30363d', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
+          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 4, display: 'flex' }}>
+            <X size={18} />
+          </button>
+          {isError ? (
+            <>
+              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
+              <button onClick={onClose} style={{ fontSize: 12, color: '#8b949e', background: 'none', border: '1px solid #30363d', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit' }}>Dismiss</button>
+            </>
+          ) : (
+            <span style={{ color: '#484f58', fontSize: 13 }}>Loading…</span>
+          )}
+        </div>
+      </div>,
+      document.body,
+    )
+  }
+
+  const effectiveIdentity: Identity = identity ?? {
+    color: detail.color ?? '#1A97A2',
+    icon: detail.icon ?? '__name_words__',
+  }
+  const effectiveName = displayName ?? detail.displayName
+
+  const isParticipant = !detail.userId
+  const isInactivated = Boolean(detail.archivedAt)
+  const stats = detail.stats
+  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
+
+  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending
+
+  // detail is guaranteed non-null here (early return above handles loading/undefined).
+  // Non-null assertions in callbacks are safe because they only fire when the
+  // rendered modal is interactive, which requires detail to be loaded.
+  function handleSave() {
+    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
+    if (displayName !== null) patch.displayName = displayName
+    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
+    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
+  }
+
+  function handlePromote() {
+    if (!detail!.userId) return
+    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
+  }
+
+  function handleInactivate() {
+    if (!detail!.userId) return
+    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+  }
+
+  function handleReactivate() {
+    if (!detail!.userId) return
+    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
+  }
+
+  function handleDelete() {
+    if (!detail!.userId) return
+    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+  }
+
+  const memberColor = effectiveIdentity.color
+
+  return createPortal(
+    <div
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+    >
+      <div style={{ width: 560, maxHeight: '90vh', background: '#21262d', border: '1px solid #30363d', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+        {/* Confirm overlays */}
+        {confirm === 'promote' && (
+          <ConfirmDialog
+            variant="indigo"
+            icon={<Shield size={22} color="#6366F1" />}
+            title="Promote to Super Admin?"
+            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
+            confirmLabel="Promote"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handlePromote}
+          />
+        )}
+        {confirm === 'inactivate' && (
+          <ConfirmDialog
+            variant="amber"
+            icon={<Archive size={22} color="#F59E0B" />}
+            title={`Inactivate ${effectiveName}?`}
+            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
+            confirmLabel="Inactivate"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleInactivate}
+          />
+        )}
+        {confirm === 'delete' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<Trash2 size={22} color="#EF4444" />}
+            title={`Delete ${effectiveName}?`}
+            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
+            confirmLabel="Delete permanently"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleDelete}
+          />
+        )}
+
+        {confirm === null && (
+          <>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid #30363d', flexShrink: 0 }}>
+              <div style={{ flexShrink: 0 }}>
+                <IdentityWidget
+                  identity={effectiveIdentity}
+                  name={effectiveName}
+                  shape="circle"
+                  onChange={setIdentity}
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, color: '#484f58', fontWeight: 600, letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 3 }}>
+                  {isParticipant ? 'Participant' : 'Team Member'}
+                  {isInactivated && ' · Inactive'}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  {(isAdmin || currentUser?.id === detail.userId) ? (
+                    <input
+                      value={displayName ?? detail.displayName}
+                      onChange={e => setDisplayName(e.target.value)}
+                      style={{
+                        fontSize: 16, fontWeight: 600, color: '#e6edf3',
+                        background: 'transparent', border: 'none', outline: 'none',
+                        padding: '1px 4px', margin: '-1px -4px',
+                        borderRadius: 4, fontFamily: 'inherit',
+                        minWidth: 0, flex: 1,
+                      }}
+                      onFocus={e => { e.currentTarget.style.background = '#2d333b'; e.currentTarget.style.border = '1px solid #30363d' }}
+                      onBlur={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.border = 'none' }}
+                    />
+                  ) : (
+                    <span style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3' }}>{effectiveName}</span>
+                  )}
+                  {isParticipant && (
+                    <span style={{ fontSize: 11, fontWeight: 600, background: '#F59E0B20', border: '1px solid #F59E0B44', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
+                  )}
+                </div>
+              </div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 4, display: 'flex', flexShrink: 0 }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Scrollable body */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+
+              {/* Email */}
+              {!isParticipant && (
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
+                  <div style={{ fontSize: 13, color: '#8b949e', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {detail.email}
+                  </div>
+                </div>
+              )}
+
+              {/* Timeline stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Timelines
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
+                    <span style={{ fontSize: 11, color: '#8b949e', marginTop: 2 }}>Active</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
+                    <span style={{ fontSize: 11, color: '#484f58', marginTop: 2 }}>Archived</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Activity stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Activities
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
+                    <span style={{ fontSize: 10, color: '#8b949e', marginTop: 2 }}>Past due</span>
+                  </div>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
+                    <span style={{ fontSize: 10, color: '#8b949e', marginTop: 2 }}>Running</span>
+                  </div>
+                  <div style={chipStyle('#3B82F6')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
+                    <span style={{ fontSize: 10, color: '#8b949e', marginTop: 2 }}>Upcoming</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
+                    <span style={{ fontSize: 10, color: '#484f58', marginTop: 2 }}>Archived</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Teams list */}
+              {detail.teams.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Teams ({detail.teams.length})
+                  </label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {detail.teams.map((tm: TeamMemberWithUser) => (
+                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: '#2d333b', borderRadius: 7 }}>
+                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
+                        <span style={{ fontSize: 13, color: '#e6edf3', flex: 1 }}>{tm.teamId}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : '#8b949e', background: tm.role === 'admin' ? '#1A97A220' : '#2d333b', border: `1px solid ${tm.role === 'admin' ? '#1A97A244' : '#30363d'}`, borderRadius: 99, padding: '1px 8px' }}>
+                          {tm.role}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Joined date */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: '#2d333b', borderRadius: 6, fontSize: 12, color: '#8b949e' }}>
+                  <Clock size={12} />
+                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
+                </div>
+              </div>
+
+              {/* Account section — non-participant only */}
+              {!isParticipant && isAdmin && (
+                <div style={{ borderTop: '1px solid #30363d', paddingTop: 16, marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
+                  <button
+                    style={{ fontSize: 12, color: '#484f58', background: 'none', border: '1px solid #30363d', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'inherit' }}
+                    title="SMTP is not configured"
+                    disabled
+                  >
+                    Reset password — SMTP not configured
+                  </button>
+                </div>
+              )}
+
+              {/* Superadmin actions */}
+              {isSuperadmin && !isParticipant && (
+                <div style={{ borderTop: '1px solid #30363d', paddingTop: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
+                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Super Admin Actions
+                  </label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {!isInactivated && (
+                      <button
+                        onClick={() => setConfirm('promote')}
+                        style={{ fontSize: 12, color: '#6366F1', background: '#6366F114', border: '1px solid #6366F144', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Shield size={13} />
+                        Promote to Super Admin
+                      </button>
+                    )}
+                    {isInactivated ? (
+                      <button
+                        onClick={handleReactivate}
+                        disabled={busy}
+                        style={{ fontSize: 12, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', opacity: busy ? 0.6 : 1 }}
+                      >
+                        Reactivate account
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setConfirm('inactivate')}
+                        style={{ fontSize: 12, color: '#F59E0B', background: '#F59E0B14', border: '1px solid #F59E0B44', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Archive size={13} />
+                        Inactivate
+                      </button>
+                    )}
+                    {detail.deletable && (
+                      <button
+                        onClick={() => setConfirm('delete')}
+                        style={{ fontSize: 12, color: '#EF4444', background: '#EF444414', border: '1px solid #EF444444', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Trash2 size={13} />
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                  {activeActivityCount > 0 && (
+                    <div style={{ fontSize: 11, color: '#484f58', marginTop: 8 }}>
+                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid #30363d', flexShrink: 0 }}>
+              <button onClick={onClose} style={cancelBtn}>Cancel</button>
+              {(isAdmin || currentUser?.id === detail.userId) && (
+                <button
+                  onClick={handleSave}
+                  disabled={busy}
+                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'inherit' }}
+                >
+                  {busy ? 'Saving…' : 'Save changes'}
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
 ````
 
 ## File: packages/web/src/components/TeamModal.tsx
@@ -20310,6 +20278,189 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
 }
 ````
 
+## File: packages/web/src/pages/settings/ProfilePage.tsx
+````typescript
+/**
+ * /settings/profile — Identity, display name, and stats for the current user.
+ */
+
+import { useState, useEffect } from 'react'
+import { Calendar, Activity } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useUpdateProfile, useMyStats } from '@/hooks/useSettings'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+
+// ── Stat chip ──────────────────────────────────────────────────────────────
+
+function StatChip({ value, label, color }: { value: number; label: string; color: string }) {
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      padding: '10px 14px', borderRadius: 8, flex: 1, minWidth: 0,
+      border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
+      background: `${color}0a`, textAlign: 'center',
+    }}>
+      <span style={{ fontSize: 20, fontWeight: 700, color }}>{value}</span>
+      <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{label}</span>
+    </div>
+  )
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────
+
+export default function ProfilePage() {
+  const { user } = useAuth()
+  const updateProfile = useUpdateProfile()
+  const { data: stats } = useMyStats()
+
+  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: user?.color ?? '#288C9B',
+    icon: user?.icon ?? '__none__',
+  })
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    if (user) {
+      setDisplayName(user.displayName)
+      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
+    }
+  }, [user])
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
+      setFeedback({ type: 'success', msg: 'Profile updated.' })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  const accentColor = identity.color
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Profile</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Changes to your name and identity propagate across all your team memberships.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] overflow-hidden mb-5">
+        {/* Header banner — identity + name (mirrors MemberModal / TeamModal pattern) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '20px 24px', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ flexShrink: 0 }}>
+            <IdentityWidget
+              identity={identity}
+              name={displayName}
+              shape="circle"
+              onChange={next => setIdentity(next)}
+            />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-1">
+              Your profile
+              {user?.isSuperadmin && (
+                <span className="ml-2 text-[11px] px-2 py-0.5 rounded bg-primary/15 text-primary font-semibold tracking-wide normal-case">
+                  Superadmin
+                </span>
+              )}
+            </div>
+            <input
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+              placeholder="Your name"
+              style={{
+                fontSize: 18, fontWeight: 600, color: 'var(--foreground)',
+                background: 'transparent', border: 'none', outline: 'none',
+                padding: '1px 4px', margin: '-1px -4px',
+                borderRadius: 4, fontFamily: 'inherit', width: '100%',
+              }}
+              onFocus={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.outline = `2px solid ${accentColor}44` }}
+              onBlur={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.outline = 'none' }}
+            />
+            <div className="text-xs text-muted-foreground mt-0.5">{user?.email ?? ''}</div>
+          </div>
+          {/* Live badge preview */}
+          <div style={{ flexShrink: 0 }}>
+            <Badge identity={identity} name={displayName} size={44} shape="circle" />
+          </div>
+        </div>
+
+        {/* Stats */}
+        {stats && (
+          <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border)' }}>
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
+              <Calendar size={11} /> Timelines
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              <StatChip value={stats.activeTimelines} label="Active" color="#1A97A2" />
+              <StatChip value={stats.archivedTimelines} label="Archived" color="#484f58" />
+            </div>
+
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
+              <Activity size={11} /> Activities
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <StatChip value={stats.pastDue} label="Past due" color={stats.pastDue > 0 ? '#EF4444' : '#484f58'} />
+              <StatChip value={stats.running} label="Running" color="#1A97A2" />
+              <StatChip value={stats.upcoming} label="Upcoming" color="#3B82F6" />
+              <StatChip value={stats.archivedActivities} label="Archived" color="#484f58" />
+            </div>
+          </div>
+        )}
+
+        {/* Fields */}
+        <div style={{ padding: '20px 24px' }}>
+          {/* Email (read-only) */}
+          <div className="flex flex-col gap-1.5 mb-5">
+            <Label>Email</Label>
+            <Input
+              value={user?.email ?? ''}
+              disabled
+              className="max-w-[360px] opacity-60"
+            />
+            <p className="text-xs text-muted-foreground m-0">Email changes are not yet supported.</p>
+          </div>
+
+          {feedback && (
+            <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+              {feedback.msg}
+            </p>
+          )}
+
+          <button
+            onClick={handleSave}
+            disabled={updateProfile.isPending || !displayName.trim()}
+            style={{
+              background: accentColor,
+              color: '#fff',
+              fontWeight: 600,
+              fontSize: 13,
+              padding: '8px 20px',
+              borderRadius: 7,
+              border: 'none',
+              cursor: updateProfile.isPending || !displayName.trim() ? 'not-allowed' : 'pointer',
+              opacity: updateProfile.isPending || !displayName.trim() ? 0.5 : 1,
+              fontFamily: 'inherit',
+              transition: 'opacity 0.15s',
+            }}
+          >
+            {updateProfile.isPending ? 'Saving…' : 'Save profile'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/pages/SettingsPage.tsx
 ````typescript
 /**
@@ -20429,56 +20580,6 @@ export default function SettingsPage() {
     </div>
   )
 }
-````
-
-## File: packages/web/src/types/index.ts
-````typescript
-/**
- * Local UI types and design-token palettes.
- *
- * Wire-format API types come from generated definitions in `packages/shared/`.
- * Only view-state types (computed from API data) live here.
- *
- * ACTIVITY_COLORS and MEMBER_COLORS are now re-exported from identity-constants
- * so there is a single source of truth for the 16-color palette.
- */
-
-export { ACTIVITY_COLORS, MEMBER_COLORS } from '@/components/identity/identity-constants';
-
-/** A person who can be assigned to events on a timeline. */
-export interface Member {
-  id: string;
-  name: string;
-  initials: string;
-  /** Hex color for display (e.g. '#288C9B'). Falls back to palette slot when not set. */
-  color: string;
-}
-
-// ── Legacy types — kept for ActivityPanel until Phase 8.2 rewrites it ──────────
-
-/** @deprecated Phase 8.2 will replace this with the API Activity type. */
-export type ActivityStatus = 'planned' | 'in-progress' | 'done';
-
-/** @deprecated Phase 8.2 will replace this with the API Activity type. */
-export interface DrabaActivity {
-  id: string;
-  title: string;
-  memberId: string;
-  startDate: string;
-  endDate: string;
-  startCol: number;
-  span: number;
-  color: string;
-  status: ActivityStatus;
-  notes?: string;
-}
-
-/** @deprecated Phase 8.2 will replace this with resolved team_statuses labels. */
-export const STATUS_LABELS: Record<ActivityStatus, string> = {
-  'planned':     'Planned',
-  'in-progress': 'In progress',
-  'done':        'Done',
-};
 ````
 
 ## File: packages/web/src/App.tsx
@@ -21249,6 +21350,376 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
+## File: packages/api/internal/api/auth_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+	"unicode"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleRegister handles POST /auth/register. The first user on a fresh
+// install registers without an invite (bootstrap); every subsequent user
+// must present a valid invite token. Tier user limits are enforced before
+// hashing the password to avoid wasted bcrypt work.
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var req RegisterJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+
+	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
+		return
+	}
+	if !isValidPassword(req.Password) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	// First user may register without an invite; all subsequent users require one.
+	count, err := s.users.Count()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	if err := s.tier.CheckUserLimit(count); err != nil {
+		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
+		return
+	}
+
+	var invite *models.Invite
+	var inviteLinkTeamID string // non-empty when a reusable invite link was used
+	if count > 0 {
+		if req.InviteToken == nil || *req.InviteToken == "" {
+			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
+			return
+		}
+		// Try as a one-time invite first.
+		inv, err := s.invites.GetValid(*req.InviteToken)
+		if err != nil {
+			// Not a valid one-time invite — check if it's a reusable invite link token.
+			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
+			if linkErr != nil {
+				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
+				return
+			}
+			inviteLinkTeamID = team.ID
+		} else {
+			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
+				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
+				return
+			}
+			invite = inv
+		}
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	now := time.Now()
+	user := &models.User{
+		ID:           newID(),
+		Email:        string(req.Email),
+		PasswordHash: hash,
+		DisplayName:  req.DisplayName,
+		IsSuperadmin: count == 0,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.users.Create(user); err != nil {
+		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
+		return
+	}
+
+	if invite != nil {
+		if err := s.invites.MarkAccepted(invite.ID); err != nil {
+			// User and tokens are still returned — email uniqueness prevents a
+			// second registration. Log so the open invite is visible in monitoring.
+			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
+		}
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   invite.TeamID,
+			UserID:   &userID,
+			Role:     invite.Role,
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
+		}
+	} else if inviteLinkTeamID != "" {
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   inviteLinkTeamID,
+			UserID:   &userID,
+			Role:     "member",
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
+		}
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleLogin handles POST /auth/login. Returns the same generic
+// INVALID_CREDENTIALS error for both unknown email and bad password so
+// the endpoint cannot be used as an account-existence oracle.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req LoginJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	if req.Email == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
+		return
+	}
+
+	user, err := s.users.GetByEmail(string(req.Email))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	if user.ArchivedAt != nil {
+		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
+		return
+	}
+
+	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
+// token for a new access token; the refresh token itself is not rotated.
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	var req RefreshTokenJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accessToken": access,
+	})
+}
+
+// handleMe handles GET /auth/me and returns the authenticated user's
+// profile. Must be mounted behind authMiddleware.
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
+// address, generates a 1-hour reset token, stores the hash, and sends a
+// reset link via SMTP. Always returns 200 to prevent email enumeration.
+// When SMTP is not configured the email is silently skipped.
+func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+	if body.Email == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
+		return
+	}
+
+	// Always return 200 regardless of whether the email exists.
+	w.Header().Set("Content-Type", "application/json")
+	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
+
+	user, err := s.users.GetByEmail(body.Email)
+	if err != nil {
+		// No user — return 200 without error (prevent enumeration).
+		return
+	}
+	if user.ArchivedAt != nil {
+		return
+	}
+
+	rawToken := newToken()
+	expiresAt := time.Now().Add(time.Hour)
+	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
+		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
+		return
+	}
+
+	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
+	// when not set so the email still contains useful info.
+	baseURL := strings.TrimRight(getBaseURL(), "/")
+	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
+
+	subject := "Reset your draba password"
+	body2 := "<html><body>" +
+		"<p>You requested a password reset for your draba account.</p>" +
+		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
+		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
+		"</body></html>"
+
+	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
+		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
+	}
+}
+
+// handleResetPassword handles POST /auth/reset-password. Accepts a token and
+// new password; validates the token, hashes the new password, and marks the
+// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
+// or already used.
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token       string `json:"token"`
+		NewPassword string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.Token == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	resetToken, err := s.passwordTokens.GetValid(body.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
+		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
+func getBaseURL() string {
+	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:8080"
+}
+
+// isValidPassword applies the minimum policy: at least 8 characters and
+// no whitespace. Strength rules beyond length are intentionally lenient —
+// length is what matters most against offline cracking.
+func isValidPassword(p string) bool {
+	if len(p) < 8 {
+		return false
+	}
+	for _, r := range p {
+		if unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
+````
+
 ## File: packages/api/go.mod
 ````
 module github.com/I0-1O/draba/packages/api
@@ -21789,376 +22260,6 @@ export default defineConfig(({ mode }) => {
     },
   }
 })
-````
-
-## File: packages/api/internal/api/auth_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"log/slog"
-	"net/http"
-	"net/url"
-	"os"
-	"strings"
-	"time"
-	"unicode"
-
-	openapi_types "github.com/oapi-codegen/runtime/types"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleRegister handles POST /auth/register. The first user on a fresh
-// install registers without an invite (bootstrap); every subsequent user
-// must present a valid invite token. Tier user limits are enforced before
-// hashing the password to avoid wasted bcrypt work.
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req RegisterJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	req.DisplayName = strings.TrimSpace(req.DisplayName)
-
-	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
-		return
-	}
-	if !isValidPassword(req.Password) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	// First user may register without an invite; all subsequent users require one.
-	count, err := s.users.Count()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	if err := s.tier.CheckUserLimit(count); err != nil {
-		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
-		return
-	}
-
-	var invite *models.Invite
-	var inviteLinkTeamID string // non-empty when a reusable invite link was used
-	if count > 0 {
-		if req.InviteToken == nil || *req.InviteToken == "" {
-			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
-			return
-		}
-		// Try as a one-time invite first.
-		inv, err := s.invites.GetValid(*req.InviteToken)
-		if err != nil {
-			// Not a valid one-time invite — check if it's a reusable invite link token.
-			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
-			if linkErr != nil {
-				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
-				return
-			}
-			inviteLinkTeamID = team.ID
-		} else {
-			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
-				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
-				return
-			}
-			invite = inv
-		}
-	}
-
-	hash, err := auth.HashPassword(req.Password)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	now := time.Now()
-	user := &models.User{
-		ID:           newID(),
-		Email:        string(req.Email),
-		PasswordHash: hash,
-		DisplayName:  req.DisplayName,
-		IsSuperadmin: count == 0,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.users.Create(user); err != nil {
-		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
-		return
-	}
-
-	if invite != nil {
-		if err := s.invites.MarkAccepted(invite.ID); err != nil {
-			// User and tokens are still returned — email uniqueness prevents a
-			// second registration. Log so the open invite is visible in monitoring.
-			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
-		}
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   invite.TeamID,
-			UserID:   &userID,
-			Role:     invite.Role,
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
-		}
-	} else if inviteLinkTeamID != "" {
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   inviteLinkTeamID,
-			UserID:   &userID,
-			Role:     "member",
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
-		}
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleLogin handles POST /auth/login. Returns the same generic
-// INVALID_CREDENTIALS error for both unknown email and bad password so
-// the endpoint cannot be used as an account-existence oracle.
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req LoginJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	if req.Email == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
-		return
-	}
-
-	user, err := s.users.GetByEmail(string(req.Email))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	if user.ArchivedAt != nil {
-		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
-		return
-	}
-
-	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
-// token for a new access token; the refresh token itself is not rotated.
-func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	var req RefreshTokenJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"accessToken": access,
-	})
-}
-
-// handleMe handles GET /auth/me and returns the authenticated user's
-// profile. Must be mounted behind authMiddleware.
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
-		return
-	}
-	writeJSON(w, http.StatusOK, user)
-}
-
-// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
-// address, generates a 1-hour reset token, stores the hash, and sends a
-// reset link via SMTP. Always returns 200 to prevent email enumeration.
-// When SMTP is not configured the email is silently skipped.
-func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Email string `json:"email"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
-	if body.Email == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
-		return
-	}
-
-	// Always return 200 regardless of whether the email exists.
-	w.Header().Set("Content-Type", "application/json")
-	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
-
-	user, err := s.users.GetByEmail(body.Email)
-	if err != nil {
-		// No user — return 200 without error (prevent enumeration).
-		return
-	}
-	if user.ArchivedAt != nil {
-		return
-	}
-
-	rawToken := newToken()
-	expiresAt := time.Now().Add(time.Hour)
-	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
-		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
-		return
-	}
-
-	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
-	// when not set so the email still contains useful info.
-	baseURL := strings.TrimRight(getBaseURL(), "/")
-	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
-
-	subject := "Reset your draba password"
-	body2 := "<html><body>" +
-		"<p>You requested a password reset for your draba account.</p>" +
-		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
-		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
-		"</body></html>"
-
-	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
-		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
-	}
-}
-
-// handleResetPassword handles POST /auth/reset-password. Accepts a token and
-// new password; validates the token, hashes the new password, and marks the
-// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
-// or already used.
-func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Token       string `json:"token"`
-		NewPassword string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if body.Token == "" || body.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
-		return
-	}
-	if !isValidPassword(body.NewPassword) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	resetToken, err := s.passwordTokens.GetValid(body.Token)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
-		return
-	}
-
-	hash, err := auth.HashPassword(body.NewPassword)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
-		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
-func getBaseURL() string {
-	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
-		return v
-	}
-	return "http://localhost:8080"
-}
-
-// isValidPassword applies the minimum policy: at least 8 characters and
-// no whitespace. Strength rules beyond length are intentionally lenient —
-// length is what matters most against offline cracking.
-func isValidPassword(p string) bool {
-	if len(p) < 8 {
-		return false
-	}
-	for _, r := range p {
-		if unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
-}
 ````
 
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
@@ -23163,7 +23264,7 @@ func (r *TeamRepo) GetMember(teamID, userID string) (*models.TeamMember, error) 
 
 // ListMembers returns active (non-archived) members of a team, including
 // login-less Participants. A LEFT JOIN handles Participants who have no users
-// row; COALESCE resolves display_name from users first, then team_members.
+// row; COALESCE prefers the per-team display_name override, then falls back to users.
 func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, error) {
 	return r.listMembers(teamID, false)
 }
@@ -23179,7 +23280,7 @@ func (r *TeamRepo) listMembers(teamID string, includeArchived bool) ([]*models.T
 		SELECT
 			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
 			COALESCE(u.email, '')                          AS email,
-			COALESCE(u.display_name, tm.display_name, '') AS display_name,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
 			u.avatar_url
 		FROM team_members tm
 		LEFT JOIN users u ON u.id = tm.user_id
@@ -23247,7 +23348,7 @@ func (r *TeamRepo) GetMemberByID(memberID string) (*models.TeamMemberWithUser, e
 		SELECT
 			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
 			COALESCE(u.email, '')                          AS email,
-			COALESCE(u.display_name, tm.display_name, '') AS display_name,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
 			u.avatar_url
 		FROM team_members tm
 		LEFT JOIN users u ON u.id = tm.user_id
@@ -23385,6 +23486,53 @@ func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) 
 	return &stats, nil
 }
 
+// GetUserStats aggregates activity and timeline counts across all of a user's
+// team memberships. Used by GET /users/me/stats for the profile page.
+func (r *TeamRepo) GetUserStats(userID string) (*models.MemberStats, error) {
+	now := time.Now()
+	var stats models.MemberStats
+
+	if err := r.db.Get(&stats.ActiveTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting active timelines: %w", err)
+	}
+	if err := r.db.Get(&stats.ArchivedTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NOT NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting archived timelines: %w", err)
+	}
+
+	rows, err := r.db.Query(`
+		SELECT
+			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ? THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                   THEN 1 ELSE 0 END), 0)
+		FROM activity_assignments aa
+		JOIN activities a ON a.id = aa.activity_id
+		JOIN team_members tm ON tm.id = aa.team_member_id
+		WHERE tm.user_id = ?
+	`, now, now, now, now, userID)
+	if err != nil {
+		return nil, fmt.Errorf("computing activity stats: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
+			return nil, fmt.Errorf("scanning activity stats: %w", err)
+		}
+	}
+
+	return &stats, nil
+}
+
 // GetMemberAllTeams returns all team memberships for a user (across all teams).
 // Used to populate the "Teams" section of the Member Edit Modal.
 func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUser, error) {
@@ -23393,7 +23541,7 @@ func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUse
 		SELECT
 			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
 			COALESCE(u.email, '')                          AS email,
-			COALESCE(u.display_name, tm.display_name, '') AS display_name,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
 			u.avatar_url
 		FROM team_members tm
 		LEFT JOIN users u ON u.id = tm.user_id
@@ -23433,6 +23581,113 @@ func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
 		return nil, fmt.Errorf("getting team by invite link: %w", err)
 	}
 	return &t, nil
+}
+````
+
+## File: packages/web/src/components/layout/TopBar.tsx
+````typescript
+/**
+ * Top toolbar above the active view. Left side: global app navigation
+ * (view switcher) and global object actions (Share). Right side: global
+ * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
+ * then whatever the parent injects into `rightSlot` (typically the profile menu).
+ *
+ * View-specific controls (date nav, zoom) intentionally live elsewhere —
+ * a context-sensitive sub-toolbar hosts them.
+ */
+
+import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
+import FilterDropdown from '@/components/filters/FilterDropdown';
+import FindBar from '@/components/layout/FindBar';
+import { useFind } from '@/contexts/FindContext';
+import { cn } from '@/lib/utils';
+
+export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
+
+interface Props {
+  view: ViewMode;
+  teamId?: string;
+  timelineName?: string;
+  onViewChange: (view: ViewMode) => void;
+  onOpenFilterEditor: () => void;
+  rightSlot?: React.ReactNode;
+}
+
+const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
+  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
+  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
+  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
+  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
+];
+
+export default function TopBar({
+  view,
+  teamId,
+  timelineName,
+  onViewChange,
+  onOpenFilterEditor,
+  rightSlot,
+}: Props) {
+  const { findBarOpen, setFindBarOpen } = useFind();
+
+  return (
+    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
+      {/* Left zone: view switcher */}
+      <div className="flex items-center justify-start shrink-0">
+        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
+          {VIEWS.map(v => (
+            <button
+              key={v.id}
+              onClick={() => onViewChange(v.id)}
+              className={cn(
+                'flex items-center justify-center gap-[5px]',
+                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
+                'border-none cursor-pointer',
+                view === v.id
+                  ? 'bg-card text-foreground shadow-sm'
+                  : 'bg-transparent text-muted-foreground',
+              )}
+            >
+              {v.icon}
+              {v.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Center zone: timeline name — truncates with ellipsis when narrow */}
+      <div className="flex-1 min-w-0 flex items-center justify-center px-3">
+        <span
+          title={timelineName}
+          className="text-xs font-medium text-muted-foreground truncate select-none"
+        >
+          {timelineName}
+        </span>
+      </div>
+
+      {/* Right zone: Find bar / trigger, Filter, profile slot */}
+      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
+        {findBarOpen ? (
+          <FindBar />
+        ) : (
+          <button
+            onClick={() => setFindBarOpen(true)}
+            title="Find in view (Ctrl+F)"
+            className={cn(
+              'flex items-center justify-center w-7 h-7',
+              'border border-border rounded-md bg-card',
+              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
+              'transition-colors shrink-0',
+            )}
+          >
+            <Search size={13} strokeWidth={1.8} />
+          </button>
+        )}
+        <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
+        {rightSlot}
+      </div>
+    </div>
+  );
 }
 ````
 
@@ -23854,110 +24109,148 @@ export default function GanttView({
 }
 ````
 
-## File: packages/web/src/components/layout/TopBar.tsx
-````typescript
-/**
- * Top toolbar above the active view. Left side: global app navigation
- * (view switcher) and global object actions (Share). Right side: global
- * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
- * then whatever the parent injects into `rightSlot` (typically the profile menu).
- *
- * View-specific controls (date nav, zoom) intentionally live elsewhere —
- * a context-sensitive sub-toolbar hosts them.
- */
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
 
-import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
-import FilterDropdown from '@/components/filters/FilterDropdown';
-import FindBar from '@/components/layout/FindBar';
-import { useFind } from '@/contexts/FindContext';
-import { cn } from '@/lib/utils';
+import (
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
 
-export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
 
-interface Props {
-  view: ViewMode;
-  teamId?: string;
-  timelineName?: string;
-  onViewChange: (view: ViewMode) => void;
-  onOpenFilterEditor: () => void;
-  rightSlot?: React.ReactNode;
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
 }
 
-const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
-  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
-  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
-  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
-  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
-];
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
 
-export default function TopBar({
-  view,
-  teamId,
-  timelineName,
-  onViewChange,
-  onOpenFilterEditor,
-  rightSlot,
-}: Props) {
-  const { findBarOpen, setFindBarOpen } = useFind();
-
-  return (
-    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
-      {/* Left zone: view switcher */}
-      <div className="flex items-center justify-start shrink-0">
-        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
-          {VIEWS.map(v => (
-            <button
-              key={v.id}
-              onClick={() => onViewChange(v.id)}
-              className={cn(
-                'flex items-center justify-center gap-[5px]',
-                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
-                'border-none cursor-pointer',
-                view === v.id
-                  ? 'bg-card text-foreground shadow-sm'
-                  : 'bg-transparent text-muted-foreground',
-              )}
-            >
-              {v.icon}
-              {v.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Center zone: timeline name — truncates with ellipsis when narrow */}
-      <div className="flex-1 min-w-0 flex items-center justify-center px-3">
-        <span
-          title={timelineName}
-          className="text-xs font-medium text-muted-foreground truncate select-none"
-        >
-          {timelineName}
-        </span>
-      </div>
-
-      {/* Right zone: Find bar / trigger, Filter, profile slot */}
-      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
-        {findBarOpen ? (
-          <FindBar />
-        ) : (
-          <button
-            onClick={() => setFindBarOpen(true)}
-            title="Find in view (Ctrl+F)"
-            className={cn(
-              'flex items-center justify-center w-7 h-7',
-              'border border-border rounded-md bg-card',
-              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
-              'transition-colors shrink-0',
-            )}
-          >
-            <Search size={13} strokeWidth={1.8} />
-          </button>
-        )}
-        <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
-        {rightSlot}
-      </div>
-    </div>
-  );
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 ````
 
@@ -25000,151 +25293,6 @@ func flatten[T any](s []*T) []T {
 		}
 	}
 	return out
-}
-````
-
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 ````
 
@@ -30898,6 +31046,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
 	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
 	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
 	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
 
