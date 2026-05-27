@@ -53,12 +53,17 @@ docs/
       IDENTITY_WIDGET_HANDOFF.md
       identity-widget-prototype.html
     handoffs/
+      filter-dropdown-redesign/
+        design_handoff_filter_dropdown/
+          Filter Dropdown.html
+          README.md
       member-modal/
         Member Edit Modal v2.html
         README.md
       team-modal/
         README.md
         Team Modal.html
+      filter-dropdown-redesign.zip
       login-redesign.zip
       settings-modal.zip
     preview/
@@ -3823,6 +3828,727 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 </body>
 </html>
+````
+
+## File: docs/design/handoffs/filter-dropdown-redesign/design_handoff_filter_dropdown/Filter Dropdown.html
+````html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Filter Dropdown — Draba</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body,#root{height:100%}
+  body{font-family:'Open Sans',sans-serif;-webkit-font-smoothing:antialiased;transition:background .2s}
+  button{font-family:inherit}
+  ::-webkit-scrollbar{width:4px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{border-radius:99px}
+  .light ::-webkit-scrollbar-thumb{background:#d4dae0}
+  .dark  ::-webkit-scrollbar-thumb{background:#373e47}
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useCallback } = React;
+
+// ── Theme tokens ─────────────────────────────────────────────────────────────
+const THEMES = {
+  light: {
+    appBg:         '#F0F2F5',
+    topbar:        '#ffffff',
+    panel:         '#ffffff',
+    border:        '#E2E6EA',
+    borderSubtle:  '#EDF0F3',
+    fg:            '#343A40',
+    fgMuted:       '#6C7A8A',
+    fgSubtle:      '#9BA6B2',
+    hover:         '#E8ECEF',
+    muted:         '#EDF0F3',
+    rowBg:         'transparent',
+    gearHover:     '#dde2e8',
+    shadow:        '0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)',
+    topbarShadow:  '0 1px 3px rgba(0,0,0,.05)',
+    blockTrack:    '#E8ECEF',
+    primary:       '#288C9B',
+    primaryTint:   'rgba(40,140,155,.09)',
+    primaryBorder: 'rgba(40,140,155,.22)',
+    pill:          { bg:'rgba(40,140,155,.09)', border:'rgba(40,140,155,.22)', text:'#288C9B' },
+    youPill:       { bg:'#EDF0F3', border:'#E2E6EA', text:'#9BA6B2' },
+    youPillActive: { bg:'rgba(40,140,155,.09)', border:'rgba(40,140,155,.22)', text:'#288C9B' },
+    trigBorder:    '#E2E6EA',
+    trigBorderAct: 'rgba(40,140,155,.22)',
+    trigBgAct:     'rgba(40,140,155,.09)',
+  },
+  dark: {
+    appBg:         '#0d1117',
+    topbar:        '#161b22',
+    panel:         '#1c2128',
+    border:        '#30363d',
+    borderSubtle:  '#21262d',
+    fg:            '#e6edf3',
+    fgMuted:       '#8b949e',
+    fgSubtle:      '#484f58',
+    hover:         '#2d333b',
+    muted:         '#2d333b',
+    rowBg:         'transparent',
+    gearHover:     '#373e47',
+    shadow:        '0 8px 28px rgba(0,0,0,.45), 0 2px 8px rgba(0,0,0,.3)',
+    topbarShadow:  '0 1px 4px rgba(0,0,0,.4)',
+    blockTrack:    '#21262d',
+    primary:       '#3DAFC0',
+    primaryTint:   'rgba(61,175,192,.12)',
+    primaryBorder: 'rgba(61,175,192,.28)',
+    pill:          { bg:'rgba(61,175,192,.12)', border:'rgba(61,175,192,.28)', text:'#3DAFC0' },
+    youPill:       { bg:'#2d333b', border:'#30363d', text:'#484f58' },
+    youPillActive: { bg:'rgba(61,175,192,.12)', border:'rgba(61,175,192,.28)', text:'#3DAFC0' },
+    trigBorder:    '#30363d',
+    trigBorderAct: 'rgba(61,175,192,.28)',
+    trigBgAct:     'rgba(61,175,192,.12)',
+  },
+};
+
+// ── Data ─────────────────────────────────────────────────────────────────────
+const MEMBERS = [
+  { id:'m1', name:'Lindsay K.',             color:'#288C9B' },
+  { id:'m2', name:'Jen M.',                 color:'#F29E4C' },
+  { id:'m3', name:'Brian R.',               color:'#5BC0DE' },
+  { id:'m4', name:'Sam T.',                 color:'#2ECC71' },
+  { id:'m5', name:'Alex Williamson-Torres', color:'#9B59B6' },
+];
+
+const PRESETS = [
+  { id:'all',      label:'All activities', icon:'layers'  },
+  { id:'upcoming', label:'Upcoming',       icon:'clock'   },
+  { id:'overdue',  label:'Overdue',        icon:'alert'   },
+  { id:'noassign', label:'No assignee',    icon:'nouser'  },
+];
+
+const ME = { id:'my', name:'My events', color:'#288C9B' };
+
+const TEAM_FILTERS = [
+  { id:'tf1', label:'Marketing Q3 priorities' },
+  { id:'tf2', label:'Cross-team blockers & dependencies — Sprint 12' },
+  { id:'tf3', label:'Sprint 12 scope' },
+];
+
+const MY_FILTERS = [
+  { id:'mf1', label:'My current focus' },
+  { id:'mf2', label:'Waiting on design review — Q3 assets pending' },
+];
+
+// ── Icons ─────────────────────────────────────────────────────────────────────
+function Ico({ n, s=14, c='currentColor', sw=1.75 }) {
+  const p = {
+    filter:  <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>,
+    chevron: <polyline points="6 9 12 15 18 9"/>,
+    check:   <polyline points="20 6 9 17 4 12"/>,
+    plus:    <><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>,
+    search:  <><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></>,
+    layers:  <><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></>,
+    clock:   <><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></>,
+    alert:   <><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></>,
+    nouser:  <><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" y1="8" x2="23" y2="14"/><line x1="23" y1="8" x2="17" y2="14"/></>,
+    gear:    <><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></>,
+    share:   <><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></>,
+    moon:    <><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></>,
+    sun:     <><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></>,
+  };
+  return (
+    <svg viewBox="0 0 24 24" width={s} height={s} fill="none" stroke={c}
+      strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round"
+      style={{flexShrink:0, display:'block'}}>
+      {p[n] || null}
+    </svg>
+  );
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+function Divider({ T }) {
+  return <div style={{height:1, background:T.border, margin:'4px 0'}}/>;
+}
+
+function SectionHead({ label, pill, T }) {
+  return (
+    <div style={{display:'flex', alignItems:'center', gap:6, padding:'10px 14px 3px'}}>
+      <span style={{fontSize:10, fontWeight:700, letterSpacing:'.8px', color:T.fgSubtle, textTransform:'uppercase', lineHeight:1}}>{label}</span>
+      {pill && (
+        <span style={{fontSize:9, fontWeight:700, letterSpacing:'.3px', color:T.pill.text, background:T.pill.bg, border:`1px solid ${T.pill.border}`, padding:'1px 6px', borderRadius:99, lineHeight:1.6}}>{pill}</span>
+      )}
+    </div>
+  );
+}
+
+function GearBtn({ label, T }) {
+  const [h, setH] = useState(false);
+  return (
+    <div role="button" title={`Configure "${label}"`}
+      onClick={e => { e.stopPropagation(); alert(`Configure filter:\n"${label}"`); }}
+      onMouseEnter={() => setH(true)} onMouseLeave={() => setH(false)}
+      style={{width:20, height:20, borderRadius:4, background:h ? T.gearHover : T.muted,
+        display:'flex', alignItems:'center', justifyContent:'center',
+        cursor:'pointer', transition:'background .1s', flexShrink:0}}>
+      <Ico n="gear" s={11} c={h ? T.fg : T.fgMuted} sw={1.75}/>
+    </div>
+  );
+}
+
+function Item({ label, sub, icon, dot, isMe, isActive, isCustom, onClick, T }) {
+  const [hov, setHov] = useState(false);
+  const youStyle = isActive ? T.youPillActive : T.youPill;
+
+  return (
+    <button onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+      onClick={onClick} title={label}
+      style={{display:'flex', alignItems:'center', gap:8, width:'100%',
+        padding:'5px 10px 5px 14px', minHeight:30,
+        background: isActive ? T.primaryTint : hov ? T.hover : 'transparent',
+        border:'none', cursor:'pointer', textAlign:'left', transition:'background .1s'}}>
+
+      {/* Left — icon or dot */}
+      <div style={{flexShrink:0, width:16, display:'flex', alignItems:'center', justifyContent:'center'}}>
+        {dot
+          ? <div style={{width:8, height:8, borderRadius:'50%', background:dot}}/>
+          : icon
+            ? <Ico n={icon} s={14} c={isActive ? T.primary : T.fgMuted} sw={1.75}/>
+            : null
+        }
+      </div>
+
+      {/* Label + you pill */}
+      <div style={{flex:1, minWidth:0, display:'flex', alignItems:'center', gap:6}}>
+        <div style={{fontSize:13, lineHeight:'18px', fontWeight:isActive ? 600 : 400,
+          color:isActive ? T.primary : T.fg,
+          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+          {label}
+        </div>
+        {isMe && (
+          <span style={{fontSize:9, fontWeight:700, letterSpacing:'.4px',
+            color:youStyle.text, background:youStyle.bg, border:`1px solid ${youStyle.border}`,
+            padding:'1px 5px', borderRadius:99, lineHeight:1.6, flexShrink:0, textTransform:'uppercase'}}>
+            you
+          </span>
+        )}
+        {sub && !isMe && (
+          <div style={{fontSize:11, color:T.fgMuted, lineHeight:'14px'}}>{sub}</div>
+        )}
+      </div>
+
+      {/* Right — check or gear — fixed 24px slot, never changes size */}
+      <div style={{flexShrink:0, width:24, height:20, display:'flex', alignItems:'center', justifyContent:'center'}}>
+        {isCustom && hov
+          ? <GearBtn label={label} T={T}/>
+          : isActive
+            ? <Ico n="check" s={13} c={T.primary} sw={2.5}/>
+            : null
+        }
+      </div>
+    </button>
+  );
+}
+
+function AddFilterBtn({ T }) {
+  const [hov, setHov] = useState(false);
+  return (
+    <button onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+      onClick={() => alert('Open "Create filter" dialog')}
+      style={{display:'flex', alignItems:'center', gap:7, width:'100%', padding:'7px 14px',
+        background:hov ? T.hover : 'transparent', border:'none', cursor:'pointer',
+        fontSize:13, fontWeight:hov ? 600 : 400,
+        color:hov ? T.primary : T.fgMuted, transition:'all .1s'}}>
+      <Ico n="plus" s={14} c={hov ? T.primary : T.fgMuted} sw={2}/>
+      Add filter
+    </button>
+  );
+}
+
+// ── Filter Dropdown ───────────────────────────────────────────────────────────
+function FilterDropdown({ T }) {
+  const [open, setOpen]     = useState(true);
+  const [active, setActive] = useState('all');
+  const [maxH, setMaxH]     = useState(480);
+  const dropRef = useRef(null);
+  const trigRef = useRef(null);
+
+  // Compute available vertical space when opening
+  const computeMaxH = useCallback(() => {
+    if (trigRef.current) {
+      const rect = trigRef.current.getBoundingClientRect();
+      setMaxH(Math.max(160, window.innerHeight - rect.bottom - 12));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open) computeMaxH();
+  }, [open, computeMaxH]);
+
+  useEffect(() => {
+    const onResize = () => { if (open) computeMaxH(); };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [open, computeMaxH]);
+
+  useEffect(() => {
+    const fn = e => {
+      if (dropRef.current && !dropRef.current.contains(e.target) &&
+          trigRef.current && !trigRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', fn);
+    return () => document.removeEventListener('mousedown', fn);
+  }, []);
+
+  const select = id => { setActive(id); setOpen(false); };
+
+  const allItems = [
+    ...PRESETS.map(p => ({ id:p.id, label:p.label })),
+    { id:ME.id, label:ME.name },
+    ...MEMBERS.map(m => ({ id:m.id, label:m.name })),
+    ...TEAM_FILTERS,
+    ...MY_FILTERS,
+  ];
+  const cur         = allItems.find(x => x.id === active) || { label:'All activities' };
+  const isDefault   = active === 'all';
+  const memberColor = active === ME.id ? ME.color : MEMBERS.find(m => m.id === active)?.color || null;
+
+  return (
+    <div style={{position:'relative'}}>
+      {/* Trigger */}
+      <button ref={trigRef} onClick={() => setOpen(o => !o)}
+        style={{display:'flex', alignItems:'center', gap:6, padding:'5px 9px 5px 8px',
+          background:isDefault ? 'transparent' : T.trigBgAct,
+          border:`1px solid ${isDefault ? T.trigBorder : T.trigBorderAct}`,
+          borderRadius:6, cursor:'pointer', fontSize:13, fontWeight:isDefault ? 400 : 600,
+          transition:'all .15s', maxWidth:220}}>
+        {memberColor
+          ? <div style={{width:8, height:8, borderRadius:'50%', background:memberColor, flexShrink:0}}/>
+          : <Ico n="filter" s={13} c={isDefault ? T.fgMuted : T.primary} sw={2}/>
+        }
+        <span style={{overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', flex:1,
+          color:isDefault ? T.fg : T.primary}}>
+          {cur.label}
+        </span>
+        <Ico n="chevron" s={12} c={T.fgMuted} sw={2}/>
+      </button>
+
+      {/* Panel — maxHeight is viewport-driven, scrollbar only when needed */}
+      {open && (
+        <div ref={dropRef} style={{
+          position:'absolute', top:'calc(100% + 5px)', right:0,
+          width:284,
+          maxHeight:maxH,
+          overflowY:'auto',
+          background:T.panel,
+          border:`1px solid ${T.border}`,
+          borderRadius:8,
+          boxShadow:T.shadow,
+          zIndex:200, paddingBottom:4,
+        }}>
+          <SectionHead label="Presets" T={T}/>
+          {PRESETS.map(p => (
+            <Item key={p.id} label={p.label} sub={p.sub} icon={p.icon}
+              isActive={active===p.id} onClick={() => select(p.id)} T={T}/>
+          ))}
+
+          <Divider T={T}/>
+
+          <SectionHead label="Members" T={T}/>
+          <Item label={ME.name} dot={ME.color} isMe={true}
+            isActive={active===ME.id} onClick={() => select(ME.id)} T={T}/>
+          {MEMBERS.map(m => (
+            <Item key={m.id} label={m.name} dot={m.color}
+              isActive={active===m.id} onClick={() => select(m.id)} T={T}/>
+          ))}
+
+          <Divider T={T}/>
+
+          <SectionHead label="Team filters" pill="Team" T={T}/>
+          {TEAM_FILTERS.map(f => (
+            <Item key={f.id} label={f.label}
+              isActive={active===f.id} isCustom={true} onClick={() => select(f.id)} T={T}/>
+          ))}
+
+          <Divider T={T}/>
+
+          <SectionHead label="My filters" T={T}/>
+          {MY_FILTERS.map(f => (
+            <Item key={f.id} label={f.label}
+              isActive={active===f.id} isCustom={true} onClick={() => select(f.id)} T={T}/>
+          ))}
+
+          <Divider T={T}/>
+
+          <AddFilterBtn T={T}/>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [dark, setDark] = useState(false);
+  const T = dark ? THEMES.dark : THEMES.light;
+
+  useEffect(() => {
+    document.body.style.background = T.appBg;
+    document.body.className = dark ? 'dark' : 'light';
+  }, [dark, T]);
+
+  return (
+    <div style={{minHeight:'100vh', fontFamily:"'Open Sans',sans-serif", transition:'background .2s', background:T.appBg}}>
+
+      {/* TopBar */}
+      <div style={{height:52, background:T.topbar, borderBottom:`1px solid ${T.border}`,
+        display:'flex', alignItems:'center', padding:'0 20px', gap:10,
+        boxShadow:T.topbarShadow, position:'relative', zIndex:10}}>
+
+        <span style={{fontSize:14, fontWeight:700, color:T.fg}}>Engineering Q2</span>
+
+        <div style={{display:'flex', alignItems:'center', gap:3, marginLeft:8}}>
+          {['‹','Today','›'].map(l => (
+            <button key={l} style={{padding:l==='Today'?'4px 9px':'4px 7px', borderRadius:5,
+              border:`1px solid ${T.border}`, background:'transparent', fontSize:12,
+              fontWeight:l==='Today'?600:400, color:l==='Today'?T.primary:T.fgMuted, cursor:'pointer'}}>
+              {l}
+            </button>
+          ))}
+        </div>
+
+        <span style={{fontSize:12, color:T.fgMuted}}>Apr 28 – May 13, 2026</span>
+
+        <div style={{display:'flex', alignItems:'center', gap:1, background:T.muted, borderRadius:5, padding:2}}>
+          {['Day','Week','Month'].map(z => (
+            <button key={z} style={{fontSize:11, fontWeight:600, padding:'3px 8px', borderRadius:4, border:'none',
+              background:z==='Week'?T.topbar:'transparent', color:z==='Week'?T.fg:T.fgMuted,
+              boxShadow:z==='Week'?'0 1px 2px rgba(0,0,0,.08)':'none', cursor:'pointer'}}>
+              {z}
+            </button>
+          ))}
+        </div>
+
+        <div style={{flex:1}}/>
+
+        <div style={{display:'flex', alignItems:'center', gap:1, background:T.muted, borderRadius:5, padding:2}}>
+          {['Timeline','Kanban','List'].map(v => (
+            <button key={v} style={{fontSize:11, fontWeight:600, padding:'3px 9px', borderRadius:4, border:'none',
+              background:v==='Timeline'?T.topbar:'transparent', color:v==='Timeline'?T.fg:T.fgMuted,
+              boxShadow:v==='Timeline'?'0 1px 2px rgba(0,0,0,.08)':'none', cursor:'pointer'}}>
+              {v}
+            </button>
+          ))}
+        </div>
+
+        <button style={{display:'flex', alignItems:'center', gap:6, padding:'6px 13px',
+          background:T.primary, border:'none', borderRadius:6, fontSize:13, fontWeight:600, color:'#fff', cursor:'pointer'}}>
+          <Ico n="share" s={13} c="#fff" sw={2}/>
+          Share
+        </button>
+
+        {/* Dark mode toggle */}
+        <button onClick={() => setDark(d => !d)}
+          title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
+          style={{width:30, height:30, borderRadius:6, border:`1px solid ${T.border}`,
+            background:'transparent', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer'}}>
+          <Ico n={dark ? 'sun' : 'moon'} s={14} c={T.fgMuted} sw={2}/>
+        </button>
+
+        <FilterDropdown T={T}/>
+      </div>
+
+      {/* Timeline rows */}
+      <div style={{padding:20, display:'flex', flexDirection:'column'}}>
+        {['Lindsay K.','Jen M.','Brian R.','Sam T.','Alex Williamson-Torres'].map((name, i) => {
+          const colors = ['#288C9B','#F29E4C','#5BC0DE','#2ECC71','#9B59B6'];
+          const col = colors[i];
+          return (
+            <div key={name} style={{display:'flex', alignItems:'center', height:52,
+              borderBottom:`1px solid ${T.borderSubtle}`}}>
+              <div style={{width:160, flexShrink:0, display:'flex', alignItems:'center', gap:8, paddingRight:12}}>
+                <div style={{width:24, height:24, borderRadius:'50%', background:col,
+                  display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0}}>
+                  <span style={{fontSize:10, fontWeight:700, color:'#fff'}}>
+                    {name.split(' ').map(w=>w[0]).join('').slice(0,2)}
+                  </span>
+                </div>
+                <span style={{fontSize:12, fontWeight:600, color:T.fgMuted,
+                  overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>{name}</span>
+              </div>
+              <div style={{flex:1, position:'relative', height:'100%'}}>
+                {i===0 && <><Block left={0}  width={38} color="#288C9B" label="Q3 Campaign Launch"/><Block left={45} width={26} color="#5BC0DE" label="Brand Refresh"/></>}
+                {i===1 && <><Block left={18} width={32} color="#F29E4C" label="Project Y"/><Block left={57} width={20} color="#5C6BC0" label="Contractor Review"/></>}
+                {i===2 && <><Block left={0}  width={13} color="#9B59B6" label="Task A" muted/><Block left={32} width={32} color="#9B59B6" label="Task B"/></>}
+                {i===3 && <><Block left={6}  width={20} color="#2ECC71" label="Onboarding" muted/><Block left={38} width={38} color="#2ECC71" label="Integration Work"/></>}
+                {i===4 && <><Block left={12} width={28} color="#9B59B6" label="Strategy Alignment"/></>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{position:'fixed', bottom:20, left:'50%', transform:'translateX(-50%)',
+        background:dark?'rgba(22,27,34,.92)':'rgba(52,58,64,.85)', color:'#fff',
+        fontSize:11, padding:'6px 14px', borderRadius:99,
+        backdropFilter:'blur(6px)', pointerEvents:'none', letterSpacing:'.2px'}}>
+        ☀︎/☾ toggle top-right · click filter to open · hover custom filters for ⚙ config
+      </div>
+    </div>
+  );
+}
+
+function Block({ left, width, color, label, muted }) {
+  return (
+    <div style={{position:'absolute', top:'50%', transform:'translateY(-50%)',
+      left:`${left}%`, width:`${width}%`, height:28, borderRadius:5,
+      background:muted?`${color}55`:color,
+      display:'flex', alignItems:'center', paddingLeft:8, overflow:'hidden'}}>
+      <span style={{fontSize:11, fontWeight:600, color:muted?color:'#fff',
+        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', opacity:muted?.8:1}}>
+        {label}
+      </span>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
+````
+
+## File: docs/design/handoffs/filter-dropdown-redesign/design_handoff_filter_dropdown/README.md
+````markdown
+# Handoff: Filter Dropdown — Draba Activity Views
+
+## Overview
+
+This is the filter dropdown used on Draba's activity view pages (Timeline, Kanban, List). It lives in the top bar and lets users narrow the activities shown to a specific scope — a preset view, a single team member, a team-promoted filter, or one of their own saved filters.
+
+## About the Design Files
+
+The files in this bundle are **HTML design prototypes** — they show the intended look, structure, and interactive behavior of the component. They are **not** production code to copy directly. Your task is to **recreate this component inside the existing Draba codebase** (React + the Draba design system) using its established patterns, components, and libraries.
+
+## Fidelity
+
+**High-fidelity.** The prototype uses the exact Draba design token values (colors, typography, spacing, radius, shadows). Recreate it pixel-closely using the codebase's existing tokens/variables.
+
+---
+
+## The Component: `<FilterDropdown>`
+
+### Purpose
+
+Replaces the current basic filter control. Allows users to select one active filter at a time across four categories: Presets, Members, Team filters, and My filters.
+
+### Trigger Button
+
+Sits in the TopBar, right-aligned, before the Search icon.
+
+| Property | Value |
+|---|---|
+| Height | 30px |
+| Padding | `5px 9px 5px 8px` |
+| Border radius | 6px |
+| Font size | 13px |
+| Default state | Transparent bg, `#E2E6EA` border, `#343A40` text, muted filter icon |
+| Active (non-default) state | `rgba(40,140,155,.09)` bg, `rgba(40,140,155,.22)` border, `#288C9B` text + icon, **semibold** |
+| Member filter active | Replace filter icon with an 8px colored dot matching the member's color |
+| Max width | 220px — label truncates with ellipsis |
+| Right icon | 12px chevron-down, always muted |
+
+---
+
+## Dropdown Panel
+
+Anchored to the bottom-right of the trigger. Opens on click, closes on outside click.
+
+| Property | Value |
+|---|---|
+| Width | 284px |
+| Max height | 460px (scrollable) |
+| Background | `#ffffff` |
+| Border | `1px solid #E2E6EA` |
+| Border radius | 8px |
+| Box shadow | `0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)` |
+| Bottom padding | 4px |
+
+---
+
+## Sections (top to bottom)
+
+Each section has a **section header** and a list of **items**, separated by thin dividers.
+
+### Section Header
+
+```
+font-size: 10px
+font-weight: 700
+letter-spacing: 0.8px
+text-transform: uppercase
+color: #9bA6B2
+padding: 10px 14px 3px
+```
+
+"Team filters" header also carries a **pill badge**: text `Team`, teal tint bg + border, 9px bold text.
+
+---
+
+### 1. Presets
+
+Five built-in options. Each has a 14px Lucide icon on the left.
+
+| ID | Label | Icon | Notes |
+|---|---|---|---|
+| `all` | All activities | `layers` | Default selection |
+| `upcoming` | Upcoming | `clock` | Subtitle: "Starting or ending in 7 days" |
+| `my` | My events | `user` | Scoped to the logged-in user |
+| `overdue` | Overdue | `alert-circle` | Activities past their end date |
+| `noassign` | No assignee | `user-x` | Activities with no member assigned |
+
+**Suggested additional presets to consider adding:**
+- **This week** — activities with any overlap in the current Mon–Sun window
+- **Unstarted** — planned but start date hasn't arrived yet
+- **Recently completed** — done in the last 7 days
+- **High priority** — if priority tagging exists
+
+---
+
+### 2. Members
+
+One row per team member. No icon — instead an **8px colored dot** (member's color) in the left icon slot.
+
+Long names (e.g. "Alex Williamson-Torres") must truncate with ellipsis. The full name should be accessible via `title` attribute.
+
+Member colors come from the existing member data model.
+
+---
+
+### 3. Team filters
+
+Custom filters that a member nominated and an admin promoted to team-wide visibility. Sourced from a `teamFilters` collection (see State section).
+
+The section header has the "Team" pill badge.
+
+On hover, the **gear icon** (12px, `settings` or `gear`) appears in the right slot — replacing the checkmark if active. Clicking it opens the filter configuration/edit dialog. The gear button should be accessible to any user with permission to edit team filters (team admins).
+
+---
+
+### 4. My filters
+
+Custom filters created by the logged-in user. Same hover-to-configure behavior as team filters. Clicking the gear opens the edit/configure dialog for that filter.
+
+---
+
+### 5. Add filter (footer)
+
+Always visible at the bottom, below a divider.
+
+```
+font-size: 13px
+color: #6C7A8A (default), #288C9B (hover)
+font-weight: 400 (default), 600 (hover)
+left icon: plus (14px, 2px stroke)
+padding: 7px 14px
+background: transparent → #E8ECEF on hover
+```
+
+Clicking opens the "Create filter" dialog/flow.
+
+---
+
+## Item Row Anatomy
+
+```
+[ 16px icon/dot slot ] [ label + optional subtitle ] [ 24px right slot ]
+padding: 5px 10px 5px 14px
+```
+
+| State | Background | Label style |
+|---|---|---|
+| Default | transparent | 13px, weight 400, `#343A40` |
+| Hover | `#E8ECEF` | same |
+| Active | `rgba(40,140,155,.09)` | 13px, weight 600, `#288C9B` |
+
+Right slot:
+- **Active + not hovering**: teal checkmark (13px, 2.5px stroke)
+- **Custom filter + hovering**: gear config button (22×22px, `#EDF0F3` bg → `#dde2e8` on hover)
+- **Active + custom + hovering**: gear takes priority over checkmark
+
+Label overflow: `overflow: hidden; text-overflow: ellipsis; white-space: nowrap`. Always add `title={label}` so the full text is visible on native tooltip.
+
+---
+
+## Interactions & Behavior
+
+- **Single-select** — only one filter active at a time across all sections
+- **Selecting any item** closes the dropdown immediately
+- **Outside click** closes the dropdown
+- **Escape key** should also close the dropdown
+- **Trigger updates** to reflect the active filter: label, color treatment, icon vs. dot
+- When "All activities" is selected, trigger returns to its default (no-tint) appearance
+
+---
+
+## State
+
+```ts
+interface FilterState {
+  activeFilterId: string;           // e.g. 'all', 'm1', 'tf2', 'mf1'
+}
+
+interface SavedFilter {
+  id: string;
+  label: string;
+  createdBy: string;                // user id
+  isTeamWide: boolean;              // promoted by admin
+  definition: FilterDefinition;     // the actual filter logic
+}
+```
+
+`teamFilters` — filters where `isTeamWide === true`, visible to all team members  
+`myFilters` — filters where `createdBy === currentUserId && !isTeamWide`
+
+---
+
+## Design Tokens Used
+
+| Token | Value | Usage |
+|---|---|---|
+| `--primary` | `#288C9B` | Active states, tints |
+| `--fg` | `#343A40` | Default text |
+| `--fg-muted` | `#6C7A8A` | Muted text, icons |
+| `--border` | `#E2E6EA` | Panel border, dividers |
+| `--card` | `#ffffff` | Panel background |
+| `--muted` | `#EDF0F3` | Gear button bg |
+| `--hover` | `#E8ECEF` | Row hover bg |
+| Font | `'Open Sans'` | All text |
+| Border radius | `6px` (trigger), `8px` (panel) | |
+
+---
+
+## Files
+
+| File | Description |
+|---|---|
+| `Filter Dropdown.html` | Full interactive prototype — component + TopBar context |
+
+Open in any browser to explore the interaction. The dropdown is **open by default**. Click items to select; hover custom filter rows to see the gear icon.
+
+---
+
+## Notes for Implementation
+
+- The gear/configure action for **team filters** should check permissions — only admins can edit team-wide filters; regular members should see the gear as a "view details" action
+- Consider keyboard navigation (↑/↓ to move focus, Enter to select, Esc to close)
+- The "Add filter" footer action should integrate with whatever filter-builder flow already exists (or needs to be built)
+- Long filter names are a real UX concern — the 284px dropdown width combined with ellipsis + `title` tooltip is the chosen approach; no wrapping
 ````
 
 ## File: docs/design/handoffs/member-modal/Member Edit Modal v2.html
@@ -9662,44 +10388,6 @@ export default function RoleDropdown({ value, onChange, disabled = false, hidePa
 }
 ````
 
-## File: packages/web/src/contexts/FilterContext.tsx
-````typescript
-/**
- * Holds the dashboard-wide active filter selection. UI-only this round —
- * the selected filter is not yet applied to the events list (real views
- * land in Phase 8).
- */
-
-import { createContext, useContext, useState } from 'react'
-
-export type ActiveFilter =
-  | { kind: 'preset'; id: 'all' | 'upcoming' | 'my' }
-  | { kind: 'member'; userId: string }
-  | { kind: 'saved'; id: string }
-
-interface FilterContextValue {
-  activeFilter: ActiveFilter
-  setActiveFilter: (f: ActiveFilter) => void
-}
-
-const FilterContext = createContext<FilterContextValue | null>(null)
-
-export function FilterProvider({ children }: { children: React.ReactNode }) {
-  const [activeFilter, setActiveFilter] = useState<ActiveFilter>({ kind: 'preset', id: 'all' })
-  return (
-    <FilterContext.Provider value={{ activeFilter, setActiveFilter }}>
-      {children}
-    </FilterContext.Provider>
-  )
-}
-
-export function useFilter(): FilterContextValue {
-  const ctx = useContext(FilterContext)
-  if (!ctx) throw new Error('useFilter must be used inside FilterProvider')
-  return ctx
-}
-````
-
 ## File: packages/web/src/hooks/useDarkMode.ts
 ````typescript
 /**
@@ -12306,6 +12994,44 @@ export default function ProtectedRoute() {
   }
 
   return <Outlet />
+}
+````
+
+## File: packages/web/src/contexts/FilterContext.tsx
+````typescript
+/**
+ * Holds the dashboard-wide active filter selection. UI-only this round —
+ * the selected filter is not yet applied to the events list (real views
+ * land in Phase 8).
+ */
+
+import { createContext, useContext, useState } from 'react'
+
+export type ActiveFilter =
+  | { kind: 'preset'; id: 'all' | 'upcoming' | 'my' | 'overdue' | 'noassign' }
+  | { kind: 'member'; userId: string }
+  | { kind: 'saved'; id: string }
+
+interface FilterContextValue {
+  activeFilter: ActiveFilter
+  setActiveFilter: (f: ActiveFilter) => void
+}
+
+const FilterContext = createContext<FilterContextValue | null>(null)
+
+export function FilterProvider({ children }: { children: React.ReactNode }) {
+  const [activeFilter, setActiveFilter] = useState<ActiveFilter>({ kind: 'preset', id: 'all' })
+  return (
+    <FilterContext.Provider value={{ activeFilter, setActiveFilter }}>
+      {children}
+    </FilterContext.Provider>
+  )
+}
+
+export function useFilter(): FilterContextValue {
+  const ctx = useContext(FilterContext)
+  if (!ctx) throw new Error('useFilter must be used inside FilterProvider')
+  return ctx
 }
 ````
 
@@ -20697,422 +21423,6 @@ export default function ProfilePage() {
 }
 ````
 
-## File: packages/web/src/pages/LoginPage.tsx
-````typescript
-import { useState, useRef, useId } from 'react'
-import { useNavigate, useLocation, Link } from 'react-router-dom'
-import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-// ── Floating-label input ─────────────────────────────────────────────────────
-
-interface FloatInputProps {
-  id: string
-  label: string
-  type: string
-  value: string
-  autoComplete: string
-  error?: string | null
-  onChange: (v: string) => void
-  onKeyDown?: (e: React.KeyboardEvent) => void
-  rightSlot?: React.ReactNode
-}
-
-function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
-  const [focused, setFocused] = useState(false)
-  const floated = focused || value.length > 0
-
-  const borderColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#288C9B'
-    : 'hsl(210 15% 24%)'
-
-  const boxShadow = error
-    ? '0 0 0 3px rgba(231,76,60,0.15)'
-    : focused
-    ? '0 0 0 3px rgba(40,140,155,0.18)'
-    : 'none'
-
-  const labelColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#5BC0DE'
-    : 'hsl(210 15% 65%)'
-
-  return (
-    <div>
-      <div style={{
-        position: 'relative',
-        borderRadius: 8,
-        border: `1px solid ${borderColor}`,
-        background: 'hsl(210 15% 17%)',
-        transition: 'border-color 180ms ease, box-shadow 180ms ease',
-        boxShadow,
-      }}>
-        {/* Floating label */}
-        <label
-          htmlFor={id}
-          style={{
-            position: 'absolute',
-            left: 14,
-            top: floated ? 8 : '50%',
-            transform: floated ? 'none' : 'translateY(-50%)',
-            fontSize: floated ? 11 : 14,
-            letterSpacing: floated ? '0.06em' : 0,
-            textTransform: floated ? 'uppercase' : 'none',
-            fontWeight: 600,
-            color: labelColor,
-            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
-            pointerEvents: 'none',
-            userSelect: 'none',
-          }}
-        >
-          {label}
-        </label>
-
-        <input
-          id={id}
-          type={type}
-          autoComplete={autoComplete}
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onKeyDown={onKeyDown}
-          style={{
-            width: '100%',
-            padding: '22px 42px 8px 14px',
-            background: 'transparent',
-            border: 'none',
-            outline: 'none',
-            fontSize: 15,
-            color: 'hsl(210 17% 93%)',
-            fontFamily: 'inherit',
-            lineHeight: 1.4,
-            boxSizing: 'border-box',
-          }}
-        />
-
-        {rightSlot && (
-          <div style={{
-            position: 'absolute',
-            right: 12,
-            top: '50%',
-            transform: 'translateY(-50%)',
-          }}>
-            {rightSlot}
-          </div>
-        )}
-      </div>
-
-      {error && (
-        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
-      )}
-    </div>
-  )
-}
-
-// ── Spinner ──────────────────────────────────────────────────────────────────
-
-function Spinner() {
-  return (
-    <Loader2
-      size={16}
-      strokeWidth={2.5}
-      color="rgba(255,255,255,0.8)"
-      style={{ animation: 'spin 0.8s linear infinite' }}
-    />
-  )
-}
-
-// ── Main page ────────────────────────────────────────────────────────────────
-
-export default function LoginPage() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [emailError, setEmailError] = useState<string | null>(null)
-  const [passwordError, setPasswordError] = useState<string | null>(null)
-  const [serverError, setServerError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [success, setSuccess] = useState(false)
-
-  function validateAndSubmit() {
-    let valid = true
-    setServerError(null)
-
-    if (!email.trim()) {
-      setEmailError('Email is required')
-      valid = false
-    } else if (!/\S+@\S+\.\S+/.test(email)) {
-      setEmailError('Enter a valid email')
-      valid = false
-    } else {
-      setEmailError(null)
-    }
-
-    if (!password) {
-      setPasswordError('Password is required')
-      valid = false
-    } else if (password.length < 6) {
-      setPasswordError('Password must be at least 6 characters')
-      valid = false
-    } else {
-      setPasswordError(null)
-    }
-
-    if (!valid) return
-    doLogin()
-  }
-
-  async function doLogin() {
-    setLoading(true)
-    try {
-      await login(email, password)
-      setSuccess(true)
-      // Brief success flash then navigate
-      setTimeout(() => navigate(from, { replace: true }), 600)
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setServerError(err.message)
-      } else {
-        setServerError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    validateAndSubmit()
-  }
-
-  return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--background)',
-      padding: '24px',
-      position: 'relative',
-    }}>
-      {/* Teal radial glow behind card */}
-      <div style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
-        pointerEvents: 'none',
-      }} />
-
-      {/* Dark mode toggle */}
-      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Card */}
-      <div style={{
-        width: '100%',
-        maxWidth: 860,
-        minHeight: 520,
-        borderRadius: 16,
-        overflow: 'hidden',
-        display: 'flex',
-        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
-        position: 'relative',
-        zIndex: 1,
-      }}>
-
-        {/* ── Left panel — brand ─────────────────────────────────────── */}
-        <div style={{
-          width: '38%',
-          flexShrink: 0,
-          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 4,
-          padding: '48px 32px',
-          position: 'relative',
-          overflow: 'hidden',
-        }}>
-          {/* Decorative circles */}
-          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
-          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
-
-          {/* Logo — 2× the handoff's 88px */}
-          <img
-            src="/icon-color.svg"
-            alt="draba"
-            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginBottom: '-62px' }}
-          />
-
-          <div style={{ position: 'relative', textAlign: 'center' }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
-              draba
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
-              Team coordination,<br />simplified.
-            </div>
-          </div>
-        </div>
-
-        {/* ── Right panel — form ─────────────────────────────────────── */}
-        <div style={{
-          flex: 1,
-          background: 'var(--card)',
-          padding: '52px 48px',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'center',
-        }}>
-          {success ? (
-            /* Success state */
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
-              <div style={{
-                width: 56, height: 56, borderRadius: '50%',
-                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                margin: '0 auto 20px',
-              }}>
-                <Check size={24} color="#288C9B" strokeWidth={2.5} />
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
-                You're signed in
-              </div>
-              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
-                Redirecting to your timeline…
-              </div>
-            </div>
-          ) : (
-            <form onSubmit={handleSubmit} noValidate>
-              {/* Heading */}
-              <div style={{ marginBottom: 28 }}>
-                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
-                  Sign in
-                </h1>
-                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
-                  Welcome back — sign in to your account.
-                </p>
-              </div>
-
-              {/* Fields */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
-                <FloatInput
-                  id="email"
-                  label="Email"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  error={emailError}
-                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
-                />
-
-                <FloatInput
-                  id="password"
-                  label="Password"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  value={password}
-                  error={passwordError}
-                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
-                  rightSlot={
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(s => !s)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
-                    >
-                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
-                    </button>
-                  }
-                />
-              </div>
-
-              {/* Forgot password */}
-              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
-                <Link
-                  to="/forgot-password"
-                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Forgot password?
-                </Link>
-              </div>
-
-              {/* Server error */}
-              {serverError && (
-                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
-              )}
-
-              {/* Sign in button */}
-              <button
-                type="submit"
-                disabled={loading}
-                style={{
-                  width: '100%',
-                  padding: '14px',
-                  borderRadius: 8,
-                  border: 'none',
-                  background: loading
-                    ? 'hsl(188 40% 35%)'
-                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
-                  color: '#fff',
-                  fontSize: 15,
-                  fontWeight: 700,
-                  letterSpacing: '0.01em',
-                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 8,
-                  fontFamily: 'inherit',
-                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
-                }}
-                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
-                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
-                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
-              >
-                {loading && <Spinner />}
-                {loading ? 'Signing in…' : 'Sign in'}
-              </button>
-
-              {/* Register link */}
-              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
-                Have an invite?{' '}
-                <Link
-                  to="/register"
-                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Create an account
-                </Link>
-              </p>
-            </form>
-          )}
-        </div>
-      </div>
-
-      {/* Keyframe for spinner */}
-      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/pages/SettingsPage.tsx
 ````typescript
 /**
@@ -22035,19 +22345,436 @@ require (
 )
 ````
 
+## File: packages/web/src/pages/LoginPage.tsx
+````typescript
+import { useState } from 'react'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
+import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError } from '@/lib/api'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+// ── Floating-label input ─────────────────────────────────────────────────────
+
+interface FloatInputProps {
+  id: string
+  label: string
+  type: string
+  value: string
+  autoComplete: string
+  error?: string | null
+  onChange: (v: string) => void
+  onKeyDown?: (e: React.KeyboardEvent) => void
+  rightSlot?: React.ReactNode
+}
+
+function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
+  const [focused, setFocused] = useState(false)
+  const floated = focused || value.length > 0
+
+  const borderColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#288C9B'
+    : 'hsl(210 15% 24%)'
+
+  const boxShadow = error
+    ? '0 0 0 3px rgba(231,76,60,0.15)'
+    : focused
+    ? '0 0 0 3px rgba(40,140,155,0.18)'
+    : 'none'
+
+  const labelColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#5BC0DE'
+    : 'hsl(210 15% 65%)'
+
+  return (
+    <div>
+      <div style={{
+        position: 'relative',
+        borderRadius: 8,
+        border: `1px solid ${borderColor}`,
+        background: 'hsl(210 15% 17%)',
+        transition: 'border-color 180ms ease, box-shadow 180ms ease',
+        boxShadow,
+      }}>
+        {/* Floating label */}
+        <label
+          htmlFor={id}
+          style={{
+            position: 'absolute',
+            left: 14,
+            top: floated ? 8 : '50%',
+            transform: floated ? 'none' : 'translateY(-50%)',
+            fontSize: floated ? 11 : 14,
+            letterSpacing: floated ? '0.06em' : 0,
+            textTransform: floated ? 'uppercase' : 'none',
+            fontWeight: 600,
+            color: labelColor,
+            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          {label}
+        </label>
+
+        <input
+          id={id}
+          type={type}
+          autoComplete={autoComplete}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onKeyDown={onKeyDown}
+          style={{
+            width: '100%',
+            padding: '22px 42px 8px 14px',
+            background: 'transparent',
+            border: 'none',
+            outline: 'none',
+            fontSize: 15,
+            color: 'hsl(210 17% 93%)',
+            fontFamily: 'inherit',
+            lineHeight: 1.4,
+            boxSizing: 'border-box',
+          }}
+        />
+
+        {rightSlot && (
+          <div style={{
+            position: 'absolute',
+            right: 12,
+            top: '50%',
+            transform: 'translateY(-50%)',
+          }}>
+            {rightSlot}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
+      )}
+    </div>
+  )
+}
+
+// ── Spinner ──────────────────────────────────────────────────────────────────
+
+function Spinner() {
+  return (
+    <Loader2
+      size={16}
+      strokeWidth={2.5}
+      color="rgba(255,255,255,0.8)"
+      style={{ animation: 'spin 0.8s linear infinite' }}
+    />
+  )
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
+
+export default function LoginPage() {
+  const { login } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [success, setSuccess] = useState(false)
+
+  function validateAndSubmit() {
+    let valid = true
+    setServerError(null)
+
+    if (!email.trim()) {
+      setEmailError('Email is required')
+      valid = false
+    } else if (!/\S+@\S+\.\S+/.test(email)) {
+      setEmailError('Enter a valid email')
+      valid = false
+    } else {
+      setEmailError(null)
+    }
+
+    if (!password) {
+      setPasswordError('Password is required')
+      valid = false
+    } else if (password.length < 6) {
+      setPasswordError('Password must be at least 6 characters')
+      valid = false
+    } else {
+      setPasswordError(null)
+    }
+
+    if (!valid) return
+    doLogin()
+  }
+
+  async function doLogin() {
+    setLoading(true)
+    try {
+      await login(email, password)
+      setSuccess(true)
+      // Brief success flash then navigate
+      setTimeout(() => navigate(from, { replace: true }), 600)
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError(err.message)
+      } else {
+        setServerError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    validateAndSubmit()
+  }
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--background)',
+      padding: '24px',
+      position: 'relative',
+    }}>
+      {/* Teal radial glow behind card */}
+      <div style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
+        pointerEvents: 'none',
+      }} />
+
+      {/* Dark mode toggle */}
+      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Card */}
+      <div style={{
+        width: '100%',
+        maxWidth: 860,
+        minHeight: 520,
+        borderRadius: 16,
+        overflow: 'hidden',
+        display: 'flex',
+        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
+        position: 'relative',
+        zIndex: 1,
+      }}>
+
+        {/* ── Left panel — brand ─────────────────────────────────────── */}
+        <div style={{
+          width: '38%',
+          flexShrink: 0,
+          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 4,
+          padding: '48px 32px',
+          position: 'relative',
+          overflow: 'hidden',
+        }}>
+          {/* Decorative circles */}
+          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
+          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
+
+          {/* Logo — 2× the handoff's 88px */}
+          <img
+            src="/icon-color.svg"
+            alt="draba"
+            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginBottom: '-62px' }}
+          />
+
+          <div style={{ position: 'relative', textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+              draba
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
+              Team coordination,<br />simplified.
+            </div>
+          </div>
+        </div>
+
+        {/* ── Right panel — form ─────────────────────────────────────── */}
+        <div style={{
+          flex: 1,
+          background: 'var(--card)',
+          padding: '52px 48px',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+        }}>
+          {success ? (
+            /* Success state */
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: '50%',
+                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 20px',
+              }}>
+                <Check size={24} color="#288C9B" strokeWidth={2.5} />
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
+                You're signed in
+              </div>
+              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
+                Redirecting to your timeline…
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} noValidate>
+              {/* Heading */}
+              <div style={{ marginBottom: 28 }}>
+                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
+                  Sign in
+                </h1>
+                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
+                  Welcome back — sign in to your account.
+                </p>
+              </div>
+
+              {/* Fields */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
+                <FloatInput
+                  id="email"
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  error={emailError}
+                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
+                />
+
+                <FloatInput
+                  id="password"
+                  label="Password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  error={passwordError}
+                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
+                  rightSlot={
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(s => !s)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
+                    >
+                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
+                    </button>
+                  }
+                />
+              </div>
+
+              {/* Forgot password */}
+              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
+                <Link
+                  to="/forgot-password"
+                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Forgot password?
+                </Link>
+              </div>
+
+              {/* Server error */}
+              {serverError && (
+                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
+              )}
+
+              {/* Sign in button */}
+              <button
+                type="submit"
+                disabled={loading}
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  borderRadius: 8,
+                  border: 'none',
+                  background: loading
+                    ? 'hsl(188 40% 35%)'
+                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
+                  color: '#fff',
+                  fontSize: 15,
+                  fontWeight: 700,
+                  letterSpacing: '0.01em',
+                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  fontFamily: 'inherit',
+                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
+                }}
+                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
+                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
+                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
+              >
+                {loading && <Spinner />}
+                {loading ? 'Signing in…' : 'Sign in'}
+              </button>
+
+              {/* Register link */}
+              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
+                Have an invite?{' '}
+                <Link
+                  to="/register"
+                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Create an account
+                </Link>
+              </p>
+            </form>
+          )}
+        </div>
+      </div>
+
+      {/* Keyframe for spinner */}
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/components/filters/FilterDropdown.tsx
 ````typescript
 /**
- * Top-bar filter selector. Surfaces presets (All / Upcoming / My events),
- * a dynamic per-team-member section, and the calling user's saved filters.
- * "New filter…" and "Manage filters…" open the right-sidebar editor.
- *
- * The selection is stored in FilterContext but not yet applied to the
- * events list — wiring lands when real views render in Phase 8.
+ * Top-bar filter selector. Surfaces presets, a per-member section, a
+ * team-promoted filters section (stub), and the user's saved filters.
+ * Selection is stored in FilterContext; wiring to the events list lands
+ * when real views render in Phase 8.
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { Filter, ChevronDown, Plus, Settings2 } from 'lucide-react'
+import {
+  Layers, Clock, User, AlertCircle, UserX,
+  ChevronDown, Plus, Check, Settings2,
+} from 'lucide-react'
 import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
 import { useTeamMembers } from '@/hooks/useTeamActivities'
 import { useSavedFilters } from '@/hooks/useSavedFilters'
@@ -22058,46 +22785,202 @@ interface Props {
   onOpenEditor: () => void
 }
 
-const PRESETS: { id: 'all' | 'upcoming' | 'my'; label: string }[] = [
-  { id: 'all', label: 'All events' },
-  { id: 'upcoming', label: 'Upcoming' },
-  { id: 'my', label: 'My events' },
+// ── Preset definitions ───────────────────────────────────────────────────────
+
+type PresetId = 'all' | 'upcoming' | 'my' | 'overdue' | 'noassign'
+
+interface Preset {
+  id: PresetId
+  label: string
+  icon: React.ReactNode
+  subtitle?: string
+}
+
+const ICON_PRESET = { size: 14, strokeWidth: 1.8 } as const
+
+const PRESETS: Preset[] = [
+  { id: 'all',      label: 'All activities',  icon: <Layers     {...ICON_PRESET} /> },
+  { id: 'upcoming', label: 'Upcoming',         icon: <Clock      {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
+  { id: 'my',       label: 'My events',        icon: <User       {...ICON_PRESET} /> },
+  { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
+  { id: 'noassign', label: 'No assignee',      icon: <UserX      {...ICON_PRESET} /> },
 ]
 
-const ROW_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  width: '100%',
-  padding: '8px 12px',
-  background: 'none',
-  border: 'none',
-  fontSize: 13,
-  color: 'var(--foreground)',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  textAlign: 'left',
-}
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-const SECTION_HEADER: React.CSSProperties = {
-  padding: '8px 12px 4px',
-  fontSize: 10,
-  fontWeight: 700,
-  textTransform: 'uppercase',
-  letterSpacing: 0.5,
-  color: 'var(--muted-foreground)',
-}
-
-function activeLabel(active: ActiveFilter, members: { userId: string; displayName: string }[], saved: { id: string; name: string }[]): string {
-  if (active.kind === 'preset') return PRESETS.find(p => p.id === active.id)?.label ?? 'Filter'
-  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.displayName ?? 'Member'
-  return saved.find(s => s.id === active.id)?.name ?? 'Saved'
-}
-
-/** Narrow TeamMemberWithUser to only those with a real user account (not Participants). */
+/** Narrow TeamMemberWithUser to only those with a real user account. */
 function hasUserId<T extends { userId?: string | null }>(m: T): m is T & { userId: string } {
   return typeof m.userId === 'string' && m.userId.length > 0
 }
+
+function activeLabel(
+  active: ActiveFilter,
+  members: { userId: string; displayName: string }[],
+  saved: { id: string; name: string }[],
+): string {
+  if (active.kind === 'preset') return PRESETS.find(p => p.id === active.id)?.label ?? 'Filter'
+  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.displayName ?? 'Member'
+  return saved.find(s => s.id === active.id)?.name ?? 'Saved filter'
+}
+
+function activeMemberColor(
+  active: ActiveFilter,
+  members: { userId: string; color?: string | null }[],
+): string | null {
+  if (active.kind !== 'member') return null
+  return members.find(m => m.userId === active.userId)?.color ?? null
+}
+
+// ── Sub-components ───────────────────────────────────────────────────────────
+
+interface ItemRowProps {
+  icon?: React.ReactNode
+  /** Rendered in the 8px-dot slot when provided (overrides icon). */
+  dotColor?: string
+  label: string
+  subtitle?: string
+  active: boolean
+  /** Gear button shown on hover for custom filters. */
+  onConfigure?: () => void
+  onClick: () => void
+}
+
+function ItemRow({ icon, dotColor, label, subtitle, active, onConfigure, onClick }: ItemRowProps) {
+  const [hovered, setHovered] = useState(false)
+  const [gearHovered, setGearHovered] = useState(false)
+
+  const rowBg = active
+    ? 'rgba(40,140,155,.09)'
+    : hovered
+    ? 'var(--muted)'
+    : 'transparent'
+
+  const labelColor = active ? 'var(--primary)' : 'var(--foreground)'
+  const labelWeight = active ? 600 : 400
+
+  const showGear = onConfigure && hovered
+  const showCheck = active && !showGear
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        padding: '5px 10px 5px 14px',
+        background: rowBg,
+        cursor: 'pointer',
+        transition: 'background 0.08s',
+      }}
+      onClick={onClick}
+    >
+      {/* 16px icon / dot slot */}
+      <div style={{ width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: active ? 'var(--primary)' : 'var(--muted-foreground)' }}>
+        {dotColor ? (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor }} />
+        ) : (
+          icon
+        )}
+      </div>
+
+      {/* Label + subtitle */}
+      <div style={{ flex: 1, minWidth: 0, marginLeft: 8 }}>
+        <div style={{
+          fontSize: 13,
+          fontWeight: labelWeight,
+          color: labelColor,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+          title={label}
+        >
+          {label}
+        </div>
+        {subtitle && (
+          <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {subtitle}
+          </div>
+        )}
+      </div>
+
+      {/* 24px right slot */}
+      <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        {showGear ? (
+          <button
+            onClick={e => { e.stopPropagation(); onConfigure?.() }}
+            onMouseEnter={() => setGearHovered(true)}
+            onMouseLeave={() => setGearHovered(false)}
+            style={{
+              width: 22,
+              height: 22,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: gearHovered ? '#dde2e8' : 'var(--muted, #EDF0F3)',
+              border: 'none',
+              borderRadius: 5,
+              cursor: 'pointer',
+              color: 'var(--muted-foreground)',
+              transition: 'background 0.1s',
+            }}
+          >
+            <Settings2 size={12} strokeWidth={1.8} />
+          </button>
+        ) : showCheck ? (
+          <Check size={13} strokeWidth={2.5} color="var(--primary)" />
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+// ── Section header ───────────────────────────────────────────────────────────
+
+interface SectionHeaderProps {
+  label: string
+  teamBadge?: boolean
+}
+
+function SectionHeader({ label, teamBadge }: SectionHeaderProps) {
+  return (
+    <div style={{
+      padding: '10px 14px 3px',
+      fontSize: 10,
+      fontWeight: 700,
+      letterSpacing: '0.8px',
+      textTransform: 'uppercase',
+      color: 'var(--muted-foreground)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+    }}>
+      {label}
+      {teamBadge && (
+        <span style={{
+          fontSize: 9,
+          fontWeight: 700,
+          color: 'var(--primary)',
+          background: 'rgba(40,140,155,.1)',
+          border: '1px solid rgba(40,140,155,.25)',
+          borderRadius: 99,
+          padding: '1px 5px',
+          letterSpacing: 0,
+          textTransform: 'none',
+        }}>
+          Team
+        </span>
+      )}
+    </div>
+  )
+}
+
+function Divider() {
+  return <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+}
+
+// ── Main component ───────────────────────────────────────────────────────────
 
 export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
   const { activeFilter, setActiveFilter } = useFilter()
@@ -22112,14 +22995,23 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
     function onDown(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
     }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
     document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
   }, [])
 
-  // Participants have no userId; omit them from the per-member filter list.
   const membersWithUser = members.filter(hasUserId)
   const label = activeLabel(activeFilter, membersWithUser, saved)
+  const memberDotColor = activeMemberColor(activeFilter, membersWithUser)
   const currentUserId = (user as { id?: string } | null)?.id ?? ''
+
+  const isDefaultFilter = activeFilter.kind === 'preset' && activeFilter.id === 'all'
 
   function select(f: ActiveFilter) {
     setActiveFilter(f)
@@ -22134,8 +23026,15 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
     return false
   }
 
+  // Trigger appearance — teal tint when a non-default filter is active.
+  const triggerBg = isDefaultFilter ? 'transparent' : 'rgba(40,140,155,.09)'
+  const triggerBorder = isDefaultFilter ? 'var(--border)' : 'rgba(40,140,155,.22)'
+  const triggerColor = isDefaultFilter ? 'var(--foreground)' : 'var(--primary)'
+  const triggerWeight = isDefaultFilter ? 400 : 600
+
   return (
     <div ref={ref} style={{ position: 'relative' }}>
+      {/* Trigger */}
       <button
         onClick={() => setOpen(o => !o)}
         title="Filter"
@@ -22145,132 +23044,152 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
           gap: 6,
           cursor: 'pointer',
           fontFamily: 'var(--font-sans)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius-md)',
-          background: 'var(--card)',
-          color: 'var(--foreground)',
-          padding: '4px 8px 4px 10px',
-          height: 28,
-          fontSize: 12,
-          fontWeight: 600,
-          maxWidth: 200,
+          border: `1px solid ${triggerBorder}`,
+          borderRadius: 6,
+          background: triggerBg,
+          color: triggerColor,
+          padding: '5px 9px 5px 8px',
+          height: 30,
+          fontSize: 13,
+          fontWeight: triggerWeight,
+          maxWidth: 220,
+          transition: 'all 0.12s',
         }}
       >
-        <Filter size={13} strokeWidth={1.8} style={{ flexShrink: 0 }} />
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>{label}</span>
-        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0 }} />
+        {/* Icon: colored dot when a member filter is active, otherwise Filter icon */}
+        {memberDotColor && !isDefaultFilter ? (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: memberDotColor, flexShrink: 0 }} />
+        ) : (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: 'var(--muted-foreground)' }}>
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+          </svg>
+        )}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+          {label}
+        </span>
+        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
       </button>
 
+      {/* Dropdown panel */}
       {open && (
         <div
           style={{
             position: 'absolute',
             top: 'calc(100% + 8px)',
             right: 0,
-            width: 240,
+            width: 284,
             background: 'var(--card)',
             border: '1px solid var(--border)',
             borderRadius: 8,
-            boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+            boxShadow: '0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)',
             zIndex: 100,
-            overflow: 'hidden',
-            maxHeight: '70vh',
+            paddingBottom: 4,
+            maxHeight: 460,
             overflowY: 'auto',
           }}
         >
-          <div style={SECTION_HEADER}>Presets</div>
+          {/* Presets */}
+          <SectionHeader label="Presets" />
           {PRESETS.map(p => {
             const f: ActiveFilter = { kind: 'preset', id: p.id }
             return (
-              <button
+              <ItemRow
                 key={p.id}
+                icon={p.icon}
+                label={p.label}
+                subtitle={p.subtitle}
+                active={isSelected(f)}
                 onClick={() => select(f)}
-                style={{
-                  ...ROW_BTN,
-                  background: isSelected(f) ? 'var(--muted)' : 'none',
-                  fontWeight: isSelected(f) ? 600 : 400,
-                }}
-                onMouseEnter={e => { if (!isSelected(f)) e.currentTarget.style.background = 'var(--muted)' }}
-                onMouseLeave={e => { if (!isSelected(f)) e.currentTarget.style.background = 'none' }}
-              >
-                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.label}</span>
-              </button>
+              />
             )
           })}
 
+          {/* Members */}
           {membersWithUser.length > 0 && (
             <>
-              <div style={{ borderTop: '1px solid var(--border)', marginTop: 4 }} />
-              <div style={SECTION_HEADER}>Members</div>
+              <Divider />
+              <SectionHeader label="Members" />
               {membersWithUser.map(m => {
                 const f: ActiveFilter = { kind: 'member', userId: m.userId }
-                const label = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName
+                const name = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName
                 return (
-                  <button
+                  <ItemRow
                     key={m.userId}
+                    dotColor={m.color ?? '#8b949e'}
+                    label={name}
+                    active={isSelected(f)}
                     onClick={() => select(f)}
-                    style={{
-                      ...ROW_BTN,
-                      background: isSelected(f) ? 'var(--muted)' : 'none',
-                      fontWeight: isSelected(f) ? 600 : 400,
-                    }}
-                    onMouseEnter={e => { if (!isSelected(f)) e.currentTarget.style.background = 'var(--muted)' }}
-                    onMouseLeave={e => { if (!isSelected(f)) e.currentTarget.style.background = 'none' }}
-                  >
-                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Activities for {label}</span>
-                  </button>
+                  />
                 )
               })}
             </>
           )}
 
+          {/* Team filters — stub; no API support yet */}
+          <Divider />
+          <SectionHeader label="Team filters" teamBadge />
+          <div style={{ padding: '6px 14px 4px', fontSize: 12, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+            No team filters yet
+          </div>
+
+          {/* My filters */}
           {saved.length > 0 && (
             <>
-              <div style={{ borderTop: '1px solid var(--border)', marginTop: 4 }} />
-              <div style={SECTION_HEADER}>Saved filters</div>
+              <Divider />
+              <SectionHeader label="My filters" />
               {saved.map(s => {
                 const f: ActiveFilter = { kind: 'saved', id: s.id }
                 return (
-                  <button
+                  <ItemRow
                     key={s.id}
+                    label={s.name}
+                    active={isSelected(f)}
+                    onConfigure={() => { onOpenEditor(); setOpen(false) }}
                     onClick={() => select(f)}
-                    style={{
-                      ...ROW_BTN,
-                      background: isSelected(f) ? 'var(--muted)' : 'none',
-                      fontWeight: isSelected(f) ? 600 : 400,
-                    }}
-                    onMouseEnter={e => { if (!isSelected(f)) e.currentTarget.style.background = 'var(--muted)' }}
-                    onMouseLeave={e => { if (!isSelected(f)) e.currentTarget.style.background = 'none' }}
-                  >
-                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
-                  </button>
+                  />
                 )
               })}
             </>
           )}
 
-          <div style={{ borderTop: '1px solid var(--border)', marginTop: 4 }} />
-          <button
-            onClick={() => { onOpenEditor(); setOpen(false) }}
-            style={ROW_BTN}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-          >
-            <Plus size={13} strokeWidth={1.8} />
-            New filter…
-          </button>
-          <button
-            onClick={() => { onOpenEditor(); setOpen(false) }}
-            style={{ ...ROW_BTN, color: 'var(--muted-foreground)' }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-          >
-            <Settings2 size={13} strokeWidth={1.8} />
-            Manage filters…
-          </button>
+          {/* Footer — add filter */}
+          <Divider />
+          <AddFilterRow onClick={() => { onOpenEditor(); setOpen(false) }} />
         </div>
       )}
     </div>
+  )
+}
+
+// ── Add filter footer row ─────────────────────────────────────────────────────
+
+function AddFilterRow({ onClick }: { onClick: () => void }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        width: '100%',
+        padding: '7px 14px',
+        background: hovered ? 'var(--muted)' : 'transparent',
+        border: 'none',
+        fontSize: 13,
+        fontWeight: hovered ? 600 : 400,
+        color: hovered ? 'var(--primary)' : 'var(--muted-foreground)',
+        cursor: 'pointer',
+        fontFamily: 'var(--font-sans)',
+        textAlign: 'left',
+        transition: 'all 0.1s',
+      }}
+    >
+      <Plus size={14} strokeWidth={2} />
+      Add filter
+    </button>
   )
 }
 ````
@@ -23973,569 +24892,6 @@ export default function TopBar({
 }
 ````
 
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTeamActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-interface Props {
-  teamId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-}
-
-/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
-function statusColorFromId(statusId: string | null | undefined): string {
-  if (!statusId) return '#6b7280';
-  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
-  let h = 0;
-  for (let i = 0; i < statusId.length; i++) {
-    h = statusId.charCodeAt(i) + ((h << 5) - h);
-    h |= 0;
-  }
-  return palette[Math.abs(h) % palette.length];
-}
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate type that carries original API fields alongside view-state. */
-interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-  }
-
-  if (groupBy === 'member') {
-    const buckets: Record<string, RichActivity[]> = {};
-    for (const ev of sorted) {
-      const key = ev.primaryMemberId ?? '__none__';
-      (buckets[key] ??= []).push(ev);
-    }
-
-    const rows: GanttRow[] = [];
-    for (const m of members) {
-      const evs = buckets[m.id];
-      if (!evs?.length) continue;
-      rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-    }
-    const unassigned = buckets['__none__'];
-    if (unassigned?.length) {
-      rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
-      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    const placed = new Set<string>();
-    const rows: GanttRow[] = [];
-
-    for (const ev of sorted) {
-      if (placed.has(ev.id) || ev.parentActivityId) continue;
-      placed.add(ev.id);
-      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-
-      for (const child of sorted) {
-        if (child.parentActivityId === ev.id) {
-          placed.add(child.id);
-          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
-        }
-      }
-    }
-
-    for (const ev of sorted) {
-      if (!placed.has(ev.id)) {
-        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
-      }
-    }
-
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-export default function GanttView({
-  teamId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onMembersLoaded,
-  onSelectApiActivity,
-}: Props) {
-  const updateActivity = useUpdateActivity(teamId);
-  const today = todayMidnight();
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity),
-    [viewStart, viewEnd, resolvedGranularity],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTeamActivities(teamId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = apiActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, apiActivities, members, apiActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, apiActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    updateActivity.mutate({
-      activityId,
-      patch: {
-        startAt: newStartDate.toISOString(),
-        endAt: newEndDate.toISOString(),
-      },
-    });
-  }, [updateActivity]);
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={onLaneDrag}
-        onBarDrag={handleBarDrag}
-        onClearFilters={filtersActive ? () => {} : undefined}
-      />
-    </div>
-  );
-}
-````
-
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-````
-
 ## File: packages/api/internal/api/team_handler.go
 ````go
 package api
@@ -25575,6 +25931,569 @@ func flatten[T any](s []*T) []T {
 		}
 	}
 	return out
+}
+````
+
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTeamActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+interface Props {
+  teamId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+}
+
+/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
+function statusColorFromId(statusId: string | null | undefined): string {
+  if (!statusId) return '#6b7280';
+  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
+  let h = 0;
+  for (let i = 0; i < statusId.length; i++) {
+    h = statusId.charCodeAt(i) + ((h << 5) - h);
+    h |= 0;
+  }
+  return palette[Math.abs(h) % palette.length];
+}
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate type that carries original API fields alongside view-state. */
+interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+  }
+
+  if (groupBy === 'member') {
+    const buckets: Record<string, RichActivity[]> = {};
+    for (const ev of sorted) {
+      const key = ev.primaryMemberId ?? '__none__';
+      (buckets[key] ??= []).push(ev);
+    }
+
+    const rows: GanttRow[] = [];
+    for (const m of members) {
+      const evs = buckets[m.id];
+      if (!evs?.length) continue;
+      rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+    }
+    const unassigned = buckets['__none__'];
+    if (unassigned?.length) {
+      rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
+      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    const placed = new Set<string>();
+    const rows: GanttRow[] = [];
+
+    for (const ev of sorted) {
+      if (placed.has(ev.id) || ev.parentActivityId) continue;
+      placed.add(ev.id);
+      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+
+      for (const child of sorted) {
+        if (child.parentActivityId === ev.id) {
+          placed.add(child.id);
+          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
+        }
+      }
+    }
+
+    for (const ev of sorted) {
+      if (!placed.has(ev.id)) {
+        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
+      }
+    }
+
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export default function GanttView({
+  teamId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onMembersLoaded,
+  onSelectApiActivity,
+}: Props) {
+  const updateActivity = useUpdateActivity(teamId);
+  const today = todayMidnight();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity),
+    [viewStart, viewEnd, resolvedGranularity],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTeamActivities(teamId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = apiActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, apiActivities, members, apiActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, apiActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    updateActivity.mutate({
+      activityId,
+      patch: {
+        startAt: newStartDate.toISOString(),
+        endAt: newEndDate.toISOString(),
+      },
+    });
+  }, [updateActivity]);
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={onLaneDrag}
+        onBarDrag={handleBarDrag}
+        onClearFilters={filtersActive ? () => {} : undefined}
+      />
+    </div>
+  );
+}
+````
+
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 ````
 
@@ -31849,7 +32768,7 @@ function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit
  */
 const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
 
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, onUnarchiveTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
   const { user } = useAuth();
   const currentUserId = (user as { id?: string } | null)?.id;
   const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
@@ -32122,34 +33041,13 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                   </span>
                 </button>
                 {archivedTeamsOpen && archivedTeams.map(t => (
-                  <div key={t.id} style={{ display: 'flex', alignItems: 'center' }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <TeamRow
-                        team={t}
-                        isActive={false}
-                        canEdit={false}
-                        onEdit={() => onEditTeam?.(t)}
-                      />
-                    </div>
-                    <button
-                      title="Restore team"
-                      onClick={() => onUnarchiveTeam?.(t.id)}
-                      style={{
-                        flexShrink: 0,
-                        marginRight: 8,
-                        fontSize: 10,
-                        padding: '2px 7px',
-                        borderRadius: 4,
-                        border: '1px solid rgba(255,255,255,0.15)',
-                        background: 'none',
-                        color: 'rgba(255,255,255,0.45)',
-                        cursor: 'pointer',
-                        fontFamily: 'inherit',
-                      }}
-                    >
-                      Restore
-                    </button>
-                  </div>
+                  <TeamRow
+                    key={t.id}
+                    team={t}
+                    isActive={false}
+                    canEdit={Boolean(onNewTeam)}
+                    onEdit={() => onEditTeam?.(t)}
+                  />
                 ))}
               </div>
             )}
