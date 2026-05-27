@@ -1748,6 +1748,42 @@ time = false
 clean_on_exit = true
 ````
 
+## File: packages/shared/package.json
+````json
+{
+  "name": "@draba/shared",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "generate": "openapi-typescript ./openapi.yaml -o ./src/index.ts",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.6.1",
+    "typescript": "~5.8.0"
+  }
+}
+````
+
+## File: packages/shared/tsconfig.json
+````json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
+````
+
 ## File: packages/web/src/main.tsx
 ````typescript
 import React from 'react'
@@ -2353,6 +2389,27 @@ Apache License
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+````
+
+## File: package.json
+````json
+{
+  "name": "draba",
+  "private": true,
+  "packageManager": "pnpm@10.33.2",
+  "scripts": {
+    "generate": "pnpm --filter shared generate",
+    "build": "pnpm -r run build",
+    "lint": "pnpm -r run lint",
+    "test": "pnpm -r run test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}
 ````
 
 ## File: pnpm-workspace.yaml
@@ -8833,42 +8890,6 @@ import type { Activity, Team, Timeline } from '@draba/shared'
 - The Go structs in `packages/api/internal/models/` should mirror the OpenAPI schemas
 ````
 
-## File: packages/shared/package.json
-````json
-{
-  "name": "@draba/shared",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
-  },
-  "scripts": {
-    "generate": "openapi-typescript ./openapi.yaml -o ./src/index.ts",
-    "lint": "tsc --noEmit"
-  },
-  "devDependencies": {
-    "openapi-typescript": "^7.6.1",
-    "typescript": "~5.8.0"
-  }
-}
-````
-
-## File: packages/shared/tsconfig.json
-````json
-{
-  "compilerOptions": {
-    "target": "ES2020",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "noEmit": true,
-    "skipLibCheck": true
-  },
-  "include": ["src"]
-}
-````
-
 ## File: packages/web/src/components/layout/FindBar.tsx
 ````typescript
 /**
@@ -10217,6 +10238,32 @@ export default function ResetPasswordPage() {
 }
 ````
 
+## File: packages/web/src/types/api.ts
+````typescript
+/**
+ * Named re-exports of API wire-format types generated from packages/shared/openapi.yaml.
+ *
+ * Import these in components and hooks instead of reaching into the raw
+ * generated file — this layer insulates callers from openapi-typescript's
+ * internal schema path syntax.
+ */
+import type { components } from "@draba/shared";
+
+type Schemas = components["schemas"];
+
+export type User = Schemas["User"];
+export type Team = Schemas["Team"];
+export type TeamMember = Schemas["TeamMember"];
+/** Team member extended with user display fields (email, displayName, avatarUrl). */
+export type TeamMemberWithUser = Schemas["TeamMemberWithUser"];
+export type Invite = Schemas["Invite"];
+/** API activity — a scheduled work item assigned to a team. */
+export type Activity = Schemas["Activity"];
+export type AuthResponse = Schemas["AuthResponse"];
+export type RefreshResponse = Schemas["RefreshResponse"];
+export type ApiError = Schemas["ApiError"];
+````
+
 ## File: packages/web/CLAUDE.md
 ````markdown
 # packages/web
@@ -10302,6 +10349,38 @@ See `skills/ts-comments.md` for comment conventions (file-level headers, TSDoc o
     "lib": "@/lib",
     "hooks": "@/hooks"
   }
+}
+````
+
+## File: packages/web/tsconfig.app.json
+````json
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "paths": {
+      "@draba/shared": ["../shared/src/index.ts"],
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
 }
 ````
 
@@ -10517,27 +10596,6 @@ Grep("MemberDetail", "docs/ai-context/repomap.md", output_mode="content")
 - [docs/design/UX_PATTERNS.md](docs/design/UX_PATTERNS.md) — Interaction patterns
 - [skills/go-comments.md](skills/go-comments.md) — Go comment conventions (package headers, exported doc comments, inline why-comments)
 - [skills/ts-comments.md](skills/ts-comments.md) — TypeScript/React comment conventions (file headers, TSDoc on exports, inline why-comments)
-````
-
-## File: package.json
-````json
-{
-  "name": "draba",
-  "private": true,
-  "packageManager": "pnpm@10.33.2",
-  "scripts": {
-    "generate": "pnpm --filter shared generate",
-    "build": "pnpm -r run build",
-    "lint": "pnpm -r run lint",
-    "test": "pnpm -r run test"
-  },
-  "engines": {
-    "node": ">=22"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
-  }
-}
 ````
 
 ## File: README.md
@@ -13864,32 +13922,6 @@ export default function RegisterPage() {
 }
 ````
 
-## File: packages/web/src/types/api.ts
-````typescript
-/**
- * Named re-exports of API wire-format types generated from packages/shared/openapi.yaml.
- *
- * Import these in components and hooks instead of reaching into the raw
- * generated file — this layer insulates callers from openapi-typescript's
- * internal schema path syntax.
- */
-import type { components } from "@draba/shared";
-
-type Schemas = components["schemas"];
-
-export type User = Schemas["User"];
-export type Team = Schemas["Team"];
-export type TeamMember = Schemas["TeamMember"];
-/** Team member extended with user display fields (email, displayName, avatarUrl). */
-export type TeamMemberWithUser = Schemas["TeamMemberWithUser"];
-export type Invite = Schemas["Invite"];
-/** API activity — a scheduled work item assigned to a team. */
-export type Activity = Schemas["Activity"];
-export type AuthResponse = Schemas["AuthResponse"];
-export type RefreshResponse = Schemas["RefreshResponse"];
-export type ApiError = Schemas["ApiError"];
-````
-
 ## File: packages/web/src/index.css
 ````css
 @import "tailwindcss";
@@ -14164,35 +14196,50 @@ code, pre {
 }
 ````
 
-## File: packages/web/tsconfig.app.json
+## File: packages/web/package.json
 ````json
 {
-  "compilerOptions": {
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
-    "target": "ES2020",
-    "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "skipLibCheck": true,
-
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "noEmit": true,
-    "jsx": "react-jsx",
-
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true,
-    "paths": {
-      "@draba/shared": ["../shared/src/index.ts"],
-      "@/*": ["./src/*"]
-    }
+  "name": "@draba/web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "tsc --noEmit",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
-  "include": ["src"]
+  "dependencies": {
+    "@draba/shared": "workspace:*",
+    "@radix-ui/react-label": "^2.1.8",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@tanstack/react-query": "^5.100.10",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.500.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.15.1",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^25.8.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.5.0",
+    "@vitest/ui": "^4.1.7",
+    "jsdom": "^29.1.1",
+    "tailwindcss": "^4.1.0",
+    "typescript": "~5.8.0",
+    "vite": "^6.3.0",
+    "vitest": "^4.1.7"
+  }
 }
 ````
 
@@ -16129,53 +16176,6 @@ describe('matchActivities', () => {
 })
 ````
 
-## File: packages/web/package.json
-````json
-{
-  "name": "@draba/web",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "tsc --noEmit",
-    "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest"
-  },
-  "dependencies": {
-    "@draba/shared": "workspace:*",
-    "@radix-ui/react-label": "^2.1.8",
-    "@radix-ui/react-slot": "^1.2.4",
-    "@tanstack/react-query": "^5.100.10",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "lucide-react": "^0.500.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "react-router-dom": "^7.15.1",
-    "tailwind-merge": "^3.6.0"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.1.0",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^25.8.0",
-    "@types/react": "^19.1.0",
-    "@types/react-dom": "^19.1.0",
-    "@vitejs/plugin-react": "^4.5.0",
-    "@vitest/ui": "^4.1.7",
-    "jsdom": "^29.1.1",
-    "tailwindcss": "^4.1.0",
-    "typescript": "~5.8.0",
-    "vite": "^6.3.0",
-    "vitest": "^4.1.7"
-  }
-}
-````
-
 ## File: .gitignore
 ````
 # Dependencies
@@ -17614,140 +17614,6 @@ export default function PreferencesPage() {
 }
 ````
 
-## File: packages/web/src/pages/LoginPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useLocation, Link } from 'react-router-dom'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-export default function LoginPage() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setError(null)
-    setLoading(true)
-    try {
-      await login(email, password)
-      navigate(from, { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--background)',
-      padding: '24px',
-    }}>
-      {/* Dark mode toggle — top-right */}
-      <div style={{ position: 'fixed', top: 16, right: 16 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Logo + wordmark */}
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, marginBottom: 32 }}>
-        <img src="/logo.svg" alt="draba" style={{ width: 144, height: 144 }} />
-        <span style={{ fontSize: 36, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.02em' }}>
-          draba
-        </span>
-      </div>
-
-      {/* Sign-in card */}
-      <div style={{
-        width: '100%',
-        maxWidth: 400,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--radius-lg)',
-        padding: '32px',
-        boxShadow: '0 4px 24px rgba(0,0,0,0.08)',
-      }}>
-        <h1 style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', margin: '0 0 4px' }}>
-          Sign in
-        </h1>
-        <p style={{ fontSize: 13, color: 'var(--muted-foreground)', margin: '0 0 24px' }}>
-          Enter your email and password to continue.
-        </p>
-
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="email">Email</Label>
-            <Input
-              id="email"
-              type="email"
-              autoComplete="email"
-              placeholder="you@example.com"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              required
-            />
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="password">Password</Label>
-            <Input
-              id="password"
-              type="password"
-              autoComplete="current-password"
-              placeholder="••••••••"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              required
-            />
-            <Link
-              to="/forgot-password"
-              style={{ fontSize: 12, color: 'var(--muted-foreground)', textDecoration: 'none', alignSelf: 'flex-start' }}
-            >
-              Forgot password?
-            </Link>
-          </div>
-
-          {error && (
-            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
-          )}
-
-          <Button type="submit" disabled={loading} style={{ width: '100%', marginTop: 4 }}>
-            {loading ? 'Signing in…' : 'Sign in'}
-          </Button>
-        </form>
-
-        <p style={{ marginTop: 20, fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
-          Have an invite?{' '}
-          <Link to="/register" style={{ color: 'var(--primary)', fontWeight: 600 }}>
-            Create an account
-          </Link>
-        </p>
-      </div>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/pages/SetupPage.tsx
 ````typescript
 /**
@@ -18525,6 +18391,376 @@ packages/api/
 ### CI/CD
 
 - [TBD — GitHub Actions; build + test on PR; publish Docker image on tag]
+````
+
+## File: packages/api/internal/api/auth_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+	"unicode"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleRegister handles POST /auth/register. The first user on a fresh
+// install registers without an invite (bootstrap); every subsequent user
+// must present a valid invite token. Tier user limits are enforced before
+// hashing the password to avoid wasted bcrypt work.
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var req RegisterJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+
+	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
+		return
+	}
+	if !isValidPassword(req.Password) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	// First user may register without an invite; all subsequent users require one.
+	count, err := s.users.Count()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	if err := s.tier.CheckUserLimit(count); err != nil {
+		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
+		return
+	}
+
+	var invite *models.Invite
+	var inviteLinkTeamID string // non-empty when a reusable invite link was used
+	if count > 0 {
+		if req.InviteToken == nil || *req.InviteToken == "" {
+			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
+			return
+		}
+		// Try as a one-time invite first.
+		inv, err := s.invites.GetValid(*req.InviteToken)
+		if err != nil {
+			// Not a valid one-time invite — check if it's a reusable invite link token.
+			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
+			if linkErr != nil {
+				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
+				return
+			}
+			inviteLinkTeamID = team.ID
+		} else {
+			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
+				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
+				return
+			}
+			invite = inv
+		}
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	now := time.Now()
+	user := &models.User{
+		ID:           newID(),
+		Email:        string(req.Email),
+		PasswordHash: hash,
+		DisplayName:  req.DisplayName,
+		IsSuperadmin: count == 0,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.users.Create(user); err != nil {
+		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
+		return
+	}
+
+	if invite != nil {
+		if err := s.invites.MarkAccepted(invite.ID); err != nil {
+			// User and tokens are still returned — email uniqueness prevents a
+			// second registration. Log so the open invite is visible in monitoring.
+			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
+		}
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   invite.TeamID,
+			UserID:   &userID,
+			Role:     invite.Role,
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
+		}
+	} else if inviteLinkTeamID != "" {
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   inviteLinkTeamID,
+			UserID:   &userID,
+			Role:     "member",
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
+		}
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleLogin handles POST /auth/login. Returns the same generic
+// INVALID_CREDENTIALS error for both unknown email and bad password so
+// the endpoint cannot be used as an account-existence oracle.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req LoginJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	if req.Email == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
+		return
+	}
+
+	user, err := s.users.GetByEmail(string(req.Email))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	if user.ArchivedAt != nil {
+		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
+		return
+	}
+
+	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
+// token for a new access token; the refresh token itself is not rotated.
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	var req RefreshTokenJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accessToken": access,
+	})
+}
+
+// handleMe handles GET /auth/me and returns the authenticated user's
+// profile. Must be mounted behind authMiddleware.
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
+// address, generates a 1-hour reset token, stores the hash, and sends a
+// reset link via SMTP. Always returns 200 to prevent email enumeration.
+// When SMTP is not configured the email is silently skipped.
+func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+	if body.Email == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
+		return
+	}
+
+	// Always return 200 regardless of whether the email exists.
+	w.Header().Set("Content-Type", "application/json")
+	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
+
+	user, err := s.users.GetByEmail(body.Email)
+	if err != nil {
+		// No user — return 200 without error (prevent enumeration).
+		return
+	}
+	if user.ArchivedAt != nil {
+		return
+	}
+
+	rawToken := newToken()
+	expiresAt := time.Now().Add(time.Hour)
+	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
+		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
+		return
+	}
+
+	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
+	// when not set so the email still contains useful info.
+	baseURL := strings.TrimRight(getBaseURL(), "/")
+	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
+
+	subject := "Reset your draba password"
+	body2 := "<html><body>" +
+		"<p>You requested a password reset for your draba account.</p>" +
+		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
+		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
+		"</body></html>"
+
+	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
+		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
+	}
+}
+
+// handleResetPassword handles POST /auth/reset-password. Accepts a token and
+// new password; validates the token, hashes the new password, and marks the
+// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
+// or already used.
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token       string `json:"token"`
+		NewPassword string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.Token == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	resetToken, err := s.passwordTokens.GetValid(body.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
+		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
+func getBaseURL() string {
+	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:8080"
+}
+
+// isValidPassword applies the minimum policy: at least 8 characters and
+// no whitespace. Strength rules beyond length are intentionally lenient —
+// length is what matters most against offline cracking.
+func isValidPassword(p string) bool {
+	if len(p) < 8 {
+		return false
+	}
+	for _, r := range p {
+		if unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
 ````
 
 ## File: packages/api/internal/api/timeline_handler.go
@@ -20461,6 +20697,422 @@ export default function ProfilePage() {
 }
 ````
 
+## File: packages/web/src/pages/LoginPage.tsx
+````typescript
+import { useState, useRef, useId } from 'react'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
+import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError } from '@/lib/api'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+// ── Floating-label input ─────────────────────────────────────────────────────
+
+interface FloatInputProps {
+  id: string
+  label: string
+  type: string
+  value: string
+  autoComplete: string
+  error?: string | null
+  onChange: (v: string) => void
+  onKeyDown?: (e: React.KeyboardEvent) => void
+  rightSlot?: React.ReactNode
+}
+
+function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
+  const [focused, setFocused] = useState(false)
+  const floated = focused || value.length > 0
+
+  const borderColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#288C9B'
+    : 'hsl(210 15% 24%)'
+
+  const boxShadow = error
+    ? '0 0 0 3px rgba(231,76,60,0.15)'
+    : focused
+    ? '0 0 0 3px rgba(40,140,155,0.18)'
+    : 'none'
+
+  const labelColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#5BC0DE'
+    : 'hsl(210 15% 65%)'
+
+  return (
+    <div>
+      <div style={{
+        position: 'relative',
+        borderRadius: 8,
+        border: `1px solid ${borderColor}`,
+        background: 'hsl(210 15% 17%)',
+        transition: 'border-color 180ms ease, box-shadow 180ms ease',
+        boxShadow,
+      }}>
+        {/* Floating label */}
+        <label
+          htmlFor={id}
+          style={{
+            position: 'absolute',
+            left: 14,
+            top: floated ? 8 : '50%',
+            transform: floated ? 'none' : 'translateY(-50%)',
+            fontSize: floated ? 11 : 14,
+            letterSpacing: floated ? '0.06em' : 0,
+            textTransform: floated ? 'uppercase' : 'none',
+            fontWeight: 600,
+            color: labelColor,
+            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          {label}
+        </label>
+
+        <input
+          id={id}
+          type={type}
+          autoComplete={autoComplete}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onKeyDown={onKeyDown}
+          style={{
+            width: '100%',
+            padding: '22px 42px 8px 14px',
+            background: 'transparent',
+            border: 'none',
+            outline: 'none',
+            fontSize: 15,
+            color: 'hsl(210 17% 93%)',
+            fontFamily: 'inherit',
+            lineHeight: 1.4,
+            boxSizing: 'border-box',
+          }}
+        />
+
+        {rightSlot && (
+          <div style={{
+            position: 'absolute',
+            right: 12,
+            top: '50%',
+            transform: 'translateY(-50%)',
+          }}>
+            {rightSlot}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
+      )}
+    </div>
+  )
+}
+
+// ── Spinner ──────────────────────────────────────────────────────────────────
+
+function Spinner() {
+  return (
+    <Loader2
+      size={16}
+      strokeWidth={2.5}
+      color="rgba(255,255,255,0.8)"
+      style={{ animation: 'spin 0.8s linear infinite' }}
+    />
+  )
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
+
+export default function LoginPage() {
+  const { login } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [success, setSuccess] = useState(false)
+
+  function validateAndSubmit() {
+    let valid = true
+    setServerError(null)
+
+    if (!email.trim()) {
+      setEmailError('Email is required')
+      valid = false
+    } else if (!/\S+@\S+\.\S+/.test(email)) {
+      setEmailError('Enter a valid email')
+      valid = false
+    } else {
+      setEmailError(null)
+    }
+
+    if (!password) {
+      setPasswordError('Password is required')
+      valid = false
+    } else if (password.length < 6) {
+      setPasswordError('Password must be at least 6 characters')
+      valid = false
+    } else {
+      setPasswordError(null)
+    }
+
+    if (!valid) return
+    doLogin()
+  }
+
+  async function doLogin() {
+    setLoading(true)
+    try {
+      await login(email, password)
+      setSuccess(true)
+      // Brief success flash then navigate
+      setTimeout(() => navigate(from, { replace: true }), 600)
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError(err.message)
+      } else {
+        setServerError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    validateAndSubmit()
+  }
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--background)',
+      padding: '24px',
+      position: 'relative',
+    }}>
+      {/* Teal radial glow behind card */}
+      <div style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
+        pointerEvents: 'none',
+      }} />
+
+      {/* Dark mode toggle */}
+      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Card */}
+      <div style={{
+        width: '100%',
+        maxWidth: 860,
+        minHeight: 520,
+        borderRadius: 16,
+        overflow: 'hidden',
+        display: 'flex',
+        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
+        position: 'relative',
+        zIndex: 1,
+      }}>
+
+        {/* ── Left panel — brand ─────────────────────────────────────── */}
+        <div style={{
+          width: '38%',
+          flexShrink: 0,
+          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 4,
+          padding: '48px 32px',
+          position: 'relative',
+          overflow: 'hidden',
+        }}>
+          {/* Decorative circles */}
+          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
+          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
+
+          {/* Logo — 2× the handoff's 88px */}
+          <img
+            src="/icon-color.svg"
+            alt="draba"
+            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginBottom: '-62px' }}
+          />
+
+          <div style={{ position: 'relative', textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+              draba
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
+              Team coordination,<br />simplified.
+            </div>
+          </div>
+        </div>
+
+        {/* ── Right panel — form ─────────────────────────────────────── */}
+        <div style={{
+          flex: 1,
+          background: 'var(--card)',
+          padding: '52px 48px',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+        }}>
+          {success ? (
+            /* Success state */
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: '50%',
+                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 20px',
+              }}>
+                <Check size={24} color="#288C9B" strokeWidth={2.5} />
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
+                You're signed in
+              </div>
+              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
+                Redirecting to your timeline…
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} noValidate>
+              {/* Heading */}
+              <div style={{ marginBottom: 28 }}>
+                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
+                  Sign in
+                </h1>
+                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
+                  Welcome back — sign in to your account.
+                </p>
+              </div>
+
+              {/* Fields */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
+                <FloatInput
+                  id="email"
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  error={emailError}
+                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
+                />
+
+                <FloatInput
+                  id="password"
+                  label="Password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  error={passwordError}
+                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
+                  rightSlot={
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(s => !s)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
+                    >
+                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
+                    </button>
+                  }
+                />
+              </div>
+
+              {/* Forgot password */}
+              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
+                <Link
+                  to="/forgot-password"
+                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Forgot password?
+                </Link>
+              </div>
+
+              {/* Server error */}
+              {serverError && (
+                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
+              )}
+
+              {/* Sign in button */}
+              <button
+                type="submit"
+                disabled={loading}
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  borderRadius: 8,
+                  border: 'none',
+                  background: loading
+                    ? 'hsl(188 40% 35%)'
+                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
+                  color: '#fff',
+                  fontSize: 15,
+                  fontWeight: 700,
+                  letterSpacing: '0.01em',
+                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  fontFamily: 'inherit',
+                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
+                }}
+                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
+                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
+                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
+              >
+                {loading && <Spinner />}
+                {loading ? 'Signing in…' : 'Sign in'}
+              </button>
+
+              {/* Register link */}
+              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
+                Have an invite?{' '}
+                <Link
+                  to="/register"
+                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Create an account
+                </Link>
+              </p>
+            </form>
+          )}
+        </div>
+      </div>
+
+      {/* Keyframe for spinner */}
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/pages/SettingsPage.tsx
 ````typescript
 /**
@@ -21348,376 +22000,6 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 
 // CreateTimelineJSONRequestBody defines body for CreateTimeline for application/json ContentType.
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
-````
-
-## File: packages/api/internal/api/auth_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"log/slog"
-	"net/http"
-	"net/url"
-	"os"
-	"strings"
-	"time"
-	"unicode"
-
-	openapi_types "github.com/oapi-codegen/runtime/types"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleRegister handles POST /auth/register. The first user on a fresh
-// install registers without an invite (bootstrap); every subsequent user
-// must present a valid invite token. Tier user limits are enforced before
-// hashing the password to avoid wasted bcrypt work.
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req RegisterJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	req.DisplayName = strings.TrimSpace(req.DisplayName)
-
-	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
-		return
-	}
-	if !isValidPassword(req.Password) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	// First user may register without an invite; all subsequent users require one.
-	count, err := s.users.Count()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	if err := s.tier.CheckUserLimit(count); err != nil {
-		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
-		return
-	}
-
-	var invite *models.Invite
-	var inviteLinkTeamID string // non-empty when a reusable invite link was used
-	if count > 0 {
-		if req.InviteToken == nil || *req.InviteToken == "" {
-			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
-			return
-		}
-		// Try as a one-time invite first.
-		inv, err := s.invites.GetValid(*req.InviteToken)
-		if err != nil {
-			// Not a valid one-time invite — check if it's a reusable invite link token.
-			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
-			if linkErr != nil {
-				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
-				return
-			}
-			inviteLinkTeamID = team.ID
-		} else {
-			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
-				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
-				return
-			}
-			invite = inv
-		}
-	}
-
-	hash, err := auth.HashPassword(req.Password)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	now := time.Now()
-	user := &models.User{
-		ID:           newID(),
-		Email:        string(req.Email),
-		PasswordHash: hash,
-		DisplayName:  req.DisplayName,
-		IsSuperadmin: count == 0,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.users.Create(user); err != nil {
-		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
-		return
-	}
-
-	if invite != nil {
-		if err := s.invites.MarkAccepted(invite.ID); err != nil {
-			// User and tokens are still returned — email uniqueness prevents a
-			// second registration. Log so the open invite is visible in monitoring.
-			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
-		}
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   invite.TeamID,
-			UserID:   &userID,
-			Role:     invite.Role,
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
-		}
-	} else if inviteLinkTeamID != "" {
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   inviteLinkTeamID,
-			UserID:   &userID,
-			Role:     "member",
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
-		}
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleLogin handles POST /auth/login. Returns the same generic
-// INVALID_CREDENTIALS error for both unknown email and bad password so
-// the endpoint cannot be used as an account-existence oracle.
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req LoginJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	if req.Email == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
-		return
-	}
-
-	user, err := s.users.GetByEmail(string(req.Email))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	if user.ArchivedAt != nil {
-		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
-		return
-	}
-
-	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
-// token for a new access token; the refresh token itself is not rotated.
-func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	var req RefreshTokenJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"accessToken": access,
-	})
-}
-
-// handleMe handles GET /auth/me and returns the authenticated user's
-// profile. Must be mounted behind authMiddleware.
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
-		return
-	}
-	writeJSON(w, http.StatusOK, user)
-}
-
-// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
-// address, generates a 1-hour reset token, stores the hash, and sends a
-// reset link via SMTP. Always returns 200 to prevent email enumeration.
-// When SMTP is not configured the email is silently skipped.
-func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Email string `json:"email"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
-	if body.Email == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
-		return
-	}
-
-	// Always return 200 regardless of whether the email exists.
-	w.Header().Set("Content-Type", "application/json")
-	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
-
-	user, err := s.users.GetByEmail(body.Email)
-	if err != nil {
-		// No user — return 200 without error (prevent enumeration).
-		return
-	}
-	if user.ArchivedAt != nil {
-		return
-	}
-
-	rawToken := newToken()
-	expiresAt := time.Now().Add(time.Hour)
-	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
-		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
-		return
-	}
-
-	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
-	// when not set so the email still contains useful info.
-	baseURL := strings.TrimRight(getBaseURL(), "/")
-	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
-
-	subject := "Reset your draba password"
-	body2 := "<html><body>" +
-		"<p>You requested a password reset for your draba account.</p>" +
-		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
-		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
-		"</body></html>"
-
-	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
-		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
-	}
-}
-
-// handleResetPassword handles POST /auth/reset-password. Accepts a token and
-// new password; validates the token, hashes the new password, and marks the
-// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
-// or already used.
-func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Token       string `json:"token"`
-		NewPassword string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if body.Token == "" || body.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
-		return
-	}
-	if !isValidPassword(body.NewPassword) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	resetToken, err := s.passwordTokens.GetValid(body.Token)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
-		return
-	}
-
-	hash, err := auth.HashPassword(body.NewPassword)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
-		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
-func getBaseURL() string {
-	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
-		return v
-	}
-	return "http://localhost:8080"
-}
-
-// isValidPassword applies the minimum policy: at least 8 characters and
-// no whitespace. Strength rules beyond length are intentionally lenient —
-// length is what matters most against offline cracking.
-func isValidPassword(p string) bool {
-	if len(p) < 8 {
-		return false
-	}
-	for _, r := range p {
-		if unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
-}
 ````
 
 ## File: packages/api/go.mod
@@ -32198,455 +32480,6 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
 }
 ````
 
-## File: packages/web/src/pages/DashboardPage.tsx
-````typescript
-/**
- * Main application shell: sidebar + top bar + content area.
- *
- * Fetches the authenticated user's first team and first timeline to seed the
- * initial view. Team-selection UI and full sidebar wiring come in a later phase.
- */
-
-import { useState, useRef, useEffect, useCallback } from 'react'
-import Sidebar from '@/components/layout/Sidebar'
-import TopBar, { type ViewMode } from '@/components/layout/TopBar'
-import RightSidebar from '@/components/layout/RightSidebar'
-import GanttView from '@/components/gantt/GanttView'
-import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
-import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
-import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
-import { FilterProvider } from '@/contexts/FilterContext'
-import { FindProvider, useFind } from '@/contexts/FindContext'
-import { useAuth } from '@/contexts/AuthContext'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamActivitySync, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities'
-import TeamModal from '@/components/TeamModal'
-import MemberModal from '@/components/MemberModal'
-import { useNavigate } from 'react-router-dom'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-type ApiTeam = components['schemas']['Team']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-const DROPDOWN_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  width: '100%',
-  padding: '10px 14px',
-  background: 'none',
-  border: 'none',
-  fontSize: 13,
-  color: 'var(--foreground)',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  textAlign: 'left',
-}
-
-function DashboardShell() {
-  const { logout, accessToken, user } = useAuth()
-  const navigate = useNavigate()
-  const { isDark, toggle: toggleDark, theme } = useDarkMode()
-  const { setFindBarOpen } = useFind()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('gantt')
-  const [profileOpen, setProfileOpen] = useState(false)
-  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
-  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
-  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
-  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
-  const [activeTimelineColor, setActiveTimelineColor] = useState('#1A97A2')
-  const [activeTimelineName, setActiveTimelineName] = useState('Q1 2027 Roadmap')
-  const [filterEditorOpen, setFilterEditorOpen] = useState(false)
-  // Gantt toolbar state
-  const [groupBy, setGroupBy] = useState<GroupBy>('none')
-  const [sortBy, setSortBy] = useState<SortBy>('startDate')
-  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
-  const [colorBy, setColorBy] = useState<ColorBy>('activity')
-  const profileRef = useRef<HTMLDivElement>(null)
-  // Preference persistence
-  const upsert = useUpsertPreference()
-  // Track whether we've applied server prefs for the active timeline so we
-  // don't immediately write defaults back before the server data arrives.
-  const prefsAppliedForTimeline = useRef<string | null>(null)
-  // One-shot guard: init activeTimelineId from global prefs only on first load.
-  const timelineIdInitialized = useRef(false)
-
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
-        setProfileOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault()
-        setFindBarOpen(true)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [setFindBarOpen])
-
-  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
-  const email = (user as { email?: string } | null)?.email ?? ''
-  const userIdentity: Identity = {
-    color: (user as { color?: string } | null)?.color ?? '#288C9B',
-    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
-  }
-
-  // Global preferences — restored on login to seed team/timeline selection.
-  const { isSuccess: globalPrefsSettled } = usePreferences()
-  const globalPrefMap = usePreferenceMap()
-
-  // Team modal state
-  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
-  const unarchiveTeam = useUnarchiveTeam()
-
-  // Member modal state
-  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
-
-  // Fetch all teams including archived for the sidebar's archived section.
-  const { data: allTeams = [] } = useMyTeams(true)
-  const activeTeams = allTeams.filter(t => !t.archivedAt)
-  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
-
-  // Explicit team selection state — initialized from global prefs or first active team.
-  const [activeTeamId, setActiveTeamId] = useState<string>('')
-  const teamIdInitialized = useRef(false)
-  useEffect(() => {
-    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
-    teamIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
-    const exists = saved && activeTeams.some(t => t.id === saved)
-    setActiveTeamId(exists ? saved : activeTeams[0].id)
-  }, [activeTeams, globalPrefsSettled, globalPrefMap])
-
-  const activeTeam = activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0]
-  const teamId = activeTeam?.id ?? ''
-
-  // Check whether the current user is an admin of the active team.
-  const { data: teamMembers = [] } = useTeamMembers(teamId)
-  const userId = (user as { id?: string } | null)?.id ?? ''
-  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
-  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
-
-  const handleSelectTeam = useCallback((id: string) => {
-    setActiveTeamId(id)
-  }, [])
-
-  const { data: timelines = [] } = useTeamTimelines(teamId)
-  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
-  // Initialize activeTimelineId from the saved global pref (selected_timeline),
-  // falling back to timelines[0] when no pref is stored or the saved timeline
-  // is no longer in the list. Waits for global prefs to settle so we don't
-  // immediately overwrite a restored value with the fallback.
-  useEffect(() => {
-    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
-    timelineIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
-    const exists = saved && timelines.some(t => t.id === saved)
-    setActiveTimelineId(exists ? saved : timelines[0].id)
-  }, [timelines, globalPrefsSettled, globalPrefMap])
-  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
-
-  const handleTimelineChange = useCallback((id: string) => {
-    prefsAppliedForTimeline.current = null
-    setActiveTimelineId(id)
-  }, [])
-
-  useTeamActivitySync(teamId, accessToken)
-
-  // Per-timeline preferences: restore toolbar state when the active timeline changes.
-  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
-  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
-  const timelinePrefs = usePreferenceMap(activeTimelineId)
-  useEffect(() => {
-    if (!activeTimelineId || !prefsSettled) return
-    if (prefsAppliedForTimeline.current === activeTimelineId) return
-    prefsAppliedForTimeline.current = activeTimelineId
-
-    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
-    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
-    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
-    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
-  }, [activeTimelineId, prefsSettled, timelinePrefs])
-
-  // Save toolbar state changes to per-timeline prefs.
-  const saveTimelinePref = useCallback((key: string, value: string) => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
-  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('group_by', groupBy)
-  }, [groupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('sort_by', sortBy)
-  }, [sortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('zoom_granularity', granularity)
-  }, [granularity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('color_by', colorBy)
-  }, [colorBy, saveTimelinePref])
-
-  // Global preferences: persist dark mode, active team, and active timeline.
-  useEffect(() => {
-    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
-  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!teamId) return
-    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
-  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
-  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
-      <Sidebar
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(c => !c)}
-        onActiveColorChange={setActiveTimelineColor}
-        onActiveNameChange={setActiveTimelineName}
-        apiTimelines={timelines}
-        activeTimelineId={activeTimelineId}
-        onActiveTimelineChange={handleTimelineChange}
-        onNewActivity={() => {
-          const today = new Date().toISOString().slice(0, 10)
-          setSelectedActivityId(null)
-          setSelectedApiActivity(null)
-          setFilterEditorOpen(false)
-          setCreateDefaults({ start: today, end: today, memberId: null })
-        }}
-        activeTeam={activeTeam}
-        activeTeams={activeTeams}
-        archivedTeams={archivedTeams}
-        canEditTeam={canEditTeam}
-        onSelectTeam={handleSelectTeam}
-        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
-        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
-        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
-        members={teamMembers.length > 0 ? teamMembers : undefined}
-        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
-      />
-
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
-        <TopBar
-          view={view}
-          teamId={teamId}
-          timelineName={activeTimelineName}
-          onViewChange={setView}
-          onOpenFilterEditor={() => setFilterEditorOpen(true)}
-          rightSlot={
-            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
-              <button
-                onClick={() => setProfileOpen(o => !o)}
-                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
-                title={displayName}
-              >
-                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
-              </button>
-
-              {profileOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 'calc(100% + 8px)',
-                    right: 0,
-                    width: 220,
-                    background: 'var(--card)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-                    zIndex: 100,
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
-                  </div>
-                  <button
-                    onClick={toggleDark}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
-                    {isDark ? 'Dark mode' : 'Light mode'}
-                  </button>
-                  <button
-                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Settings size={14} strokeWidth={1.8} />
-                    Settings
-                  </button>
-                  <button
-                    onClick={logout}
-                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <LogOut size={14} strokeWidth={1.8} />
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
-          }
-        />
-
-        {/* Active timeline color band */}
-        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
-
-        {/* Gantt sub-toolbar — only shown in Gantt view */}
-        {view === 'gantt' && (
-          <GanttToolbar
-            groupBy={groupBy}
-            onGroupByChange={setGroupBy}
-            sortBy={sortBy}
-            onSortByChange={setSortBy}
-            granularity={granularity}
-            onGranularityChange={setGranularity}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => {}}
-            onShare={() => {}}
-          />
-        )}
-
-        {/* Content area */}
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'gantt' && teamId ? (
-            <GanttView
-              teamId={teamId}
-              startDate={activeTimeline?.startDate}
-              endDate={activeTimeline?.endDate}
-              groupBy={groupBy}
-              sortBy={sortBy}
-              granularity={granularity}
-              colorBy={colorBy}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-                if (activity) setFilterEditorOpen(false)
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'gantt' && !teamId ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
-                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Activity detail panel — slides in from right when an activity is selected */}
-      <ActivityDetailPanel
-        open={Boolean(selectedApiActivity)}
-        event={selectedApiActivity}
-        members={ganttMembers}
-        teamId={teamId}
-        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null) }}
-      />
-
-      {/* Activity create panel — slides in from New Activity button or future drag */}
-      <ActivityCreatePanel
-        open={Boolean(createDefaults) && !selectedApiActivity}
-        teamId={teamId}
-        members={ganttMembers}
-        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
-        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
-        defaultMemberId={createDefaults?.memberId}
-        onClose={() => setCreateDefaults(null)}
-      />
-
-      <RightSidebar
-        open={filterEditorOpen}
-        title="Filter editor"
-        onClose={() => setFilterEditorOpen(false)}
-      >
-        <p style={{ color: 'var(--muted-foreground)', fontSize: 13, lineHeight: 1.5 }}>
-          Filter editor coming soon.
-        </p>
-      </RightSidebar>
-
-      {/* Team modal — create or edit */}
-      {teamModalMode && (
-        <TeamModal
-          mode={teamModalMode}
-          team={editingTeam ?? undefined}
-          isAdmin={canEditTeam}
-          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
-          onTeamCreated={created => setActiveTeamId(created.id)}
-        />
-      )}
-
-      {/* Member modal — edit a team member */}
-      {editingMember && (
-        <MemberModal
-          teamId={teamId}
-          memberId={editingMember.id}
-          isAdmin={canEditTeam}
-          isSuperadmin={isSuperadmin}
-          onClose={() => setEditingMember(null)}
-        />
-      )}
-    </div>
-  )
-}
-
-export default function DashboardPage() {
-  return (
-    <FindProvider>
-      <FilterProvider>
-        <DashboardShell />
-      </FilterProvider>
-    </FindProvider>
-  )
-}
-````
-
 ## File: docs/TASKS.md
 ````markdown
 # Tasks
@@ -33497,6 +33330,455 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - Notifications (email, push)
 - Recurring event UI (RRULE editing)
 - Kanban drag-to-change-status (v2; v1 Kanban is read-only)
+````
+
+## File: packages/web/src/pages/DashboardPage.tsx
+````typescript
+/**
+ * Main application shell: sidebar + top bar + content area.
+ *
+ * Fetches the authenticated user's first team and first timeline to seed the
+ * initial view. Team-selection UI and full sidebar wiring come in a later phase.
+ */
+
+import { useState, useRef, useEffect, useCallback } from 'react'
+import Sidebar from '@/components/layout/Sidebar'
+import TopBar, { type ViewMode } from '@/components/layout/TopBar'
+import RightSidebar from '@/components/layout/RightSidebar'
+import GanttView from '@/components/gantt/GanttView'
+import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
+import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
+import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
+import { FilterProvider } from '@/contexts/FilterContext'
+import { FindProvider, useFind } from '@/contexts/FindContext'
+import { useAuth } from '@/contexts/AuthContext'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Settings, Moon, Sun, LogOut } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useMyTeams, useTeamTimelines, useTeamActivitySync, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities'
+import TeamModal from '@/components/TeamModal'
+import MemberModal from '@/components/MemberModal'
+import { useNavigate } from 'react-router-dom'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type ApiTeam = components['schemas']['Team']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+const DROPDOWN_BTN: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  padding: '10px 14px',
+  background: 'none',
+  border: 'none',
+  fontSize: 13,
+  color: 'var(--foreground)',
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+  textAlign: 'left',
+}
+
+function DashboardShell() {
+  const { logout, accessToken, user } = useAuth()
+  const navigate = useNavigate()
+  const { isDark, toggle: toggleDark, theme } = useDarkMode()
+  const { setFindBarOpen } = useFind()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [view, setView] = useState<ViewMode>('gantt')
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
+  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
+  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
+  const [activeTimelineColor, setActiveTimelineColor] = useState('#1A97A2')
+  const [activeTimelineName, setActiveTimelineName] = useState('Q1 2027 Roadmap')
+  const [filterEditorOpen, setFilterEditorOpen] = useState(false)
+  // Gantt toolbar state
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
+  const [sortBy, setSortBy] = useState<SortBy>('startDate')
+  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
+  const [colorBy, setColorBy] = useState<ColorBy>('activity')
+  const profileRef = useRef<HTMLDivElement>(null)
+  // Preference persistence
+  const upsert = useUpsertPreference()
+  // Track whether we've applied server prefs for the active timeline so we
+  // don't immediately write defaults back before the server data arrives.
+  const prefsAppliedForTimeline = useRef<string | null>(null)
+  // One-shot guard: init activeTimelineId from global prefs only on first load.
+  const timelineIdInitialized = useRef(false)
+
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setFindBarOpen(true)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [setFindBarOpen])
+
+  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
+  const email = (user as { email?: string } | null)?.email ?? ''
+  const userIdentity: Identity = {
+    color: (user as { color?: string } | null)?.color ?? '#288C9B',
+    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+  }
+
+  // Global preferences — restored on login to seed team/timeline selection.
+  const { isSuccess: globalPrefsSettled } = usePreferences()
+  const globalPrefMap = usePreferenceMap()
+
+  // Team modal state
+  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
+  const unarchiveTeam = useUnarchiveTeam()
+
+  // Member modal state
+  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
+
+  // Fetch all teams including archived for the sidebar's archived section.
+  const { data: allTeams = [] } = useMyTeams(true)
+  const activeTeams = allTeams.filter(t => !t.archivedAt)
+  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
+
+  // Explicit team selection state — initialized from global prefs or first active team.
+  const [activeTeamId, setActiveTeamId] = useState<string>('')
+  const teamIdInitialized = useRef(false)
+  useEffect(() => {
+    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
+    teamIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
+    const exists = saved && activeTeams.some(t => t.id === saved)
+    setActiveTeamId(exists ? saved : activeTeams[0].id)
+  }, [activeTeams, globalPrefsSettled, globalPrefMap])
+
+  const activeTeam = activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0]
+  const teamId = activeTeam?.id ?? ''
+
+  // Check whether the current user is an admin of the active team.
+  const { data: teamMembers = [] } = useTeamMembers(teamId)
+  const userId = (user as { id?: string } | null)?.id ?? ''
+  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
+  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
+
+  const handleSelectTeam = useCallback((id: string) => {
+    setActiveTeamId(id)
+  }, [])
+
+  const { data: timelines = [] } = useTeamTimelines(teamId)
+  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
+  // Initialize activeTimelineId from the saved global pref (selected_timeline),
+  // falling back to timelines[0] when no pref is stored or the saved timeline
+  // is no longer in the list. Waits for global prefs to settle so we don't
+  // immediately overwrite a restored value with the fallback.
+  useEffect(() => {
+    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
+    timelineIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
+    const exists = saved && timelines.some(t => t.id === saved)
+    setActiveTimelineId(exists ? saved : timelines[0].id)
+  }, [timelines, globalPrefsSettled, globalPrefMap])
+  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
+
+  const handleTimelineChange = useCallback((id: string) => {
+    prefsAppliedForTimeline.current = null
+    setActiveTimelineId(id)
+  }, [])
+
+  useTeamActivitySync(teamId, accessToken)
+
+  // Per-timeline preferences: restore toolbar state when the active timeline changes.
+  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
+  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
+  const timelinePrefs = usePreferenceMap(activeTimelineId)
+  useEffect(() => {
+    if (!activeTimelineId || !prefsSettled) return
+    if (prefsAppliedForTimeline.current === activeTimelineId) return
+    prefsAppliedForTimeline.current = activeTimelineId
+
+    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
+    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
+    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
+    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
+  }, [activeTimelineId, prefsSettled, timelinePrefs])
+
+  // Save toolbar state changes to per-timeline prefs.
+  const saveTimelinePref = useCallback((key: string, value: string) => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
+  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('group_by', groupBy)
+  }, [groupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('sort_by', sortBy)
+  }, [sortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('zoom_granularity', granularity)
+  }, [granularity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('color_by', colorBy)
+  }, [colorBy, saveTimelinePref])
+
+  // Global preferences: persist dark mode, active team, and active timeline.
+  useEffect(() => {
+    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
+  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!teamId) return
+    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
+  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
+  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(c => !c)}
+        onActiveColorChange={setActiveTimelineColor}
+        onActiveNameChange={setActiveTimelineName}
+        apiTimelines={timelines}
+        activeTimelineId={activeTimelineId}
+        onActiveTimelineChange={handleTimelineChange}
+        onNewActivity={() => {
+          const today = new Date().toISOString().slice(0, 10)
+          setSelectedActivityId(null)
+          setSelectedApiActivity(null)
+          setFilterEditorOpen(false)
+          setCreateDefaults({ start: today, end: today, memberId: null })
+        }}
+        activeTeam={activeTeam}
+        activeTeams={activeTeams}
+        archivedTeams={archivedTeams}
+        canEditTeam={canEditTeam}
+        onSelectTeam={handleSelectTeam}
+        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
+        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
+        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
+        members={teamMembers.length > 0 ? teamMembers : undefined}
+        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
+      />
+
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <TopBar
+          view={view}
+          teamId={teamId}
+          timelineName={activeTimelineName}
+          onViewChange={setView}
+          onOpenFilterEditor={() => setFilterEditorOpen(true)}
+          rightSlot={
+            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
+              <button
+                onClick={() => setProfileOpen(o => !o)}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                title={displayName}
+              >
+                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
+              </button>
+
+              {profileOpen && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 8px)',
+                    right: 0,
+                    width: 220,
+                    background: 'var(--card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+                    zIndex: 100,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
+                  </div>
+                  <button
+                    onClick={toggleDark}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
+                    {isDark ? 'Dark mode' : 'Light mode'}
+                  </button>
+                  <button
+                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Settings size={14} strokeWidth={1.8} />
+                    Settings
+                  </button>
+                  <button
+                    onClick={logout}
+                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <LogOut size={14} strokeWidth={1.8} />
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
+          }
+        />
+
+        {/* Active timeline color band */}
+        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
+
+        {/* Gantt sub-toolbar — only shown in Gantt view */}
+        {view === 'gantt' && (
+          <GanttToolbar
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            granularity={granularity}
+            onGranularityChange={setGranularity}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => {}}
+            onShare={() => {}}
+          />
+        )}
+
+        {/* Content area */}
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {view === 'gantt' && teamId ? (
+            <GanttView
+              teamId={teamId}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              granularity={granularity}
+              colorBy={colorBy}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+                if (activity) setFilterEditorOpen(false)
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'gantt' && !teamId ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
+                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Activity detail panel — slides in from right when an activity is selected */}
+      <ActivityDetailPanel
+        open={Boolean(selectedApiActivity)}
+        event={selectedApiActivity}
+        members={ganttMembers}
+        teamId={teamId}
+        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null) }}
+      />
+
+      {/* Activity create panel — slides in from New Activity button or future drag */}
+      <ActivityCreatePanel
+        open={Boolean(createDefaults) && !selectedApiActivity}
+        teamId={teamId}
+        members={ganttMembers}
+        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
+        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
+        defaultMemberId={createDefaults?.memberId}
+        onClose={() => setCreateDefaults(null)}
+      />
+
+      <RightSidebar
+        open={filterEditorOpen}
+        title="Filter editor"
+        onClose={() => setFilterEditorOpen(false)}
+      >
+        <p style={{ color: 'var(--muted-foreground)', fontSize: 13, lineHeight: 1.5 }}>
+          Filter editor coming soon.
+        </p>
+      </RightSidebar>
+
+      {/* Team modal — create or edit */}
+      {teamModalMode && (
+        <TeamModal
+          mode={teamModalMode}
+          team={editingTeam ?? undefined}
+          isAdmin={canEditTeam}
+          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
+          onTeamCreated={created => setActiveTeamId(created.id)}
+        />
+      )}
+
+      {/* Member modal — edit a team member */}
+      {editingMember && (
+        <MemberModal
+          teamId={teamId}
+          memberId={editingMember.id}
+          isAdmin={canEditTeam}
+          isSuperadmin={isSuperadmin}
+          onClose={() => setEditingMember(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+export default function DashboardPage() {
+  return (
+    <FindProvider>
+      <FilterProvider>
+        <DashboardShell />
+      </FilterProvider>
+    </FindProvider>
+  )
+}
 ````
 
 ## File: docs/ROADMAP.md
