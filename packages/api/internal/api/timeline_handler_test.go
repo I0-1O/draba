@@ -283,7 +283,7 @@ func TestGetTimeline_MemberWithoutAccessForbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
 	bobToken, _ := seedUserWithInvite(t, srv, "bob@member.com", "password2", "Bob", inv["token"].(string))
 
-	// Bob is a team member but has no timeline_access entry â€” must be forbidden.
+	// Bob is a team member but has no timeline_access entry - must be forbidden.
 	w3 := httptest.NewRecorder()
 	srv.ServeHTTP(w3, authReq(http.MethodGet, fmt.Sprintf("/timelines/%s", timelineID), nil, bobToken))
 	assert.Equal(t, http.StatusForbidden, w3.Code)
@@ -404,7 +404,7 @@ func TestGetTimeline_PublicShareToken(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
 	shareToken := created["shareToken"].(string)
 
-	// Fetch via share token â€” no auth header.
+	// Fetch via share token - no auth header.
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/timelines/share/%s", shareToken), http.NoBody)
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, req)

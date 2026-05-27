@@ -183,7 +183,7 @@ func TestInviteFlow_FullCycle(t *testing.T) {
 	// Bob registers via the invite token.
 	bobToken, _ := seedUserWithInvite(t, srv, "bob@example.com", "password2", "Bob", inviteToken)
 
-	// Alice lists members â€” should see both Alice and Bob.
+	// Alice lists members - should see both Alice and Bob.
 	w3 := httptest.NewRecorder()
 	srv.ServeHTTP(w3, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, aliceToken))
 	require.Equal(t, http.StatusOK, w3.Code)
@@ -216,7 +216,7 @@ func TestCreateInvite_NonAdminForbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
 	bobToken, _ := seedUserWithInvite(t, srv, "bob@example.com", "password2", "Bob", inv["token"].(string))
 
-	// Bob (member) tries to send an invite â€” should be forbidden.
+	// Bob (member) tries to send an invite - should be forbidden.
 	w3 := httptest.NewRecorder()
 	srv.ServeHTTP(w3, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
 		map[string]string{"email": "carol@example.com"}, bobToken))
@@ -289,7 +289,7 @@ func TestCreateTeam_SameNameAllowed(t *testing.T) {
 	srv, _ := newTeamTestServer(t)
 	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
 
-	// Two teams with the same name are allowed â€” slugs include the team ID so
+	// Two teams with the same name are allowed - slugs include the team ID so
 	// they never collide even when the names are identical.
 	w1 := httptest.NewRecorder()
 	srv.ServeHTTP(w1, authReq(http.MethodPost, "/teams", map[string]string{"name": "Engineering"}, token))
@@ -588,7 +588,7 @@ func TestUpdateMember_RoleChange_AdminOnly(t *testing.T) {
 	}
 	require.NotEmpty(t, bobMemberID)
 
-	// Bob (member) tries to change his own role â€” forbidden.
+	// Bob (member) tries to change his own role - forbidden.
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, authReq(http.MethodPatch, fmt.Sprintf("/teams/%s/members/%s", teamID, bobMemberID),
 		map[string]string{"role": "admin"}, bobToken))
@@ -622,7 +622,7 @@ func TestDeleteMember_LastAdminBlocked(t *testing.T) {
 	}
 	require.NotEmpty(t, aliceMemberID)
 
-	// Alice is the sole admin â€” deleting her should return LAST_ADMIN.
+	// Alice is the sole admin - deleting her should return LAST_ADMIN.
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, authReq(http.MethodDelete, fmt.Sprintf("/teams/%s/members/%s", teamID, aliceMemberID),
 		nil, aliceToken))
@@ -808,7 +808,7 @@ func TestGetMemberStats_Success(t *testing.T) {
 func TestInviteLink_CreateGetReset(t *testing.T) {
 	srv, aliceToken, bobToken, teamID := memberTestSetup(t)
 
-	// No link yet â€” GET returns null token field.
+	// No link yet - GET returns null token field.
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/invite-link", teamID), nil, aliceToken))
 	assert.Equal(t, http.StatusOK, w.Code)

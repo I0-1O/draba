@@ -373,7 +373,7 @@ func TestActivityCRUD_NonMemberForbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
 	activityID := created["id"].(string)
 
-	// Register an outsider â€” not a member of the activities team.
+	// Register an outsider - not a member of the activities team.
 	outsiderToken := seedNonMember(t, srv, aliceToken, "outsider@activity.com", "Outsider")
 
 	// All activity operations should return 403 for the outsider.

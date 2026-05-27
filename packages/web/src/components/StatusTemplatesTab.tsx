@@ -95,7 +95,7 @@ function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
             onChange={e => setIsClosed(e.target.checked)}
             style={{ accentColor: '#3B82F6' }}
           />
-          Closed status (hides from active views when "Hide closed" filter is on)
+          Closed status (marks this status as completed/done)
         </label>
         {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{error}</div>}
       </div>
@@ -276,7 +276,7 @@ function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: Templ
                     onChange={e => setNewItemIsClosed(e.target.checked)}
                     style={{ accentColor: '#3B82F6' }}
                   />
-                  Closed status (hides from active views when "Hide closed" filter is on)
+                  Closed status (marks this status as completed/done)
                 </label>
                 {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 26 }}>{itemError}</div>}
               </div>

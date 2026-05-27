@@ -175,7 +175,7 @@ func TestUpdateSavedFilter_NonOwnerForbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&f))
 	filterID := f["id"].(string)
 
-	// Alice tries to update it â€” forbidden.
+	// Alice tries to update it - forbidden.
 	wUpd := httptest.NewRecorder()
 	srv.ServeHTTP(wUpd, authReq(http.MethodPatch, fmt.Sprintf("/saved_filters/%s", filterID),
 		map[string]any{"name": "hijacked"}, aliceToken))
