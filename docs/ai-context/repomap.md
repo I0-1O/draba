@@ -10363,318 +10363,6 @@ func (r *SavedFilterRepo) Delete(id string) error {
 }
 ````
 
-## File: packages/api/internal/db/status_repo.go
-````go
-// Package db — StatusRepo manages status templates, template items,
-// and live timeline statuses.
-package db
-
-import (
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// StatusRepo is the persistence layer for status templates and timeline statuses.
-type StatusRepo struct {
-	db *sqlx.DB
-}
-
-// NewStatusRepo returns a StatusRepo backed by db.
-func NewStatusRepo(db *sqlx.DB) *StatusRepo {
-	return &StatusRepo{db: db}
-}
-
-// ── Templates ─────────────────────────────────────────────────────────────────
-
-// ListTemplates returns all status templates for a team, ordered by position,
-// with their items populated.
-func (r *StatusRepo) ListTemplates(teamID string) ([]*models.StatusTemplate, error) {
-	var templates []*models.StatusTemplate
-	if err := r.db.Select(&templates, `
-		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at
-	`, teamID); err != nil {
-		return nil, fmt.Errorf("listing status templates: %w", err)
-	}
-
-	// Populate items for each template in one query.
-	if len(templates) == 0 {
-		return templates, nil
-	}
-	ids := make([]string, len(templates))
-	for i, t := range templates {
-		ids[i] = t.ID
-	}
-
-	query, args, err := sqlx.In(`
-		SELECT * FROM status_template_items WHERE template_id IN (?) ORDER BY position
-	`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("building status template items query: %w", err)
-	}
-	query = r.db.Rebind(query)
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, query, args...); err != nil {
-		return nil, fmt.Errorf("listing status template items: %w", err)
-	}
-
-	byTemplate := make(map[string][]models.StatusTemplateItem)
-	for _, item := range items {
-		byTemplate[item.TemplateID] = append(byTemplate[item.TemplateID], item)
-	}
-	for _, t := range templates {
-		t.Items = byTemplate[t.ID]
-		if t.Items == nil {
-			t.Items = []models.StatusTemplateItem{}
-		}
-	}
-	return templates, nil
-}
-
-// GetTemplate returns a single status template by ID.
-func (r *StatusRepo) GetTemplate(id string) (*models.StatusTemplate, error) {
-	var t models.StatusTemplate
-	if err := r.db.Get(&t, `SELECT * FROM status_templates WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status template: %w", err)
-	}
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, `
-		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
-	`, id); err != nil {
-		return nil, fmt.Errorf("getting status template items: %w", err)
-	}
-	t.Items = items
-	if t.Items == nil {
-		t.Items = []models.StatusTemplateItem{}
-	}
-	return &t, nil
-}
-
-// CreateTemplate inserts a new status template.
-func (r *StatusRepo) CreateTemplate(t *models.StatusTemplate) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
-		VALUES (:id, :team_id, :name, :description, :position, :created_by, :created_at, :updated_at)
-	`, t)
-	if err != nil {
-		return fmt.Errorf("creating status template: %w", err)
-	}
-	return nil
-}
-
-// UpdateTemplate writes mutable template fields (name, description, position).
-func (r *StatusRepo) UpdateTemplate(t *models.StatusTemplate) error {
-	_, err := r.db.NamedExec(`
-		UPDATE status_templates
-		SET name = :name, description = :description, position = :position, updated_at = :updated_at
-		WHERE id = :id
-	`, t)
-	if err != nil {
-		return fmt.Errorf("updating status template: %w", err)
-	}
-	return nil
-}
-
-// CountTemplates returns the number of status templates for a team.
-func (r *StatusRepo) CountTemplates(teamID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_templates WHERE team_id = ?`, teamID); err != nil {
-		return 0, fmt.Errorf("counting status templates: %w", err)
-	}
-	return n, nil
-}
-
-// DeleteTemplate deletes a status template by ID.
-func (r *StatusRepo) DeleteTemplate(id string) error {
-	_, err := r.db.Exec(`DELETE FROM status_templates WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting status template: %w", err)
-	}
-	return nil
-}
-
-// ── Template items ────────────────────────────────────────────────────────────
-
-// GetTemplateItem returns a single template item by ID.
-func (r *StatusRepo) GetTemplateItem(id string) (*models.StatusTemplateItem, error) {
-	var item models.StatusTemplateItem
-	if err := r.db.Get(&item, `SELECT * FROM status_template_items WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status template item: %w", err)
-	}
-	return &item, nil
-}
-
-// CreateTemplateItem inserts a new item into a template.
-func (r *StatusRepo) CreateTemplateItem(item *models.StatusTemplateItem) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO status_template_items (id, template_id, name, color, icon, is_closed, position)
-		VALUES (:id, :template_id, :name, :color, :icon, :is_closed, :position)
-	`, item)
-	if err != nil {
-		return fmt.Errorf("creating status template item: %w", err)
-	}
-	return nil
-}
-
-// UpdateTemplateItem writes mutable item fields (name, color, icon, is_closed, position).
-func (r *StatusRepo) UpdateTemplateItem(item *models.StatusTemplateItem) error {
-	_, err := r.db.NamedExec(`
-		UPDATE status_template_items
-		SET name = :name, color = :color, icon = :icon, is_closed = :is_closed, position = :position
-		WHERE id = :id
-	`, item)
-	if err != nil {
-		return fmt.Errorf("updating status template item: %w", err)
-	}
-	return nil
-}
-
-// CountTemplateItems returns the number of items in a template.
-func (r *StatusRepo) CountTemplateItems(templateID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_template_items WHERE template_id = ?`, templateID); err != nil {
-		return 0, fmt.Errorf("counting status template items: %w", err)
-	}
-	return n, nil
-}
-
-// DeleteTemplateItem deletes a single template item by ID.
-func (r *StatusRepo) DeleteTemplateItem(id string) error {
-	_, err := r.db.Exec(`DELETE FROM status_template_items WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting status template item: %w", err)
-	}
-	return nil
-}
-
-// ── Seeding ───────────────────────────────────────────────────────────────────
-
-// SeedDefaultTemplate creates the "Simple" template (Planned / In Progress / Done)
-// for a newly created team. Done is marked is_closed = true.
-func (r *StatusRepo) SeedDefaultTemplate(teamID, createdBy string) error {
-	now := time.Now()
-	templateID := newRepoID()
-	t := &models.StatusTemplate{
-		ID:        templateID,
-		TeamID:    teamID,
-		Name:      "Simple",
-		Position:  0,
-		CreatedBy: createdBy,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := r.CreateTemplate(t); err != nil {
-		return err
-	}
-
-	type seed struct {
-		name     string
-		color    string
-		isClosed bool
-	}
-	seeds := []seed{
-		{"Planned", "#3B82F6", false},
-		{"In Progress", "#F59E0B", false},
-		{"Done", "#22C55E", true},
-	}
-	for i, s := range seeds {
-		item := &models.StatusTemplateItem{
-			ID:         newRepoID(),
-			TemplateID: templateID,
-			Name:       s.name,
-			Color:      s.color,
-			IsClosed:   s.isClosed,
-			Position:   i,
-		}
-		if err := r.CreateTemplateItem(item); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ── Timeline statuses ─────────────────────────────────────────────────────────
-
-// ListStatuses returns all statuses for a timeline, ordered by position.
-func (r *StatusRepo) ListStatuses(timelineID string) ([]*models.Status, error) {
-	var statuses []*models.Status
-	if err := r.db.Select(&statuses, `
-		SELECT * FROM statuses WHERE timeline_id = ? ORDER BY position
-	`, timelineID); err != nil {
-		return nil, fmt.Errorf("listing statuses: %w", err)
-	}
-	if statuses == nil {
-		statuses = []*models.Status{}
-	}
-	return statuses, nil
-}
-
-// GetStatus returns a single status by ID.
-func (r *StatusRepo) GetStatus(id string) (*models.Status, error) {
-	var s models.Status
-	if err := r.db.Get(&s, `SELECT * FROM statuses WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status: %w", err)
-	}
-	return &s, nil
-}
-
-// CopyTemplateToTimeline copies a template's items into live statuses for a timeline.
-// If no template is found for the team it is a silent no-op.
-func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string) error {
-	// Use the team's first template (by position, then created_at).
-	var template models.StatusTemplate
-	err := r.db.Get(&template, `
-		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at LIMIT 1
-	`, teamID)
-	if err != nil {
-		// No template — not an error; leave the timeline with no statuses.
-		return nil
-	}
-
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, `
-		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
-	`, template.ID); err != nil {
-		return fmt.Errorf("loading template items for copy: %w", err)
-	}
-
-	now := time.Now()
-	for _, item := range items {
-		s := &models.Status{
-			ID:         newRepoID(),
-			TimelineID: timelineID,
-			Name:       item.Name,
-			Color:      item.Color,
-			Icon:       item.Icon,
-			IsClosed:   item.IsClosed,
-			Position:   item.Position,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		if _, err := r.db.NamedExec(`
-			INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
-			VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
-		`, s); err != nil {
-			return fmt.Errorf("copying status to timeline: %w", err)
-		}
-	}
-	return nil
-}
-
-// newRepoID generates a 32-character hex ID — same entropy as api.newID but
-// usable within the db package without importing the api package.
-func newRepoID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-````
-
 ## File: packages/api/internal/db/user_preference_repo.go
 ````go
 package db
@@ -11011,6 +10699,39 @@ import "embed"
 
 //go:embed all:static
 var FS embed.FS
+````
+
+## File: packages/api/go.mod
+````
+module github.com/I0-1O/draba/packages/api
+
+go 1.24.0
+
+require (
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/gorilla/websocket v1.5.3
+	github.com/jmoiron/sqlx v1.4.0
+	github.com/stretchr/testify v1.11.1
+	golang.org/x/crypto v0.46.0
+	modernc.org/sqlite v1.34.5
+)
+
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/oapi-codegen/runtime v1.4.0 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+	modernc.org/libc v1.61.6 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.8.0 // indirect
+)
 ````
 
 ## File: packages/shared/CLAUDE.md
@@ -13288,6 +13009,318 @@ ALTER TABLE activity_tags RENAME COLUMN event_id TO activity_id;
 ALTER TABLE activity_assignments RENAME COLUMN event_id TO activity_id;
 ````
 
+## File: packages/api/internal/db/status_repo.go
+````go
+// Package db — StatusRepo manages status templates, template items,
+// and live timeline statuses.
+package db
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// StatusRepo is the persistence layer for status templates and timeline statuses.
+type StatusRepo struct {
+	db *sqlx.DB
+}
+
+// NewStatusRepo returns a StatusRepo backed by db.
+func NewStatusRepo(db *sqlx.DB) *StatusRepo {
+	return &StatusRepo{db: db}
+}
+
+// ── Templates ─────────────────────────────────────────────────────────────────
+
+// ListTemplates returns all status templates for a team, ordered by position,
+// with their items populated.
+func (r *StatusRepo) ListTemplates(teamID string) ([]*models.StatusTemplate, error) {
+	var templates []*models.StatusTemplate
+	if err := r.db.Select(&templates, `
+		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at
+	`, teamID); err != nil {
+		return nil, fmt.Errorf("listing status templates: %w", err)
+	}
+
+	// Populate items for each template in one query.
+	if len(templates) == 0 {
+		return templates, nil
+	}
+	ids := make([]string, len(templates))
+	for i, t := range templates {
+		ids[i] = t.ID
+	}
+
+	query, args, err := sqlx.In(`
+		SELECT * FROM status_template_items WHERE template_id IN (?) ORDER BY position
+	`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("building status template items query: %w", err)
+	}
+	query = r.db.Rebind(query)
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, query, args...); err != nil {
+		return nil, fmt.Errorf("listing status template items: %w", err)
+	}
+
+	byTemplate := make(map[string][]models.StatusTemplateItem)
+	for _, item := range items {
+		byTemplate[item.TemplateID] = append(byTemplate[item.TemplateID], item)
+	}
+	for _, t := range templates {
+		t.Items = byTemplate[t.ID]
+		if t.Items == nil {
+			t.Items = []models.StatusTemplateItem{}
+		}
+	}
+	return templates, nil
+}
+
+// GetTemplate returns a single status template by ID.
+func (r *StatusRepo) GetTemplate(id string) (*models.StatusTemplate, error) {
+	var t models.StatusTemplate
+	if err := r.db.Get(&t, `SELECT * FROM status_templates WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status template: %w", err)
+	}
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, `
+		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
+	`, id); err != nil {
+		return nil, fmt.Errorf("getting status template items: %w", err)
+	}
+	t.Items = items
+	if t.Items == nil {
+		t.Items = []models.StatusTemplateItem{}
+	}
+	return &t, nil
+}
+
+// CreateTemplate inserts a new status template.
+func (r *StatusRepo) CreateTemplate(t *models.StatusTemplate) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
+		VALUES (:id, :team_id, :name, :description, :position, :created_by, :created_at, :updated_at)
+	`, t)
+	if err != nil {
+		return fmt.Errorf("creating status template: %w", err)
+	}
+	return nil
+}
+
+// UpdateTemplate writes mutable template fields (name, description, position).
+func (r *StatusRepo) UpdateTemplate(t *models.StatusTemplate) error {
+	_, err := r.db.NamedExec(`
+		UPDATE status_templates
+		SET name = :name, description = :description, position = :position, updated_at = :updated_at
+		WHERE id = :id
+	`, t)
+	if err != nil {
+		return fmt.Errorf("updating status template: %w", err)
+	}
+	return nil
+}
+
+// CountTemplates returns the number of status templates for a team.
+func (r *StatusRepo) CountTemplates(teamID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_templates WHERE team_id = ?`, teamID); err != nil {
+		return 0, fmt.Errorf("counting status templates: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteTemplate deletes a status template by ID.
+func (r *StatusRepo) DeleteTemplate(id string) error {
+	_, err := r.db.Exec(`DELETE FROM status_templates WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting status template: %w", err)
+	}
+	return nil
+}
+
+// ── Template items ────────────────────────────────────────────────────────────
+
+// GetTemplateItem returns a single template item by ID.
+func (r *StatusRepo) GetTemplateItem(id string) (*models.StatusTemplateItem, error) {
+	var item models.StatusTemplateItem
+	if err := r.db.Get(&item, `SELECT * FROM status_template_items WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status template item: %w", err)
+	}
+	return &item, nil
+}
+
+// CreateTemplateItem inserts a new item into a template.
+func (r *StatusRepo) CreateTemplateItem(item *models.StatusTemplateItem) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO status_template_items (id, template_id, name, color, icon, is_closed, position)
+		VALUES (:id, :template_id, :name, :color, :icon, :is_closed, :position)
+	`, item)
+	if err != nil {
+		return fmt.Errorf("creating status template item: %w", err)
+	}
+	return nil
+}
+
+// UpdateTemplateItem writes mutable item fields (name, color, icon, is_closed, position).
+func (r *StatusRepo) UpdateTemplateItem(item *models.StatusTemplateItem) error {
+	_, err := r.db.NamedExec(`
+		UPDATE status_template_items
+		SET name = :name, color = :color, icon = :icon, is_closed = :is_closed, position = :position
+		WHERE id = :id
+	`, item)
+	if err != nil {
+		return fmt.Errorf("updating status template item: %w", err)
+	}
+	return nil
+}
+
+// CountTemplateItems returns the number of items in a template.
+func (r *StatusRepo) CountTemplateItems(templateID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_template_items WHERE template_id = ?`, templateID); err != nil {
+		return 0, fmt.Errorf("counting status template items: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteTemplateItem deletes a single template item by ID.
+func (r *StatusRepo) DeleteTemplateItem(id string) error {
+	_, err := r.db.Exec(`DELETE FROM status_template_items WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting status template item: %w", err)
+	}
+	return nil
+}
+
+// ── Seeding ───────────────────────────────────────────────────────────────────
+
+// SeedDefaultTemplate creates the "Default" template (Planning / In Progress / Complete)
+// for a newly created team. Complete is marked is_closed = true.
+func (r *StatusRepo) SeedDefaultTemplate(teamID, createdBy string) error {
+	now := time.Now()
+	templateID := newRepoID()
+	t := &models.StatusTemplate{
+		ID:        templateID,
+		TeamID:    teamID,
+		Name:      "Default",
+		Position:  0,
+		CreatedBy: createdBy,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := r.CreateTemplate(t); err != nil {
+		return err
+	}
+
+	type seed struct {
+		name     string
+		color    string
+		isClosed bool
+	}
+	seeds := []seed{
+		{"Planning", "#3B82F6", false},
+		{"In Progress", "#F59E0B", false},
+		{"Complete", "#22C55E", true},
+	}
+	for i, s := range seeds {
+		item := &models.StatusTemplateItem{
+			ID:         newRepoID(),
+			TemplateID: templateID,
+			Name:       s.name,
+			Color:      s.color,
+			IsClosed:   s.isClosed,
+			Position:   i,
+		}
+		if err := r.CreateTemplateItem(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ── Timeline statuses ─────────────────────────────────────────────────────────
+
+// ListStatuses returns all statuses for a timeline, ordered by position.
+func (r *StatusRepo) ListStatuses(timelineID string) ([]*models.Status, error) {
+	var statuses []*models.Status
+	if err := r.db.Select(&statuses, `
+		SELECT * FROM statuses WHERE timeline_id = ? ORDER BY position
+	`, timelineID); err != nil {
+		return nil, fmt.Errorf("listing statuses: %w", err)
+	}
+	if statuses == nil {
+		statuses = []*models.Status{}
+	}
+	return statuses, nil
+}
+
+// GetStatus returns a single status by ID.
+func (r *StatusRepo) GetStatus(id string) (*models.Status, error) {
+	var s models.Status
+	if err := r.db.Get(&s, `SELECT * FROM statuses WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status: %w", err)
+	}
+	return &s, nil
+}
+
+// CopyTemplateToTimeline copies a template's items into live statuses for a timeline.
+// If no template is found for the team it is a silent no-op.
+func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string) error {
+	// Use the team's first template (by position, then created_at).
+	var template models.StatusTemplate
+	err := r.db.Get(&template, `
+		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at LIMIT 1
+	`, teamID)
+	if err != nil {
+		// No template — not an error; leave the timeline with no statuses.
+		return nil
+	}
+
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, `
+		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
+	`, template.ID); err != nil {
+		return fmt.Errorf("loading template items for copy: %w", err)
+	}
+
+	now := time.Now()
+	for _, item := range items {
+		s := &models.Status{
+			ID:         newRepoID(),
+			TimelineID: timelineID,
+			Name:       item.Name,
+			Color:      item.Color,
+			Icon:       item.Icon,
+			IsClosed:   item.IsClosed,
+			Position:   item.Position,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		if _, err := r.db.NamedExec(`
+			INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+			VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
+		`, s); err != nil {
+			return fmt.Errorf("copying status to timeline: %w", err)
+		}
+	}
+	return nil
+}
+
+// newRepoID generates a 32-character hex ID — same entropy as api.newID but
+// usable within the db package without importing the api package.
+func newRepoID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+````
+
 ## File: packages/api/internal/db/timeline_repo.go
 ````go
 package db
@@ -14688,401 +14721,6 @@ export default function ProtectedRoute() {
   }
 
   return <Outlet />
-}
-````
-
-## File: packages/web/src/components/StatusTemplatesTab.tsx
-````typescript
-/**
- * StatusTemplatesTab — Status Templates management inside the Team Modal.
- *
- * Shows a list of status templates for the team. Each template can be expanded
- * to reveal its items, which can be edited, reordered (positionally), added,
- * or removed. Admins can also create and delete templates, with the server
- * blocking deletion of the last template or last item.
- */
-
-import { useState } from 'react'
-import { Plus, Trash2, ChevronDown, ChevronRight, Check, X } from 'lucide-react'
-import {
-  useStatusTemplates,
-  useCreateStatusTemplate,
-  useDeleteStatusTemplate,
-  useCreateTemplateItem,
-  useUpdateTemplateItem,
-  useDeleteTemplateItem,
-} from '@/hooks/useStatusTemplates'
-import type { components } from '@draba/shared'
-
-type StatusTemplate = components['schemas']['StatusTemplate']
-type StatusTemplateItem = components['schemas']['StatusTemplateItem']
-
-interface Props {
-  teamId: string
-  isAdmin: boolean
-  teamColor: string
-}
-
-// ── Colour swatches shown in the item editor ────────────────────────────────
-
-const ITEM_COLORS = [
-  '#3B82F6', '#22C55E', '#F59E0B', '#EF4444', '#8B5CF6',
-  '#14B8A6', '#F97316', '#EC4899', '#6B7280', '#e6edf3',
-]
-
-// ── Item row ─────────────────────────────────────────────────────────────────
-
-interface ItemRowProps {
-  item: StatusTemplateItem
-  teamId: string
-  canDelete: boolean
-}
-
-function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
-  const [editing, setEditing] = useState(false)
-  const [name, setName] = useState(item.name)
-  const [color, setColor] = useState(item.color)
-  const [isClosed, setIsClosed] = useState(item.isClosed)
-  const updateItem = useUpdateTemplateItem(teamId)
-  const deleteItem = useDeleteTemplateItem(teamId)
-  const [error, setError] = useState('')
-
-  function handleSave() {
-    if (!name.trim()) { setError('Name is required'); return }
-    updateItem.mutate(
-      { id: item.id, name: name.trim(), color, isClosed },
-      {
-        onSuccess: () => setEditing(false),
-        onError: () => setError('Failed to save'),
-      }
-    )
-  }
-
-  function handleDelete() {
-    if (!canDelete) { setError('Cannot delete the last item'); return }
-    deleteItem.mutate(item.id, {
-      onError: (err: unknown) => {
-        const msg = err instanceof Error ? err.message : 'Failed to delete'
-        setError(msg.includes('LAST_ITEM') ? 'Cannot delete the last item' : msg)
-      },
-    })
-  }
-
-  if (editing) {
-    return (
-      <div style={{ background: '#2d333b', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ width: 16, height: 16, borderRadius: 4, background: color, flexShrink: 0 }} />
-          <input
-            autoFocus
-            value={name}
-            onChange={e => { setName(e.target.value); setError('') }}
-            onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') setEditing(false) }}
-            style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
-          />
-          <button onClick={handleSave} disabled={updateItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#3B82F6', display: 'flex', padding: 2 }}>
-            <Check size={15} />
-          </button>
-          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
-            <X size={15} />
-          </button>
-        </div>
-        {/* Colour swatches */}
-        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-          {ITEM_COLORS.map(c => (
-            <button
-              key={c}
-              onClick={() => setColor(c)}
-              style={{
-                width: 20, height: 20, borderRadius: 4, background: c, border: 'none', cursor: 'pointer',
-                outline: color === c ? `2px solid ${c}` : 'none', outlineOffset: 2,
-              }}
-            />
-          ))}
-        </div>
-        {/* is_closed toggle */}
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
-          <input
-            type="checkbox"
-            checked={isClosed}
-            onChange={e => setIsClosed(e.target.checked)}
-            style={{ accentColor: '#3B82F6' }}
-          />
-          Closed status (hides from active views when "Hide closed" filter is on)
-        </label>
-        {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{error}</div>}
-      </div>
-    )
-  }
-
-  return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 8, padding: '7px 4px',
-      borderRadius: 6,
-    }}>
-      <div style={{ width: 12, height: 12, borderRadius: 3, background: item.color, flexShrink: 0 }} />
-      <span
-        onClick={() => setEditing(true)}
-        style={{ flex: 1, fontSize: 13, color: '#e6edf3', cursor: 'pointer' }}
-        title="Click to edit"
-      >
-        {item.name}
-      </span>
-      {item.isClosed && (
-        <span style={{ fontSize: 10, color: '#484f58', background: '#161b22', borderRadius: 4, padding: '1px 5px', letterSpacing: '0.3px' }}>
-          closed
-        </span>
-      )}
-      <button
-        onClick={handleDelete}
-        disabled={!canDelete || deleteItem.isPending}
-        title={canDelete ? 'Remove item' : 'Cannot delete the last item'}
-        style={{
-          background: 'none', border: 'none', cursor: canDelete ? 'pointer' : 'not-allowed',
-          color: '#484f58', display: 'flex', padding: 2, opacity: canDelete ? 1 : 0.35,
-        }}
-      >
-        <Trash2 size={13} />
-      </button>
-    </div>
-  )
-}
-
-// ── Template card ─────────────────────────────────────────────────────────────
-
-interface TemplateCardProps {
-  template: StatusTemplate
-  teamId: string
-  isAdmin: boolean
-  teamColor: string
-  canDelete: boolean
-}
-
-function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: TemplateCardProps) {
-  const [expanded, setExpanded] = useState(true)
-  const [addingItem, setAddingItem] = useState(false)
-  const [newItemName, setNewItemName] = useState('')
-  const [newItemColor, setNewItemColor] = useState('#3B82F6')
-  const [itemError, setItemError] = useState('')
-  const [deleteError, setDeleteError] = useState('')
-
-  const createItem = useCreateTemplateItem(teamId)
-  const deleteTemplate = useDeleteStatusTemplate(teamId)
-
-  function handleAddItem() {
-    if (!newItemName.trim()) { setItemError('Name is required'); return }
-    createItem.mutate(
-      { templateId: template.id, name: newItemName.trim(), color: newItemColor },
-      {
-        onSuccess: () => { setNewItemName(''); setNewItemColor('#3B82F6'); setAddingItem(false) },
-        onError: () => setItemError('Failed to add item'),
-      }
-    )
-  }
-
-  function handleDeleteTemplate() {
-    if (!canDelete) { setDeleteError('Cannot delete the last template'); return }
-    deleteTemplate.mutate(template.id, {
-      onError: (err: unknown) => {
-        const msg = err instanceof Error ? err.message : 'Failed to delete'
-        setDeleteError(msg.includes('LAST_TEMPLATE') ? 'Cannot delete the last template' : msg)
-      },
-    })
-  }
-
-  return (
-    <div style={{ border: '1px solid #30363d', borderRadius: 10, overflow: 'hidden' }}>
-      {/* Template header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', background: '#2d333b' }}>
-        <button
-          onClick={() => setExpanded(x => !x)}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#8b949e', display: 'flex', padding: 0 }}
-        >
-          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </button>
-        <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>{template.name}</span>
-        <span style={{ fontSize: 11, color: '#484f58' }}>{template.items.length} item{template.items.length !== 1 ? 's' : ''}</span>
-        {isAdmin && canDelete && (
-          <button
-            onClick={handleDeleteTemplate}
-            disabled={deleteTemplate.isPending}
-            title="Delete template"
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}
-          >
-            <Trash2 size={14} />
-          </button>
-        )}
-      </div>
-
-      {deleteError && (
-        <div style={{ padding: '4px 14px', fontSize: 11, color: '#ef4444', background: '#2d333b' }}>
-          {deleteError}
-        </div>
-      )}
-
-      {/* Template items */}
-      {expanded && (
-        <div style={{ padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {template.items.map(item => (
-            <ItemRow
-              key={item.id}
-              item={item}
-              teamId={teamId}
-              canDelete={template.items.length > 1}
-            />
-          ))}
-
-          {/* Add item row */}
-          {isAdmin && (
-            addingItem ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div style={{ width: 12, height: 12, borderRadius: 3, background: newItemColor, flexShrink: 0 }} />
-                  <input
-                    autoFocus
-                    value={newItemName}
-                    onChange={e => { setNewItemName(e.target.value); setItemError('') }}
-                    onKeyDown={e => { if (e.key === 'Enter') handleAddItem(); if (e.key === 'Escape') setAddingItem(false) }}
-                    placeholder="Status name…"
-                    style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
-                  />
-                  <button onClick={handleAddItem} disabled={createItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: teamColor, display: 'flex', padding: 2 }}>
-                    <Check size={15} />
-                  </button>
-                  <button onClick={() => setAddingItem(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
-                    <X size={15} />
-                  </button>
-                </div>
-                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', paddingLeft: 20 }}>
-                  {ITEM_COLORS.map(c => (
-                    <button
-                      key={c}
-                      onClick={() => setNewItemColor(c)}
-                      style={{
-                        width: 18, height: 18, borderRadius: 3, background: c, border: 'none', cursor: 'pointer',
-                        outline: newItemColor === c ? `2px solid ${c}` : 'none', outlineOffset: 2,
-                      }}
-                    />
-                  ))}
-                </div>
-                {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 20 }}>{itemError}</div>}
-              </div>
-            ) : (
-              <button
-                onClick={() => setAddingItem(true)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6, marginTop: 4,
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: '#484f58', fontSize: 12, padding: '4px 2px', fontFamily: 'inherit',
-                }}
-              >
-                <Plus size={13} /> Add status
-              </button>
-            )
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Main tab ──────────────────────────────────────────────────────────────────
-
-export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props) {
-  const { data: templates = [], isLoading } = useStatusTemplates(teamId)
-  const createTemplate = useCreateStatusTemplate(teamId)
-  const [addingTemplate, setAddingTemplate] = useState(false)
-  const [newTemplateName, setNewTemplateName] = useState('')
-  const [createError, setCreateError] = useState('')
-
-  function handleCreateTemplate() {
-    if (!newTemplateName.trim()) { setCreateError('Name is required'); return }
-    createTemplate.mutate(
-      { name: newTemplateName.trim() },
-      {
-        onSuccess: () => { setNewTemplateName(''); setAddingTemplate(false) },
-        onError: () => setCreateError('Failed to create template'),
-      }
-    )
-  }
-
-  if (isLoading) {
-    return (
-      <div style={{ padding: 20, fontSize: 13, color: '#484f58' }}>Loading…</div>
-    )
-  }
-
-  return (
-    <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ fontSize: 12, color: '#8b949e', lineHeight: 1.6 }}>
-        Status templates are reusable presets. When a new timeline is created, its statuses are
-        copied from the first template. Changes here don't affect existing timelines.
-      </div>
-
-      {templates.map(template => (
-        <TemplateCard
-          key={template.id}
-          template={template}
-          teamId={teamId}
-          isAdmin={isAdmin}
-          teamColor={teamColor}
-          canDelete={templates.length > 1}
-        />
-      ))}
-
-      {/* Add template */}
-      {isAdmin && (
-        addingTemplate ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                autoFocus
-                value={newTemplateName}
-                onChange={e => { setNewTemplateName(e.target.value); setCreateError('') }}
-                onKeyDown={e => { if (e.key === 'Enter') handleCreateTemplate(); if (e.key === 'Escape') setAddingTemplate(false) }}
-                placeholder="Template name (e.g. Kanban, Sprint)…"
-                style={{
-                  flex: 1, background: '#2d333b', border: '1px solid #30363d',
-                  borderRadius: 7, padding: '8px 12px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit',
-                }}
-              />
-              <button
-                onClick={handleCreateTemplate}
-                disabled={createTemplate.isPending}
-                style={{
-                  background: teamColor, border: 'none', borderRadius: 7, color: '#fff',
-                  fontWeight: 600, fontSize: 13, padding: '8px 16px', cursor: 'pointer',
-                  opacity: createTemplate.isPending ? 0.6 : 1, fontFamily: 'inherit',
-                }}
-              >
-                {createTemplate.isPending ? 'Creating…' : 'Create'}
-              </button>
-              <button
-                onClick={() => setAddingTemplate(false)}
-                style={{ background: 'none', border: '1px solid #30363d', borderRadius: 7, color: '#8b949e', fontSize: 13, padding: '8px 12px', cursor: 'pointer' }}
-              >
-                Cancel
-              </button>
-            </div>
-            {createError && <div style={{ fontSize: 11, color: '#ef4444' }}>{createError}</div>}
-          </div>
-        ) : (
-          <button
-            onClick={() => setAddingTemplate(true)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center',
-              background: 'none', border: '1px dashed #30363d', borderRadius: 8,
-              color: '#484f58', fontSize: 13, padding: '10px 16px', cursor: 'pointer',
-              fontFamily: 'inherit', width: '100%',
-            }}
-          >
-            <Plus size={14} />
-            New template
-          </button>
-        )
-      )}
-    </div>
-  )
 }
 ````
 
@@ -16993,39 +16631,6 @@ func requestLogger(next http.Handler) http.Handler {
 }
 ````
 
-## File: packages/api/go.mod
-````
-module github.com/I0-1O/draba/packages/api
-
-go 1.24.0
-
-require (
-	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/gorilla/websocket v1.5.3
-	github.com/jmoiron/sqlx v1.4.0
-	github.com/stretchr/testify v1.11.1
-	golang.org/x/crypto v0.46.0
-	modernc.org/sqlite v1.34.5
-)
-
-require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/oapi-codegen/runtime v1.4.0 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
-	modernc.org/libc v1.61.6 // indirect
-	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.8.0 // indirect
-)
-````
-
 ## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
 ````typescript
 /**
@@ -18048,6 +17653,409 @@ export function autoFitGranularity(
   }
 
   return best;
+}
+````
+
+## File: packages/web/src/components/StatusTemplatesTab.tsx
+````typescript
+/**
+ * StatusTemplatesTab — Status Templates management inside the Team Modal.
+ *
+ * Shows a list of status templates for the team. Each template can be expanded
+ * to reveal its items, which can be edited, reordered (positionally), added,
+ * or removed. Admins can also create and delete templates, with the server
+ * blocking deletion of the last template or last item.
+ */
+
+import { useState } from 'react'
+import { Plus, Trash2, ChevronDown, ChevronRight, Check, X } from 'lucide-react'
+import {
+  useStatusTemplates,
+  useCreateStatusTemplate,
+  useDeleteStatusTemplate,
+  useCreateTemplateItem,
+  useUpdateTemplateItem,
+  useDeleteTemplateItem,
+} from '@/hooks/useStatusTemplates'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import type { components } from '@draba/shared'
+
+type StatusTemplate = components['schemas']['StatusTemplate']
+type StatusTemplateItem = components['schemas']['StatusTemplateItem']
+
+interface Props {
+  teamId: string
+  isAdmin: boolean
+  teamColor: string
+}
+
+// ── Item row ─────────────────────────────────────────────────────────────────
+
+interface ItemRowProps {
+  item: StatusTemplateItem
+  teamId: string
+  canDelete: boolean
+}
+
+function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(item.name)
+  const [identity, setIdentity] = useState<Identity>({ color: item.color, icon: item.icon ?? '' })
+  const [isClosed, setIsClosed] = useState(item.isClosed)
+  const updateItem = useUpdateTemplateItem(teamId)
+  const deleteItem = useDeleteTemplateItem(teamId)
+  const [error, setError] = useState('')
+
+  function handleSave() {
+    if (!name.trim()) { setError('Name is required'); return }
+    updateItem.mutate(
+      { id: item.id, name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
+      {
+        onSuccess: () => setEditing(false),
+        onError: () => setError('Failed to save'),
+      }
+    )
+  }
+
+  function handleDelete() {
+    if (!canDelete) { setError('Cannot delete the last item'); return }
+    deleteItem.mutate(item.id, {
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to delete'
+        setError(msg.includes('LAST_ITEM') ? 'Cannot delete the last item' : msg)
+      },
+    })
+  }
+
+  if (editing) {
+    return (
+      <div style={{ background: '#2d333b', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <IdentityWidget identity={identity} name={name || 'Status'} shape="square" onChange={setIdentity} />
+          <input
+            autoFocus
+            value={name}
+            onChange={e => { setName(e.target.value); setError('') }}
+            onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') setEditing(false) }}
+            style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
+          />
+          <button onClick={handleSave} disabled={updateItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#3B82F6', display: 'flex', padding: 2 }}>
+            <Check size={15} />
+          </button>
+          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
+            <X size={15} />
+          </button>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
+          <input
+            type="checkbox"
+            checked={isClosed}
+            onChange={e => setIsClosed(e.target.checked)}
+            style={{ accentColor: '#3B82F6' }}
+          />
+          Closed status (hides from active views when "Hide closed" filter is on)
+        </label>
+        {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{error}</div>}
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '7px 4px',
+      borderRadius: 6,
+    }}>
+      <Badge identity={{ color: item.color, icon: item.icon ?? '' }} name={item.name} size={16} />
+      <span
+        onClick={() => setEditing(true)}
+        style={{ flex: 1, fontSize: 13, color: '#e6edf3', cursor: 'pointer' }}
+        title="Click to edit"
+      >
+        {item.name}
+      </span>
+      {item.isClosed && (
+        <span style={{ fontSize: 10, color: '#484f58', background: '#161b22', borderRadius: 4, padding: '1px 5px', letterSpacing: '0.3px' }}>
+          closed
+        </span>
+      )}
+      <button
+        onClick={handleDelete}
+        disabled={!canDelete || deleteItem.isPending}
+        title={canDelete ? 'Remove item' : 'Cannot delete the last item'}
+        style={{
+          background: 'none', border: 'none', cursor: canDelete ? 'pointer' : 'not-allowed',
+          color: '#484f58', display: 'flex', padding: 2, opacity: canDelete ? 1 : 0.35,
+        }}
+      >
+        <Trash2 size={13} />
+      </button>
+    </div>
+  )
+}
+
+// ── Template card ─────────────────────────────────────────────────────────────
+
+interface TemplateCardProps {
+  template: StatusTemplate
+  teamId: string
+  isAdmin: boolean
+  teamColor: string
+  canDelete: boolean
+}
+
+function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: TemplateCardProps) {
+  const [expanded, setExpanded] = useState(true)
+  const [addingItem, setAddingItem] = useState(false)
+  const [newItemName, setNewItemName] = useState('')
+  const [newItemIdentity, setNewItemIdentity] = useState<Identity>({ color: '#3B82F6', icon: '' })
+  const [newItemIsClosed, setNewItemIsClosed] = useState(false)
+  const [itemError, setItemError] = useState('')
+  const [deleteError, setDeleteError] = useState('')
+
+  const createItem = useCreateTemplateItem(teamId)
+  const deleteTemplate = useDeleteStatusTemplate(teamId)
+
+  function handleAddItem() {
+    if (!newItemName.trim()) { setItemError('Name is required'); return }
+    createItem.mutate(
+      {
+        templateId: template.id,
+        name: newItemName.trim(),
+        color: newItemIdentity.color,
+        icon: newItemIdentity.icon || null,
+        isClosed: newItemIsClosed,
+      },
+      {
+        onSuccess: () => {
+          setNewItemName('')
+          setNewItemIdentity({ color: '#3B82F6', icon: '' })
+          setNewItemIsClosed(false)
+          setAddingItem(false)
+        },
+        onError: () => setItemError('Failed to add item'),
+      }
+    )
+  }
+
+  function handleCancelAddItem() {
+    setAddingItem(false)
+    setNewItemName('')
+    setNewItemIdentity({ color: '#3B82F6', icon: '' })
+    setNewItemIsClosed(false)
+    setItemError('')
+  }
+
+  function handleDeleteTemplate() {
+    if (!canDelete) { setDeleteError('Cannot delete the last template'); return }
+    deleteTemplate.mutate(template.id, {
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to delete'
+        setDeleteError(msg.includes('LAST_TEMPLATE') ? 'Cannot delete the last template' : msg)
+      },
+    })
+  }
+
+  return (
+    <div style={{ border: '1px solid #30363d', borderRadius: 10, overflow: 'hidden' }}>
+      {/* Template header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', background: '#2d333b' }}>
+        <button
+          onClick={() => setExpanded(x => !x)}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#8b949e', display: 'flex', padding: 0 }}
+        >
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+        <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>{template.name}</span>
+        <span style={{ fontSize: 11, color: '#484f58' }}>{template.items.length} item{template.items.length !== 1 ? 's' : ''}</span>
+        {isAdmin && (
+          <button
+            onClick={handleDeleteTemplate}
+            disabled={deleteTemplate.isPending || !canDelete}
+            title={canDelete ? 'Delete template' : 'Cannot delete the last template'}
+            style={{
+              background: 'none', border: 'none', padding: 2, display: 'flex',
+              cursor: canDelete ? 'pointer' : 'not-allowed',
+              color: '#484f58', opacity: canDelete ? 1 : 0.35,
+            }}
+          >
+            <Trash2 size={14} />
+          </button>
+        )}
+      </div>
+
+      {deleteError && (
+        <div style={{ padding: '4px 14px', fontSize: 11, color: '#ef4444', background: '#2d333b' }}>
+          {deleteError}
+        </div>
+      )}
+
+      {/* Template items */}
+      {expanded && (
+        <div style={{ padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {template.items.map(item => (
+            <ItemRow
+              key={item.id}
+              item={item}
+              teamId={teamId}
+              canDelete={template.items.length > 1}
+            />
+          ))}
+
+          {/* Add item row */}
+          {isAdmin && (
+            addingItem ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <IdentityWidget
+                    identity={newItemIdentity}
+                    name={newItemName || 'New status'}
+                    shape="square"
+                    onChange={setNewItemIdentity}
+                  />
+                  <input
+                    autoFocus
+                    value={newItemName}
+                    onChange={e => { setNewItemName(e.target.value); setItemError('') }}
+                    onKeyDown={e => { if (e.key === 'Enter') handleAddItem(); if (e.key === 'Escape') handleCancelAddItem() }}
+                    placeholder="Status name…"
+                    style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
+                  />
+                  <button onClick={handleAddItem} disabled={createItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: teamColor, display: 'flex', padding: 2 }}>
+                    <Check size={15} />
+                  </button>
+                  <button onClick={handleCancelAddItem} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
+                    <X size={15} />
+                  </button>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+                  <input
+                    type="checkbox"
+                    checked={newItemIsClosed}
+                    onChange={e => setNewItemIsClosed(e.target.checked)}
+                    style={{ accentColor: '#3B82F6' }}
+                  />
+                  Closed status (hides from active views when "Hide closed" filter is on)
+                </label>
+                {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 26 }}>{itemError}</div>}
+              </div>
+            ) : (
+              <button
+                onClick={() => setAddingItem(true)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, marginTop: 4,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: '#484f58', fontSize: 12, padding: '4px 2px', fontFamily: 'inherit',
+                }}
+              >
+                <Plus size={13} /> Add status
+              </button>
+            )
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Main tab ──────────────────────────────────────────────────────────────────
+
+export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props) {
+  const { data: templates = [], isLoading } = useStatusTemplates(teamId)
+  const createTemplate = useCreateStatusTemplate(teamId)
+  const [addingTemplate, setAddingTemplate] = useState(false)
+  const [newTemplateName, setNewTemplateName] = useState('')
+  const [createError, setCreateError] = useState('')
+
+  function handleCreateTemplate() {
+    if (!newTemplateName.trim()) { setCreateError('Name is required'); return }
+    createTemplate.mutate(
+      { name: newTemplateName.trim() },
+      {
+        onSuccess: () => { setNewTemplateName(''); setAddingTemplate(false) },
+        onError: () => setCreateError('Failed to create template'),
+      }
+    )
+  }
+
+  if (isLoading) {
+    return (
+      <div style={{ padding: 20, fontSize: 13, color: '#484f58' }}>Loading…</div>
+    )
+  }
+
+  return (
+    <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ fontSize: 12, color: '#8b949e', lineHeight: 1.6 }}>
+        Status templates are reusable presets. When a new timeline is created, its statuses are
+        copied from the first template. Changes here don't affect existing timelines.
+      </div>
+
+      {templates.map(template => (
+        <TemplateCard
+          key={template.id}
+          template={template}
+          teamId={teamId}
+          isAdmin={isAdmin}
+          teamColor={teamColor}
+          canDelete={templates.length > 1}
+        />
+      ))}
+
+      {/* Add template */}
+      {isAdmin && (
+        addingTemplate ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                autoFocus
+                value={newTemplateName}
+                onChange={e => { setNewTemplateName(e.target.value); setCreateError('') }}
+                onKeyDown={e => { if (e.key === 'Enter') handleCreateTemplate(); if (e.key === 'Escape') setAddingTemplate(false) }}
+                placeholder="Template name (e.g. Kanban, Sprint)…"
+                style={{
+                  flex: 1, background: '#2d333b', border: '1px solid #30363d',
+                  borderRadius: 7, padding: '8px 12px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit',
+                }}
+              />
+              <button
+                onClick={handleCreateTemplate}
+                disabled={createTemplate.isPending}
+                style={{
+                  background: teamColor, border: 'none', borderRadius: 7, color: '#fff',
+                  fontWeight: 600, fontSize: 13, padding: '8px 16px', cursor: 'pointer',
+                  opacity: createTemplate.isPending ? 0.6 : 1, fontFamily: 'inherit',
+                }}
+              >
+                {createTemplate.isPending ? 'Creating…' : 'Create'}
+              </button>
+              <button
+                onClick={() => setAddingTemplate(false)}
+                style={{ background: 'none', border: '1px solid #30363d', borderRadius: 7, color: '#8b949e', fontSize: 13, padding: '8px 12px', cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+            </div>
+            {createError && <div style={{ fontSize: 11, color: '#ef4444' }}>{createError}</div>}
+          </div>
+        ) : (
+          <button
+            onClick={() => setAddingTemplate(true)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center',
+              background: 'none', border: '1px dashed #30363d', borderRadius: 8,
+              color: '#484f58', fontSize: 13, padding: '10px 16px', cursor: 'pointer',
+              fontFamily: 'inherit', width: '100%',
+            }}
+          >
+            <Plus size={14} />
+            New template
+          </button>
+        )
+      )}
+    </div>
+  )
 }
 ````
 
@@ -24331,59 +24339,6 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
 }
 ````
 
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
-````
-
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
 ````typescript
 /**
@@ -26088,6 +26043,61 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
     document.body,
   );
 }
+````
+
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
 ````
 
 ## File: packages/api/cmd/draba/main.go
@@ -38766,6 +38776,13 @@ By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), an
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-05-27 — /test-phase 10.2
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 partial-skip (ws-smoke: heartbeat full 3-cycle skipped per time budget; unit tests cover at speed)
+- Smoke target: http://epcot.lan:8081
 
 ---
 
