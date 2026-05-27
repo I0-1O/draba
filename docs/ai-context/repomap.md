@@ -1140,6 +1140,231 @@ Used by `/review-phase` (and human reviewers) when evaluating the diff for a com
 `/review-phase` should report findings as a table grouped by severity: **blocker / suggestion / nit**. Each finding cites a `file:line` and a one-line rationale. Empty categories are omitted.
 ````
 
+## File: docs/TESTING.md
+````markdown
+# Testing & Review Procedures
+
+This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
+
+For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
+
+---
+
+## Test environment setup (manual, do once per host)
+
+These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
+
+### Step 1 — One-time host prep (manual)
+On the docker host, as the `draba-test` user (created in the SSH setup steps below):
+
+1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
+2. Create `~/.draba-test.env` (chmod 600) with:
+   ```
+   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
+   DRABA_TEST_ADMIN_EMAIL=test-admin@local
+   DRABA_TEST_INVITE_EMAIL=invitee@local
+   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
+   DRABA_CONTAINER=draba
+   ```
+   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
+   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
+
+### Step 2 — Per-run reset (manual or SSH-driven)
+Before each `/test-phase` run that needs a clean DB, run on the docker host:
+```bash
+./scripts/reset-test-env.sh
+```
+This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
+
+### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
+On the machine where you run Claude (this Windows box):
+- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
+- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
+- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
+
+### What's manual vs automated, at a glance
+
+| Step | Where it runs | Who does it |
+|---|---|---|
+| Host prep (Step 1) | Docker host | **You, once** |
+| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
+| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
+| API smoke against live container | Dev box → live container | Claude |
+| Logging the run to `docs/log.md` | Dev box | Claude |
+
+---
+
+## Global procedures
+
+These run regardless of phase.
+
+### Static checks
+- `cd packages/api && golangci-lint run`
+- `cd packages/api && go vet ./...`
+- `pnpm --filter web lint`
+- `pnpm --filter web build`
+
+### Unit & integration
+- `cd packages/api && go test -count=1 ./...`
+- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
+
+### Live smoke target
+Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
+1. `DRABA_TEST_URL` environment variable, if set.
+2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
+3. If neither is available, the subagent reports **skipped**, not failed.
+
+### Review checklist (always)
+- CONVENTIONS.md compliance
+- No scope creep beyond the phase's ROADMAP entry
+- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
+- No secrets, no `.env` files, no host-specific values committed
+- Migrations idempotent (re-run produces no diff)
+- `docs/log.md` updated with a dated entry
+
+---
+
+## Subagent map
+
+| Subagent | Scope | Active from |
+|---|---|---|
+| `static-check` | lint + vet + web typecheck/build | Phase 1 |
+| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
+| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
+| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
+| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
+| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
+| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
+| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
+
+---
+
+## Per-phase procedures
+
+### Phase 1 — Project Infrastructure
+
+**static-check**
+- `go build ./...` from `packages/api/` succeeds with no errors
+- `pnpm build` from `packages/web/` succeeds
+- `golangci-lint run` is clean
+- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
+
+### Phase 2 — API Foundation (DB & Auth)
+
+**unit-test**
+- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
+- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
+  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
+  - `Validate` rejects a token signed with a different secret (tampered signature)
+  - `Validate` rejects an expired token
+  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
+  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
+  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
+- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
+  - `GetValid` returns `sql.ErrNoRows` for an expired invite
+  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
+
+**schema-check**
+- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
+- Restart the container; assert migration runner produces no schema changes (idempotency)
+
+**api-smoke** (against `$DRABA_TEST_URL`)
+- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
+- `POST /auth/register` with an invalid/missing invite token → 4xx
+- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
+- `POST /auth/login` with the registered credentials → 200, returns JWT
+- `POST /auth/login` with a non-existent email → 401
+- `POST /auth/login` with bad credentials → 401
+- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
+- `POST /auth/refresh` with an access token (wrong type) → 401
+- `POST /auth/refresh` with a token signed by a different secret → 401
+- A subsequent authenticated request with the issued JWT → 200 (validates signing)
+
+**security-review**
+- No password fields stored in plaintext (grep migrations + handlers)
+- JWT secret loaded from env/config, not hardcoded
+- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
+- No SQL string concatenation in queries
+
+### Phase 3 — Core API (Events & Teams)
+
+**api-smoke**
+- `POST /teams` → returns team (201 Created)
+- `GET /teams/:id` with member token → 200 OK, returns team
+- `GET /teams/:id` with non-member token → 403 Forbidden
+- `POST /teams/:id/invites` → returns invite token (201 Created)
+- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
+- `POST /teams/:id/events`, then `GET /teams/:id/events?from=…&to=…` returns it (200 OK)
+- `PATCH /events/:id` updates fields (200 OK); `DELETE /events/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
+- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
+- Authz: a user not on the team cannot read or mutate that team's events (403 Forbidden)
+- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
+
+**security-review**
+- Every new route requires auth middleware
+- Team membership enforced on every team-scoped endpoint
+
+### Phase 4 — OpenAPI Spec & Type Generation
+
+**type-sync**
+- `pnpm generate` succeeds with no errors
+- `git diff` after generate is empty (committed types match spec)
+- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
+
+### Phase 5 — Real-Time (WebSocket)
+
+**unit-test**
+- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
+- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
+- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
+
+**ws-smoke**
+- Two clients on team A both receive a delta within 500ms of an event mutation
+- A client on team B does not receive team A's events
+- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
+  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
+
+### Phase 6 — Timelines
+
+**unit-test**
+- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
+  - Grant access then revoke; `HasAccess` returns false after revoke
+  - Revoking access that was never granted is a no-op (no error)
+- `timeline_repo.ListByTeam` — unit test needed:
+  - Returns all non-archived timelines for a team in descending creation order
+  - Returns empty slice (not error) when team has no timelines
+
+**api-smoke**
+- `POST /teams/:id/timelines` with JWT → 201 Created
+- `GET /timelines/:id` with JWT (user on access list) → 200 OK
+- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
+- `GET /timelines/share/:token` → 200 OK without requiring auth
+
+### Phase 7 — Web — Scaffold
+
+**web-e2e**
+- Navigating to protected routes unauthenticated redirects to `/login`
+- Successful login redirects to the main app view and stores the token
+- TanStack Query successfully fetches team/event data from the API
+- WebSocket client successfully connects and maintains a heartbeat
+
+**Known gap — frontend component unit tests**
+No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
+
+### Phase 8+ — Web
+
+*Stubs.* Detailed assertions added when each phase begins.
+
+---
+
+## Adding tests for a new phase
+
+1. Find the phase's section in this file (or add one if missing).
+2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
+3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
+4. That's it — `/test-phase` will pick it up on the next run.
+````
+
 ## File: packages/api/internal/auth/jwt.go
 ````go
 package auth
@@ -1667,6 +1892,270 @@ func (t Tier) String() string {
 		return "unlimited"
 	}
 	return string(t)
+}
+````
+
+## File: packages/api/internal/ws/hub.go
+````go
+// Package ws implements the WebSocket hub and per-client read/write pumps.
+// The hub maintains a team-scoped subscription map and fans out domain event
+// messages to all clients that have subscribed to a given team.
+package ws
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+)
+
+const (
+	// defaultHeartbeatInterval is the ping cadence in production.
+	defaultHeartbeatInterval = 30 * time.Second
+	// writeTimeout is the maximum time allowed to write a single message.
+	writeTimeout = 10 * time.Second
+	// defaultReadTimeout is the read deadline reset after every pong. It is
+	// long enough for a client to respond to at least two ping cycles.
+	defaultReadTimeout = 70 * time.Second
+	// maxMessageBytes caps inbound frame size; subscribe and pong messages are
+	// tiny JSON blobs so 512 bytes is generous.
+	maxMessageBytes = 512
+)
+
+// MemberChecker reports whether userID belongs to teamID.
+// A non-nil error (including sql.ErrNoRows) means the user is not a member.
+// It is satisfied in production by wrapping (*db.TeamRepo).GetMember.
+type MemberChecker func(teamID, userID string) error
+
+var upgrader = websocket.Upgrader{
+	// Origin check is intentionally permissive; auth is enforced via JWT.
+	CheckOrigin:     func(_ *http.Request) bool { return true },
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
+// inboundMsg is a client-to-server WebSocket message.
+type inboundMsg struct {
+	Type   string `json:"type"`
+	TeamID string `json:"teamId,omitempty"`
+}
+
+// OutboundMsg is a server-to-client WebSocket message. It is exported so
+// tests can assert on the wire shape without duplicating the type.
+type OutboundMsg struct {
+	Type    string `json:"type"`
+	Payload any    `json:"payload,omitempty"`
+}
+
+// client represents one active WebSocket connection.
+type client struct {
+	conn    *websocket.Conn
+	send    chan OutboundMsg
+	mu      sync.RWMutex
+	teamIDs map[string]struct{}
+	userID  string
+}
+
+// Hub manages all connected WebSocket clients and routes broadcast messages
+// to team-subscribed clients. Call Run in a goroutine before serving requests.
+type Hub struct {
+	tokens  *auth.TokenService
+	members MemberChecker
+	bus     *events.Bus
+
+	// heartbeatInterval controls how often writePump sends a ping frame.
+	// readTimeout is the read deadline extended after each pong. Both default
+	// to production values and are overridden in tests to keep them fast.
+	heartbeatInterval time.Duration
+	readTimeout       time.Duration
+
+	mu    sync.RWMutex
+	teams map[string]map[*client]struct{} // teamID → set of clients
+}
+
+// NewHub returns a Hub wired to the given event bus, auth token service, and
+// member checker. The checker gates subscribe messages: only users who are
+// members of a team may subscribe to its real-time feed.
+func NewHub(bus *events.Bus, tokens *auth.TokenService, members MemberChecker) *Hub {
+	return &Hub{
+		tokens:            tokens,
+		members:           members,
+		bus:               bus,
+		heartbeatInterval: defaultHeartbeatInterval,
+		readTimeout:       defaultReadTimeout,
+		teams:             make(map[string]map[*client]struct{}),
+	}
+}
+
+// Run subscribes to the event bus and broadcasts domain events to the
+// appropriate team subscribers. It blocks until the bus subscription channel
+// is closed; call it in its own goroutine.
+func (h *Hub) Run() {
+	ch := h.bus.Subscribe()
+	defer h.bus.Unsubscribe(ch)
+	for msg := range ch {
+		h.broadcast(msg.TeamID, OutboundMsg{Type: string(msg.Type), Payload: msg.Payload})
+	}
+}
+
+// ServeWS upgrades an HTTP request to a WebSocket connection, validates the
+// JWT from the ?token query parameter, and drives the client read/write pumps.
+func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
+	tokenStr := r.URL.Query().Get("token")
+	if tokenStr == "" {
+		http.Error(w, "missing token", http.StatusUnauthorized)
+		return
+	}
+	claims, err := h.tokens.Validate(tokenStr, "access")
+	if err != nil {
+		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		// Upgrade wrote the HTTP error; log and return.
+		slog.Error("ws: upgrade failed", "err", err)
+		return
+	}
+
+	c := &client{
+		conn:    conn,
+		send:    make(chan OutboundMsg, 64),
+		teamIDs: make(map[string]struct{}),
+		userID:  claims.UserID,
+	}
+	slog.Debug("ws: client connected", "userID", claims.UserID)
+
+	go c.writePump(h)
+	c.readPump(h)
+}
+
+// subscribe adds c to the subscription set for teamID.
+func (h *Hub) subscribe(c *client, teamID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.teams[teamID] == nil {
+		h.teams[teamID] = make(map[*client]struct{})
+	}
+	h.teams[teamID][c] = struct{}{}
+
+	c.mu.Lock()
+	c.teamIDs[teamID] = struct{}{}
+	c.mu.Unlock()
+}
+
+// unsubscribeAll removes c from every team subscription set it belongs to
+// and logs the disconnect.
+func (h *Hub) unsubscribeAll(c *client) {
+	slog.Debug("ws: client disconnected", "userID", c.userID)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for teamID := range c.teamIDs {
+		delete(h.teams[teamID], c)
+		if len(h.teams[teamID]) == 0 {
+			delete(h.teams, teamID)
+		}
+	}
+}
+
+// broadcast delivers msg to every client subscribed to teamID. Sends are
+// non-blocking; slow clients are skipped rather than stalling the broadcast.
+func (h *Hub) broadcast(teamID string, msg OutboundMsg) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.teams[teamID] {
+		select {
+		case c.send <- msg:
+		default:
+			// Slow client — drop rather than block.
+		}
+	}
+}
+
+// readPump reads inbound messages from the WebSocket connection and handles
+// the subscribe and pong message types. It returns when the connection closes,
+// triggering deferred cleanup.
+func (c *client) readPump(h *Hub) {
+	defer func() {
+		h.unsubscribeAll(c)
+		c.conn.Close()
+	}()
+
+	c.conn.SetReadLimit(maxMessageBytes)
+	_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
+
+	for {
+		_, raw, err := c.conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				slog.Warn("ws: unexpected close", "userID", c.userID, "err", err)
+			}
+			return
+		}
+
+		var msg inboundMsg
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			continue
+		}
+
+		switch msg.Type {
+		case "subscribe":
+			if msg.TeamID != "" {
+				if err := h.members(msg.TeamID, c.userID); err != nil {
+					slog.Debug("ws: subscribe denied", "userID", c.userID, "teamID", msg.TeamID)
+					select {
+					case c.send <- OutboundMsg{Type: "error", Payload: "not a member of team " + msg.TeamID}:
+					default:
+					}
+				} else {
+					slog.Debug("ws: subscribed", "userID", c.userID, "teamID", msg.TeamID)
+					h.subscribe(c, msg.TeamID)
+				}
+			}
+		case "pong":
+			// Extend the read deadline when the client acknowledges a ping.
+			_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
+		}
+	}
+}
+
+// writePump sends outgoing messages and heartbeat pings to the WebSocket
+// connection. It returns when the send channel is closed or a write fails,
+// triggering a connection close that causes readPump to return too.
+func (c *client) writePump(h *Hub) {
+	ticker := time.NewTicker(h.heartbeatInterval)
+	defer func() {
+		ticker.Stop()
+		c.conn.Close()
+	}()
+
+	for {
+		select {
+		case msg, ok := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if !ok {
+				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			if err := c.conn.WriteJSON(msg); err != nil {
+				return
+			}
+		case <-ticker.C:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := c.conn.WriteJSON(OutboundMsg{Type: "ping"}); err != nil {
+				return
+			}
+		}
+	}
 }
 ````
 
@@ -7729,231 +8218,6 @@ ALTER TABLE activity_assignments RENAME TO event_assignments;
 **Take a DB backup before applying migration 005.** This is the one irreversible step if you don't have a backup.
 ````
 
-## File: docs/TESTING.md
-````markdown
-# Testing & Review Procedures
-
-This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
-
-For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
-
----
-
-## Test environment setup (manual, do once per host)
-
-These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
-
-### Step 1 — One-time host prep (manual)
-On the docker host, as the `draba-test` user (created in the SSH setup steps below):
-
-1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
-2. Create `~/.draba-test.env` (chmod 600) with:
-   ```
-   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
-   DRABA_TEST_ADMIN_EMAIL=test-admin@local
-   DRABA_TEST_INVITE_EMAIL=invitee@local
-   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
-   DRABA_CONTAINER=draba
-   ```
-   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
-   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
-
-### Step 2 — Per-run reset (manual or SSH-driven)
-Before each `/test-phase` run that needs a clean DB, run on the docker host:
-```bash
-./scripts/reset-test-env.sh
-```
-This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
-
-### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
-On the machine where you run Claude (this Windows box):
-- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
-- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
-- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
-
-### What's manual vs automated, at a glance
-
-| Step | Where it runs | Who does it |
-|---|---|---|
-| Host prep (Step 1) | Docker host | **You, once** |
-| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
-| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
-| API smoke against live container | Dev box → live container | Claude |
-| Logging the run to `docs/log.md` | Dev box | Claude |
-
----
-
-## Global procedures
-
-These run regardless of phase.
-
-### Static checks
-- `cd packages/api && golangci-lint run`
-- `cd packages/api && go vet ./...`
-- `pnpm --filter web lint`
-- `pnpm --filter web build`
-
-### Unit & integration
-- `cd packages/api && go test -count=1 ./...`
-- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
-
-### Live smoke target
-Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
-1. `DRABA_TEST_URL` environment variable, if set.
-2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
-3. If neither is available, the subagent reports **skipped**, not failed.
-
-### Review checklist (always)
-- CONVENTIONS.md compliance
-- No scope creep beyond the phase's ROADMAP entry
-- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
-- No secrets, no `.env` files, no host-specific values committed
-- Migrations idempotent (re-run produces no diff)
-- `docs/log.md` updated with a dated entry
-
----
-
-## Subagent map
-
-| Subagent | Scope | Active from |
-|---|---|---|
-| `static-check` | lint + vet + web typecheck/build | Phase 1 |
-| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
-| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
-| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
-| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
-| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
-| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
-| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
-
----
-
-## Per-phase procedures
-
-### Phase 1 — Project Infrastructure
-
-**static-check**
-- `go build ./...` from `packages/api/` succeeds with no errors
-- `pnpm build` from `packages/web/` succeeds
-- `golangci-lint run` is clean
-- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
-
-### Phase 2 — API Foundation (DB & Auth)
-
-**unit-test**
-- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
-- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
-  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
-  - `Validate` rejects a token signed with a different secret (tampered signature)
-  - `Validate` rejects an expired token
-  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
-  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
-  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
-- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
-  - `GetValid` returns `sql.ErrNoRows` for an expired invite
-  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
-
-**schema-check**
-- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
-- Restart the container; assert migration runner produces no schema changes (idempotency)
-
-**api-smoke** (against `$DRABA_TEST_URL`)
-- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
-- `POST /auth/register` with an invalid/missing invite token → 4xx
-- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
-- `POST /auth/login` with the registered credentials → 200, returns JWT
-- `POST /auth/login` with a non-existent email → 401
-- `POST /auth/login` with bad credentials → 401
-- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
-- `POST /auth/refresh` with an access token (wrong type) → 401
-- `POST /auth/refresh` with a token signed by a different secret → 401
-- A subsequent authenticated request with the issued JWT → 200 (validates signing)
-
-**security-review**
-- No password fields stored in plaintext (grep migrations + handlers)
-- JWT secret loaded from env/config, not hardcoded
-- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
-- No SQL string concatenation in queries
-
-### Phase 3 — Core API (Events & Teams)
-
-**api-smoke**
-- `POST /teams` → returns team (201 Created)
-- `GET /teams/:id` with member token → 200 OK, returns team
-- `GET /teams/:id` with non-member token → 403 Forbidden
-- `POST /teams/:id/invites` → returns invite token (201 Created)
-- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
-- `POST /teams/:id/events`, then `GET /teams/:id/events?from=…&to=…` returns it (200 OK)
-- `PATCH /events/:id` updates fields (200 OK); `DELETE /events/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
-- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
-- Authz: a user not on the team cannot read or mutate that team's events (403 Forbidden)
-- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
-
-**security-review**
-- Every new route requires auth middleware
-- Team membership enforced on every team-scoped endpoint
-
-### Phase 4 — OpenAPI Spec & Type Generation
-
-**type-sync**
-- `pnpm generate` succeeds with no errors
-- `git diff` after generate is empty (committed types match spec)
-- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
-
-### Phase 5 — Real-Time (WebSocket)
-
-**unit-test**
-- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
-- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
-- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
-
-**ws-smoke**
-- Two clients on team A both receive a delta within 500ms of an event mutation
-- A client on team B does not receive team A's events
-- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
-  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
-
-### Phase 6 — Timelines
-
-**unit-test**
-- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
-  - Grant access then revoke; `HasAccess` returns false after revoke
-  - Revoking access that was never granted is a no-op (no error)
-- `timeline_repo.ListByTeam` — unit test needed:
-  - Returns all non-archived timelines for a team in descending creation order
-  - Returns empty slice (not error) when team has no timelines
-
-**api-smoke**
-- `POST /teams/:id/timelines` with JWT → 201 Created
-- `GET /timelines/:id` with JWT (user on access list) → 200 OK
-- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
-- `GET /timelines/share/:token` → 200 OK without requiring auth
-
-### Phase 7 — Web — Scaffold
-
-**web-e2e**
-- Navigating to protected routes unauthenticated redirects to `/login`
-- Successful login redirects to the main app view and stores the token
-- TanStack Query successfully fetches team/event data from the API
-- WebSocket client successfully connects and maintains a heartbeat
-
-**Known gap — frontend component unit tests**
-No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
-
-### Phase 8+ — Web
-
-*Stubs.* Detailed assertions added when each phase begins.
-
----
-
-## Adding tests for a new phase
-
-1. Find the phase's section in this file (or add one if missing).
-2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
-3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
-4. That's it — `/test-phase` will pick it up on the next run.
-````
-
 ## File: packages/api/internal/api/activity_handler.go
 ````go
 package api
@@ -10415,270 +10679,6 @@ func (r *UserPreferenceRepo) Upsert(p *models.UserPreference) error {
 		return fmt.Errorf("upserting user preference: %w", err)
 	}
 	return nil
-}
-````
-
-## File: packages/api/internal/ws/hub.go
-````go
-// Package ws implements the WebSocket hub and per-client read/write pumps.
-// The hub maintains a team-scoped subscription map and fans out domain event
-// messages to all clients that have subscribed to a given team.
-package ws
-
-import (
-	"encoding/json"
-	"log/slog"
-	"net/http"
-	"sync"
-	"time"
-
-	"github.com/gorilla/websocket"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-)
-
-const (
-	// defaultHeartbeatInterval is the ping cadence in production.
-	defaultHeartbeatInterval = 30 * time.Second
-	// writeTimeout is the maximum time allowed to write a single message.
-	writeTimeout = 10 * time.Second
-	// defaultReadTimeout is the read deadline reset after every pong. It is
-	// long enough for a client to respond to at least two ping cycles.
-	defaultReadTimeout = 70 * time.Second
-	// maxMessageBytes caps inbound frame size; subscribe and pong messages are
-	// tiny JSON blobs so 512 bytes is generous.
-	maxMessageBytes = 512
-)
-
-// MemberChecker reports whether userID belongs to teamID.
-// A non-nil error (including sql.ErrNoRows) means the user is not a member.
-// It is satisfied in production by wrapping (*db.TeamRepo).GetMember.
-type MemberChecker func(teamID, userID string) error
-
-var upgrader = websocket.Upgrader{
-	// Origin check is intentionally permissive; auth is enforced via JWT.
-	CheckOrigin:     func(_ *http.Request) bool { return true },
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
-
-// inboundMsg is a client-to-server WebSocket message.
-type inboundMsg struct {
-	Type   string `json:"type"`
-	TeamID string `json:"teamId,omitempty"`
-}
-
-// OutboundMsg is a server-to-client WebSocket message. It is exported so
-// tests can assert on the wire shape without duplicating the type.
-type OutboundMsg struct {
-	Type    string `json:"type"`
-	Payload any    `json:"payload,omitempty"`
-}
-
-// client represents one active WebSocket connection.
-type client struct {
-	conn    *websocket.Conn
-	send    chan OutboundMsg
-	mu      sync.RWMutex
-	teamIDs map[string]struct{}
-	userID  string
-}
-
-// Hub manages all connected WebSocket clients and routes broadcast messages
-// to team-subscribed clients. Call Run in a goroutine before serving requests.
-type Hub struct {
-	tokens  *auth.TokenService
-	members MemberChecker
-	bus     *events.Bus
-
-	// heartbeatInterval controls how often writePump sends a ping frame.
-	// readTimeout is the read deadline extended after each pong. Both default
-	// to production values and are overridden in tests to keep them fast.
-	heartbeatInterval time.Duration
-	readTimeout       time.Duration
-
-	mu    sync.RWMutex
-	teams map[string]map[*client]struct{} // teamID → set of clients
-}
-
-// NewHub returns a Hub wired to the given event bus, auth token service, and
-// member checker. The checker gates subscribe messages: only users who are
-// members of a team may subscribe to its real-time feed.
-func NewHub(bus *events.Bus, tokens *auth.TokenService, members MemberChecker) *Hub {
-	return &Hub{
-		tokens:            tokens,
-		members:           members,
-		bus:               bus,
-		heartbeatInterval: defaultHeartbeatInterval,
-		readTimeout:       defaultReadTimeout,
-		teams:             make(map[string]map[*client]struct{}),
-	}
-}
-
-// Run subscribes to the event bus and broadcasts domain events to the
-// appropriate team subscribers. It blocks until the bus subscription channel
-// is closed; call it in its own goroutine.
-func (h *Hub) Run() {
-	ch := h.bus.Subscribe()
-	defer h.bus.Unsubscribe(ch)
-	for msg := range ch {
-		h.broadcast(msg.TeamID, OutboundMsg{Type: string(msg.Type), Payload: msg.Payload})
-	}
-}
-
-// ServeWS upgrades an HTTP request to a WebSocket connection, validates the
-// JWT from the ?token query parameter, and drives the client read/write pumps.
-func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
-	tokenStr := r.URL.Query().Get("token")
-	if tokenStr == "" {
-		http.Error(w, "missing token", http.StatusUnauthorized)
-		return
-	}
-	claims, err := h.tokens.Validate(tokenStr, "access")
-	if err != nil {
-		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
-		return
-	}
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		// Upgrade wrote the HTTP error; log and return.
-		slog.Error("ws: upgrade failed", "err", err)
-		return
-	}
-
-	c := &client{
-		conn:    conn,
-		send:    make(chan OutboundMsg, 64),
-		teamIDs: make(map[string]struct{}),
-		userID:  claims.UserID,
-	}
-	slog.Debug("ws: client connected", "userID", claims.UserID)
-
-	go c.writePump(h)
-	c.readPump(h)
-}
-
-// subscribe adds c to the subscription set for teamID.
-func (h *Hub) subscribe(c *client, teamID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.teams[teamID] == nil {
-		h.teams[teamID] = make(map[*client]struct{})
-	}
-	h.teams[teamID][c] = struct{}{}
-
-	c.mu.Lock()
-	c.teamIDs[teamID] = struct{}{}
-	c.mu.Unlock()
-}
-
-// unsubscribeAll removes c from every team subscription set it belongs to
-// and logs the disconnect.
-func (h *Hub) unsubscribeAll(c *client) {
-	slog.Debug("ws: client disconnected", "userID", c.userID)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for teamID := range c.teamIDs {
-		delete(h.teams[teamID], c)
-		if len(h.teams[teamID]) == 0 {
-			delete(h.teams, teamID)
-		}
-	}
-}
-
-// broadcast delivers msg to every client subscribed to teamID. Sends are
-// non-blocking; slow clients are skipped rather than stalling the broadcast.
-func (h *Hub) broadcast(teamID string, msg OutboundMsg) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for c := range h.teams[teamID] {
-		select {
-		case c.send <- msg:
-		default:
-			// Slow client — drop rather than block.
-		}
-	}
-}
-
-// readPump reads inbound messages from the WebSocket connection and handles
-// the subscribe and pong message types. It returns when the connection closes,
-// triggering deferred cleanup.
-func (c *client) readPump(h *Hub) {
-	defer func() {
-		h.unsubscribeAll(c)
-		c.conn.Close()
-	}()
-
-	c.conn.SetReadLimit(maxMessageBytes)
-	_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
-
-	for {
-		_, raw, err := c.conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				slog.Warn("ws: unexpected close", "userID", c.userID, "err", err)
-			}
-			return
-		}
-
-		var msg inboundMsg
-		if err := json.Unmarshal(raw, &msg); err != nil {
-			continue
-		}
-
-		switch msg.Type {
-		case "subscribe":
-			if msg.TeamID != "" {
-				if err := h.members(msg.TeamID, c.userID); err != nil {
-					slog.Debug("ws: subscribe denied", "userID", c.userID, "teamID", msg.TeamID)
-					select {
-					case c.send <- OutboundMsg{Type: "error", Payload: "not a member of team " + msg.TeamID}:
-					default:
-					}
-				} else {
-					slog.Debug("ws: subscribed", "userID", c.userID, "teamID", msg.TeamID)
-					h.subscribe(c, msg.TeamID)
-				}
-			}
-		case "pong":
-			// Extend the read deadline when the client acknowledges a ping.
-			_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
-		}
-	}
-}
-
-// writePump sends outgoing messages and heartbeat pings to the WebSocket
-// connection. It returns when the send channel is closed or a write fails,
-// triggering a connection close that causes readPump to return too.
-func (c *client) writePump(h *Hub) {
-	ticker := time.NewTicker(h.heartbeatInterval)
-	defer func() {
-		ticker.Stop()
-		c.conn.Close()
-	}()
-
-	for {
-		select {
-		case msg, ok := <-c.send:
-			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if !ok {
-				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-			if err := c.conn.WriteJSON(msg); err != nil {
-				return
-			}
-		case <-ticker.C:
-			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if err := c.conn.WriteJSON(OutboundMsg{Type: "ping"}); err != nil {
-				return
-			}
-		}
-	}
 }
 ````
 
@@ -17656,409 +17656,6 @@ export function autoFitGranularity(
 }
 ````
 
-## File: packages/web/src/components/StatusTemplatesTab.tsx
-````typescript
-/**
- * StatusTemplatesTab — Status Templates management inside the Team Modal.
- *
- * Shows a list of status templates for the team. Each template can be expanded
- * to reveal its items, which can be edited, reordered (positionally), added,
- * or removed. Admins can also create and delete templates, with the server
- * blocking deletion of the last template or last item.
- */
-
-import { useState } from 'react'
-import { Plus, Trash2, ChevronDown, ChevronRight, Check, X } from 'lucide-react'
-import {
-  useStatusTemplates,
-  useCreateStatusTemplate,
-  useDeleteStatusTemplate,
-  useCreateTemplateItem,
-  useUpdateTemplateItem,
-  useDeleteTemplateItem,
-} from '@/hooks/useStatusTemplates'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import type { components } from '@draba/shared'
-
-type StatusTemplate = components['schemas']['StatusTemplate']
-type StatusTemplateItem = components['schemas']['StatusTemplateItem']
-
-interface Props {
-  teamId: string
-  isAdmin: boolean
-  teamColor: string
-}
-
-// ── Item row ─────────────────────────────────────────────────────────────────
-
-interface ItemRowProps {
-  item: StatusTemplateItem
-  teamId: string
-  canDelete: boolean
-}
-
-function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
-  const [editing, setEditing] = useState(false)
-  const [name, setName] = useState(item.name)
-  const [identity, setIdentity] = useState<Identity>({ color: item.color, icon: item.icon ?? '' })
-  const [isClosed, setIsClosed] = useState(item.isClosed)
-  const updateItem = useUpdateTemplateItem(teamId)
-  const deleteItem = useDeleteTemplateItem(teamId)
-  const [error, setError] = useState('')
-
-  function handleSave() {
-    if (!name.trim()) { setError('Name is required'); return }
-    updateItem.mutate(
-      { id: item.id, name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
-      {
-        onSuccess: () => setEditing(false),
-        onError: () => setError('Failed to save'),
-      }
-    )
-  }
-
-  function handleDelete() {
-    if (!canDelete) { setError('Cannot delete the last item'); return }
-    deleteItem.mutate(item.id, {
-      onError: (err: unknown) => {
-        const msg = err instanceof Error ? err.message : 'Failed to delete'
-        setError(msg.includes('LAST_ITEM') ? 'Cannot delete the last item' : msg)
-      },
-    })
-  }
-
-  if (editing) {
-    return (
-      <div style={{ background: '#2d333b', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <IdentityWidget identity={identity} name={name || 'Status'} shape="square" onChange={setIdentity} />
-          <input
-            autoFocus
-            value={name}
-            onChange={e => { setName(e.target.value); setError('') }}
-            onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') setEditing(false) }}
-            style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
-          />
-          <button onClick={handleSave} disabled={updateItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#3B82F6', display: 'flex', padding: 2 }}>
-            <Check size={15} />
-          </button>
-          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
-            <X size={15} />
-          </button>
-        </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
-          <input
-            type="checkbox"
-            checked={isClosed}
-            onChange={e => setIsClosed(e.target.checked)}
-            style={{ accentColor: '#3B82F6' }}
-          />
-          Closed status (hides from active views when "Hide closed" filter is on)
-        </label>
-        {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{error}</div>}
-      </div>
-    )
-  }
-
-  return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 8, padding: '7px 4px',
-      borderRadius: 6,
-    }}>
-      <Badge identity={{ color: item.color, icon: item.icon ?? '' }} name={item.name} size={16} />
-      <span
-        onClick={() => setEditing(true)}
-        style={{ flex: 1, fontSize: 13, color: '#e6edf3', cursor: 'pointer' }}
-        title="Click to edit"
-      >
-        {item.name}
-      </span>
-      {item.isClosed && (
-        <span style={{ fontSize: 10, color: '#484f58', background: '#161b22', borderRadius: 4, padding: '1px 5px', letterSpacing: '0.3px' }}>
-          closed
-        </span>
-      )}
-      <button
-        onClick={handleDelete}
-        disabled={!canDelete || deleteItem.isPending}
-        title={canDelete ? 'Remove item' : 'Cannot delete the last item'}
-        style={{
-          background: 'none', border: 'none', cursor: canDelete ? 'pointer' : 'not-allowed',
-          color: '#484f58', display: 'flex', padding: 2, opacity: canDelete ? 1 : 0.35,
-        }}
-      >
-        <Trash2 size={13} />
-      </button>
-    </div>
-  )
-}
-
-// ── Template card ─────────────────────────────────────────────────────────────
-
-interface TemplateCardProps {
-  template: StatusTemplate
-  teamId: string
-  isAdmin: boolean
-  teamColor: string
-  canDelete: boolean
-}
-
-function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: TemplateCardProps) {
-  const [expanded, setExpanded] = useState(true)
-  const [addingItem, setAddingItem] = useState(false)
-  const [newItemName, setNewItemName] = useState('')
-  const [newItemIdentity, setNewItemIdentity] = useState<Identity>({ color: '#3B82F6', icon: '' })
-  const [newItemIsClosed, setNewItemIsClosed] = useState(false)
-  const [itemError, setItemError] = useState('')
-  const [deleteError, setDeleteError] = useState('')
-
-  const createItem = useCreateTemplateItem(teamId)
-  const deleteTemplate = useDeleteStatusTemplate(teamId)
-
-  function handleAddItem() {
-    if (!newItemName.trim()) { setItemError('Name is required'); return }
-    createItem.mutate(
-      {
-        templateId: template.id,
-        name: newItemName.trim(),
-        color: newItemIdentity.color,
-        icon: newItemIdentity.icon || null,
-        isClosed: newItemIsClosed,
-      },
-      {
-        onSuccess: () => {
-          setNewItemName('')
-          setNewItemIdentity({ color: '#3B82F6', icon: '' })
-          setNewItemIsClosed(false)
-          setAddingItem(false)
-        },
-        onError: () => setItemError('Failed to add item'),
-      }
-    )
-  }
-
-  function handleCancelAddItem() {
-    setAddingItem(false)
-    setNewItemName('')
-    setNewItemIdentity({ color: '#3B82F6', icon: '' })
-    setNewItemIsClosed(false)
-    setItemError('')
-  }
-
-  function handleDeleteTemplate() {
-    if (!canDelete) { setDeleteError('Cannot delete the last template'); return }
-    deleteTemplate.mutate(template.id, {
-      onError: (err: unknown) => {
-        const msg = err instanceof Error ? err.message : 'Failed to delete'
-        setDeleteError(msg.includes('LAST_TEMPLATE') ? 'Cannot delete the last template' : msg)
-      },
-    })
-  }
-
-  return (
-    <div style={{ border: '1px solid #30363d', borderRadius: 10, overflow: 'hidden' }}>
-      {/* Template header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', background: '#2d333b' }}>
-        <button
-          onClick={() => setExpanded(x => !x)}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#8b949e', display: 'flex', padding: 0 }}
-        >
-          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </button>
-        <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>{template.name}</span>
-        <span style={{ fontSize: 11, color: '#484f58' }}>{template.items.length} item{template.items.length !== 1 ? 's' : ''}</span>
-        {isAdmin && (
-          <button
-            onClick={handleDeleteTemplate}
-            disabled={deleteTemplate.isPending || !canDelete}
-            title={canDelete ? 'Delete template' : 'Cannot delete the last template'}
-            style={{
-              background: 'none', border: 'none', padding: 2, display: 'flex',
-              cursor: canDelete ? 'pointer' : 'not-allowed',
-              color: '#484f58', opacity: canDelete ? 1 : 0.35,
-            }}
-          >
-            <Trash2 size={14} />
-          </button>
-        )}
-      </div>
-
-      {deleteError && (
-        <div style={{ padding: '4px 14px', fontSize: 11, color: '#ef4444', background: '#2d333b' }}>
-          {deleteError}
-        </div>
-      )}
-
-      {/* Template items */}
-      {expanded && (
-        <div style={{ padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {template.items.map(item => (
-            <ItemRow
-              key={item.id}
-              item={item}
-              teamId={teamId}
-              canDelete={template.items.length > 1}
-            />
-          ))}
-
-          {/* Add item row */}
-          {isAdmin && (
-            addingItem ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <IdentityWidget
-                    identity={newItemIdentity}
-                    name={newItemName || 'New status'}
-                    shape="square"
-                    onChange={setNewItemIdentity}
-                  />
-                  <input
-                    autoFocus
-                    value={newItemName}
-                    onChange={e => { setNewItemName(e.target.value); setItemError('') }}
-                    onKeyDown={e => { if (e.key === 'Enter') handleAddItem(); if (e.key === 'Escape') handleCancelAddItem() }}
-                    placeholder="Status name…"
-                    style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
-                  />
-                  <button onClick={handleAddItem} disabled={createItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: teamColor, display: 'flex', padding: 2 }}>
-                    <Check size={15} />
-                  </button>
-                  <button onClick={handleCancelAddItem} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
-                    <X size={15} />
-                  </button>
-                </div>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
-                  <input
-                    type="checkbox"
-                    checked={newItemIsClosed}
-                    onChange={e => setNewItemIsClosed(e.target.checked)}
-                    style={{ accentColor: '#3B82F6' }}
-                  />
-                  Closed status (hides from active views when "Hide closed" filter is on)
-                </label>
-                {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 26 }}>{itemError}</div>}
-              </div>
-            ) : (
-              <button
-                onClick={() => setAddingItem(true)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6, marginTop: 4,
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: '#484f58', fontSize: 12, padding: '4px 2px', fontFamily: 'inherit',
-                }}
-              >
-                <Plus size={13} /> Add status
-              </button>
-            )
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Main tab ──────────────────────────────────────────────────────────────────
-
-export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props) {
-  const { data: templates = [], isLoading } = useStatusTemplates(teamId)
-  const createTemplate = useCreateStatusTemplate(teamId)
-  const [addingTemplate, setAddingTemplate] = useState(false)
-  const [newTemplateName, setNewTemplateName] = useState('')
-  const [createError, setCreateError] = useState('')
-
-  function handleCreateTemplate() {
-    if (!newTemplateName.trim()) { setCreateError('Name is required'); return }
-    createTemplate.mutate(
-      { name: newTemplateName.trim() },
-      {
-        onSuccess: () => { setNewTemplateName(''); setAddingTemplate(false) },
-        onError: () => setCreateError('Failed to create template'),
-      }
-    )
-  }
-
-  if (isLoading) {
-    return (
-      <div style={{ padding: 20, fontSize: 13, color: '#484f58' }}>Loading…</div>
-    )
-  }
-
-  return (
-    <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ fontSize: 12, color: '#8b949e', lineHeight: 1.6 }}>
-        Status templates are reusable presets. When a new timeline is created, its statuses are
-        copied from the first template. Changes here don't affect existing timelines.
-      </div>
-
-      {templates.map(template => (
-        <TemplateCard
-          key={template.id}
-          template={template}
-          teamId={teamId}
-          isAdmin={isAdmin}
-          teamColor={teamColor}
-          canDelete={templates.length > 1}
-        />
-      ))}
-
-      {/* Add template */}
-      {isAdmin && (
-        addingTemplate ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                autoFocus
-                value={newTemplateName}
-                onChange={e => { setNewTemplateName(e.target.value); setCreateError('') }}
-                onKeyDown={e => { if (e.key === 'Enter') handleCreateTemplate(); if (e.key === 'Escape') setAddingTemplate(false) }}
-                placeholder="Template name (e.g. Kanban, Sprint)…"
-                style={{
-                  flex: 1, background: '#2d333b', border: '1px solid #30363d',
-                  borderRadius: 7, padding: '8px 12px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit',
-                }}
-              />
-              <button
-                onClick={handleCreateTemplate}
-                disabled={createTemplate.isPending}
-                style={{
-                  background: teamColor, border: 'none', borderRadius: 7, color: '#fff',
-                  fontWeight: 600, fontSize: 13, padding: '8px 16px', cursor: 'pointer',
-                  opacity: createTemplate.isPending ? 0.6 : 1, fontFamily: 'inherit',
-                }}
-              >
-                {createTemplate.isPending ? 'Creating…' : 'Create'}
-              </button>
-              <button
-                onClick={() => setAddingTemplate(false)}
-                style={{ background: 'none', border: '1px solid #30363d', borderRadius: 7, color: '#8b949e', fontSize: 13, padding: '8px 12px', cursor: 'pointer' }}
-              >
-                Cancel
-              </button>
-            </div>
-            {createError && <div style={{ fontSize: 11, color: '#ef4444' }}>{createError}</div>}
-          </div>
-        ) : (
-          <button
-            onClick={() => setAddingTemplate(true)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center',
-              background: 'none', border: '1px dashed #30363d', borderRadius: 8,
-              color: '#484f58', fontSize: 13, padding: '10px 16px', cursor: 'pointer',
-              fontFamily: 'inherit', width: '100%',
-            }}
-          >
-            <Plus size={14} />
-            New template
-          </button>
-        )
-      )}
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/hooks/useMemberManagement.ts
 ````typescript
 /**
@@ -18796,6 +18393,633 @@ packages/api/ui/static/*
 .claude/launch.json
 .claude/mockups/
 GEMINI.md
+````
+
+## File: docs/ARCHITECTURE.md
+````markdown
+# Architecture
+
+## System Overview
+
+draba is an API-first, event-driven team coordination tool. The API server is the single source of truth. All clients (web, CLI, MCP agents) are dumb consumers of the same REST + WebSocket API. Every state change emits an internal event; calendar sync, real-time broadcast, and notifications are event consumers.
+
+```
+Web UI ──┐
+   CLI ──┤
+   MCP ──┤──→ REST API ──→ Internal Event Bus ──→ Calendar Sync (Google, CalDAV)
+Agents ──┤                                    ──→ WebSocket Broadcast
+         └──→ WebSocket (real-time subscribe)  ──→ Notifications (future)
+```
+
+The server also implements a built-in CalDAV endpoint, allowing iOS/macOS Calendar apps to connect directly without any external CalDAV server dependency.
+
+---
+
+## Components
+
+### API Server (`packages/api/`)
+
+- Language: Go
+- Transport: HTTP/REST + WebSocket
+- Auth: JWT (access token) + short-lived refresh tokens; invite tokens for registration
+- Database access: abstracted repository layer supporting SQLite, MySQL/MariaDB, and Postgres
+- Internal event bus: in-process pub/sub; every write operation publishes a typed event
+- CalDAV server: built-in, implemented as part of the Go server (no Radicale dependency)
+- Google Calendar sync: OAuth 2.0 connection per user; outbound push + inbound webhook
+- Entry point: `cmd/draba/main.go`
+
+### Web Frontend (`packages/web/`)
+
+- Framework: React (TypeScript, strict mode)
+- UI components: shadcn/ui (copy-paste components, owned by the repo — not a runtime dependency)
+- Styling: Tailwind CSS v4; design tokens via CSS custom properties following shadcn convention
+- State management: TanStack Query (server state); React Context or Zustand for global UI state (TBD when needed)
+- Routing: React Router
+- Real-time: WebSocket client, reconnects automatically
+- Build: Vite
+- Static files served by the Go binary in production (embedded)
+
+### Shared (`packages/shared/`)
+
+- OpenAPI specification (`openapi.yaml`) — the contract between API and web
+- TypeScript types generated from the OpenAPI spec (used by `packages/web`)
+- Go server models generated from the OpenAPI spec (used by `packages/api`) using `oapi-codegen`
+- This is the source of truth for the API shape; Go structs and TS types both derive from it
+
+---
+
+## Data Model
+
+### Core Entities
+
+```
+users
+  id, email, password_hash, display_name, avatar_url, is_superadmin,
+  created_at, updated_at, archived_at (nullable)
+  -- archived_at: when set, user account is inactivated (login rejected)
+
+teams
+  id, name, slug, description (nullable), notes (nullable),
+  color (nullable), icon (nullable), invite_link_token (nullable),
+  created_at, updated_at, archived_at (nullable)
+
+team_members
+  id, team_id, user_id (nullable), display_name (nullable), role (admin|member),
+  color, icon (nullable), joined_at, archived_at (nullable)
+  -- user_id is null and display_name is populated for login-less "Participants"
+  -- role="admin" represents a Team Admin
+  -- archived_at: when set, member is inactivated (access disabled, data preserved)
+
+team_statuses
+  id, team_id, name, color, position, created_at, updated_at
+  -- seeded with Planned / In Progress / Done on team creation
+  -- position controls Kanban column order and dropdown sort order
+
+invites
+  id, team_id, email, token, role, invited_by, expires_at, accepted_at
+
+api_tokens
+  id, user_id, name, token_hash,
+  scope (read|add|edit_own|edit_all),
+  last_used_at, created_at, revoked_at (nullable)
+
+activities
+  id, team_id, title, description, status, percent_complete,
+  icon, color, start_at, end_at, all_day,
+  status_id (FK → team_statuses),
+  parent_activity_id (nullable → self-ref FK),
+  location, url, rrule,
+  caldav_uid, google_event_id,     -- external IDs for sync (VEVENT identifiers)
+  created_by, created_at, updated_at, archived_at (nullable)
+
+activity_tags
+  activity_id, tag
+
+activity_assignments
+  activity_id, team_member_id (FK → team_members.id)
+
+activity_links
+  id, activity_id (FK), provider (e.g. asana), external_id, url
+
+timelines
+  id, team_id, name, start_date, end_date,
+  visibility (public|restricted), share_token, ical_token,
+  created_by, created_at, updated_at, archived_at (nullable)
+
+timeline_access
+  timeline_id, team_member_id, role (admin|member)
+  -- role="admin" represents a Timeline Admin
+
+team_inbound_webhooks
+  id, team_id, provider, token, created_by, created_at
+
+calendar_connections
+  id, user_id, provider (google|caldav),
+  credentials_encrypted, caldav_url,
+  last_synced_at, created_at
+```
+
+### Key Relationships
+
+- An activity belongs to a team and can be assigned to multiple users (`activity_assignments`)
+- An activity can have a parent activity (same team), enabling nesting without a separate Project entity
+- An activity created via an external integration has `is_external=true` and an associated `activity_links` record
+- A timeline is a named date range over a team's events — not a data container
+- Calendar connections are per-user; each user chooses which calendars to sync their events to
+
+---
+
+## Data Flow
+
+### Activity Create / Update
+
+1. Client sends REST request → API handler validates and writes to DB
+2. Handler publishes typed event to internal event bus (e.g., `activity.updated`)
+3. Event bus fans out to consumers:
+   - **WebSocket broadcaster** — pushes delta to all connected clients subscribed to that team
+   - **Calendar sync worker** — pushes change to Google Calendar and/or CalDAV for each assigned user who has a connection
+
+### External Connectors (Inbound One-Way Sync)
+
+1. External system (e.g. Asana) pushes a payload to `POST /webhooks/:provider/:token`
+2. Handler verifies the token against `team_inbound_webhooks` to identify the team
+3. Handler parses the payload, finds or creates an activity (setting `is_external=true`), and updates `activity_links`
+4. Publishes `activity.updated` to the event bus → WebSocket broadcast (UI renders block as read-only)
+
+### Inbound Google Calendar Sync
+
+1. Google pushes a webhook notification to `/webhooks/google`
+2. Handler fetches the changed activity from Google Calendar API
+3. Upserts the activity in draba DB (matched on `google_event_id`)
+4. Publishes `activity.updated` to the event bus → WebSocket broadcast
+
+### CalDAV (Inbound from iOS/macOS)
+
+1. Client issues a CalDAV REPORT or PUT to draba's built-in CalDAV endpoint
+2. draba handles the CalDAV protocol natively and writes to DB
+3. Publishes to event bus → WebSocket broadcast + outbound Google sync if connected
+
+### Real-Time
+
+- WebSocket connections are scoped per team
+- On connect, client subscribes to one or more team rooms
+- Server broadcasts JSON delta payloads on `activity.*` and `timeline.*` messages
+
+---
+
+## Key Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Language | Go | Single static binary; easy Docker distribution; excellent concurrency for WebSockets |
+| Database default | SQLite | Zero-config self-hosting — one binary + one file |
+| DB abstraction | Repository pattern | Swap SQLite/MySQL/Postgres without touching business logic |
+| CalDAV | Built-in Go server | No external Radicale dependency; simpler self-hosted story |
+| Calendar sync v1 | Google + CalDAV only | Microsoft is lower priority; adds OAuth complexity for small gain |
+| Frontend | React + TypeScript | Large ecosystem; strong typing; team familiarity |
+| UI library | shadcn/ui + Tailwind CSS | Copy-paste ownership model; Tailwind utility classes; strong shadcn/React ecosystem |
+| API contract | OpenAPI spec in `packages/shared/` | Single source of truth; generate TS types for web |
+| Auth | JWT + email invite flow | Simple, stateless, no OAuth complexity in v1 |
+| Real-time | WebSockets | Lower latency than polling; Go handles many concurrent connections well |
+| Static files | Embedded in Go binary | Single artifact deployment — no separate static server needed |
+| Deployment | Docker container | Zero external dependencies in SQLite mode; ships as one image |
+| Tenancy | One container per customer | Simpler ops and data isolation to start; multi-tenant is a later optimization |
+
+---
+
+## Infrastructure
+
+### Self-Hosted (v1)
+
+- Single Docker image: `ghcr.io/draba/draba:latest`
+- Configuration via environment variables (DB path, DB type, SMTP, Google OAuth credentials)
+- SQLite: data stored in a mounted volume
+- MySQL/Postgres: point to external DB via connection string env var
+- No external services required in SQLite mode
+
+### Directory Structure (Go server)
+
+```
+packages/api/
+  cmd/draba/          -- main entry point
+  internal/
+    api/              -- HTTP handlers and routing
+    auth/             -- JWT, invite tokens, password hashing
+    caldav/           -- built-in CalDAV server implementation
+    calendar/         -- Google Calendar sync + CalDAV outbound sync
+    db/               -- repository layer (SQLite/MySQL/Postgres adapters)
+    events/           -- internal event bus
+    models/           -- domain types
+    ws/               -- WebSocket hub and broadcaster
+  migrations/         -- SQL migration files
+```
+
+### CI/CD
+
+- [TBD — GitHub Actions; build + test on PR; publish Docker image on tag]
+````
+
+## File: packages/web/src/components/StatusTemplatesTab.tsx
+````typescript
+/**
+ * StatusTemplatesTab — Status Templates management inside the Team Modal.
+ *
+ * Shows a list of status templates for the team. Each template can be expanded
+ * to reveal its items, which can be edited, reordered (positionally), added,
+ * or removed. Admins can also create and delete templates, with the server
+ * blocking deletion of the last template or last item.
+ */
+
+import { useState } from 'react'
+import { Plus, Trash2, ChevronDown, ChevronRight, Check, X } from 'lucide-react'
+import {
+  useStatusTemplates,
+  useCreateStatusTemplate,
+  useDeleteStatusTemplate,
+  useCreateTemplateItem,
+  useUpdateTemplateItem,
+  useDeleteTemplateItem,
+} from '@/hooks/useStatusTemplates'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import type { components } from '@draba/shared'
+
+type StatusTemplate = components['schemas']['StatusTemplate']
+type StatusTemplateItem = components['schemas']['StatusTemplateItem']
+
+interface Props {
+  teamId: string
+  isAdmin: boolean
+  teamColor: string
+}
+
+// ── Item row ─────────────────────────────────────────────────────────────────
+
+interface ItemRowProps {
+  item: StatusTemplateItem
+  teamId: string
+  canDelete: boolean
+}
+
+function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(item.name)
+  const [identity, setIdentity] = useState<Identity>({ color: item.color, icon: item.icon ?? '' })
+  const [isClosed, setIsClosed] = useState(item.isClosed)
+  const updateItem = useUpdateTemplateItem(teamId)
+  const deleteItem = useDeleteTemplateItem(teamId)
+  const [error, setError] = useState('')
+
+  function handleSave() {
+    if (!name.trim()) { setError('Name is required'); return }
+    updateItem.mutate(
+      { id: item.id, name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
+      {
+        onSuccess: () => setEditing(false),
+        onError: () => setError('Failed to save'),
+      }
+    )
+  }
+
+  function handleDelete() {
+    if (!canDelete) { setError('Cannot delete the last item'); return }
+    deleteItem.mutate(item.id, {
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to delete'
+        setError(msg.includes('LAST_ITEM') ? 'Cannot delete the last item' : msg)
+      },
+    })
+  }
+
+  if (editing) {
+    return (
+      <div style={{ background: '#2d333b', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <IdentityWidget identity={identity} name={name || 'Status'} shape="square" onChange={setIdentity} />
+          <input
+            autoFocus
+            value={name}
+            onChange={e => { setName(e.target.value); setError('') }}
+            onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') setEditing(false) }}
+            style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
+          />
+          <button onClick={handleSave} disabled={updateItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#3B82F6', display: 'flex', padding: 2 }}>
+            <Check size={15} />
+          </button>
+          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
+            <X size={15} />
+          </button>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
+          <input
+            type="checkbox"
+            checked={isClosed}
+            onChange={e => setIsClosed(e.target.checked)}
+            style={{ accentColor: '#3B82F6' }}
+          />
+          Closed status (marks this status as completed/done)
+        </label>
+        {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{error}</div>}
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '7px 4px',
+      borderRadius: 6,
+    }}>
+      <Badge identity={{ color: item.color, icon: item.icon ?? '' }} name={item.name} size={16} />
+      <span
+        onClick={() => setEditing(true)}
+        style={{ flex: 1, fontSize: 13, color: '#e6edf3', cursor: 'pointer' }}
+        title="Click to edit"
+      >
+        {item.name}
+      </span>
+      {item.isClosed && (
+        <span style={{ fontSize: 10, color: '#484f58', background: '#161b22', borderRadius: 4, padding: '1px 5px', letterSpacing: '0.3px' }}>
+          closed
+        </span>
+      )}
+      <button
+        onClick={handleDelete}
+        disabled={!canDelete || deleteItem.isPending}
+        title={canDelete ? 'Remove item' : 'Cannot delete the last item'}
+        style={{
+          background: 'none', border: 'none', cursor: canDelete ? 'pointer' : 'not-allowed',
+          color: '#484f58', display: 'flex', padding: 2, opacity: canDelete ? 1 : 0.35,
+        }}
+      >
+        <Trash2 size={13} />
+      </button>
+    </div>
+  )
+}
+
+// ── Template card ─────────────────────────────────────────────────────────────
+
+interface TemplateCardProps {
+  template: StatusTemplate
+  teamId: string
+  isAdmin: boolean
+  teamColor: string
+  canDelete: boolean
+}
+
+function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: TemplateCardProps) {
+  const [expanded, setExpanded] = useState(true)
+  const [addingItem, setAddingItem] = useState(false)
+  const [newItemName, setNewItemName] = useState('')
+  const [newItemIdentity, setNewItemIdentity] = useState<Identity>({ color: '#3B82F6', icon: '' })
+  const [newItemIsClosed, setNewItemIsClosed] = useState(false)
+  const [itemError, setItemError] = useState('')
+  const [deleteError, setDeleteError] = useState('')
+
+  const createItem = useCreateTemplateItem(teamId)
+  const deleteTemplate = useDeleteStatusTemplate(teamId)
+
+  function handleAddItem() {
+    if (!newItemName.trim()) { setItemError('Name is required'); return }
+    createItem.mutate(
+      {
+        templateId: template.id,
+        name: newItemName.trim(),
+        color: newItemIdentity.color,
+        icon: newItemIdentity.icon || null,
+        isClosed: newItemIsClosed,
+      },
+      {
+        onSuccess: () => {
+          setNewItemName('')
+          setNewItemIdentity({ color: '#3B82F6', icon: '' })
+          setNewItemIsClosed(false)
+          setAddingItem(false)
+        },
+        onError: () => setItemError('Failed to add item'),
+      }
+    )
+  }
+
+  function handleCancelAddItem() {
+    setAddingItem(false)
+    setNewItemName('')
+    setNewItemIdentity({ color: '#3B82F6', icon: '' })
+    setNewItemIsClosed(false)
+    setItemError('')
+  }
+
+  function handleDeleteTemplate() {
+    if (!canDelete) { setDeleteError('Cannot delete the last template'); return }
+    deleteTemplate.mutate(template.id, {
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to delete'
+        setDeleteError(msg.includes('LAST_TEMPLATE') ? 'Cannot delete the last template' : msg)
+      },
+    })
+  }
+
+  return (
+    <div style={{ border: '1px solid #30363d', borderRadius: 10, overflow: 'hidden' }}>
+      {/* Template header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', background: '#2d333b' }}>
+        <button
+          onClick={() => setExpanded(x => !x)}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#8b949e', display: 'flex', padding: 0 }}
+        >
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+        <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>{template.name}</span>
+        <span style={{ fontSize: 11, color: '#484f58' }}>{template.items.length} item{template.items.length !== 1 ? 's' : ''}</span>
+        {isAdmin && (
+          <button
+            onClick={handleDeleteTemplate}
+            disabled={deleteTemplate.isPending || !canDelete}
+            title={canDelete ? 'Delete template' : 'Cannot delete the last template'}
+            style={{
+              background: 'none', border: 'none', padding: 2, display: 'flex',
+              cursor: canDelete ? 'pointer' : 'not-allowed',
+              color: '#484f58', opacity: canDelete ? 1 : 0.35,
+            }}
+          >
+            <Trash2 size={14} />
+          </button>
+        )}
+      </div>
+
+      {deleteError && (
+        <div style={{ padding: '4px 14px', fontSize: 11, color: '#ef4444', background: '#2d333b' }}>
+          {deleteError}
+        </div>
+      )}
+
+      {/* Template items */}
+      {expanded && (
+        <div style={{ padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {template.items.map(item => (
+            <ItemRow
+              key={item.id}
+              item={item}
+              teamId={teamId}
+              canDelete={template.items.length > 1}
+            />
+          ))}
+
+          {/* Add item row */}
+          {isAdmin && (
+            addingItem ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <IdentityWidget
+                    identity={newItemIdentity}
+                    name={newItemName || 'New status'}
+                    shape="square"
+                    onChange={setNewItemIdentity}
+                  />
+                  <input
+                    autoFocus
+                    value={newItemName}
+                    onChange={e => { setNewItemName(e.target.value); setItemError('') }}
+                    onKeyDown={e => { if (e.key === 'Enter') handleAddItem(); if (e.key === 'Escape') handleCancelAddItem() }}
+                    placeholder="Status name…"
+                    style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
+                  />
+                  <button onClick={handleAddItem} disabled={createItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: teamColor, display: 'flex', padding: 2 }}>
+                    <Check size={15} />
+                  </button>
+                  <button onClick={handleCancelAddItem} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
+                    <X size={15} />
+                  </button>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+                  <input
+                    type="checkbox"
+                    checked={newItemIsClosed}
+                    onChange={e => setNewItemIsClosed(e.target.checked)}
+                    style={{ accentColor: '#3B82F6' }}
+                  />
+                  Closed status (marks this status as completed/done)
+                </label>
+                {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 26 }}>{itemError}</div>}
+              </div>
+            ) : (
+              <button
+                onClick={() => setAddingItem(true)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, marginTop: 4,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: '#484f58', fontSize: 12, padding: '4px 2px', fontFamily: 'inherit',
+                }}
+              >
+                <Plus size={13} /> Add status
+              </button>
+            )
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Main tab ──────────────────────────────────────────────────────────────────
+
+export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props) {
+  const { data: templates = [], isLoading } = useStatusTemplates(teamId)
+  const createTemplate = useCreateStatusTemplate(teamId)
+  const [addingTemplate, setAddingTemplate] = useState(false)
+  const [newTemplateName, setNewTemplateName] = useState('')
+  const [createError, setCreateError] = useState('')
+
+  function handleCreateTemplate() {
+    if (!newTemplateName.trim()) { setCreateError('Name is required'); return }
+    createTemplate.mutate(
+      { name: newTemplateName.trim() },
+      {
+        onSuccess: () => { setNewTemplateName(''); setAddingTemplate(false) },
+        onError: () => setCreateError('Failed to create template'),
+      }
+    )
+  }
+
+  if (isLoading) {
+    return (
+      <div style={{ padding: 20, fontSize: 13, color: '#484f58' }}>Loading…</div>
+    )
+  }
+
+  return (
+    <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ fontSize: 12, color: '#8b949e', lineHeight: 1.6 }}>
+        Status templates are reusable presets. When a new timeline is created, its statuses are
+        copied from the first template. Changes here don't affect existing timelines.
+      </div>
+
+      {templates.map(template => (
+        <TemplateCard
+          key={template.id}
+          template={template}
+          teamId={teamId}
+          isAdmin={isAdmin}
+          teamColor={teamColor}
+          canDelete={templates.length > 1}
+        />
+      ))}
+
+      {/* Add template */}
+      {isAdmin && (
+        addingTemplate ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                autoFocus
+                value={newTemplateName}
+                onChange={e => { setNewTemplateName(e.target.value); setCreateError('') }}
+                onKeyDown={e => { if (e.key === 'Enter') handleCreateTemplate(); if (e.key === 'Escape') setAddingTemplate(false) }}
+                placeholder="Template name (e.g. Kanban, Sprint)…"
+                style={{
+                  flex: 1, background: '#2d333b', border: '1px solid #30363d',
+                  borderRadius: 7, padding: '8px 12px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit',
+                }}
+              />
+              <button
+                onClick={handleCreateTemplate}
+                disabled={createTemplate.isPending}
+                style={{
+                  background: teamColor, border: 'none', borderRadius: 7, color: '#fff',
+                  fontWeight: 600, fontSize: 13, padding: '8px 16px', cursor: 'pointer',
+                  opacity: createTemplate.isPending ? 0.6 : 1, fontFamily: 'inherit',
+                }}
+              >
+                {createTemplate.isPending ? 'Creating…' : 'Create'}
+              </button>
+              <button
+                onClick={() => setAddingTemplate(false)}
+                style={{ background: 'none', border: '1px solid #30363d', borderRadius: 7, color: '#8b949e', fontSize: 13, padding: '8px 12px', cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+            </div>
+            {createError && <div style={{ fontSize: 11, color: '#ef4444' }}>{createError}</div>}
+          </div>
+        ) : (
+          <button
+            onClick={() => setAddingTemplate(true)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center',
+              background: 'none', border: '1px dashed #30363d', borderRadius: 8,
+              color: '#484f58', fontSize: 13, padding: '10px 16px', cursor: 'pointer',
+              fontFamily: 'inherit', width: '100%',
+            }}
+          >
+            <Plus size={14} />
+            New template
+          </button>
+        )
+      )}
+    </div>
+  )
+}
 ````
 
 ## File: packages/web/src/contexts/AuthContext.tsx
@@ -20228,230 +20452,6 @@ export const STATUS_LABELS: Record<ActivityStatus, string> = {
   'in-progress': 'In progress',
   'done':        'Done',
 };
-````
-
-## File: docs/ARCHITECTURE.md
-````markdown
-# Architecture
-
-## System Overview
-
-draba is an API-first, event-driven team coordination tool. The API server is the single source of truth. All clients (web, CLI, MCP agents) are dumb consumers of the same REST + WebSocket API. Every state change emits an internal event; calendar sync, real-time broadcast, and notifications are event consumers.
-
-```
-Web UI ──┐
-   CLI ──┤
-   MCP ──┤──→ REST API ──→ Internal Event Bus ──→ Calendar Sync (Google, CalDAV)
-Agents ──┤                                    ──→ WebSocket Broadcast
-         └──→ WebSocket (real-time subscribe)  ──→ Notifications (future)
-```
-
-The server also implements a built-in CalDAV endpoint, allowing iOS/macOS Calendar apps to connect directly without any external CalDAV server dependency.
-
----
-
-## Components
-
-### API Server (`packages/api/`)
-
-- Language: Go
-- Transport: HTTP/REST + WebSocket
-- Auth: JWT (access token) + short-lived refresh tokens; invite tokens for registration
-- Database access: abstracted repository layer supporting SQLite, MySQL/MariaDB, and Postgres
-- Internal event bus: in-process pub/sub; every write operation publishes a typed event
-- CalDAV server: built-in, implemented as part of the Go server (no Radicale dependency)
-- Google Calendar sync: OAuth 2.0 connection per user; outbound push + inbound webhook
-- Entry point: `cmd/draba/main.go`
-
-### Web Frontend (`packages/web/`)
-
-- Framework: React (TypeScript, strict mode)
-- UI components: shadcn/ui (copy-paste components, owned by the repo — not a runtime dependency)
-- Styling: Tailwind CSS v4; design tokens via CSS custom properties following shadcn convention
-- State management: TanStack Query (server state); React Context or Zustand for global UI state (TBD when needed)
-- Routing: React Router
-- Real-time: WebSocket client, reconnects automatically
-- Build: Vite
-- Static files served by the Go binary in production (embedded)
-
-### Shared (`packages/shared/`)
-
-- OpenAPI specification (`openapi.yaml`) — the contract between API and web
-- TypeScript types generated from the OpenAPI spec (used by `packages/web`)
-- Go server models generated from the OpenAPI spec (used by `packages/api`) using `oapi-codegen`
-- This is the source of truth for the API shape; Go structs and TS types both derive from it
-
----
-
-## Data Model
-
-### Core Entities
-
-```
-users
-  id, email, password_hash, display_name, avatar_url, is_superadmin,
-  created_at, updated_at, archived_at (nullable)
-  -- archived_at: when set, user account is inactivated (login rejected)
-
-teams
-  id, name, slug, description (nullable), notes (nullable),
-  color (nullable), icon (nullable), invite_link_token (nullable),
-  created_at, updated_at, archived_at (nullable)
-
-team_members
-  id, team_id, user_id (nullable), display_name (nullable), role (admin|member),
-  color, icon (nullable), joined_at, archived_at (nullable)
-  -- user_id is null and display_name is populated for login-less "Participants"
-  -- role="admin" represents a Team Admin
-  -- archived_at: when set, member is inactivated (access disabled, data preserved)
-
-team_statuses
-  id, team_id, name, color, position, created_at, updated_at
-  -- seeded with Planned / In Progress / Done on team creation
-  -- position controls Kanban column order and dropdown sort order
-
-invites
-  id, team_id, email, token, role, invited_by, expires_at, accepted_at
-
-api_tokens
-  id, user_id, name, token_hash,
-  scope (read|add|edit_own|edit_all),
-  last_used_at, created_at, revoked_at (nullable)
-
-activities
-  id, team_id, title, description, status, percent_complete,
-  icon, color, start_at, end_at, all_day,
-  status_id (FK → team_statuses),
-  parent_activity_id (nullable → self-ref FK),
-  location, url, rrule,
-  caldav_uid, google_event_id,     -- external IDs for sync (VEVENT identifiers)
-  created_by, created_at, updated_at, archived_at (nullable)
-
-activity_tags
-  activity_id, tag
-
-activity_assignments
-  activity_id, team_member_id (FK → team_members.id)
-
-activity_links
-  id, activity_id (FK), provider (e.g. asana), external_id, url
-
-timelines
-  id, team_id, name, start_date, end_date,
-  visibility (public|restricted), share_token, ical_token,
-  created_by, created_at, updated_at, archived_at (nullable)
-
-timeline_access
-  timeline_id, team_member_id, role (admin|member)
-  -- role="admin" represents a Timeline Admin
-
-team_inbound_webhooks
-  id, team_id, provider, token, created_by, created_at
-
-calendar_connections
-  id, user_id, provider (google|caldav),
-  credentials_encrypted, caldav_url,
-  last_synced_at, created_at
-```
-
-### Key Relationships
-
-- An activity belongs to a team and can be assigned to multiple users (`activity_assignments`)
-- An activity can have a parent activity (same team), enabling nesting without a separate Project entity
-- An activity created via an external integration has `is_external=true` and an associated `activity_links` record
-- A timeline is a named date range over a team's events — not a data container
-- Calendar connections are per-user; each user chooses which calendars to sync their events to
-
----
-
-## Data Flow
-
-### Activity Create / Update
-
-1. Client sends REST request → API handler validates and writes to DB
-2. Handler publishes typed event to internal event bus (e.g., `activity.updated`)
-3. Event bus fans out to consumers:
-   - **WebSocket broadcaster** — pushes delta to all connected clients subscribed to that team
-   - **Calendar sync worker** — pushes change to Google Calendar and/or CalDAV for each assigned user who has a connection
-
-### External Connectors (Inbound One-Way Sync)
-
-1. External system (e.g. Asana) pushes a payload to `POST /webhooks/:provider/:token`
-2. Handler verifies the token against `team_inbound_webhooks` to identify the team
-3. Handler parses the payload, finds or creates an activity (setting `is_external=true`), and updates `activity_links`
-4. Publishes `activity.updated` to the event bus → WebSocket broadcast (UI renders block as read-only)
-
-### Inbound Google Calendar Sync
-
-1. Google pushes a webhook notification to `/webhooks/google`
-2. Handler fetches the changed activity from Google Calendar API
-3. Upserts the activity in draba DB (matched on `google_event_id`)
-4. Publishes `activity.updated` to the event bus → WebSocket broadcast
-
-### CalDAV (Inbound from iOS/macOS)
-
-1. Client issues a CalDAV REPORT or PUT to draba's built-in CalDAV endpoint
-2. draba handles the CalDAV protocol natively and writes to DB
-3. Publishes to event bus → WebSocket broadcast + outbound Google sync if connected
-
-### Real-Time
-
-- WebSocket connections are scoped per team
-- On connect, client subscribes to one or more team rooms
-- Server broadcasts JSON delta payloads on `activity.*` and `timeline.*` messages
-
----
-
-## Key Decisions
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Language | Go | Single static binary; easy Docker distribution; excellent concurrency for WebSockets |
-| Database default | SQLite | Zero-config self-hosting — one binary + one file |
-| DB abstraction | Repository pattern | Swap SQLite/MySQL/Postgres without touching business logic |
-| CalDAV | Built-in Go server | No external Radicale dependency; simpler self-hosted story |
-| Calendar sync v1 | Google + CalDAV only | Microsoft is lower priority; adds OAuth complexity for small gain |
-| Frontend | React + TypeScript | Large ecosystem; strong typing; team familiarity |
-| UI library | shadcn/ui + Tailwind CSS | Copy-paste ownership model; Tailwind utility classes; strong shadcn/React ecosystem |
-| API contract | OpenAPI spec in `packages/shared/` | Single source of truth; generate TS types for web |
-| Auth | JWT + email invite flow | Simple, stateless, no OAuth complexity in v1 |
-| Real-time | WebSockets | Lower latency than polling; Go handles many concurrent connections well |
-| Static files | Embedded in Go binary | Single artifact deployment — no separate static server needed |
-| Deployment | Docker container | Zero external dependencies in SQLite mode; ships as one image |
-| Tenancy | One container per customer | Simpler ops and data isolation to start; multi-tenant is a later optimization |
-
----
-
-## Infrastructure
-
-### Self-Hosted (v1)
-
-- Single Docker image: `ghcr.io/draba/draba:latest`
-- Configuration via environment variables (DB path, DB type, SMTP, Google OAuth credentials)
-- SQLite: data stored in a mounted volume
-- MySQL/Postgres: point to external DB via connection string env var
-- No external services required in SQLite mode
-
-### Directory Structure (Go server)
-
-```
-packages/api/
-  cmd/draba/          -- main entry point
-  internal/
-    api/              -- HTTP handlers and routing
-    auth/             -- JWT, invite tokens, password hashing
-    caldav/           -- built-in CalDAV server implementation
-    calendar/         -- Google Calendar sync + CalDAV outbound sync
-    db/               -- repository layer (SQLite/MySQL/Postgres adapters)
-    events/           -- internal event bus
-    models/           -- domain types
-    ws/               -- WebSocket hub and broadcaster
-  migrations/         -- SQL migration files
-```
-
-### CI/CD
-
-- [TBD — GitHub Actions; build + test on PR; publish Docker image on tag]
 ````
 
 ## File: packages/api/internal/api/auth_handler.go
