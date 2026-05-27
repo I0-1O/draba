@@ -230,6 +230,47 @@ type RevokeUserResult struct {
 	MembershipsRemoved     int  `json:"membershipsRemoved"`
 }
 
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
 // Invite is a single-use token that grants an email address the right to
 // join a Team. AcceptedAt is non-nil once consumed; expired or accepted
 // invites are rejected by the registration handler.

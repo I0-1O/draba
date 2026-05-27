@@ -19,8 +19,10 @@ func TestMigrate_Idempotent(t *testing.T) {
 	require.NoError(t, db.Migrate(database), "second run (idempotent)")
 
 	// Verify all expected tables exist.
+	// team_statuses was replaced by status_templates + status_template_items + statuses in migration 012.
 	tables := []string{
-		"users", "teams", "team_members", "team_statuses",
+		"users", "teams", "team_members",
+		"status_templates", "status_template_items", "statuses",
 		"invites", "api_tokens", "activities", "activity_tags",
 		"activity_assignments", "timelines", "timeline_access",
 		"calendar_connections",
@@ -130,6 +132,31 @@ func TestMigrate_Idempotent(t *testing.T) {
 		}
 	}
 	assert.True(t, foundTARestrict, "timeline_access.team_member_id FK should exist")
+
+	// Verify migration 012: team_statuses dropped, new status tables created.
+	var teamStatusesCount int
+	require.NoError(t, database.Get(&teamStatusesCount,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='team_statuses'`))
+	assert.Equal(t, 0, teamStatusesCount, "team_statuses should be dropped after migration 012")
+
+	m012Tables := []string{"status_templates", "status_template_items", "statuses"}
+	for _, tbl := range m012Tables {
+		var n int
+		require.NoError(t, database.Get(&n,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl))
+		assert.Equal(t, 1, n, "table %q should exist after migration 012", tbl)
+	}
+
+	// Verify activities.status_id now references statuses (not team_statuses).
+	var actFKs []fkInfo
+	require.NoError(t, database.Select(&actFKs,
+		`SELECT "table", "from", on_delete FROM pragma_foreign_key_list('activities')`))
+	for _, fk := range actFKs {
+		if fk.From == "status_id" {
+			assert.Equal(t, "statuses", fk.Table,
+				"activities.status_id FK should reference statuses, not team_statuses")
+		}
+	}
 }
 
 // TestMigrate_006_007_ColorConversion verifies the two-step color conversion:

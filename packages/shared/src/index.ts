@@ -828,6 +828,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/teams/{teamId}/status-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List all status templates for a team */
+        get: operations["listStatusTemplates"];
+        put?: never;
+        /** Create a status template */
+        post: operations["createStatusTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/status-templates/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a status template (blocked if it is the last one) */
+        delete: operations["deleteStatusTemplate"];
+        options?: never;
+        head?: never;
+        /** Rename or reorder a status template */
+        patch: operations["updateStatusTemplate"];
+        trace?: never;
+    };
+    "/status-templates/{id}/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add an item to a status template */
+        post: operations["createStatusTemplateItem"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/status-template-items/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a template item (blocked if it is the last one in the template) */
+        delete: operations["deleteStatusTemplateItem"];
+        options?: never;
+        head?: never;
+        /** Rename, recolor, reicon, toggle is_closed, or reorder a template item */
+        patch: operations["updateStatusTemplateItem"];
+        trace?: never;
+    };
+    "/teams/{teamId}/timelines/{timelineId}/statuses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List statuses for a specific timeline */
+        get: operations["listTimelineStatuses"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/timelines/share/{token}": {
         parameters: {
             query?: never;
@@ -1105,6 +1193,69 @@ export interface components {
             membershipsInactivated: number;
             membershipsRemoved: number;
         };
+        StatusTemplateItem: {
+            id: string;
+            templateId: string;
+            name: string;
+            /** @description Hex color string (e.g. "#3B82F6"). */
+            color: string;
+            /** @description Identity icon ID. Null if not set. */
+            icon?: string | null;
+            /** @description Closed statuses filter activities out of active views. */
+            isClosed: boolean;
+            position: number;
+        };
+        StatusTemplate: {
+            id: string;
+            teamId: string;
+            name: string;
+            description?: string | null;
+            position: number;
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            items: components["schemas"]["StatusTemplateItem"][];
+        };
+        Status: {
+            id: string;
+            timelineId: string;
+            name: string;
+            /** @description Hex color string (e.g. "#3B82F6"). */
+            color: string;
+            /** @description Identity icon ID. Null if not set. */
+            icon?: string | null;
+            /** @description Closed statuses filter activities out of active views. */
+            isClosed: boolean;
+            position: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        CreateStatusTemplateInput: {
+            name: string;
+            description?: string | null;
+        };
+        PatchStatusTemplateInput: {
+            name?: string;
+            description?: string | null;
+            position?: number;
+        };
+        CreateStatusTemplateItemInput: {
+            name: string;
+            color?: string;
+            icon?: string | null;
+            isClosed?: boolean;
+        };
+        PatchStatusTemplateItemInput: {
+            name?: string;
+            color?: string;
+            icon?: string | null;
+            isClosed?: boolean;
+            position?: number;
+        };
     };
     responses: {
         /** @description Invalid request body or parameters. */
@@ -1171,6 +1322,8 @@ export interface components {
         timelineId: string;
         /** @description Saved filter ID. */
         savedFilterId: string;
+        /** @description Resource ID. */
+        id: string;
         /** @description Public share token for a timeline. */
         shareToken: string;
     };
@@ -2997,6 +3150,244 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    listStatusTemplates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of status templates with their items. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusTemplate"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createStatusTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateStatusTemplateInput"];
+            };
+        };
+        responses: {
+            /** @description Created status template (with empty items array). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusTemplate"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteStatusTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Cannot delete the last template on the team. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    updateStatusTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchStatusTemplateInput"];
+            };
+        };
+        responses: {
+            /** @description Updated status template. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusTemplate"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createStatusTemplateItem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateStatusTemplateItemInput"];
+            };
+        };
+        responses: {
+            /** @description Created template item. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusTemplateItem"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteStatusTemplateItem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Cannot delete the last item in a template. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    updateStatusTemplateItem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchStatusTemplateItemInput"];
+            };
+        };
+        responses: {
+            /** @description Updated template item. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusTemplateItem"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listTimelineStatuses: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: string;
+                timelineId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of timeline statuses in position order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Status"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     getTimelineByShareToken: {

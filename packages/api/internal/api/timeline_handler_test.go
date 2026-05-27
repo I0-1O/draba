@@ -72,7 +72,7 @@ func timelineTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID strin
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
 	isrTl := db.NewInstanceSettingsRepo(database)
-	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrTl, db.NewPasswordResetTokenRepo(database), mailer.New(isrTl, nil), tokens, tier.Unlimited, bus, hub).Routes()
+	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrTl, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), mailer.New(isrTl, nil), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@timeline.com", "password1", "Alice")
 
@@ -283,7 +283,7 @@ func TestGetTimeline_MemberWithoutAccessForbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
 	bobToken, _ := seedUserWithInvite(t, srv, "bob@member.com", "password2", "Bob", inv["token"].(string))
 
-	// Bob is a team member but has no timeline_access entry — must be forbidden.
+	// Bob is a team member but has no timeline_access entry â€” must be forbidden.
 	w3 := httptest.NewRecorder()
 	srv.ServeHTTP(w3, authReq(http.MethodGet, fmt.Sprintf("/timelines/%s", timelineID), nil, bobToken))
 	assert.Equal(t, http.StatusForbidden, w3.Code)
@@ -304,7 +304,7 @@ func TestGetTimeline_MemberGrantedAccessAllowed(t *testing.T) {
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 	isrAcc := db.NewInstanceSettingsRepo(database)
 	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo,
-		db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrAcc, db.NewPasswordResetTokenRepo(database), mailer.New(isrAcc, nil), tokens, tier.Unlimited, bus, hub).Routes()
+		db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrAcc, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), mailer.New(isrAcc, nil), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ := seedUser(t, srv, "alice@access.com", "password1", "Alice")
 
@@ -404,7 +404,7 @@ func TestGetTimeline_PublicShareToken(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
 	shareToken := created["shareToken"].(string)
 
-	// Fetch via share token — no auth header.
+	// Fetch via share token â€” no auth header.
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/timelines/share/%s", shareToken), http.NoBody)
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, req)
@@ -441,7 +441,7 @@ func TestCreateTimeline_RestrictedGrantAccessError(t *testing.T) {
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
 	isrFake := db.NewInstanceSettingsRepo(database)
-	srv := api.NewServer(users, invites, teams, activitiesRepo, fake, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrFake, db.NewPasswordResetTokenRepo(database), mailer.New(isrFake, nil), tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, activitiesRepo, fake, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrFake, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), mailer.New(isrFake, nil), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ := seedUser(t, srv, "alice@granterr.com", "password1", "Alice")
 
@@ -476,7 +476,7 @@ func TestCreateTimeline_PublishesBusMessage(t *testing.T) {
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
 	isrBus := db.NewInstanceSettingsRepo(database)
-	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrBus, db.NewPasswordResetTokenRepo(database), mailer.New(isrBus, nil), tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrBus, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), mailer.New(isrBus, nil), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ := seedUser(t, srv, "alice@tlbus.com", "password1", "Alice")
 

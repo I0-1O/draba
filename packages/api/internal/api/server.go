@@ -44,6 +44,7 @@ type Server struct {
 	apiTokens      *db.APITokenRepo
 	instanceSets   *db.InstanceSettingsRepo
 	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
 	mailer         *mailer.Mailer
 	tokens         *auth.TokenService
 	tier           tier.Tier
@@ -65,6 +66,7 @@ func NewServer(
 	apiTokensRepo *db.APITokenRepo,
 	instanceSetsRepo *db.InstanceSettingsRepo,
 	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
 	m *mailer.Mailer,
 	tokens *auth.TokenService,
 	t tier.Tier,
@@ -82,6 +84,7 @@ func NewServer(
 		apiTokens:      apiTokensRepo,
 		instanceSets:   instanceSetsRepo,
 		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
 		mailer:         m,
 		tokens:         tokens,
 		tier:           t,
@@ -171,12 +174,25 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
 	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
 
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
 	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
 	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
 	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
 	// the more-specific literal "share" segment takes precedence.
 	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
 	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
 	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
 	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
 

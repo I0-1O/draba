@@ -99,6 +99,12 @@ func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Seed the default "Simple" status template for the new team.
+	if err := s.statuses.SeedDefaultTemplate(team.ID, claims.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
+		return
+	}
+
 	writeJSON(w, http.StatusCreated, team)
 }
 

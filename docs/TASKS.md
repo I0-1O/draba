@@ -616,22 +616,46 @@ Closes data-integrity and access-revocation gaps from 10.1.2. Protects historica
 
 ---
 
-### Team Statuses & Member Colors (Phase 10.2)
+### Status Templates & Timeline Statuses (Phase 10.2)
 API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
 
-**API:**
-- [ ] `team_statuses` migration and repository
-- [ ] Seed default statuses (Planned / In Progress / Done) on team creation
-- [ ] `GET /teams/:id/statuses` — list in order
-- [ ] `POST /teams/:id/statuses` — create
-- [ ] `PATCH /statuses/:id` — rename, recolor, reorder
-- [ ] `DELETE /statuses/:id` — requires `replacementStatusId`; migrates events
-- [ ] Self-protect: cannot delete the last remaining status
+**Schema (migration 012):**
+- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
+- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
+- [x] Update `migrations_test.go` — 2026-05-27
 
-**Web (`/settings/team/:id` Statuses tab):**
-- [ ] Drag-to-reorder list with inline rename + color picker
-- [ ] Delete-with-replacement dialog: lists affected event count, picker for replacement
-- [ ] Member identity picker in Members tab uses `<IdentityWidget>` (Phase 9.6, wired in 10.1.2) confirmed working with color + icon fields
+**Go API:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
+- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
+- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
+- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
+- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
+- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
+- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
+- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
+- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
+- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
+- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
+
+**OpenAPI + types:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
+- [x] All new endpoint paths — 2026-05-27
+- [x] Regenerate TypeScript types — 2026-05-27
+
+**Web:**
+- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
+- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
+- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
+
+**Testing & verification:**
+- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
+- [ ] Manual: create second template, add items, rename/recolor items
+- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
+- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
+- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
 
 ---
 

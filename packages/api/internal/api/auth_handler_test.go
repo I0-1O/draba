@@ -47,8 +47,9 @@ func newTestServerWithTier(t *testing.T, tr tier.Tier) http.Handler {
 	apiTokensRepo := db.NewAPITokenRepo(database)
 	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
 	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
 	m := mailer.New(instanceSetsRepo, nil)
-	return api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, savedFiltersRepo, preferencesRepo, apiTokensRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, tr, bus, hub).Routes()
+	return api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, savedFiltersRepo, preferencesRepo, apiTokensRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, m, tokens, tr, bus, hub).Routes()
 }
 
 func postJSON(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {
@@ -265,7 +266,7 @@ func TestRegister_TierUserLimitReached(t *testing.T) {
 	bus2 := events.NewBus()
 	hub2 := ws.NewHub(bus2, toks2, func(_, _ string) error { return nil })
 	isr2 := db.NewInstanceSettingsRepo(database)
-	srv := api.NewServer(users, db.NewInviteRepo(database), db.NewTeamRepo(database), db.NewActivityRepo(database), db.NewTimelineRepo(database), db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr2, db.NewPasswordResetTokenRepo(database), mailer.New(isr2, nil), toks2, tier.Team, bus2, hub2).Routes()
+	srv := api.NewServer(users, db.NewInviteRepo(database), db.NewTeamRepo(database), db.NewActivityRepo(database), db.NewTimelineRepo(database), db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr2, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), mailer.New(isr2, nil), toks2, tier.Team, bus2, hub2).Routes()
 
 	w := postJSON(t, srv, "/auth/register", map[string]string{
 		"email": "newcomer@example.com", "password": "supersecret", "displayName": "Newcomer",

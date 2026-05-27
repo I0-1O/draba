@@ -533,6 +533,136 @@ components:
         membershipsRemoved:
           type: integer
 
+    StatusTemplateItem:
+      type: object
+      required: [id, templateId, name, color, isClosed, position]
+      properties:
+        id:
+          type: string
+        templateId:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          description: Hex color string (e.g. "#3B82F6").
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID. Null if not set.
+        isClosed:
+          type: boolean
+          description: Closed statuses filter activities out of active views.
+        position:
+          type: integer
+
+    StatusTemplate:
+      type: object
+      required: [id, teamId, name, position, createdBy, createdAt, updatedAt, items]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        position:
+          type: integer
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/StatusTemplateItem"
+
+    Status:
+      type: object
+      required: [id, timelineId, name, color, isClosed, position, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        timelineId:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          description: Hex color string (e.g. "#3B82F6").
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID. Null if not set.
+        isClosed:
+          type: boolean
+          description: Closed statuses filter activities out of active views.
+        position:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateStatusTemplateInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+
+    PatchStatusTemplateInput:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        position:
+          type: integer
+
+    CreateStatusTemplateItemInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+
+    PatchStatusTemplateItemInput:
+      type: object
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+        position:
+          type: integer
+
   # ────────────────────────────────────────────────────────────
   # Reusable responses
   # ────────────────────────────────────────────────────────────
@@ -612,6 +742,14 @@ components:
       in: path
       required: true
       description: Saved filter ID.
+      schema:
+        type: string
+
+    id:
+      name: id
+      in: path
+      required: true
+      description: Resource ID.
       schema:
         type: string
 
@@ -2437,6 +2575,221 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /teams/{teamId}/status-templates:
+    get:
+      operationId: listStatusTemplates
+      summary: List all status templates for a team
+      tags: [statusTemplates]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of status templates with their items.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StatusTemplate"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createStatusTemplate
+      summary: Create a status template
+      tags: [statusTemplates]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStatusTemplateInput"
+      responses:
+        "201":
+          description: Created status template (with empty items array).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /status-templates/{id}:
+    patch:
+      operationId: updateStatusTemplate
+      summary: Rename or reorder a status template
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchStatusTemplateInput"
+      responses:
+        "200":
+          description: Updated status template.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteStatusTemplate
+      summary: Delete a status template (blocked if it is the last one)
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot delete the last template on the team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /status-templates/{id}/items:
+    post:
+      operationId: createStatusTemplateItem
+      summary: Add an item to a status template
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStatusTemplateItemInput"
+      responses:
+        "201":
+          description: Created template item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplateItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /status-template-items/{id}:
+    patch:
+      operationId: updateStatusTemplateItem
+      summary: Rename, recolor, reicon, toggle is_closed, or reorder a template item
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchStatusTemplateItemInput"
+      responses:
+        "200":
+          description: Updated template item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplateItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteStatusTemplateItem
+      summary: Delete a template item (blocked if it is the last one in the template)
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot delete the last item in a template.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /teams/{teamId}/timelines/{timelineId}/statuses:
+    get:
+      operationId: listTimelineStatuses
+      summary: List statuses for a specific timeline
+      tags: [statuses]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: timelineId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of timeline statuses in position order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Status"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /timelines/share/{token}:
     get:

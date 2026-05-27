@@ -15,6 +15,7 @@ import { Badge } from '@/components/identity/Badge';
 import type { Identity } from '@/components/identity/identity-constants';
 import { IDENTITY_COLORS } from '@/components/identity/identity-constants';
 import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities';
+import StatusTemplatesTab from '@/components/StatusTemplatesTab';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   useTeamInvites, useRevokeInvite,
@@ -38,7 +39,7 @@ interface Props {
   isAdmin?: boolean;
 }
 
-type Tab = 'settings' | 'members';
+type Tab = 'settings' | 'members' | 'statuses';
 
 const DEFAULT_COLOR = IDENTITY_COLORS[0].hex;
 const DEFAULT_ICON = '__name_1__';
@@ -319,9 +320,9 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
 
         {/* Tab bar */}
         <div style={{ display: 'flex', padding: '0 20px', borderBottom: '1px solid #30363d' }}>
-          {(['settings', 'members'] as Tab[]).map(t => {
+          {(['settings', 'members', 'statuses'] as Tab[]).map(t => {
             const isActive = tab === t;
-            const locked = t === 'members' && membersLocked;
+            const locked = t === 'members' && membersLocked || t === 'statuses' && membersLocked;
             return (
               <div key={t} style={{ position: 'relative' }}>
                 <button
@@ -338,7 +339,7 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
                     textTransform: 'capitalize',
                   }}
                 >
-                  {t}
+                  {t === 'statuses' ? 'Status Templates' : t}
                   {t === 'members' && teamSaved && (
                     <span style={{ fontSize: 11, color: '#484f58', background: '#2d333b', borderRadius: 99, padding: '1px 6px' }}>
                       {members.length}
@@ -396,6 +397,12 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
                 </div>
               )}
             </div>
+          ) : tab === 'statuses' ? (
+            <StatusTemplatesTab
+              teamId={activeTeamId}
+              isAdmin={isAdmin}
+              teamColor={teamColor}
+            />
           ) : (
             // Members tab
             <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>

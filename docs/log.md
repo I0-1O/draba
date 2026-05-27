@@ -2,6 +2,30 @@
 
 ---
 
+## 2026-05-27 — Phase 10.2 — Status Templates & Timeline Statuses
+
+**Backend:**
+- Migration 012: replaced `team_statuses` table with three new tables — `status_templates` (team-level reusable presets), `status_template_items` (items within a template), `statuses` (live timeline-specific statuses copied from a template)
+- `activities.status_id` FK updated to reference `statuses(id) ON DELETE SET NULL` instead of the now-dropped `team_statuses`
+- New `StatusTemplate`, `StatusTemplateItem`, `Status` models in `models.go`
+- New `StatusRepo` (`internal/db/status_repo.go`): full CRUD for templates, template items, and statuses; `SeedDefaultTemplate` creates the "Simple" preset (Planned / In Progress / Done, Done is `is_closed`); `CopyTemplateToTimeline` copies the team's first template into live statuses on timeline creation
+- `handleCreateTeam` now seeds the default template after team creation
+- `handleCreateTimeline` now calls `CopyTemplateToTimeline` so every new timeline gets statuses from the template
+- New API endpoints: `GET/POST /teams/{id}/status-templates`, `PATCH/DELETE /status-templates/{id}`, `POST /status-templates/{id}/items`, `PATCH/DELETE /status-template-items/{id}`, `GET /teams/{id}/timelines/{timelineId}/statuses`
+- Note: `GET /timelines/{id}/statuses` conflicts with `GET /timelines/share/{token}` in Go 1.22's mux (both are 3-segment wildcard paths, ambiguous on `/timelines/share/statuses`); resolved by using the team-scoped URL `/teams/{id}/timelines/{timelineId}/statuses`
+- OpenAPI spec updated with `StatusTemplate`, `StatusTemplateItem`, `Status`, and all input schemas; TypeScript types regenerated
+
+**Tests:**
+- `status_handler_test.go`: 5 tests covering default seeding on team create, admin-only template creation, last-template deletion guard, template item add/delete, and timeline status copy-from-template
+- `migrations_test.go` updated: `team_statuses` removed from expected tables; `status_templates`, `status_template_items`, `statuses` added; `activities.status_id` FK target verified
+
+**Frontend:**
+- `useStatusTemplates.ts` — hooks for all status template and timeline status endpoints
+- `StatusTemplatesTab.tsx` — standalone component: expandable template cards with inline item editing (name, color swatch picker, `is_closed` toggle), add/delete items with last-item guard, create/delete templates with last-template guard
+- `TeamModal.tsx` — added "Status Templates" tab (3rd tab alongside Settings and Members); tab is locked until the team is saved
+
+---
+
 ## 2026-05-27 — /review-phase 10.1.4 — fixes applied
 
 Post-review fixes across security, tests, spec, and conventions:

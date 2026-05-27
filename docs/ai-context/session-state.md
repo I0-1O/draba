@@ -15,8 +15,26 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.1.2 | Members Management | ✅ | ⬜ needs Docker verification |
 | 10.1.3 | Settings — Profile, Tokens & Admin | ✅ | ⬜ needs Docker verification |
 | 10.1.4 | Member Access & Data Lifecycle | ✅ | ⬜ needs Docker verification |
+| 10.2 | Status Templates & Timeline Statuses | ✅ | ⬜ needs Docker verification |
 
-Next phase to build: **10.2** — Team Statuses & Member Colors (API + UI).
+Next phase to build: **10.3** — Timelines — Full CRUD (API + UI).
+
+---
+
+## Phase 10.2 Implemented (2026-05-27 — not yet Docker-verified)
+
+**Backend:**
+- Migration 012: replaced `team_statuses` with `status_templates` + `status_template_items` + `statuses`; rebuilt `activities` table so `status_id` references `statuses(id) ON DELETE SET NULL`
+- New `StatusRepo` with full CRUD + `SeedDefaultTemplate` + `CopyTemplateToTimeline`
+- `handleCreateTeam` seeds "Simple" template (Planned / In Progress / Done, Done is `is_closed`)
+- `handleCreateTimeline` copies team's first template into live `statuses` rows
+- Endpoints: `GET/POST /teams/{id}/status-templates`, `PATCH/DELETE /status-templates/{id}`, `POST /status-templates/{id}/items`, `PATCH/DELETE /status-template-items/{id}`, `GET /teams/{id}/timelines/{timelineId}/statuses`
+- Note: statuses endpoint is team-scoped (not `/timelines/{id}/statuses`) to avoid Go 1.22 mux conflict with `/timelines/share/{token}`
+
+**Frontend:**
+- `useStatusTemplates.ts` hooks for all status endpoints
+- `StatusTemplatesTab.tsx` — expandable template cards with inline item editing, color picker, is_closed toggle, add/delete with guards
+- `TeamModal.tsx` — "Status Templates" tab (3rd tab, locked until team saved)
 
 ---
 
@@ -129,6 +147,17 @@ These were found during manual testing of 10.1.2 and fixed 2026-05-25:
 - **repomap.md usage:** Use Grep on it for targeted symbol lookups; do not read it wholesale (1.3 MB, exceeds Read tool limit).
 
 ---
+
+## Manual Verification Checklist for 10.2 (against epcot.lan:8081)
+
+- [ ] Open TeamModal for a new team → create it → switch to "Status Templates" tab → "Simple" template shows with Planned / In Progress / Done items
+- [ ] Click an item name to edit inline → change name/color → save → persists
+- [ ] Toggle is_closed on an item → save → persists
+- [ ] Add a new item to a template → appears in list
+- [ ] Delete a non-last item → success; attempt to delete last item → error message "Cannot delete the last item"
+- [ ] Create a second template → appears in list; delete it → success; delete remaining template → error "Cannot delete the last template"
+- [ ] Create a new timeline → `GET /teams/{id}/timelines/{timelineId}/statuses` returns 3 statuses matching Simple template
+- [ ] Existing timelines (created before migration 012) show empty statuses list (no statuses copied retroactively)
 
 ## Manual Verification Checklist for 10.1.4 (against epcot.lan:8081)
 

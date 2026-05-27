@@ -38,7 +38,7 @@ func savedFilterTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID st
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
 	isrSF := db.NewInstanceSettingsRepo(database)
-	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, savedFiltersRepo, db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrSF, db.NewPasswordResetTokenRepo(database), mailer.New(isrSF, nil), tokens, tier.Unlimited, bus, hub).Routes()
+	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, savedFiltersRepo, db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isrSF, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), mailer.New(isrSF, nil), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@savedfilter.com", "password1", "Alice")
 
@@ -175,7 +175,7 @@ func TestUpdateSavedFilter_NonOwnerForbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&f))
 	filterID := f["id"].(string)
 
-	// Alice tries to update it — forbidden.
+	// Alice tries to update it â€” forbidden.
 	wUpd := httptest.NewRecorder()
 	srv.ServeHTTP(wUpd, authReq(http.MethodPatch, fmt.Sprintf("/saved_filters/%s", filterID),
 		map[string]any{"name": "hijacked"}, aliceToken))

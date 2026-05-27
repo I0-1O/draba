@@ -38,8 +38,8 @@ This document organizes development into discrete phases with effort estimates a
 | 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
 | 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | 🔄 |
 | 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | 🔄 |
-| 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
-| 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
+| 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | 🔄 In Progress |
+| 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | ⬜ |
 | 10.4 | [Preference Consumption, Branding & Backup](#phase-104--preference-consumption-branding--backup-admin) | S — 1 day | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
@@ -846,41 +846,59 @@ Hard-delete of a `team_members` row is only ever permitted when the member has z
 
 ---
 
-### Phase 10.2 — Team Statuses & Member Colors (API + UI)
-**Status:** ⬜ | **Effort:** M (1–2 days)
+### Phase 10.2 — Status Templates & Timeline Statuses
+**Status:** 🔄 In Progress — 2026-05-27, all automated checks pass; manual Docker verification still needed | **Effort:** M (2–3 days)
 
-Statuses are team-scoped configuration; pairing them with the Statuses tab UI in one phase keeps the API and the only consumer of that API shipping together. Required before Phase 11.3 (Kanban) so admins can configure columns. Depends on 10.1.2 (Members) because the statuses tab sits alongside the Members tab in team settings.
+Statuses represent phases for an activity (e.g., Planned → In Progress → Done). They are **timeline-scoped** — each timeline has its own set. To reduce setup friction, teams maintain **status templates** (reusable presets). When a timeline is created, a template's items are copied into timeline-specific status rows; from that point the timeline's statuses are independent of the template. Activities default to null status (no auto-assignment). Required before Phase 11.3 (Kanban) so admins can configure columns.
+
+**Data model:**
+
+*`status_templates` (team-level reusable presets):*
+- `id`, `team_id` (FK teams), `name`, `description`, `position`, `created_by` (FK users), `created_at`, `updated_at`
+
+*`status_template_items` (statuses within a template):*
+- `id`, `template_id` (FK status_templates CASCADE), `name`, `color`, `icon`, `is_closed` (boolean — closure flag for filtering), `position`
+
+*`statuses` (live statuses on a timeline, copied from template):*
+- `id`, `timeline_id` (FK timelines CASCADE), `name`, `color`, `icon`, `is_closed`, `position`, `created_at`, `updated_at`
+
+*Migration:* `activities.status_id` FK moves from `team_statuses` → `statuses`; drop `team_statuses`.
 
 **Scope:**
 
-*API:*
-- `team_statuses` migration and repository
-- Seed default statuses (Planned / In Progress / Done) on team creation
-- `GET /teams/:id/statuses`, `POST /teams/:id/statuses`
-- `PATCH /statuses/:id` — rename, recolor, reorder
-- `DELETE /statuses/:id` — requires `replacementStatusId`; migrates events
-- Self-protect: cannot delete the last remaining status on a team
-- `color` field on `team_members` (already established in 10.1 via member PATCH; reaffirmed here)
+*API — templates (team-level):*
+- Seed one default template ("Simple": Planned / In Progress / Done; Done is `is_closed`) on team creation
+- `GET /teams/:id/status-templates` — list templates with items
+- `POST /teams/:id/status-templates` — create template
+- `PATCH /status-templates/:id` — rename, reorder
+- `DELETE /status-templates/:id` — blocked if last template on team
+- `POST /status-templates/:id/items` — add item
+- `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder
+- `DELETE /status-template-items/:id` — blocked if last item in template
 
-*Web:*
-- `/settings/team/:id` — Statuses tab: drag-to-reorder list, inline rename, color picker
-- Delete-with-replacement dialog: lists affected event count, requires picking a replacement status before confirming
-- Member color picker in Members tab (already shipped in 10.1) — confirmed wired to the same color field
+*API — timeline statuses:*
+- On timeline creation, copy items from chosen template (or team's first template) into `statuses`
+- `GET /timelines/:id/statuses` — list statuses for a timeline
+
+*Web — Team Modal → "Status Templates" tab:*
+- List templates with expand/collapse to show items
+- Create template, rename, delete (with guard)
+- Within a template: add/remove/reorder items, inline edit name + identity (color/icon) + is_closed toggle
+- Drag-to-reorder items
 
 **Exit criteria — safe to pause when:**
-- A newly created team has exactly 3 seeded statuses
-- Statuses can be renamed, recolored, and reordered from the UI; changes persist
-- Deleting a status without a replacement is blocked at both API and UI levels
-- Deleting a status with a replacement migrates all associated events
-- Deleting the last remaining status is blocked
-- Member color changes from the Members tab reflect immediately wherever members are shown
+- New team gets one "Simple" template with 3 statuses (last marked closed)
+- Templates can be created, edited, reordered, deleted from team modal
+- Creating a timeline copies the selected template's statuses into `statuses` table
+- `GET /timelines/:id/statuses` returns the copied statuses
+- `is_closed` flag stored and returned in API responses
 
 ---
 
 ### Phase 10.3 — Timelines — Full CRUD (API + UI)
-**Status:** ⬜ | **Effort:** M (2 days)
+**Status:** ⬜ | **Effort:** M (2–3 days)
 
-Closes the Timelines cornerstone. Same problem space as 10.1: today timelines can be created in the wizard and never managed afterward, and access lists exist in the schema (Phase 8.0) with no CRUD endpoints.
+Closes the Timelines cornerstone. Same problem space as 10.1: today timelines can be created in the wizard and never managed afterward, and access lists exist in the schema (Phase 8.0) with no CRUD endpoints. Also wires the status system from 10.2 into the timeline and activity UIs.
 
 **Scope:**
 
@@ -889,20 +907,38 @@ Closes the Timelines cornerstone. Same problem space as 10.1: today timelines ca
 - `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (depends on Phase 9)
 - `DELETE /timelines/:id` — hard delete; admin only; confirms via second action
 
+*API — timeline statuses (editing):*
+- `POST /timelines/:id/statuses` — add a status
+- `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder
+- `DELETE /statuses/:id` — requires `replacementStatusId` if activities reference it; blocked if last status
+
 *API — access-list:*
 - `GET /timelines/:id/access` — list current grants (team member + role)
 - `PUT /timelines/:id/access/:memberId` — grant or update role (admin / member)
 - `DELETE /timelines/:id/access/:memberId` — revoke grant
 
-*Web:*
-- "New timeline" affordance in the sidebar timelines list → create-timeline modal (name, date range)
-- Edit-timeline modal reachable from each timeline in the sidebar (or a `/settings/team/:id/timelines` sub-route): rename, change date range, archive, delete
+*Web — timeline CRUD:*
+- "New timeline" affordance in the sidebar → create-timeline modal (name, date range, **template picker** with status preview)
+- Edit-timeline modal reachable from each timeline in the sidebar: rename, change date range, archive, delete
 - Access-list management UI: search-pick team members, role toggle, remove
 - Sidebar shows archived timelines under a collapsed "Archived" group; unarchive from there
 
+*Web — status uplifts (wiring 10.2 into the UI):*
+- **Timeline status management:** within edit-timeline modal, a "Statuses" tab where admins can add, rename, reorder, delete statuses; delete-with-replacement dialog shows affected activity count; identity (color/icon) and is_closed toggle inline
+- **Activity detail status picker:** `ActivityDetailPanel` gets a status dropdown populated from `GET /timelines/:id/statuses`; shows identity (color dot + icon) next to each option; null = "No status"
+- **"Hide closed" filter toggle:** in the Gantt toolbar filter area, hides activities whose status has `is_closed = true`
+
+*Deferred:*
+- "Re-apply template" (replace timeline statuses from a template with merge semantics) — future effort
+- Gantt bar status indicator (small color dot/icon on bars) — polish pass
+
 **Exit criteria — safe to pause when:**
 - A user can create a second timeline without going through the first-run wizard
-- A timeline admin can rename a timeline and change its date range; events outside the new range are not deleted, just hidden from default views
+- Timeline creation modal shows template picker; selected template's statuses are previewed and copied
+- A timeline admin can rename a timeline and change its date range; activities outside the new range are not deleted, just hidden from default views
+- Timeline status management: add, rename, reorder, delete (with replacement) all work from the UI
+- Activity detail panel shows status dropdown; selected status persists across reload
+- "Hide closed" toggle hides activities with a closed status; removing the filter restores them
 - Archiving a timeline removes it from the active sidebar; unarchive restores it
 - The access-list UI lets an admin grant / revoke access for any team member; a non-admin attempting these actions is rejected
 - A team member without an access grant cannot open the timeline (existing 8.0 enforcement) — verified end-to-end through the new UI

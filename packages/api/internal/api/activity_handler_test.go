@@ -38,7 +38,7 @@ func activityTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID strin
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
 	isr := db.NewInstanceSettingsRepo(database)
-	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
+	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@activity.com", "password1", "Alice")
 
@@ -268,7 +268,7 @@ func activityTestSetupWithBus(t *testing.T) (srv http.Handler, aliceToken, teamI
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
 	isr := db.NewInstanceSettingsRepo(database)
-	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
+	srv = api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
 
 	aliceToken, _ = seedUser(t, srv, "alice@bustest.com", "password1", "Alice")
 
@@ -373,7 +373,7 @@ func TestActivityCRUD_NonMemberForbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
 	activityID := created["id"].(string)
 
-	// Register an outsider — not a member of the activities team.
+	// Register an outsider â€” not a member of the activities team.
 	outsiderToken := seedNonMember(t, srv, aliceToken, "outsider@activity.com", "Outsider")
 
 	// All activity operations should return 403 for the outsider.

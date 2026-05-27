@@ -96,6 +96,12 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Copy the team's first status template's items into live statuses for this timeline.
+	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
 	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
 	writeJSON(w, http.StatusCreated, timeline)
 }

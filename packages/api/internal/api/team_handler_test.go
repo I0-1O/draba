@@ -40,7 +40,7 @@ func newTeamTestServer(t *testing.T) (http.Handler, *auth.TokenService) {
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
 	isr := db.NewInstanceSettingsRepo(database)
-	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
 	return srv, tokens
 }
 
@@ -71,7 +71,7 @@ func newTeamTestServerFull(t *testing.T) *testServerEnv {
 
 	isr := db.NewInstanceSettingsRepo(database)
 	pwr := db.NewPasswordResetTokenRepo(database)
-	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, pwr, mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, pwr, db.NewStatusRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
 	return &testServerEnv{srv: srv, toks: tokens, passwordTokens: pwr}
 }
 
@@ -183,7 +183,7 @@ func TestInviteFlow_FullCycle(t *testing.T) {
 	// Bob registers via the invite token.
 	bobToken, _ := seedUserWithInvite(t, srv, "bob@example.com", "password2", "Bob", inviteToken)
 
-	// Alice lists members — should see both Alice and Bob.
+	// Alice lists members â€” should see both Alice and Bob.
 	w3 := httptest.NewRecorder()
 	srv.ServeHTTP(w3, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, aliceToken))
 	require.Equal(t, http.StatusOK, w3.Code)
@@ -216,7 +216,7 @@ func TestCreateInvite_NonAdminForbidden(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
 	bobToken, _ := seedUserWithInvite(t, srv, "bob@example.com", "password2", "Bob", inv["token"].(string))
 
-	// Bob (member) tries to send an invite — should be forbidden.
+	// Bob (member) tries to send an invite â€” should be forbidden.
 	w3 := httptest.NewRecorder()
 	srv.ServeHTTP(w3, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
 		map[string]string{"email": "carol@example.com"}, bobToken))
@@ -289,7 +289,7 @@ func TestCreateTeam_SameNameAllowed(t *testing.T) {
 	srv, _ := newTeamTestServer(t)
 	token, _ := seedUser(t, srv, "alice@example.com", "password1", "Alice")
 
-	// Two teams with the same name are allowed — slugs include the team ID so
+	// Two teams with the same name are allowed â€” slugs include the team ID so
 	// they never collide even when the names are identical.
 	w1 := httptest.NewRecorder()
 	srv.ServeHTTP(w1, authReq(http.MethodPost, "/teams", map[string]string{"name": "Engineering"}, token))
@@ -534,7 +534,7 @@ func TestTierTeamLimit(t *testing.T) {
 	srv := api.NewServer(
 		users, db.NewInviteRepo(database), teamsRepo, db.NewActivityRepo(database), db.NewTimelineRepo(database),
 		db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database),
-		isr2, db.NewPasswordResetTokenRepo(database), mailer.New(isr2, nil), toks2, tier.Team, bus2, hub2,
+		isr2, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), mailer.New(isr2, nil), toks2, tier.Team, bus2, hub2,
 	).Routes()
 
 	// Register first user (no invite needed).
@@ -550,7 +550,7 @@ func TestTierTeamLimit(t *testing.T) {
 	assert.Equal(t, "TIER_TEAM_LIMIT", errObj["code"])
 }
 
-// ── Member management tests ───────────────────────────────────────────────────
+// â”€â”€ Member management tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // memberTestSetup returns a server, Alice's admin token, Bob's member token,
 // and the shared team ID.
@@ -588,7 +588,7 @@ func TestUpdateMember_RoleChange_AdminOnly(t *testing.T) {
 	}
 	require.NotEmpty(t, bobMemberID)
 
-	// Bob (member) tries to change his own role — forbidden.
+	// Bob (member) tries to change his own role â€” forbidden.
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, authReq(http.MethodPatch, fmt.Sprintf("/teams/%s/members/%s", teamID, bobMemberID),
 		map[string]string{"role": "admin"}, bobToken))
@@ -622,7 +622,7 @@ func TestDeleteMember_LastAdminBlocked(t *testing.T) {
 	}
 	require.NotEmpty(t, aliceMemberID)
 
-	// Alice is the sole admin — deleting her should return LAST_ADMIN.
+	// Alice is the sole admin â€” deleting her should return LAST_ADMIN.
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, authReq(http.MethodDelete, fmt.Sprintf("/teams/%s/members/%s", teamID, aliceMemberID),
 		nil, aliceToken))
@@ -803,12 +803,12 @@ func TestGetMemberStats_Success(t *testing.T) {
 	assert.Contains(t, stats, "pastDue")
 }
 
-// ── Invite-link tests ─────────────────────────────────────────────────────────
+// â”€â”€ Invite-link tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func TestInviteLink_CreateGetReset(t *testing.T) {
 	srv, aliceToken, bobToken, teamID := memberTestSetup(t)
 
-	// No link yet — GET returns null token field.
+	// No link yet â€” GET returns null token field.
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/invite-link", teamID), nil, aliceToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -865,7 +865,7 @@ func TestInviteLink_Revoke(t *testing.T) {
 	assert.Nil(t, body["token"])
 }
 
-// ── User search tests ─────────────────────────────────────────────────────────
+// â”€â”€ User search tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func TestSearchUsers_SafeFields(t *testing.T) {
 	srv, aliceToken, _, teamID := memberTestSetup(t)
