@@ -35,6 +35,27 @@ export function useUpdateProfile() {
   })
 }
 
+// ── My stats ──────────────────────────────────────────────────────────────────
+
+interface MemberStats {
+  activeTimelines: number
+  archivedTimelines: number
+  pastDue: number
+  running: number
+  upcoming: number
+  unscheduled: number
+  archivedActivities: number
+}
+
+export function useMyStats() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: ['me', 'stats'],
+    queryFn: () => authFetch<MemberStats>('/users/me/stats'),
+  })
+}
+
 // ── Password ──────────────────────────────────────────────────────────────────
 
 export function useChangePassword() {

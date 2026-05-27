@@ -63,6 +63,18 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, user)
 }
 
+// handleGetMyStats handles GET /users/me/stats. Returns aggregated activity and
+// timeline counts across all of the authenticated user's team memberships.
+func (s *Server) handleGetMyStats(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	stats, err := s.teams.GetUserStats(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
 // handleChangePassword handles PUT /users/me/password. Requires the caller
 // to supply the current password before setting a new one.
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {

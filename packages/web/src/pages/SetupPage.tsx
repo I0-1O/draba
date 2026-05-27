@@ -311,7 +311,7 @@ interface SetupStatus {
 }
 
 export default function SetupPage() {
-  const { register } = useAuth()
+  const { register, user } = useAuth()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
@@ -339,9 +339,9 @@ export default function SetupPage() {
   // Wait for the status check before rendering anything.
   if (statusLoading) return null
 
-  // Setup already done — send to login.
+  // Setup already done — logged-in users go home, others go to login.
   if (setupStatus && !setupStatus.needsSetup) {
-    return <Navigate to="/login" replace />
+    return <Navigate to={user ? '/' : '/login'} replace />
   }
 
   function handleChange(patch: Partial<WizardData>) {

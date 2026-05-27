@@ -106,7 +106,7 @@ func (r *TeamRepo) GetMember(teamID, userID string) (*models.TeamMember, error) 
 
 // ListMembers returns active (non-archived) members of a team, including
 // login-less Participants. A LEFT JOIN handles Participants who have no users
-// row; COALESCE resolves display_name from users first, then team_members.
+// row; COALESCE prefers the per-team display_name override, then falls back to users.
 func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, error) {
 	return r.listMembers(teamID, false)
 }
@@ -122,7 +122,7 @@ func (r *TeamRepo) listMembers(teamID string, includeArchived bool) ([]*models.T
 		SELECT
 			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
 			COALESCE(u.email, '')                          AS email,
-			COALESCE(u.display_name, tm.display_name, '') AS display_name,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
 			u.avatar_url
 		FROM team_members tm
 		LEFT JOIN users u ON u.id = tm.user_id
@@ -190,7 +190,7 @@ func (r *TeamRepo) GetMemberByID(memberID string) (*models.TeamMemberWithUser, e
 		SELECT
 			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
 			COALESCE(u.email, '')                          AS email,
-			COALESCE(u.display_name, tm.display_name, '') AS display_name,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
 			u.avatar_url
 		FROM team_members tm
 		LEFT JOIN users u ON u.id = tm.user_id
@@ -328,6 +328,53 @@ func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) 
 	return &stats, nil
 }
 
+// GetUserStats aggregates activity and timeline counts across all of a user's
+// team memberships. Used by GET /users/me/stats for the profile page.
+func (r *TeamRepo) GetUserStats(userID string) (*models.MemberStats, error) {
+	now := time.Now()
+	var stats models.MemberStats
+
+	if err := r.db.Get(&stats.ActiveTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting active timelines: %w", err)
+	}
+	if err := r.db.Get(&stats.ArchivedTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NOT NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting archived timelines: %w", err)
+	}
+
+	rows, err := r.db.Query(`
+		SELECT
+			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ? THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                   THEN 1 ELSE 0 END), 0)
+		FROM activity_assignments aa
+		JOIN activities a ON a.id = aa.activity_id
+		JOIN team_members tm ON tm.id = aa.team_member_id
+		WHERE tm.user_id = ?
+	`, now, now, now, now, userID)
+	if err != nil {
+		return nil, fmt.Errorf("computing activity stats: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
+			return nil, fmt.Errorf("scanning activity stats: %w", err)
+		}
+	}
+
+	return &stats, nil
+}
+
 // GetMemberAllTeams returns all team memberships for a user (across all teams).
 // Used to populate the "Teams" section of the Member Edit Modal.
 func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUser, error) {
@@ -336,7 +383,7 @@ func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUse
 		SELECT
 			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
 			COALESCE(u.email, '')                          AS email,
-			COALESCE(u.display_name, tm.display_name, '') AS display_name,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
 			u.avatar_url
 		FROM team_members tm
 		LEFT JOIN users u ON u.id = tm.user_id

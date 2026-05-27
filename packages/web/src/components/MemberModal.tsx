@@ -229,9 +229,25 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
                   {isInactivated && ' · Inactive'}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3' }}>{effectiveName}</span>
+                  {(isAdmin || currentUser?.id === detail.userId) ? (
+                    <input
+                      value={displayName ?? detail.displayName}
+                      onChange={e => setDisplayName(e.target.value)}
+                      style={{
+                        fontSize: 16, fontWeight: 600, color: '#e6edf3',
+                        background: 'transparent', border: 'none', outline: 'none',
+                        padding: '1px 4px', margin: '-1px -4px',
+                        borderRadius: 4, fontFamily: 'inherit',
+                        minWidth: 0, flex: 1,
+                      }}
+                      onFocus={e => { e.currentTarget.style.background = '#2d333b'; e.currentTarget.style.border = '1px solid #30363d' }}
+                      onBlur={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.border = 'none' }}
+                    />
+                  ) : (
+                    <span style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3' }}>{effectiveName}</span>
+                  )}
                   {isParticipant && (
-                    <span style={{ fontSize: 11, fontWeight: 600, background: '#F59E0B20', border: '1px solid #F59E0B44', color: '#F59E0B', borderRadius: 99, padding: '1px 7px' }}>No login</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, background: '#F59E0B20', border: '1px solid #F59E0B44', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
                   )}
                 </div>
               </div>
@@ -243,27 +259,15 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
             {/* Scrollable body */}
             <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
 
-              {/* Name + email */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
-                <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Display Name</label>
-                  {(isAdmin || currentUser?.id === detail.userId) ? (
-                    <input
-                      value={displayName ?? detail.displayName}
-                      onChange={e => setDisplayName(e.target.value)}
-                      style={{ background: '#2d333b', border: '1px solid #30363d', borderRadius: 7, padding: '8px 12px', color: '#e6edf3', fontSize: 13, width: '100%', boxSizing: 'border-box', fontFamily: 'inherit' }}
-                    />
-                  ) : (
-                    <div style={{ fontSize: 13, color: '#8b949e', padding: '8px 0' }}>{detail.displayName}</div>
-                  )}
-                </div>
-                <div>
+              {/* Email */}
+              {!isParticipant && (
+                <div style={{ marginBottom: 20 }}>
                   <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
                   <div style={{ fontSize: 13, color: '#8b949e', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {isParticipant ? <em style={{ color: '#484f58' }}>No email — participant</em> : detail.email}
+                    {detail.email}
                   </div>
                 </div>
-              </div>
+              )}
 
               {/* Timeline stats */}
               <div style={{ marginBottom: 16 }}>

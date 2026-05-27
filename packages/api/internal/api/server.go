@@ -115,6 +115,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
 	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
 	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
 	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
 
