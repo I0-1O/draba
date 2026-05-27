@@ -110,6 +110,8 @@ packages/
         saved_filter_handler.go
         server.go
         setup_handler.go
+        status_handler.go
+        status_types.go
         team_handler.go
         timeline_handler.go
         user_handler.go
@@ -131,6 +133,7 @@ packages/
           009_member_management.sql
           010_settings.sql
           011_fk_restrict.sql
+          012_status_templates.sql
         activity_repo.go
         api_token_repo.go
         db.go
@@ -139,6 +142,7 @@ packages/
         migrations.go
         password_reset_token_repo.go
         saved_filter_repo.go
+        status_repo.go
         team_repo.go
         timeline_repo.go
         user_preference_repo.go
@@ -208,6 +212,7 @@ packages/
         MemberModal.tsx
         ProtectedRoute.tsx
         RoleDropdown.tsx
+        StatusTemplatesTab.tsx
         TeamModal.tsx
       contexts/
         AuthContext.tsx
@@ -219,6 +224,7 @@ packages/
         usePreferences.ts
         useSavedFilters.ts
         useSettings.ts
+        useStatusTemplates.ts
         useTeamActivities.ts
         useWebSocket.ts
       lib/
@@ -2474,6 +2480,61 @@ Apache License
 ````yaml
 packages:
   - "packages/*"
+````
+
+## File: README.md
+````markdown
+# draba
+
+> **Who is working on what, and when?**
+
+**draba** is a lightweight team coordination and planning tool designed for small teams (5–20 people) who need visibility across people and time, without the heavy overhead of tickets, sprints, or complex dependencies. 
+
+It is not a calendar replacement. It is not a project management suite. It is a **shared team timeline** that your team can adopt in minutes.
+
+---
+
+## Key Features
+
+- **Horizontal Timeline:** The primary view is a person-first timeline. See exactly what everyone is doing at a glance.
+- **Real-Time Collaboration:** Multiple users can view and edit simultaneously. Changes appear instantly for everyone without refreshing.
+- **Calendar Sync (Coming Soon):** Two-way sync with Google Calendar, plus a built-in CalDAV server so you can connect native apps (like Apple Calendar) directly to draba.
+- **Public & Restricted Views:** Share specific timelines publicly with a stable link, or restrict them to authenticated team members.
+- **Zero-Friction Self-Hosting:** Runs as a single Docker container with an embedded SQLite database. No external services required.
+
+## Technology Stack
+
+draba is built as an API-first, event-driven application:
+
+- **Backend:** Go (API + built-in CalDAV server)
+- **Database:** SQLite (default for zero-config hosting) via `sqlx`
+- **Frontend:** React 19, TypeScript, Vite, and Tailwind CSS v4
+- **Real-Time:** WebSockets (team-scoped broadcasting)
+- **API Contract:** OpenAPI with auto-generated TypeScript types
+
+## Status
+
+draba is currently under active development. The core API foundation (auth, teams, events, websockets) is complete, and we are currently building out the React frontend. 
+
+Check out the `docs/` folder for our architecture decisions, roadmap, and design patterns.
+
+## Deployment (Self-Hosted)
+
+draba is deployable as a single Docker container. The official image is available on Docker Hub at `mewcus/draba`.
+
+```yaml
+services:
+  draba:
+    image: mewcus/draba:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+```
+
+## License
+
+[MIT License](LICENSE)
 ````
 
 ## File: .github/workflows/ci.yml
@@ -8640,6 +8701,493 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
+## File: packages/api/internal/api/status_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ── Status templates ──────────────────────────────────────────────────────────
+
+// handleListStatusTemplates handles GET /teams/{id}/status-templates.
+// Any team member may list the team's status templates.
+func (s *Server) handleListStatusTemplates(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list status templates")
+		return
+	}
+
+	templates, err := s.statuses.ListTemplates(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list status templates")
+		return
+	}
+	writeJSON(w, http.StatusOK, templates)
+}
+
+// handleCreateStatusTemplate handles POST /teams/{id}/status-templates.
+// Team admins only.
+func (s *Server) handleCreateStatusTemplate(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	member, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status template")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var req CreateStatusTemplateJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	// Position defaults to end of existing list.
+	count, err := s.statuses.CountTemplates(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status template")
+		return
+	}
+
+	now := time.Now()
+	t := &models.StatusTemplate{
+		ID:        newID(),
+		TeamID:    teamID,
+		Name:      name,
+		Position:  count,
+		CreatedBy: claims.UserID,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if req.Description != nil {
+		t.Description = req.Description
+	}
+	if err := s.statuses.CreateTemplate(t); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status template")
+		return
+	}
+	t.Items = []models.StatusTemplateItem{}
+	writeJSON(w, http.StatusCreated, t)
+}
+
+// handleUpdateStatusTemplate handles PATCH /status-templates/{id}.
+// Team admins only.
+func (s *Server) handleUpdateStatusTemplate(w http.ResponseWriter, r *http.Request) {
+	templateID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	t, err := s.statuses.GetTemplate(templateID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status template")
+		return
+	}
+
+	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status template")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var req PatchStatusTemplateJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		t.Name = name
+	}
+	if req.Description != nil {
+		t.Description = req.Description
+	}
+	if req.Position != nil {
+		t.Position = *req.Position
+	}
+	t.UpdatedAt = time.Now()
+
+	if err := s.statuses.UpdateTemplate(t); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status template")
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+// handleDeleteStatusTemplate handles DELETE /status-templates/{id}.
+// Team admins only. Blocked if it is the last template on the team.
+func (s *Server) handleDeleteStatusTemplate(w http.ResponseWriter, r *http.Request) {
+	templateID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	t, err := s.statuses.GetTemplate(templateID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
+		return
+	}
+
+	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	count, err := s.statuses.CountTemplates(t.TeamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
+		return
+	}
+	if count <= 1 {
+		writeError(w, http.StatusConflict, "LAST_TEMPLATE", "cannot delete the last status template")
+		return
+	}
+
+	if err := s.statuses.DeleteTemplate(templateID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── Template items ────────────────────────────────────────────────────────────
+
+// handleCreateTemplateItem handles POST /status-templates/{id}/items.
+// Team admins only.
+func (s *Server) handleCreateTemplateItem(w http.ResponseWriter, r *http.Request) {
+	templateID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	t, err := s.statuses.GetTemplate(templateID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
+		return
+	}
+
+	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var req CreateStatusTemplateItemJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	count, err := s.statuses.CountTemplateItems(templateID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
+		return
+	}
+
+	color := "#8b949e"
+	if req.Color != nil {
+		color = *req.Color
+	}
+
+	item := &models.StatusTemplateItem{
+		ID:         newID(),
+		TemplateID: templateID,
+		Name:       name,
+		Color:      color,
+		Icon:       req.Icon,
+		Position:   count,
+	}
+	if req.IsClosed != nil {
+		item.IsClosed = *req.IsClosed
+	}
+
+	if err := s.statuses.CreateTemplateItem(item); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+// handleUpdateTemplateItem handles PATCH /status-template-items/{id}.
+// Team admins only.
+func (s *Server) handleUpdateTemplateItem(w http.ResponseWriter, r *http.Request) {
+	itemID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	item, err := s.statuses.GetTemplateItem(itemID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template item not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
+		return
+	}
+
+	t, err := s.statuses.GetTemplate(item.TemplateID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
+		return
+	}
+
+	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var req PatchStatusTemplateItemJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		item.Name = name
+	}
+	if req.Color != nil {
+		item.Color = *req.Color
+	}
+	if req.Icon != nil {
+		item.Icon = req.Icon
+	}
+	if req.IsClosed != nil {
+		item.IsClosed = *req.IsClosed
+	}
+	if req.Position != nil {
+		item.Position = *req.Position
+	}
+
+	if err := s.statuses.UpdateTemplateItem(item); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+// handleDeleteTemplateItem handles DELETE /status-template-items/{id}.
+// Team admins only. Blocked if it is the last item in the template.
+func (s *Server) handleDeleteTemplateItem(w http.ResponseWriter, r *http.Request) {
+	itemID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	item, err := s.statuses.GetTemplateItem(itemID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template item not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
+		return
+	}
+
+	t, err := s.statuses.GetTemplate(item.TemplateID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
+		return
+	}
+
+	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	count, err := s.statuses.CountTemplateItems(item.TemplateID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
+		return
+	}
+	if count <= 1 {
+		writeError(w, http.StatusConflict, "LAST_ITEM", "cannot delete the last item in a template")
+		return
+	}
+
+	if err := s.statuses.DeleteTemplateItem(itemID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── Timeline statuses ─────────────────────────────────────────────────────────
+
+// handleListTimelineStatuses handles GET /teams/{id}/timelines/{timelineId}/statuses.
+// Any member with access to the timeline may list its statuses.
+func (s *Server) handleListTimelineStatuses(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
+		return
+	}
+
+	if member.Role != "admin" {
+		ok, err := s.timelines.HasAccess(timelineID, member.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
+			return
+		}
+	}
+
+	statuses, err := s.statuses.ListStatuses(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
+		return
+	}
+	writeJSON(w, http.StatusOK, statuses)
+}
+````
+
+## File: packages/api/internal/api/status_types.go
+````go
+package api
+
+// CreateStatusTemplateJSONBody is the request body for POST /teams/{id}/status-templates.
+type CreateStatusTemplateJSONBody struct {
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
+}
+
+// PatchStatusTemplateJSONBody is the request body for PATCH /status-templates/{id}.
+type PatchStatusTemplateJSONBody struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Position    *int    `json:"position,omitempty"`
+}
+
+// CreateStatusTemplateItemJSONBody is the request body for POST /status-templates/{id}/items.
+type CreateStatusTemplateItemJSONBody struct {
+	Name     string  `json:"name"`
+	Color    *string `json:"color,omitempty"`
+	Icon     *string `json:"icon,omitempty"`
+	IsClosed *bool   `json:"isClosed,omitempty"`
+}
+
+// PatchStatusTemplateItemJSONBody is the request body for PATCH /status-template-items/{id}.
+type PatchStatusTemplateItemJSONBody struct {
+	Name     *string `json:"name,omitempty"`
+	Color    *string `json:"color,omitempty"`
+	Icon     *string `json:"icon,omitempty"`
+	IsClosed *bool   `json:"isClosed,omitempty"`
+	Position *int    `json:"position,omitempty"`
+}
+````
+
 ## File: packages/api/internal/auth/api_token.go
 ````go
 package auth
@@ -9036,6 +9584,107 @@ CREATE TABLE timeline_access (
 INSERT INTO timeline_access (timeline_id, team_member_id, role)
     SELECT timeline_id, team_member_id, role FROM tmp_timeline_access;
 DROP TABLE tmp_timeline_access;
+````
+
+## File: packages/api/internal/db/migrations/012_status_templates.sql
+````sql
+-- Phase 10.2: Status templates and timeline statuses.
+--
+-- Replaces team_statuses with a two-level template system:
+--   status_templates      — reusable named presets owned by a team
+--   status_template_items — the individual status values in a template
+--   statuses              — live statuses on a specific timeline, copied from a template
+--
+-- activities.status_id formerly referenced team_statuses(id). Since SQLite does not
+-- support ALTER TABLE … DROP CONSTRAINT, the activities table is rebuilt with the FK
+-- pointing to statuses(id). All existing status_id values are NULL (no UI ever set them),
+-- so the NULL-preserving INSERT below is a no-op data migration.
+--
+-- team_statuses is dropped after the rebuild because it is fully superseded.
+
+-- 1. New template tables.
+
+CREATE TABLE status_templates (
+    id          TEXT PRIMARY KEY,
+    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    description TEXT,
+    position    INTEGER NOT NULL DEFAULT 0,
+    created_by  TEXT NOT NULL REFERENCES users(id),
+    created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at  DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE status_template_items (
+    id          TEXT PRIMARY KEY,
+    template_id TEXT NOT NULL REFERENCES status_templates(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    color       TEXT NOT NULL DEFAULT '#8b949e',
+    icon        TEXT,
+    is_closed   BOOLEAN NOT NULL DEFAULT 0,
+    position    INTEGER NOT NULL DEFAULT 0
+);
+
+-- 2. Live timeline statuses table.
+
+CREATE TABLE statuses (
+    id          TEXT PRIMARY KEY,
+    timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    color       TEXT NOT NULL DEFAULT '#8b949e',
+    icon        TEXT,
+    is_closed   BOOLEAN NOT NULL DEFAULT 0,
+    position    INTEGER NOT NULL DEFAULT 0,
+    created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at  DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 3. Rebuild activities so status_id references statuses instead of team_statuses.
+--    Stash existing rows, drop, recreate, restore.
+
+CREATE TABLE tmp_activities AS SELECT * FROM activities;
+DROP TABLE activities;
+
+CREATE TABLE activities (
+    id                 TEXT PRIMARY KEY,
+    team_id            TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    title              TEXT NOT NULL,
+    description        TEXT,
+    icon               TEXT,
+    color              TEXT,
+    start_at           DATETIME NOT NULL,
+    end_at             DATETIME NOT NULL,
+    all_day            BOOLEAN NOT NULL DEFAULT 0,
+    status_id          TEXT REFERENCES statuses(id) ON DELETE SET NULL,
+    parent_activity_id TEXT REFERENCES activities(id),
+    percent_complete   INTEGER,
+    location           TEXT,
+    url                TEXT,
+    rrule              TEXT,
+    caldav_uid         TEXT,
+    google_event_id    TEXT,
+    created_by         TEXT NOT NULL REFERENCES users(id),
+    created_at         DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at         DATETIME NOT NULL DEFAULT (datetime('now')),
+    archived_at        DATETIME
+);
+
+-- status_id was always NULL before this phase; copy all other columns as-is.
+INSERT INTO activities (
+    id, team_id, title, description, icon, color, start_at, end_at, all_day,
+    status_id, parent_activity_id, percent_complete, location, url, rrule,
+    caldav_uid, google_event_id, created_by, created_at, updated_at, archived_at
+)
+SELECT
+    id, team_id, title, description, icon, color, start_at, end_at, all_day,
+    NULL, parent_activity_id, percent_complete, location, url, rrule,
+    caldav_uid, google_event_id, created_by, created_at, updated_at, archived_at
+FROM tmp_activities;
+
+DROP TABLE tmp_activities;
+
+-- 4. Drop team_statuses — fully superseded by status_templates + statuses.
+DROP TABLE team_statuses;
 ````
 
 ## File: packages/api/internal/db/activity_repo.go
@@ -9714,6 +10363,318 @@ func (r *SavedFilterRepo) Delete(id string) error {
 }
 ````
 
+## File: packages/api/internal/db/status_repo.go
+````go
+// Package db — StatusRepo manages status templates, template items,
+// and live timeline statuses.
+package db
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// StatusRepo is the persistence layer for status templates and timeline statuses.
+type StatusRepo struct {
+	db *sqlx.DB
+}
+
+// NewStatusRepo returns a StatusRepo backed by db.
+func NewStatusRepo(db *sqlx.DB) *StatusRepo {
+	return &StatusRepo{db: db}
+}
+
+// ── Templates ─────────────────────────────────────────────────────────────────
+
+// ListTemplates returns all status templates for a team, ordered by position,
+// with their items populated.
+func (r *StatusRepo) ListTemplates(teamID string) ([]*models.StatusTemplate, error) {
+	var templates []*models.StatusTemplate
+	if err := r.db.Select(&templates, `
+		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at
+	`, teamID); err != nil {
+		return nil, fmt.Errorf("listing status templates: %w", err)
+	}
+
+	// Populate items for each template in one query.
+	if len(templates) == 0 {
+		return templates, nil
+	}
+	ids := make([]string, len(templates))
+	for i, t := range templates {
+		ids[i] = t.ID
+	}
+
+	query, args, err := sqlx.In(`
+		SELECT * FROM status_template_items WHERE template_id IN (?) ORDER BY position
+	`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("building status template items query: %w", err)
+	}
+	query = r.db.Rebind(query)
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, query, args...); err != nil {
+		return nil, fmt.Errorf("listing status template items: %w", err)
+	}
+
+	byTemplate := make(map[string][]models.StatusTemplateItem)
+	for _, item := range items {
+		byTemplate[item.TemplateID] = append(byTemplate[item.TemplateID], item)
+	}
+	for _, t := range templates {
+		t.Items = byTemplate[t.ID]
+		if t.Items == nil {
+			t.Items = []models.StatusTemplateItem{}
+		}
+	}
+	return templates, nil
+}
+
+// GetTemplate returns a single status template by ID.
+func (r *StatusRepo) GetTemplate(id string) (*models.StatusTemplate, error) {
+	var t models.StatusTemplate
+	if err := r.db.Get(&t, `SELECT * FROM status_templates WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status template: %w", err)
+	}
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, `
+		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
+	`, id); err != nil {
+		return nil, fmt.Errorf("getting status template items: %w", err)
+	}
+	t.Items = items
+	if t.Items == nil {
+		t.Items = []models.StatusTemplateItem{}
+	}
+	return &t, nil
+}
+
+// CreateTemplate inserts a new status template.
+func (r *StatusRepo) CreateTemplate(t *models.StatusTemplate) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
+		VALUES (:id, :team_id, :name, :description, :position, :created_by, :created_at, :updated_at)
+	`, t)
+	if err != nil {
+		return fmt.Errorf("creating status template: %w", err)
+	}
+	return nil
+}
+
+// UpdateTemplate writes mutable template fields (name, description, position).
+func (r *StatusRepo) UpdateTemplate(t *models.StatusTemplate) error {
+	_, err := r.db.NamedExec(`
+		UPDATE status_templates
+		SET name = :name, description = :description, position = :position, updated_at = :updated_at
+		WHERE id = :id
+	`, t)
+	if err != nil {
+		return fmt.Errorf("updating status template: %w", err)
+	}
+	return nil
+}
+
+// CountTemplates returns the number of status templates for a team.
+func (r *StatusRepo) CountTemplates(teamID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_templates WHERE team_id = ?`, teamID); err != nil {
+		return 0, fmt.Errorf("counting status templates: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteTemplate deletes a status template by ID.
+func (r *StatusRepo) DeleteTemplate(id string) error {
+	_, err := r.db.Exec(`DELETE FROM status_templates WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting status template: %w", err)
+	}
+	return nil
+}
+
+// ── Template items ────────────────────────────────────────────────────────────
+
+// GetTemplateItem returns a single template item by ID.
+func (r *StatusRepo) GetTemplateItem(id string) (*models.StatusTemplateItem, error) {
+	var item models.StatusTemplateItem
+	if err := r.db.Get(&item, `SELECT * FROM status_template_items WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status template item: %w", err)
+	}
+	return &item, nil
+}
+
+// CreateTemplateItem inserts a new item into a template.
+func (r *StatusRepo) CreateTemplateItem(item *models.StatusTemplateItem) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO status_template_items (id, template_id, name, color, icon, is_closed, position)
+		VALUES (:id, :template_id, :name, :color, :icon, :is_closed, :position)
+	`, item)
+	if err != nil {
+		return fmt.Errorf("creating status template item: %w", err)
+	}
+	return nil
+}
+
+// UpdateTemplateItem writes mutable item fields (name, color, icon, is_closed, position).
+func (r *StatusRepo) UpdateTemplateItem(item *models.StatusTemplateItem) error {
+	_, err := r.db.NamedExec(`
+		UPDATE status_template_items
+		SET name = :name, color = :color, icon = :icon, is_closed = :is_closed, position = :position
+		WHERE id = :id
+	`, item)
+	if err != nil {
+		return fmt.Errorf("updating status template item: %w", err)
+	}
+	return nil
+}
+
+// CountTemplateItems returns the number of items in a template.
+func (r *StatusRepo) CountTemplateItems(templateID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_template_items WHERE template_id = ?`, templateID); err != nil {
+		return 0, fmt.Errorf("counting status template items: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteTemplateItem deletes a single template item by ID.
+func (r *StatusRepo) DeleteTemplateItem(id string) error {
+	_, err := r.db.Exec(`DELETE FROM status_template_items WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting status template item: %w", err)
+	}
+	return nil
+}
+
+// ── Seeding ───────────────────────────────────────────────────────────────────
+
+// SeedDefaultTemplate creates the "Simple" template (Planned / In Progress / Done)
+// for a newly created team. Done is marked is_closed = true.
+func (r *StatusRepo) SeedDefaultTemplate(teamID, createdBy string) error {
+	now := time.Now()
+	templateID := newRepoID()
+	t := &models.StatusTemplate{
+		ID:        templateID,
+		TeamID:    teamID,
+		Name:      "Simple",
+		Position:  0,
+		CreatedBy: createdBy,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := r.CreateTemplate(t); err != nil {
+		return err
+	}
+
+	type seed struct {
+		name     string
+		color    string
+		isClosed bool
+	}
+	seeds := []seed{
+		{"Planned", "#3B82F6", false},
+		{"In Progress", "#F59E0B", false},
+		{"Done", "#22C55E", true},
+	}
+	for i, s := range seeds {
+		item := &models.StatusTemplateItem{
+			ID:         newRepoID(),
+			TemplateID: templateID,
+			Name:       s.name,
+			Color:      s.color,
+			IsClosed:   s.isClosed,
+			Position:   i,
+		}
+		if err := r.CreateTemplateItem(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ── Timeline statuses ─────────────────────────────────────────────────────────
+
+// ListStatuses returns all statuses for a timeline, ordered by position.
+func (r *StatusRepo) ListStatuses(timelineID string) ([]*models.Status, error) {
+	var statuses []*models.Status
+	if err := r.db.Select(&statuses, `
+		SELECT * FROM statuses WHERE timeline_id = ? ORDER BY position
+	`, timelineID); err != nil {
+		return nil, fmt.Errorf("listing statuses: %w", err)
+	}
+	if statuses == nil {
+		statuses = []*models.Status{}
+	}
+	return statuses, nil
+}
+
+// GetStatus returns a single status by ID.
+func (r *StatusRepo) GetStatus(id string) (*models.Status, error) {
+	var s models.Status
+	if err := r.db.Get(&s, `SELECT * FROM statuses WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status: %w", err)
+	}
+	return &s, nil
+}
+
+// CopyTemplateToTimeline copies a template's items into live statuses for a timeline.
+// If no template is found for the team it is a silent no-op.
+func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string) error {
+	// Use the team's first template (by position, then created_at).
+	var template models.StatusTemplate
+	err := r.db.Get(&template, `
+		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at LIMIT 1
+	`, teamID)
+	if err != nil {
+		// No template — not an error; leave the timeline with no statuses.
+		return nil
+	}
+
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, `
+		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
+	`, template.ID); err != nil {
+		return fmt.Errorf("loading template items for copy: %w", err)
+	}
+
+	now := time.Now()
+	for _, item := range items {
+		s := &models.Status{
+			ID:         newRepoID(),
+			TimelineID: timelineID,
+			Name:       item.Name,
+			Color:      item.Color,
+			Icon:       item.Icon,
+			IsClosed:   item.IsClosed,
+			Position:   item.Position,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		if _, err := r.db.NamedExec(`
+			INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+			VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
+		`, s); err != nil {
+			return fmt.Errorf("copying status to timeline: %w", err)
+		}
+	}
+	return nil
+}
+
+// newRepoID generates a 32-character hex ID — same entropy as api.newID but
+// usable within the db package without importing the api package.
+func newRepoID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+````
+
 ## File: packages/api/internal/db/user_preference_repo.go
 ````go
 package db
@@ -9766,6 +10727,270 @@ func (r *UserPreferenceRepo) Upsert(p *models.UserPreference) error {
 		return fmt.Errorf("upserting user preference: %w", err)
 	}
 	return nil
+}
+````
+
+## File: packages/api/internal/ws/hub.go
+````go
+// Package ws implements the WebSocket hub and per-client read/write pumps.
+// The hub maintains a team-scoped subscription map and fans out domain event
+// messages to all clients that have subscribed to a given team.
+package ws
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+)
+
+const (
+	// defaultHeartbeatInterval is the ping cadence in production.
+	defaultHeartbeatInterval = 30 * time.Second
+	// writeTimeout is the maximum time allowed to write a single message.
+	writeTimeout = 10 * time.Second
+	// defaultReadTimeout is the read deadline reset after every pong. It is
+	// long enough for a client to respond to at least two ping cycles.
+	defaultReadTimeout = 70 * time.Second
+	// maxMessageBytes caps inbound frame size; subscribe and pong messages are
+	// tiny JSON blobs so 512 bytes is generous.
+	maxMessageBytes = 512
+)
+
+// MemberChecker reports whether userID belongs to teamID.
+// A non-nil error (including sql.ErrNoRows) means the user is not a member.
+// It is satisfied in production by wrapping (*db.TeamRepo).GetMember.
+type MemberChecker func(teamID, userID string) error
+
+var upgrader = websocket.Upgrader{
+	// Origin check is intentionally permissive; auth is enforced via JWT.
+	CheckOrigin:     func(_ *http.Request) bool { return true },
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
+// inboundMsg is a client-to-server WebSocket message.
+type inboundMsg struct {
+	Type   string `json:"type"`
+	TeamID string `json:"teamId,omitempty"`
+}
+
+// OutboundMsg is a server-to-client WebSocket message. It is exported so
+// tests can assert on the wire shape without duplicating the type.
+type OutboundMsg struct {
+	Type    string `json:"type"`
+	Payload any    `json:"payload,omitempty"`
+}
+
+// client represents one active WebSocket connection.
+type client struct {
+	conn    *websocket.Conn
+	send    chan OutboundMsg
+	mu      sync.RWMutex
+	teamIDs map[string]struct{}
+	userID  string
+}
+
+// Hub manages all connected WebSocket clients and routes broadcast messages
+// to team-subscribed clients. Call Run in a goroutine before serving requests.
+type Hub struct {
+	tokens  *auth.TokenService
+	members MemberChecker
+	bus     *events.Bus
+
+	// heartbeatInterval controls how often writePump sends a ping frame.
+	// readTimeout is the read deadline extended after each pong. Both default
+	// to production values and are overridden in tests to keep them fast.
+	heartbeatInterval time.Duration
+	readTimeout       time.Duration
+
+	mu    sync.RWMutex
+	teams map[string]map[*client]struct{} // teamID → set of clients
+}
+
+// NewHub returns a Hub wired to the given event bus, auth token service, and
+// member checker. The checker gates subscribe messages: only users who are
+// members of a team may subscribe to its real-time feed.
+func NewHub(bus *events.Bus, tokens *auth.TokenService, members MemberChecker) *Hub {
+	return &Hub{
+		tokens:            tokens,
+		members:           members,
+		bus:               bus,
+		heartbeatInterval: defaultHeartbeatInterval,
+		readTimeout:       defaultReadTimeout,
+		teams:             make(map[string]map[*client]struct{}),
+	}
+}
+
+// Run subscribes to the event bus and broadcasts domain events to the
+// appropriate team subscribers. It blocks until the bus subscription channel
+// is closed; call it in its own goroutine.
+func (h *Hub) Run() {
+	ch := h.bus.Subscribe()
+	defer h.bus.Unsubscribe(ch)
+	for msg := range ch {
+		h.broadcast(msg.TeamID, OutboundMsg{Type: string(msg.Type), Payload: msg.Payload})
+	}
+}
+
+// ServeWS upgrades an HTTP request to a WebSocket connection, validates the
+// JWT from the ?token query parameter, and drives the client read/write pumps.
+func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
+	tokenStr := r.URL.Query().Get("token")
+	if tokenStr == "" {
+		http.Error(w, "missing token", http.StatusUnauthorized)
+		return
+	}
+	claims, err := h.tokens.Validate(tokenStr, "access")
+	if err != nil {
+		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		// Upgrade wrote the HTTP error; log and return.
+		slog.Error("ws: upgrade failed", "err", err)
+		return
+	}
+
+	c := &client{
+		conn:    conn,
+		send:    make(chan OutboundMsg, 64),
+		teamIDs: make(map[string]struct{}),
+		userID:  claims.UserID,
+	}
+	slog.Debug("ws: client connected", "userID", claims.UserID)
+
+	go c.writePump(h)
+	c.readPump(h)
+}
+
+// subscribe adds c to the subscription set for teamID.
+func (h *Hub) subscribe(c *client, teamID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.teams[teamID] == nil {
+		h.teams[teamID] = make(map[*client]struct{})
+	}
+	h.teams[teamID][c] = struct{}{}
+
+	c.mu.Lock()
+	c.teamIDs[teamID] = struct{}{}
+	c.mu.Unlock()
+}
+
+// unsubscribeAll removes c from every team subscription set it belongs to
+// and logs the disconnect.
+func (h *Hub) unsubscribeAll(c *client) {
+	slog.Debug("ws: client disconnected", "userID", c.userID)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for teamID := range c.teamIDs {
+		delete(h.teams[teamID], c)
+		if len(h.teams[teamID]) == 0 {
+			delete(h.teams, teamID)
+		}
+	}
+}
+
+// broadcast delivers msg to every client subscribed to teamID. Sends are
+// non-blocking; slow clients are skipped rather than stalling the broadcast.
+func (h *Hub) broadcast(teamID string, msg OutboundMsg) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.teams[teamID] {
+		select {
+		case c.send <- msg:
+		default:
+			// Slow client — drop rather than block.
+		}
+	}
+}
+
+// readPump reads inbound messages from the WebSocket connection and handles
+// the subscribe and pong message types. It returns when the connection closes,
+// triggering deferred cleanup.
+func (c *client) readPump(h *Hub) {
+	defer func() {
+		h.unsubscribeAll(c)
+		c.conn.Close()
+	}()
+
+	c.conn.SetReadLimit(maxMessageBytes)
+	_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
+
+	for {
+		_, raw, err := c.conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				slog.Warn("ws: unexpected close", "userID", c.userID, "err", err)
+			}
+			return
+		}
+
+		var msg inboundMsg
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			continue
+		}
+
+		switch msg.Type {
+		case "subscribe":
+			if msg.TeamID != "" {
+				if err := h.members(msg.TeamID, c.userID); err != nil {
+					slog.Debug("ws: subscribe denied", "userID", c.userID, "teamID", msg.TeamID)
+					select {
+					case c.send <- OutboundMsg{Type: "error", Payload: "not a member of team " + msg.TeamID}:
+					default:
+					}
+				} else {
+					slog.Debug("ws: subscribed", "userID", c.userID, "teamID", msg.TeamID)
+					h.subscribe(c, msg.TeamID)
+				}
+			}
+		case "pong":
+			// Extend the read deadline when the client acknowledges a ping.
+			_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
+		}
+	}
+}
+
+// writePump sends outgoing messages and heartbeat pings to the WebSocket
+// connection. It returns when the send channel is closed or a write fails,
+// triggering a connection close that causes readPump to return too.
+func (c *client) writePump(h *Hub) {
+	ticker := time.NewTicker(h.heartbeatInterval)
+	defer func() {
+		ticker.Stop()
+		c.conn.Close()
+	}()
+
+	for {
+		select {
+		case msg, ok := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if !ok {
+				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			if err := c.conn.WriteJSON(msg); err != nil {
+				return
+			}
+		case <-ticker.C:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := c.conn.WriteJSON(OutboundMsg{Type: "ping"}); err != nil {
+				return
+			}
+		}
+	}
 }
 ````
 
@@ -10587,6 +11812,402 @@ export default function RoleDropdown({ value, onChange, disabled = false, hidePa
 }
 ````
 
+## File: packages/web/src/components/StatusTemplatesTab.tsx
+````typescript
+/**
+ * StatusTemplatesTab — Status Templates management inside the Team Modal.
+ *
+ * Shows a list of status templates for the team. Each template can be expanded
+ * to reveal its items, which can be edited, reordered (positionally), added,
+ * or removed. Admins can also create and delete templates, with the server
+ * blocking deletion of the last template or last item.
+ */
+
+import { useState } from 'react'
+import { Plus, Trash2, ChevronDown, ChevronRight, Check, X } from 'lucide-react'
+import {
+  useStatusTemplates,
+  useCreateStatusTemplate,
+  useUpdateStatusTemplate,
+  useDeleteStatusTemplate,
+  useCreateTemplateItem,
+  useUpdateTemplateItem,
+  useDeleteTemplateItem,
+} from '@/hooks/useStatusTemplates'
+import type { components } from '@draba/shared'
+
+type StatusTemplate = components['schemas']['StatusTemplate']
+type StatusTemplateItem = components['schemas']['StatusTemplateItem']
+
+interface Props {
+  teamId: string
+  isAdmin: boolean
+  teamColor: string
+}
+
+// ── Colour swatches shown in the item editor ────────────────────────────────
+
+const ITEM_COLORS = [
+  '#3B82F6', '#22C55E', '#F59E0B', '#EF4444', '#8B5CF6',
+  '#14B8A6', '#F97316', '#EC4899', '#6B7280', '#e6edf3',
+]
+
+// ── Item row ─────────────────────────────────────────────────────────────────
+
+interface ItemRowProps {
+  item: StatusTemplateItem
+  teamId: string
+  canDelete: boolean
+}
+
+function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(item.name)
+  const [color, setColor] = useState(item.color)
+  const [isClosed, setIsClosed] = useState(item.isClosed)
+  const updateItem = useUpdateTemplateItem(teamId)
+  const deleteItem = useDeleteTemplateItem(teamId)
+  const [error, setError] = useState('')
+
+  function handleSave() {
+    if (!name.trim()) { setError('Name is required'); return }
+    updateItem.mutate(
+      { id: item.id, name: name.trim(), color, isClosed },
+      {
+        onSuccess: () => setEditing(false),
+        onError: () => setError('Failed to save'),
+      }
+    )
+  }
+
+  function handleDelete() {
+    if (!canDelete) { setError('Cannot delete the last item'); return }
+    deleteItem.mutate(item.id, {
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to delete'
+        setError(msg.includes('LAST_ITEM') ? 'Cannot delete the last item' : msg)
+      },
+    })
+  }
+
+  if (editing) {
+    return (
+      <div style={{ background: '#2d333b', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ width: 16, height: 16, borderRadius: 4, background: color, flexShrink: 0 }} />
+          <input
+            autoFocus
+            value={name}
+            onChange={e => { setName(e.target.value); setError('') }}
+            onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') setEditing(false) }}
+            style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
+          />
+          <button onClick={handleSave} disabled={updateItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#3B82F6', display: 'flex', padding: 2 }}>
+            <Check size={15} />
+          </button>
+          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
+            <X size={15} />
+          </button>
+        </div>
+        {/* Colour swatches */}
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {ITEM_COLORS.map(c => (
+            <button
+              key={c}
+              onClick={() => setColor(c)}
+              style={{
+                width: 20, height: 20, borderRadius: 4, background: c, border: 'none', cursor: 'pointer',
+                outline: color === c ? `2px solid ${c}` : 'none', outlineOffset: 2,
+              }}
+            />
+          ))}
+        </div>
+        {/* is_closed toggle */}
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
+          <input
+            type="checkbox"
+            checked={isClosed}
+            onChange={e => setIsClosed(e.target.checked)}
+            style={{ accentColor: '#3B82F6' }}
+          />
+          Closed status (hides from active views when "Hide closed" filter is on)
+        </label>
+        {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{error}</div>}
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '7px 4px',
+      borderRadius: 6,
+    }}>
+      <div style={{ width: 12, height: 12, borderRadius: 3, background: item.color, flexShrink: 0 }} />
+      <span
+        onClick={() => setEditing(true)}
+        style={{ flex: 1, fontSize: 13, color: '#e6edf3', cursor: 'pointer' }}
+        title="Click to edit"
+      >
+        {item.name}
+      </span>
+      {item.isClosed && (
+        <span style={{ fontSize: 10, color: '#484f58', background: '#161b22', borderRadius: 4, padding: '1px 5px', letterSpacing: '0.3px' }}>
+          closed
+        </span>
+      )}
+      <button
+        onClick={handleDelete}
+        disabled={!canDelete || deleteItem.isPending}
+        title={canDelete ? 'Remove item' : 'Cannot delete the last item'}
+        style={{
+          background: 'none', border: 'none', cursor: canDelete ? 'pointer' : 'not-allowed',
+          color: '#484f58', display: 'flex', padding: 2, opacity: canDelete ? 1 : 0.35,
+        }}
+      >
+        <Trash2 size={13} />
+      </button>
+    </div>
+  )
+}
+
+// ── Template card ─────────────────────────────────────────────────────────────
+
+interface TemplateCardProps {
+  template: StatusTemplate
+  teamId: string
+  isAdmin: boolean
+  teamColor: string
+  canDelete: boolean
+}
+
+function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: TemplateCardProps) {
+  const [expanded, setExpanded] = useState(true)
+  const [addingItem, setAddingItem] = useState(false)
+  const [newItemName, setNewItemName] = useState('')
+  const [newItemColor, setNewItemColor] = useState('#3B82F6')
+  const [itemError, setItemError] = useState('')
+  const [deleteError, setDeleteError] = useState('')
+
+  const createItem = useCreateTemplateItem(teamId)
+  const deleteTemplate = useDeleteStatusTemplate(teamId)
+
+  function handleAddItem() {
+    if (!newItemName.trim()) { setItemError('Name is required'); return }
+    createItem.mutate(
+      { templateId: template.id, name: newItemName.trim(), color: newItemColor },
+      {
+        onSuccess: () => { setNewItemName(''); setNewItemColor('#3B82F6'); setAddingItem(false) },
+        onError: () => setItemError('Failed to add item'),
+      }
+    )
+  }
+
+  function handleDeleteTemplate() {
+    if (!canDelete) { setDeleteError('Cannot delete the last template'); return }
+    deleteTemplate.mutate(template.id, {
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to delete'
+        setDeleteError(msg.includes('LAST_TEMPLATE') ? 'Cannot delete the last template' : msg)
+      },
+    })
+  }
+
+  return (
+    <div style={{ border: '1px solid #30363d', borderRadius: 10, overflow: 'hidden' }}>
+      {/* Template header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', background: '#2d333b' }}>
+        <button
+          onClick={() => setExpanded(x => !x)}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#8b949e', display: 'flex', padding: 0 }}
+        >
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+        <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>{template.name}</span>
+        <span style={{ fontSize: 11, color: '#484f58' }}>{template.items.length} item{template.items.length !== 1 ? 's' : ''}</span>
+        {isAdmin && canDelete && (
+          <button
+            onClick={handleDeleteTemplate}
+            disabled={deleteTemplate.isPending}
+            title="Delete template"
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}
+          >
+            <Trash2 size={14} />
+          </button>
+        )}
+      </div>
+
+      {deleteError && (
+        <div style={{ padding: '4px 14px', fontSize: 11, color: '#ef4444', background: '#2d333b' }}>
+          {deleteError}
+        </div>
+      )}
+
+      {/* Template items */}
+      {expanded && (
+        <div style={{ padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {template.items.map(item => (
+            <ItemRow
+              key={item.id}
+              item={item}
+              teamId={teamId}
+              canDelete={template.items.length > 1}
+            />
+          ))}
+
+          {/* Add item row */}
+          {isAdmin && (
+            addingItem ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ width: 12, height: 12, borderRadius: 3, background: newItemColor, flexShrink: 0 }} />
+                  <input
+                    autoFocus
+                    value={newItemName}
+                    onChange={e => { setNewItemName(e.target.value); setItemError('') }}
+                    onKeyDown={e => { if (e.key === 'Enter') handleAddItem(); if (e.key === 'Escape') setAddingItem(false) }}
+                    placeholder="Status name…"
+                    style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
+                  />
+                  <button onClick={handleAddItem} disabled={createItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: teamColor, display: 'flex', padding: 2 }}>
+                    <Check size={15} />
+                  </button>
+                  <button onClick={() => setAddingItem(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
+                    <X size={15} />
+                  </button>
+                </div>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', paddingLeft: 20 }}>
+                  {ITEM_COLORS.map(c => (
+                    <button
+                      key={c}
+                      onClick={() => setNewItemColor(c)}
+                      style={{
+                        width: 18, height: 18, borderRadius: 3, background: c, border: 'none', cursor: 'pointer',
+                        outline: newItemColor === c ? `2px solid ${c}` : 'none', outlineOffset: 2,
+                      }}
+                    />
+                  ))}
+                </div>
+                {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 20 }}>{itemError}</div>}
+              </div>
+            ) : (
+              <button
+                onClick={() => setAddingItem(true)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, marginTop: 4,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: '#484f58', fontSize: 12, padding: '4px 2px', fontFamily: 'inherit',
+                }}
+              >
+                <Plus size={13} /> Add status
+              </button>
+            )
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Main tab ──────────────────────────────────────────────────────────────────
+
+export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props) {
+  const { data: templates = [], isLoading } = useStatusTemplates(teamId)
+  const createTemplate = useCreateStatusTemplate(teamId)
+  const [addingTemplate, setAddingTemplate] = useState(false)
+  const [newTemplateName, setNewTemplateName] = useState('')
+  const [createError, setCreateError] = useState('')
+
+  function handleCreateTemplate() {
+    if (!newTemplateName.trim()) { setCreateError('Name is required'); return }
+    createTemplate.mutate(
+      { name: newTemplateName.trim() },
+      {
+        onSuccess: () => { setNewTemplateName(''); setAddingTemplate(false) },
+        onError: () => setCreateError('Failed to create template'),
+      }
+    )
+  }
+
+  if (isLoading) {
+    return (
+      <div style={{ padding: 20, fontSize: 13, color: '#484f58' }}>Loading…</div>
+    )
+  }
+
+  return (
+    <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ fontSize: 12, color: '#8b949e', lineHeight: 1.6 }}>
+        Status templates are reusable presets. When a new timeline is created, its statuses are
+        copied from the first template. Changes here don't affect existing timelines.
+      </div>
+
+      {templates.map(template => (
+        <TemplateCard
+          key={template.id}
+          template={template}
+          teamId={teamId}
+          isAdmin={isAdmin}
+          teamColor={teamColor}
+          canDelete={templates.length > 1}
+        />
+      ))}
+
+      {/* Add template */}
+      {isAdmin && (
+        addingTemplate ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                autoFocus
+                value={newTemplateName}
+                onChange={e => { setNewTemplateName(e.target.value); setCreateError('') }}
+                onKeyDown={e => { if (e.key === 'Enter') handleCreateTemplate(); if (e.key === 'Escape') setAddingTemplate(false) }}
+                placeholder="Template name (e.g. Kanban, Sprint)…"
+                style={{
+                  flex: 1, background: '#2d333b', border: '1px solid #30363d',
+                  borderRadius: 7, padding: '8px 12px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit',
+                }}
+              />
+              <button
+                onClick={handleCreateTemplate}
+                disabled={createTemplate.isPending}
+                style={{
+                  background: teamColor, border: 'none', borderRadius: 7, color: '#fff',
+                  fontWeight: 600, fontSize: 13, padding: '8px 16px', cursor: 'pointer',
+                  opacity: createTemplate.isPending ? 0.6 : 1, fontFamily: 'inherit',
+                }}
+              >
+                {createTemplate.isPending ? 'Creating…' : 'Create'}
+              </button>
+              <button
+                onClick={() => setAddingTemplate(false)}
+                style={{ background: 'none', border: '1px solid #30363d', borderRadius: 7, color: '#8b949e', fontSize: 13, padding: '8px 12px', cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+            </div>
+            {createError && <div style={{ fontSize: 11, color: '#ef4444' }}>{createError}</div>}
+          </div>
+        ) : (
+          <button
+            onClick={() => setAddingTemplate(true)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center',
+              background: 'none', border: '1px dashed #30363d', borderRadius: 8,
+              color: '#484f58', fontSize: 13, padding: '10px 16px', cursor: 'pointer',
+              fontFamily: 'inherit', width: '100%',
+            }}
+          >
+            <Plus size={14} />
+            New template
+          </button>
+        )
+      )}
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/hooks/useDarkMode.ts
 ````typescript
 /**
@@ -10780,6 +12401,152 @@ export function useDeleteSavedFilter(teamId: string) {
     mutationFn: (id: string) =>
       authFetch<void>(`/saved_filters/${id}`, { method: 'DELETE' }),
     onSuccess: () => qc.invalidateQueries({ queryKey: savedFiltersKey(teamId) }),
+  })
+}
+````
+
+## File: packages/web/src/hooks/useStatusTemplates.ts
+````typescript
+/**
+ * TanStack Query hooks for status templates and timeline statuses.
+ *
+ * Status templates are team-level reusable presets. When a timeline is
+ * created the team's first template's items are copied into live Status rows
+ * for that timeline.
+ */
+
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+type StatusTemplate = components['schemas']['StatusTemplate']
+type StatusTemplateItem = components['schemas']['StatusTemplateItem']
+type Status = components['schemas']['Status']
+type CreateStatusTemplateInput = components['schemas']['CreateStatusTemplateInput']
+type PatchStatusTemplateInput = components['schemas']['PatchStatusTemplateInput']
+type CreateStatusTemplateItemInput = components['schemas']['CreateStatusTemplateItemInput']
+type PatchStatusTemplateItemInput = components['schemas']['PatchStatusTemplateItemInput']
+
+export const statusKeys = {
+  templates: (teamId: string) => ['teams', teamId, 'status-templates'] as const,
+  statuses: (teamId: string, timelineId: string) =>
+    ['teams', teamId, 'timelines', timelineId, 'statuses'] as const,
+}
+
+/** Fetches all status templates for a team. */
+export function useStatusTemplates(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: statusKeys.templates(teamId),
+    queryFn: async () =>
+      (await authFetch<StatusTemplate[]>(`/teams/${teamId}/status-templates`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Creates a new status template for a team. */
+export function useCreateStatusTemplate(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateStatusTemplateInput) =>
+      authFetch<StatusTemplate>(`/teams/${teamId}/status-templates`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Updates a status template (name, description, position). */
+export function useUpdateStatusTemplate(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ id, ...patch }: PatchStatusTemplateInput & { id: string }) =>
+      authFetch<StatusTemplate>(`/status-templates/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Deletes a status template. The server blocks deleting the last template. */
+export function useDeleteStatusTemplate(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/status-templates/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Adds an item to a status template. */
+export function useCreateTemplateItem(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ templateId, ...input }: CreateStatusTemplateItemInput & { templateId: string }) =>
+      authFetch<StatusTemplateItem>(`/status-templates/${templateId}/items`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Updates a template item (name, color, icon, isClosed, position). */
+export function useUpdateTemplateItem(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ id, ...patch }: PatchStatusTemplateItemInput & { id: string }) =>
+      authFetch<StatusTemplateItem>(`/status-template-items/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Deletes a template item. The server blocks deleting the last item. */
+export function useDeleteTemplateItem(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/status-template-items/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Fetches live statuses for a timeline. */
+export function useTimelineStatuses(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: statusKeys.statuses(teamId, timelineId),
+    queryFn: async () =>
+      (await authFetch<Status[]>(`/teams/${teamId}/timelines/${timelineId}/statuses`)) ?? [],
+    enabled: Boolean(teamId) && Boolean(timelineId),
   })
 }
 ````
@@ -11518,61 +13285,6 @@ services:
       - VITE_API_URL=http://api:8080
     depends_on:
       - api
-````
-
-## File: README.md
-````markdown
-# draba
-
-> **Who is working on what, and when?**
-
-**draba** is a lightweight team coordination and planning tool designed for small teams (5–20 people) who need visibility across people and time, without the heavy overhead of tickets, sprints, or complex dependencies. 
-
-It is not a calendar replacement. It is not a project management suite. It is a **shared team timeline** that your team can adopt in minutes.
-
----
-
-## Key Features
-
-- **Horizontal Timeline:** The primary view is a person-first timeline. See exactly what everyone is doing at a glance.
-- **Real-Time Collaboration:** Multiple users can view and edit simultaneously. Changes appear instantly for everyone without refreshing.
-- **Calendar Sync (Coming Soon):** Two-way sync with Google Calendar, plus a built-in CalDAV server so you can connect native apps (like Apple Calendar) directly to draba.
-- **Public & Restricted Views:** Share specific timelines publicly with a stable link, or restrict them to authenticated team members.
-- **Zero-Friction Self-Hosting:** Runs as a single Docker container with an embedded SQLite database. No external services required.
-
-## Technology Stack
-
-draba is built as an API-first, event-driven application:
-
-- **Backend:** Go (API + built-in CalDAV server)
-- **Database:** SQLite (default for zero-config hosting) via `sqlx`
-- **Frontend:** React 19, TypeScript, Vite, and Tailwind CSS v4
-- **Real-Time:** WebSockets (team-scoped broadcasting)
-- **API Contract:** OpenAPI with auto-generated TypeScript types
-
-## Status
-
-draba is currently under active development. The core API foundation (auth, teams, events, websockets) is complete, and we are currently building out the React frontend. 
-
-Check out the `docs/` folder for our architecture decisions, roadmap, and design patterns.
-
-## Deployment (Self-Hosted)
-
-draba is deployable as a single Docker container. The official image is available on Docker Hub at `mewcus/draba`.
-
-```yaml
-services:
-  draba:
-    image: mewcus/draba:latest
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./data:/data
-```
-
-## License
-
-[MIT License](LICENSE)
 ````
 
 ## File: packages/api/cmd/draba/reset_password.go
@@ -12495,270 +14207,6 @@ func doSend(c *smtp.Client, from, to, msg string) error {
 		return fmt.Errorf("smtp write body: %w", err)
 	}
 	return w.Close()
-}
-````
-
-## File: packages/api/internal/ws/hub.go
-````go
-// Package ws implements the WebSocket hub and per-client read/write pumps.
-// The hub maintains a team-scoped subscription map and fans out domain event
-// messages to all clients that have subscribed to a given team.
-package ws
-
-import (
-	"encoding/json"
-	"log/slog"
-	"net/http"
-	"sync"
-	"time"
-
-	"github.com/gorilla/websocket"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-)
-
-const (
-	// defaultHeartbeatInterval is the ping cadence in production.
-	defaultHeartbeatInterval = 30 * time.Second
-	// writeTimeout is the maximum time allowed to write a single message.
-	writeTimeout = 10 * time.Second
-	// defaultReadTimeout is the read deadline reset after every pong. It is
-	// long enough for a client to respond to at least two ping cycles.
-	defaultReadTimeout = 70 * time.Second
-	// maxMessageBytes caps inbound frame size; subscribe and pong messages are
-	// tiny JSON blobs so 512 bytes is generous.
-	maxMessageBytes = 512
-)
-
-// MemberChecker reports whether userID belongs to teamID.
-// A non-nil error (including sql.ErrNoRows) means the user is not a member.
-// It is satisfied in production by wrapping (*db.TeamRepo).GetMember.
-type MemberChecker func(teamID, userID string) error
-
-var upgrader = websocket.Upgrader{
-	// Origin check is intentionally permissive; auth is enforced via JWT.
-	CheckOrigin:     func(_ *http.Request) bool { return true },
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
-
-// inboundMsg is a client-to-server WebSocket message.
-type inboundMsg struct {
-	Type   string `json:"type"`
-	TeamID string `json:"teamId,omitempty"`
-}
-
-// OutboundMsg is a server-to-client WebSocket message. It is exported so
-// tests can assert on the wire shape without duplicating the type.
-type OutboundMsg struct {
-	Type    string `json:"type"`
-	Payload any    `json:"payload,omitempty"`
-}
-
-// client represents one active WebSocket connection.
-type client struct {
-	conn    *websocket.Conn
-	send    chan OutboundMsg
-	mu      sync.RWMutex
-	teamIDs map[string]struct{}
-	userID  string
-}
-
-// Hub manages all connected WebSocket clients and routes broadcast messages
-// to team-subscribed clients. Call Run in a goroutine before serving requests.
-type Hub struct {
-	tokens  *auth.TokenService
-	members MemberChecker
-	bus     *events.Bus
-
-	// heartbeatInterval controls how often writePump sends a ping frame.
-	// readTimeout is the read deadline extended after each pong. Both default
-	// to production values and are overridden in tests to keep them fast.
-	heartbeatInterval time.Duration
-	readTimeout       time.Duration
-
-	mu    sync.RWMutex
-	teams map[string]map[*client]struct{} // teamID → set of clients
-}
-
-// NewHub returns a Hub wired to the given event bus, auth token service, and
-// member checker. The checker gates subscribe messages: only users who are
-// members of a team may subscribe to its real-time feed.
-func NewHub(bus *events.Bus, tokens *auth.TokenService, members MemberChecker) *Hub {
-	return &Hub{
-		tokens:            tokens,
-		members:           members,
-		bus:               bus,
-		heartbeatInterval: defaultHeartbeatInterval,
-		readTimeout:       defaultReadTimeout,
-		teams:             make(map[string]map[*client]struct{}),
-	}
-}
-
-// Run subscribes to the event bus and broadcasts domain events to the
-// appropriate team subscribers. It blocks until the bus subscription channel
-// is closed; call it in its own goroutine.
-func (h *Hub) Run() {
-	ch := h.bus.Subscribe()
-	defer h.bus.Unsubscribe(ch)
-	for msg := range ch {
-		h.broadcast(msg.TeamID, OutboundMsg{Type: string(msg.Type), Payload: msg.Payload})
-	}
-}
-
-// ServeWS upgrades an HTTP request to a WebSocket connection, validates the
-// JWT from the ?token query parameter, and drives the client read/write pumps.
-func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
-	tokenStr := r.URL.Query().Get("token")
-	if tokenStr == "" {
-		http.Error(w, "missing token", http.StatusUnauthorized)
-		return
-	}
-	claims, err := h.tokens.Validate(tokenStr, "access")
-	if err != nil {
-		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
-		return
-	}
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		// Upgrade wrote the HTTP error; log and return.
-		slog.Error("ws: upgrade failed", "err", err)
-		return
-	}
-
-	c := &client{
-		conn:    conn,
-		send:    make(chan OutboundMsg, 64),
-		teamIDs: make(map[string]struct{}),
-		userID:  claims.UserID,
-	}
-	slog.Debug("ws: client connected", "userID", claims.UserID)
-
-	go c.writePump(h)
-	c.readPump(h)
-}
-
-// subscribe adds c to the subscription set for teamID.
-func (h *Hub) subscribe(c *client, teamID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.teams[teamID] == nil {
-		h.teams[teamID] = make(map[*client]struct{})
-	}
-	h.teams[teamID][c] = struct{}{}
-
-	c.mu.Lock()
-	c.teamIDs[teamID] = struct{}{}
-	c.mu.Unlock()
-}
-
-// unsubscribeAll removes c from every team subscription set it belongs to
-// and logs the disconnect.
-func (h *Hub) unsubscribeAll(c *client) {
-	slog.Debug("ws: client disconnected", "userID", c.userID)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for teamID := range c.teamIDs {
-		delete(h.teams[teamID], c)
-		if len(h.teams[teamID]) == 0 {
-			delete(h.teams, teamID)
-		}
-	}
-}
-
-// broadcast delivers msg to every client subscribed to teamID. Sends are
-// non-blocking; slow clients are skipped rather than stalling the broadcast.
-func (h *Hub) broadcast(teamID string, msg OutboundMsg) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for c := range h.teams[teamID] {
-		select {
-		case c.send <- msg:
-		default:
-			// Slow client — drop rather than block.
-		}
-	}
-}
-
-// readPump reads inbound messages from the WebSocket connection and handles
-// the subscribe and pong message types. It returns when the connection closes,
-// triggering deferred cleanup.
-func (c *client) readPump(h *Hub) {
-	defer func() {
-		h.unsubscribeAll(c)
-		c.conn.Close()
-	}()
-
-	c.conn.SetReadLimit(maxMessageBytes)
-	_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
-
-	for {
-		_, raw, err := c.conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				slog.Warn("ws: unexpected close", "userID", c.userID, "err", err)
-			}
-			return
-		}
-
-		var msg inboundMsg
-		if err := json.Unmarshal(raw, &msg); err != nil {
-			continue
-		}
-
-		switch msg.Type {
-		case "subscribe":
-			if msg.TeamID != "" {
-				if err := h.members(msg.TeamID, c.userID); err != nil {
-					slog.Debug("ws: subscribe denied", "userID", c.userID, "teamID", msg.TeamID)
-					select {
-					case c.send <- OutboundMsg{Type: "error", Payload: "not a member of team " + msg.TeamID}:
-					default:
-					}
-				} else {
-					slog.Debug("ws: subscribed", "userID", c.userID, "teamID", msg.TeamID)
-					h.subscribe(c, msg.TeamID)
-				}
-			}
-		case "pong":
-			// Extend the read deadline when the client acknowledges a ping.
-			_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
-		}
-	}
-}
-
-// writePump sends outgoing messages and heartbeat pings to the WebSocket
-// connection. It returns when the send channel is closed or a write fails,
-// triggering a connection close that causes readPump to return too.
-func (c *client) writePump(h *Hub) {
-	ticker := time.NewTicker(h.heartbeatInterval)
-	defer func() {
-		ticker.Stop()
-		c.conn.Close()
-	}()
-
-	for {
-		select {
-		case msg, ok := <-c.send:
-			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if !ok {
-				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-			if err := c.conn.WriteJSON(msg); err != nil {
-				return
-			}
-		case <-ticker.C:
-			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if err := c.conn.WriteJSON(OutboundMsg{Type: "ping"}); err != nil {
-				return
-			}
-		}
-	}
 }
 ````
 
@@ -17260,237 +18708,6 @@ packages/api/ui/static/*
 GEMINI.md
 ````
 
-## File: packages/api/internal/api/timeline_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
-// list the non-archived timelines for a team.
-func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
-		return
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timelines)
-}
-
-// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
-// user must be a member of the team. The creator is automatically granted
-// timeline-admin access.
-func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	var req CreateTimelineJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-
-	startDate := req.StartDate.Time
-	endDate := req.EndDate.Time
-
-	if endDate.Before(startDate) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
-		return
-	}
-
-	now := time.Now()
-	timeline := &models.Timeline{
-		ID:         newID(),
-		TeamID:     teamID,
-		Name:       req.Name,
-		StartDate:  startDate.Format("2006-01-02"),
-		EndDate:    endDate.Format("2006-01-02"),
-		ShareToken: newID(),
-		IcalToken:  newID(),
-		CreatedBy:  claims.UserID,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}
-	if err := s.timelines.Create(timeline); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	// Always grant the creator timeline-admin access so they can manage it.
-	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusCreated, timeline)
-}
-
-// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
-// be a member of the timeline's team. Team admins may access any timeline;
-// other members require an entry in timeline_access.
-func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	// Hide archived timelines from the standard read path unless ?archived=true.
-	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	// Team admins can access all timelines; members need an explicit grant.
-	if member.Role != "admin" {
-		ok, err := s.timelines.HasAccess(timelineID, member.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-			return
-		}
-		if !ok {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
-// admins or timeline admins may archive.
-func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, true)
-}
-
-// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
-func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, false)
-}
-
-// setTimelineArchive is the shared archive/unarchive implementation. Access
-// is admin-only: the caller must be a team admin, or hold timeline_access
-// with role='admin' for this timeline.
-func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	// Team admins always pass. Per-timeline admin grants are not consulted
-	// here — granular timeline-admin checks are tracked for Phase 10.3.
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-	}
-	if err := s.timelines.SetArchived(timelineID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	timeline.ArchivedAt = at
-	timeline.UpdatedAt = time.Now().UTC()
-
-	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
-// authentication is required; the token itself is the credential.
-func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	timeline, err := s.timelines.GetByShareToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
-}
-````
-
 ## File: packages/api/Dockerfile
 ````
 # ── Web builder ──
@@ -19564,6 +20781,243 @@ func isValidPassword(p string) bool {
 		}
 	}
 	return true
+}
+````
+
+## File: packages/api/internal/api/timeline_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
+// list the non-archived timelines for a team.
+func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timelines)
+}
+
+// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
+// user must be a member of the team. The creator is automatically granted
+// timeline-admin access.
+func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	member, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	var req CreateTimelineJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	startDate := req.StartDate.Time
+	endDate := req.EndDate.Time
+
+	if endDate.Before(startDate) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
+		return
+	}
+
+	now := time.Now()
+	timeline := &models.Timeline{
+		ID:         newID(),
+		TeamID:     teamID,
+		Name:       req.Name,
+		StartDate:  startDate.Format("2006-01-02"),
+		EndDate:    endDate.Format("2006-01-02"),
+		ShareToken: newID(),
+		IcalToken:  newID(),
+		CreatedBy:  claims.UserID,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := s.timelines.Create(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	// Always grant the creator timeline-admin access so they can manage it.
+	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	// Copy the team's first status template's items into live statuses for this timeline.
+	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusCreated, timeline)
+}
+
+// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
+// be a member of the timeline's team. Team admins may access any timeline;
+// other members require an entry in timeline_access.
+func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	// Hide archived timelines from the standard read path unless ?archived=true.
+	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	// Team admins can access all timelines; members need an explicit grant.
+	if member.Role != "admin" {
+		ok, err := s.timelines.HasAccess(timelineID, member.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
+// admins or timeline admins may archive.
+func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, true)
+}
+
+// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
+func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, false)
+}
+
+// setTimelineArchive is the shared archive/unarchive implementation. Access
+// is admin-only: the caller must be a team admin, or hold timeline_access
+// with role='admin' for this timeline.
+func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+	// Team admins always pass. Per-timeline admin grants are not consulted
+	// here — granular timeline-admin checks are tracked for Phase 10.3.
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+	}
+	if err := s.timelines.SetArchived(timelineID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+	timeline.ArchivedAt = at
+	timeline.UpdatedAt = time.Now().UTC()
+
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
+// authentication is required; the token itself is the credential.
+func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	timeline, err := s.timelines.GetByShareToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
 }
 ````
 
@@ -22878,813 +24332,6 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
 }
 ````
 
-## File: packages/web/src/components/TeamModal.tsx
-````typescript
-/**
- * TeamModal — create / edit a team in a portal-rendered modal.
- *
- * The Members tab is fully functional after Phase 10.1.2. The Settings tab
- * handles team identity and metadata. Identity and name live in the modal
- * header so they remain visible while the user scrolls the tab body.
- */
-
-import { useState, useEffect, useRef } from 'react';
-import { createPortal } from 'react-dom';
-import { X, Archive, Mail, Link2, Copy, Check, Plus, Minus, RefreshCw, UserMinus } from 'lucide-react';
-import { ApiError } from '@/lib/api';
-import { IdentityWidget } from '@/components/identity/IdentityWidget';
-import { Badge } from '@/components/identity/Badge';
-import type { Identity } from '@/components/identity/identity-constants';
-import { IDENTITY_COLORS } from '@/components/identity/identity-constants';
-import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities';
-import { useAuth } from '@/contexts/AuthContext';
-import {
-  useTeamInvites, useRevokeInvite,
-  useTeamInviteLink, useCreateInviteLink, useRevokeInviteLink,
-  useAddMember, useDeleteMember, useArchiveMember, useUnarchiveMember,
-  useCreateParticipant, useUpdateMember, useUserSearch,
-} from '@/hooks/useMemberManagement';
-import RoleDropdown, { type MemberRole } from '@/components/RoleDropdown';
-import type { components } from '@draba/shared';
-
-type Team = components['schemas']['Team'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-interface Props {
-  mode: 'new' | 'edit';
-  team?: Team;
-  onClose: () => void;
-  /** Called with the newly created team immediately after server confirmation. */
-  onTeamCreated?: (team: Team) => void;
-  /** Whether the current user is a team admin. */
-  isAdmin?: boolean;
-}
-
-type Tab = 'settings' | 'members';
-
-const DEFAULT_COLOR = IDENTITY_COLORS[0].hex;
-const DEFAULT_ICON = '__name_1__';
-
-function resolveIdentity(team?: Team): Identity {
-  return {
-    color: team?.color ?? DEFAULT_COLOR,
-    icon: team?.icon ?? DEFAULT_ICON,
-  };
-}
-
-// ── Archive confirmation dialog ─────────────────────────────────────────────
-
-interface ArchiveDialogProps {
-  teamName: string;
-  onCancel: () => void;
-  onConfirm: () => void;
-  busy: boolean;
-}
-
-function ArchiveDialog({ teamName, onCancel, onConfirm, busy }: ArchiveDialogProps) {
-  return (
-    <div style={{ padding: '32px 28px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, textAlign: 'center' }}>
-      <div style={{
-        width: 48, height: 48, borderRadius: 12,
-        background: 'rgba(249,115,22,.20)', border: '1.5px solid rgba(249,115,22,.44)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>
-        <Archive size={22} color="#F97316" />
-      </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3' }}>
-        Archive &ldquo;{teamName}&rdquo;?
-      </div>
-      <div style={{ fontSize: 13, color: '#8b949e', lineHeight: 1.6, maxWidth: 400 }}>
-        The team will be hidden from active views. All timelines and activities will be preserved and the team can be restored from the Archived section at any time.
-      </div>
-      <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
-        <button onClick={onCancel} disabled={busy} style={cancelBtnStyle}>Cancel</button>
-        <button onClick={onConfirm} disabled={busy} style={{
-          background: 'rgba(249,115,22,.22)', border: '1px solid rgba(249,115,22,.66)',
-          color: '#F97316', fontWeight: 600, fontSize: 13,
-          padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
-          opacity: busy ? 0.6 : 1,
-        }}>
-          {busy ? 'Archiving…' : 'Archive team'}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ── Shared button styles ────────────────────────────────────────────────────
-
-const cancelBtnStyle: React.CSSProperties = {
-  background: 'none', border: '1px solid #30363d', color: '#8b949e',
-  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
-};
-
-const inputStyle: React.CSSProperties = {
-  background: '#2d333b', border: '1px solid #30363d', borderRadius: 7,
-  padding: '8px 12px', color: '#e6edf3', fontSize: 13,
-  width: '100%', boxSizing: 'border-box', fontFamily: 'inherit',
-};
-
-const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px',
-  textTransform: 'uppercase', marginBottom: 6, display: 'block',
-};
-
-// ── Main component ──────────────────────────────────────────────────────────
-
-export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin = true }: Props) {
-  const { user } = useAuth()
-  const currentUserId = (user as { id?: string } | null)?.id ?? ''
-  const [tab, setTab] = useState<Tab>('settings');
-  const [teamSaved, setTeamSaved] = useState(mode === 'edit');
-  const [showBanner, setShowBanner] = useState(false);
-  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
-  const [nameEditing, setNameEditing] = useState(false);
-  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const nameInputRef = useRef<HTMLInputElement>(null);
-
-  const [identity, setIdentity] = useState<Identity>(resolveIdentity(team));
-  const [name, setName] = useState(team?.name ?? '');
-  const [description, setDescription] = useState(team?.description ?? '');
-  const [notes, setNotes] = useState(team?.notes ?? '');
-
-  const [savedTeamId, setSavedTeamId] = useState(team?.id ?? '');
-
-  const createTeam = useCreateTeam();
-  const updateTeam = useUpdateTeam();
-  const archiveTeam = useArchiveTeam();
-  const unarchiveTeam = useUnarchiveTeam();
-
-  // Members tab state — only loaded when the team exists.
-  const activeTeamId = savedTeamId || team?.id || '';
-  const { data: members = [] } = useTeamMembers(activeTeamId);
-  const { data: invites = [] } = useTeamInvites(activeTeamId);
-  const { data: inviteLink } = useTeamInviteLink(activeTeamId);
-  const addMember = useAddMember(activeTeamId);
-  const deleteMember = useDeleteMember(activeTeamId);
-  const archiveMember = useArchiveMember(activeTeamId);
-  const unarchiveMember = useUnarchiveMember(activeTeamId);
-  const createParticipant = useCreateParticipant(activeTeamId);
-  const updateMember = useUpdateMember(activeTeamId);
-  const revokeInvite = useRevokeInvite(activeTeamId);
-  const createInviteLink = useCreateInviteLink(activeTeamId);
-  const revokeInviteLink = useRevokeInviteLink(activeTeamId);
-
-  const [searchQ, setSearchQ] = useState('');
-  const [showParticipantForm, setShowParticipantForm] = useState(false);
-  // Maps memberId → assignmentCount when a 409 MEMBER_HAS_ASSIGNMENTS is returned.
-  const [removeErrors, setRemoveErrors] = useState<Record<string, number>>({});
-  const [participantName, setParticipantName] = useState('');
-  const [participantIdentity, setParticipantIdentity] = useState<Identity>({ color: IDENTITY_COLORS[3].hex, icon: '__name_1__' });
-  const [copyLinkLabel, setCopyLinkLabel] = useState<'copy' | 'copied'>('copy');
-  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const { data: searchResults = [] } = useUserSearch(searchQ);
-
-  const isArchived = Boolean(team?.archivedAt);
-  const busy = createTeam.isPending || updateTeam.isPending || archiveTeam.isPending || unarchiveTeam.isPending;
-
-  useEffect(() => {
-    return () => { if (bannerTimer.current) clearTimeout(bannerTimer.current); };
-  }, []);
-
-  // Focus name input when entering edit mode.
-  useEffect(() => {
-    if (nameEditing) nameInputRef.current?.focus();
-  }, [nameEditing]);
-
-  // Open in name-editing mode for new teams so the user can type right away.
-  useEffect(() => {
-    if (mode === 'new') setNameEditing(true);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Stale 409 errors belong to a specific member row; clear them when the
-  // search changes because the member list may reorder or filter differently.
-  useEffect(() => {
-    setRemoveErrors({});
-  }, [searchQ]);
-
-  useEffect(() => {
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        if (nameEditing) { setNameEditing(false); return; }
-        onClose();
-      }
-    }
-    document.addEventListener('keydown', handleKey);
-    return () => document.removeEventListener('keydown', handleKey);
-  }, [onClose, nameEditing]);
-
-  function handleSave() {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-
-    const patch = {
-      name: trimmed,
-      description: description.trim() || null,
-      notes: notes.trim() || null,
-      color: identity.color,
-      icon: identity.icon,
-    };
-
-    if (mode === 'new' && !teamSaved) {
-      createTeam.mutate(patch, {
-        onSuccess: (created) => {
-          setSavedTeamId(created.id);
-          setTeamSaved(true);
-          setShowBanner(true);
-          onTeamCreated?.(created);
-          bannerTimer.current = setTimeout(() => setShowBanner(false), 3000);
-        },
-      });
-    } else {
-      const tid = savedTeamId || team?.id;
-      if (!tid) return;
-      updateTeam.mutate({ teamId: tid, patch }, { onSuccess: () => { /* noop */ } });
-    }
-  }
-
-  function handleArchive() {
-    const tid = savedTeamId || team?.id;
-    if (!tid) return;
-    archiveTeam.mutate(tid, { onSuccess: onClose });
-  }
-
-  function handleRestore() {
-    const tid = savedTeamId || team?.id;
-    if (!tid) return;
-    unarchiveTeam.mutate(tid, { onSuccess: onClose });
-  }
-
-  const teamColor = identity.color;
-  const isNew = mode === 'new';
-  const primaryLabel = teamSaved ? 'Save changes' : 'Create team';
-  const membersLocked = !teamSaved;
-
-  return createPortal(
-    <div
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        zIndex: 1000,
-      }}
-    >
-      <div
-        style={{
-          width: 580, maxHeight: '90vh', background: '#21262d',
-          border: '1px solid #30363d', borderRadius: 14,
-          boxShadow: '0 24px 64px rgba(0,0,0,.6)',
-          display: 'flex', flexDirection: 'column', overflow: 'hidden',
-        }}
-      >
-        {/* Header — identity widget + editable name */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 12,
-          padding: '16px 20px', borderBottom: '1px solid #30363d',
-        }}>
-          <IdentityWidget identity={identity} name={name} shape="square" onChange={setIdentity} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.6px', textTransform: 'uppercase', marginBottom: 3 }}>
-              {isNew ? 'New team' : 'Edit team'}
-            </div>
-            {nameEditing ? (
-              <input
-                ref={nameInputRef}
-                value={name}
-                onChange={e => setName(e.target.value)}
-                onBlur={() => setNameEditing(false)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') { setNameEditing(false); }
-                  // Escape is handled globally above
-                }}
-                placeholder="Team name…"
-                style={{
-                  background: 'transparent', border: 'none',
-                  borderBottom: '1px solid #484f58',
-                  color: '#e6edf3', fontSize: 16, fontWeight: 600,
-                  fontFamily: 'inherit', width: '100%', outline: 'none',
-                  padding: '0 0 2px 0',
-                }}
-              />
-            ) : (
-              <div
-                onClick={() => setNameEditing(true)}
-                title="Click to edit name"
-                style={{
-                  fontSize: 16, fontWeight: 600,
-                  color: name ? '#e6edf3' : '#484f58',
-                  cursor: 'text',
-                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                }}
-              >
-                {name || 'Click to name this team…'}
-              </div>
-            )}
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 4, display: 'flex' }}>
-            <X size={18} />
-          </button>
-        </div>
-
-        {/* Saved banner */}
-        {showBanner && (
-          <div style={{
-            padding: '8px 20px',
-            background: `${teamColor}18`,
-            borderBottom: `1px solid ${teamColor}44`,
-            display: 'flex', alignItems: 'center', gap: 8,
-          }}>
-            <span style={{ fontSize: 14, color: teamColor }}>✓</span>
-            <span style={{ fontSize: 12, color: teamColor }}>Team created — you can now add members.</span>
-          </div>
-        )}
-
-        {/* Tab bar */}
-        <div style={{ display: 'flex', padding: '0 20px', borderBottom: '1px solid #30363d' }}>
-          {(['settings', 'members'] as Tab[]).map(t => {
-            const isActive = tab === t;
-            const locked = t === 'members' && membersLocked;
-            return (
-              <div key={t} style={{ position: 'relative' }}>
-                <button
-                  onClick={() => !locked && setTab(t)}
-                  title={locked ? 'Save the team first to add members' : undefined}
-                  style={{
-                    padding: '10px 14px', fontSize: 13, fontWeight: 500, background: 'none', border: 'none',
-                    borderBottom: `2px solid ${isActive ? teamColor : 'transparent'}`,
-                    color: isActive ? '#e6edf3' : '#8b949e',
-                    cursor: locked ? 'not-allowed' : 'pointer',
-                    opacity: locked ? 0.45 : 1,
-                    marginBottom: -1, fontFamily: 'inherit',
-                    display: 'flex', alignItems: 'center', gap: 6,
-                    textTransform: 'capitalize',
-                  }}
-                >
-                  {t}
-                  {t === 'members' && teamSaved && (
-                    <span style={{ fontSize: 11, color: '#484f58', background: '#2d333b', borderRadius: 99, padding: '1px 6px' }}>
-                      {members.length}
-                    </span>
-                  )}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          {showArchiveConfirm ? (
-            <ArchiveDialog
-              teamName={name || 'this team'}
-              onCancel={() => setShowArchiveConfirm(false)}
-              onConfirm={handleArchive}
-              busy={archiveTeam.isPending}
-            />
-          ) : tab === 'settings' ? (
-            <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
-              {/* Description */}
-              <div>
-                <label style={labelStyle}>Description</label>
-                <input
-                  autoFocus={mode === 'edit'}
-                  value={description}
-                  onChange={e => setDescription(e.target.value)}
-                  placeholder="Short description of this team…"
-                  style={inputStyle}
-                />
-              </div>
-
-              {/* Notes */}
-              <div>
-                <label style={labelStyle}>Notes</label>
-                <textarea
-                  value={notes}
-                  onChange={e => setNotes(e.target.value)}
-                  placeholder="Internal notes, context, links…"
-                  rows={4}
-                  style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5 }}
-                />
-              </div>
-
-              {createTeam.isError && (
-                <div style={{ fontSize: 12, color: '#ef4444' }}>
-                  Something went wrong — refer to logs for details.
-                </div>
-              )}
-              {updateTeam.isError && (
-                <div style={{ fontSize: 12, color: '#ef4444' }}>
-                  Something went wrong — refer to logs for details.
-                </div>
-              )}
-            </div>
-          ) : (
-            // Members tab
-            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-              {/* Search / add input */}
-              {isAdmin && (
-                <div>
-                  <label style={labelStyle}>Add member or invite by email</label>
-                  <div style={{ position: 'relative' }}>
-                    <input
-                      value={searchQ}
-                      onChange={e => setSearchQ(e.target.value)}
-                      placeholder="Search by name or email…"
-                      style={{ ...inputStyle, paddingRight: 36 }}
-                    />
-                    {searchQ && (
-                      <button
-                        onClick={() => setSearchQ('')}
-                        style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}
-                      >
-                        <X size={14} />
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Search results */}
-                  {searchQ.length >= 2 && (
-                    <div style={{ background: '#2d333b', border: '1px solid #30363d', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
-                      {searchResults.length === 0 ? (
-                        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                          <span style={{ fontSize: 12, color: '#8b949e' }}>No users found for "{searchQ}"</span>
-                          <button
-                            onClick={() => {
-                              // Trigger email invite
-                              const email = searchQ.includes('@') ? searchQ : null;
-                              if (!email) return;
-                              fetch(`/teams/${activeTeamId}/invites`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('accessToken') ?? ''}` },
-                                body: JSON.stringify({ email }),
-                              }).then(() => setSearchQ(''));
-                            }}
-                            style={{ fontSize: 11, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit' }}
-                          >
-                            <Mail size={11} style={{ display: 'inline', marginRight: 4 }} />
-                            Invite
-                          </button>
-                        </div>
-                      ) : (
-                        searchResults.map(u => {
-                          const alreadyMember = members.some(m => m.userId === u.id);
-                          return (
-                            <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: '1px solid #30363d' }}>
-                              <Badge identity={{ color: '#8b949e', icon: '__name_1__' }} name={u.displayName} shape="circle" size={22} />
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontSize: 13, color: '#e6edf3' }}>{u.displayName}</div>
-                                <div style={{ fontSize: 11, color: '#484f58' }}>{u.email}</div>
-                              </div>
-                              {alreadyMember ? (
-                                <span style={{ fontSize: 11, color: '#484f58' }}>Already added</span>
-                              ) : (
-                                <button
-                                  onClick={() => addMember.mutate({ userId: u.id }, { onSuccess: () => setSearchQ('') })}
-                                  style={{ fontSize: 11, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4 }}
-                                >
-                                  <Plus size={11} />
-                                  Add
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Participant creation form */}
-              {isAdmin && (
-                <div>
-                  {!showParticipantForm ? (
-                    <button
-                      onClick={() => setShowParticipantForm(true)}
-                      style={{ fontSize: 12, color: '#F59E0B', background: '#F59E0B14', border: '1px solid #F59E0B44', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
-                    >
-                      <Plus size={12} />
-                      Add participant (no login)
-                    </button>
-                  ) : (
-                    <div style={{ background: '#2d333b', border: '1px solid #30363d', borderRadius: 8, padding: 14 }}>
-                      <label style={labelStyle}>New participant</label>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <IdentityWidget
-                          identity={participantIdentity}
-                          name={participantName}
-                          shape="circle"
-                          onChange={setParticipantIdentity}
-                        />
-                        <input
-                          value={participantName}
-                          onChange={e => setParticipantName(e.target.value)}
-                          placeholder="Display name (required)…"
-                          style={{ ...inputStyle, flex: 1 }}
-                          autoFocus
-                        />
-                        <button
-                          onClick={() => {
-                            if (!participantName.trim()) return;
-                            createParticipant.mutate({
-                              name: participantName.trim(),
-                              color: participantIdentity.color,
-                              icon: participantIdentity.icon,
-                            }, {
-                              onSuccess: () => { setParticipantName(''); setShowParticipantForm(false); },
-                            });
-                          }}
-                          disabled={!participantName.trim() || createParticipant.isPending}
-                          style={{ background: '#F59E0B', color: '#000', fontWeight: 600, fontSize: 12, padding: '7px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0, opacity: !participantName.trim() ? 0.5 : 1 }}
-                        >
-                          Create
-                        </button>
-                        <button onClick={() => setShowParticipantForm(false)} style={{ ...cancelBtnStyle, padding: '7px 10px' }}>
-                          <X size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Role-change error banner */}
-              {updateMember.isError && (
-                <div style={{ fontSize: 12, color: '#F59E0B', background: '#F59E0B10', border: '1px solid #F59E0B33', borderRadius: 7, padding: '7px 12px' }}>
-                  {(updateMember.error as { message?: string })?.message ?? 'Could not update role.'}
-                </div>
-              )}
-
-              {/* Member list */}
-              <div>
-                <label style={labelStyle}>Members ({members.length})</label>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {members.map((m: TeamMemberWithUser) => {
-                    const isParticipant = !m.userId;
-                    const isInactive = Boolean(m.archivedAt);
-                    const memberRole: MemberRole = isParticipant ? 'participant' : (m.role as MemberRole);
-                    const removeError = removeErrors[m.id];
-                    return (
-                      <div key={m.id}>
-                        <div
-                          style={{
-                            display: 'flex', alignItems: 'center', gap: 10,
-                            padding: '7px 10px', borderRadius: 7,
-                            background: isInactive ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)',
-                            opacity: isInactive ? 0.5 : 1,
-                          }}
-                        >
-                          <div style={{ flexShrink: 0, border: isParticipant ? '1.5px dashed #484f58' : 'none', borderRadius: '50%' }}>
-                            <Badge
-                              identity={{ color: m.color ?? '#8b949e', icon: m.icon ?? '__name_words__' }}
-                              name={m.displayName}
-                              shape="circle"
-                              size={24}
-                            />
-                          </div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                              <span style={{ fontSize: 13, color: '#e6edf3', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.displayName}</span>
-                              {isParticipant && <span style={{ fontSize: 10, fontWeight: 600, background: '#F59E0B20', border: '1px solid #F59E0B44', color: '#F59E0B', borderRadius: 99, padding: '0px 5px', flexShrink: 0 }}>No login</span>}
-                            </div>
-                            {!isParticipant && <div style={{ fontSize: 11, color: '#484f58', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>}
-                          </div>
-                          {isAdmin && (
-                            <RoleDropdown
-                              value={memberRole}
-                              onChange={role => {
-                                if (isParticipant || role === 'participant') return;
-                                updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
-                              }}
-                              disabled={isParticipant || m.userId === currentUserId}
-                              hideParticipant={!isParticipant}
-                            />
-                          )}
-                          {isAdmin && (
-                            <div style={{ display: 'flex', gap: 4 }}>
-                              {isInactive ? (
-                                <button
-                                  title="Reactivate member"
-                                  onClick={() => unarchiveMember.mutate(m.id)}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
-                                  onMouseEnter={e => (e.currentTarget.style.color = '#1A97A2')}
-                                  onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
-                                >
-                                  <RefreshCw size={13} />
-                                </button>
-                              ) : (
-                                <button
-                                  title="Inactivate member"
-                                  onClick={() => archiveMember.mutate(m.id)}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
-                                  onMouseEnter={e => (e.currentTarget.style.color = '#F59E0B')}
-                                  onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
-                                >
-                                  <UserMinus size={13} />
-                                </button>
-                              )}
-                              <button
-                                title="Remove from team"
-                                onClick={() => {
-                                  setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; });
-                                  deleteMember.mutate(m.id, {
-                                    onError: (err) => {
-                                      if (err instanceof ApiError && err.code === 'MEMBER_HAS_ASSIGNMENTS') {
-                                        const count = (err.data?.assignmentCount as number) ?? 0;
-                                        setRemoveErrors(prev => ({ ...prev, [m.id]: count }));
-                                      }
-                                    },
-                                  });
-                                }}
-                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
-                                onMouseEnter={e => (e.currentTarget.style.color = '#EF4444')}
-                                onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
-                              >
-                                <Minus size={13} />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                        {removeError !== undefined && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#F59E0B', padding: '4px 10px 4px 44px' }}>
-                            <span>{removeError} assignment{removeError === 1 ? '' : 's'} — can't remove.</span>
-                            <button
-                              onClick={() => {
-                                archiveMember.mutate(m.id, {
-                                  onSuccess: () => setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; }),
-                                });
-                              }}
-                              style={{ fontSize: 12, color: '#F59E0B', background: 'none', border: '1px solid #F59E0B66', borderRadius: 5, padding: '2px 8px', cursor: 'pointer', fontFamily: 'inherit' }}
-                            >
-                              Inactivate instead
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Pending invitations */}
-              {isAdmin && invites.length > 0 && (
-                <div>
-                  <label style={labelStyle}>Pending invitations ({invites.length})</label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    {invites.map(inv => (
-                      <div key={inv.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)' }}>
-                        <div style={{ width: 24, height: 24, borderRadius: '50%', border: '1.5px dashed #30363d', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                          <Mail size={11} color="#484f58" />
-                        </div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, color: '#8b949e', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.email}</div>
-                          <div style={{ fontSize: 11, color: '#484f58' }}>
-                            Sent {new Date(inv.createdAt).toLocaleDateString()} · expires {new Date(inv.expiresAt).toLocaleDateString()}
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => revokeInvite.mutate(inv.id)}
-                          style={{ fontSize: 11, color: '#EF4444', background: '#EF444414', border: '1px solid #EF444444', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit' }}
-                        >
-                          Revoke
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Invite link */}
-              {isAdmin && (
-                <div>
-                  <label style={labelStyle}>
-                    <Link2 size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Invite link
-                  </label>
-                  {inviteLink?.token ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <input
-                          readOnly
-                          value={`${window.location.origin}/register?token=${inviteLink.token}`}
-                          style={{ ...inputStyle, color: '#8b949e', flex: 1 }}
-                          onClick={e => (e.target as HTMLInputElement).select()}
-                        />
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(`${window.location.origin}/register?token=${inviteLink.token!}`);
-                            setCopyLinkLabel('copied');
-                            if (copyTimer.current) clearTimeout(copyTimer.current);
-                            copyTimer.current = setTimeout(() => setCopyLinkLabel('copy'), 2000);
-                          }}
-                          style={{
-                            background: copyLinkLabel === 'copied' ? '#1A97A222' : '#2d333b',
-                            border: `1px solid ${copyLinkLabel === 'copied' ? '#1A97A244' : '#30363d'}`,
-                            color: copyLinkLabel === 'copied' ? '#1A97A2' : '#8b949e',
-                            borderRadius: 7, padding: '0 14px', cursor: 'pointer',
-                            display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontFamily: 'inherit',
-                            transition: 'all 0.15s', flexShrink: 0,
-                          }}
-                        >
-                          {copyLinkLabel === 'copied' ? <Check size={12} /> : <Copy size={12} />}
-                          {copyLinkLabel === 'copied' ? 'Copied!' : 'Copy link'}
-                        </button>
-                      </div>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <span style={{ fontSize: 11, color: '#484f58', flex: 1, lineHeight: 1.5 }}>
-                          Anyone with this link can join the team as a member.
-                        </span>
-                        <button
-                          onClick={() => createInviteLink.mutate()}
-                          style={{ fontSize: 11, color: '#8b949e', background: 'none', border: '1px solid #30363d', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
-                        >
-                          <RefreshCw size={11} /> Regenerate
-                        </button>
-                        <button
-                          onClick={() => revokeInviteLink.mutate()}
-                          style={{ fontSize: 11, color: '#EF4444', background: 'none', border: '1px solid #EF444444', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
-                        >
-                          Revoke
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <span style={{ fontSize: 12, color: '#484f58' }}>No invite link — generate one to share a reusable join URL.</span>
-                      <button
-                        onClick={() => createInviteLink.mutate()}
-                        style={{ fontSize: 12, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
-                      >
-                        Generate
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '12px 20px', borderTop: '1px solid #30363d',
-        }}>
-          <div>
-            {mode === 'edit' && !showArchiveConfirm && (
-              isArchived ? (
-                <button
-                  onClick={handleRestore}
-                  disabled={busy}
-                  style={{
-                    background: 'none', border: '1px solid #30363d', color: '#8b949e',
-                    fontSize: 12, padding: '6px 14px', borderRadius: 7, cursor: 'pointer',
-                    display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit',
-                    opacity: busy ? 0.6 : 1,
-                  }}
-                >
-                  <Archive size={13} />
-                  Restore team
-                </button>
-              ) : (
-                <button
-                  onClick={() => setShowArchiveConfirm(true)}
-                  style={{
-                    background: 'none', border: '1px solid #30363d', color: '#484f58',
-                    fontSize: 12, padding: '6px 14px', borderRadius: 7, cursor: 'pointer',
-                    display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit',
-                  }}
-                >
-                  <Archive size={13} />
-                  Archive team
-                </button>
-              )
-            )}
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={onClose} style={cancelBtnStyle}>Cancel</button>
-            <button
-              onClick={handleSave}
-              disabled={busy || !name.trim()}
-              style={{
-                background: teamColor, color: '#fff', fontWeight: 600,
-                fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
-                border: 'none', opacity: (busy || !name.trim()) ? 0.6 : 1,
-                fontFamily: 'inherit',
-              }}
-            >
-              {busy ? 'Saving…' : primaryLabel}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-````
-
 ## File: packages/web/vite.config.ts
 ````typescript
 /// <reference types="vitest" />
@@ -23736,151 +24383,6 @@ export default defineConfig(({ mode }) => {
     },
   }
 })
-````
-
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
 ````
 
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
@@ -24772,6 +25274,966 @@ export default function GanttGrid({
       )}
     </div>
   );
+}
+````
+
+## File: packages/web/src/components/TeamModal.tsx
+````typescript
+/**
+ * TeamModal — create / edit a team in a portal-rendered modal.
+ *
+ * The Members tab is fully functional after Phase 10.1.2. The Settings tab
+ * handles team identity and metadata. Identity and name live in the modal
+ * header so they remain visible while the user scrolls the tab body.
+ */
+
+import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { X, Archive, Mail, Link2, Copy, Check, Plus, Minus, RefreshCw, UserMinus } from 'lucide-react';
+import { ApiError } from '@/lib/api';
+import { IdentityWidget } from '@/components/identity/IdentityWidget';
+import { Badge } from '@/components/identity/Badge';
+import type { Identity } from '@/components/identity/identity-constants';
+import { IDENTITY_COLORS } from '@/components/identity/identity-constants';
+import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities';
+import StatusTemplatesTab from '@/components/StatusTemplatesTab';
+import { useAuth } from '@/contexts/AuthContext';
+import {
+  useTeamInvites, useRevokeInvite,
+  useTeamInviteLink, useCreateInviteLink, useRevokeInviteLink,
+  useAddMember, useDeleteMember, useArchiveMember, useUnarchiveMember,
+  useCreateParticipant, useUpdateMember, useUserSearch,
+} from '@/hooks/useMemberManagement';
+import RoleDropdown, { type MemberRole } from '@/components/RoleDropdown';
+import type { components } from '@draba/shared';
+
+type Team = components['schemas']['Team'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+interface Props {
+  mode: 'new' | 'edit';
+  team?: Team;
+  onClose: () => void;
+  /** Called with the newly created team immediately after server confirmation. */
+  onTeamCreated?: (team: Team) => void;
+  /** Whether the current user is a team admin. */
+  isAdmin?: boolean;
+}
+
+type Tab = 'settings' | 'members' | 'statuses';
+
+const DEFAULT_COLOR = IDENTITY_COLORS[0].hex;
+const DEFAULT_ICON = '__name_1__';
+
+function resolveIdentity(team?: Team): Identity {
+  return {
+    color: team?.color ?? DEFAULT_COLOR,
+    icon: team?.icon ?? DEFAULT_ICON,
+  };
+}
+
+// ── Archive confirmation dialog ─────────────────────────────────────────────
+
+interface ArchiveDialogProps {
+  teamName: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+  busy: boolean;
+}
+
+function ArchiveDialog({ teamName, onCancel, onConfirm, busy }: ArchiveDialogProps) {
+  return (
+    <div style={{ padding: '32px 28px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, textAlign: 'center' }}>
+      <div style={{
+        width: 48, height: 48, borderRadius: 12,
+        background: 'rgba(249,115,22,.20)', border: '1.5px solid rgba(249,115,22,.44)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <Archive size={22} color="#F97316" />
+      </div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3' }}>
+        Archive &ldquo;{teamName}&rdquo;?
+      </div>
+      <div style={{ fontSize: 13, color: '#8b949e', lineHeight: 1.6, maxWidth: 400 }}>
+        The team will be hidden from active views. All timelines and activities will be preserved and the team can be restored from the Archived section at any time.
+      </div>
+      <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+        <button onClick={onCancel} disabled={busy} style={cancelBtnStyle}>Cancel</button>
+        <button onClick={onConfirm} disabled={busy} style={{
+          background: 'rgba(249,115,22,.22)', border: '1px solid rgba(249,115,22,.66)',
+          color: '#F97316', fontWeight: 600, fontSize: 13,
+          padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
+          opacity: busy ? 0.6 : 1,
+        }}>
+          {busy ? 'Archiving…' : 'Archive team'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Shared button styles ────────────────────────────────────────────────────
+
+const cancelBtnStyle: React.CSSProperties = {
+  background: 'none', border: '1px solid #30363d', color: '#8b949e',
+  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
+};
+
+const inputStyle: React.CSSProperties = {
+  background: '#2d333b', border: '1px solid #30363d', borderRadius: 7,
+  padding: '8px 12px', color: '#e6edf3', fontSize: 13,
+  width: '100%', boxSizing: 'border-box', fontFamily: 'inherit',
+};
+
+const labelStyle: React.CSSProperties = {
+  fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px',
+  textTransform: 'uppercase', marginBottom: 6, display: 'block',
+};
+
+// ── Main component ──────────────────────────────────────────────────────────
+
+export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin = true }: Props) {
+  const { user } = useAuth()
+  const currentUserId = (user as { id?: string } | null)?.id ?? ''
+  const [tab, setTab] = useState<Tab>('settings');
+  const [teamSaved, setTeamSaved] = useState(mode === 'edit');
+  const [showBanner, setShowBanner] = useState(false);
+  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
+  const [nameEditing, setNameEditing] = useState(false);
+  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
+  const [identity, setIdentity] = useState<Identity>(resolveIdentity(team));
+  const [name, setName] = useState(team?.name ?? '');
+  const [description, setDescription] = useState(team?.description ?? '');
+  const [notes, setNotes] = useState(team?.notes ?? '');
+
+  const [savedTeamId, setSavedTeamId] = useState(team?.id ?? '');
+
+  const createTeam = useCreateTeam();
+  const updateTeam = useUpdateTeam();
+  const archiveTeam = useArchiveTeam();
+  const unarchiveTeam = useUnarchiveTeam();
+
+  // Members tab state — only loaded when the team exists.
+  const activeTeamId = savedTeamId || team?.id || '';
+  const { data: members = [] } = useTeamMembers(activeTeamId);
+  const { data: invites = [] } = useTeamInvites(activeTeamId);
+  const { data: inviteLink } = useTeamInviteLink(activeTeamId);
+  const addMember = useAddMember(activeTeamId);
+  const deleteMember = useDeleteMember(activeTeamId);
+  const archiveMember = useArchiveMember(activeTeamId);
+  const unarchiveMember = useUnarchiveMember(activeTeamId);
+  const createParticipant = useCreateParticipant(activeTeamId);
+  const updateMember = useUpdateMember(activeTeamId);
+  const revokeInvite = useRevokeInvite(activeTeamId);
+  const createInviteLink = useCreateInviteLink(activeTeamId);
+  const revokeInviteLink = useRevokeInviteLink(activeTeamId);
+
+  const [searchQ, setSearchQ] = useState('');
+  const [showParticipantForm, setShowParticipantForm] = useState(false);
+  // Maps memberId → assignmentCount when a 409 MEMBER_HAS_ASSIGNMENTS is returned.
+  const [removeErrors, setRemoveErrors] = useState<Record<string, number>>({});
+  const [participantName, setParticipantName] = useState('');
+  const [participantIdentity, setParticipantIdentity] = useState<Identity>({ color: IDENTITY_COLORS[3].hex, icon: '__name_1__' });
+  const [copyLinkLabel, setCopyLinkLabel] = useState<'copy' | 'copied'>('copy');
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const { data: searchResults = [] } = useUserSearch(searchQ);
+
+  const isArchived = Boolean(team?.archivedAt);
+  const busy = createTeam.isPending || updateTeam.isPending || archiveTeam.isPending || unarchiveTeam.isPending;
+
+  useEffect(() => {
+    return () => { if (bannerTimer.current) clearTimeout(bannerTimer.current); };
+  }, []);
+
+  // Focus name input when entering edit mode.
+  useEffect(() => {
+    if (nameEditing) nameInputRef.current?.focus();
+  }, [nameEditing]);
+
+  // Open in name-editing mode for new teams so the user can type right away.
+  useEffect(() => {
+    if (mode === 'new') setNameEditing(true);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Stale 409 errors belong to a specific member row; clear them when the
+  // search changes because the member list may reorder or filter differently.
+  useEffect(() => {
+    setRemoveErrors({});
+  }, [searchQ]);
+
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        if (nameEditing) { setNameEditing(false); return; }
+        onClose();
+      }
+    }
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [onClose, nameEditing]);
+
+  function handleSave() {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    const patch = {
+      name: trimmed,
+      description: description.trim() || null,
+      notes: notes.trim() || null,
+      color: identity.color,
+      icon: identity.icon,
+    };
+
+    if (mode === 'new' && !teamSaved) {
+      createTeam.mutate(patch, {
+        onSuccess: (created) => {
+          setSavedTeamId(created.id);
+          setTeamSaved(true);
+          setShowBanner(true);
+          onTeamCreated?.(created);
+          bannerTimer.current = setTimeout(() => setShowBanner(false), 3000);
+        },
+      });
+    } else {
+      const tid = savedTeamId || team?.id;
+      if (!tid) return;
+      updateTeam.mutate({ teamId: tid, patch }, { onSuccess: () => { /* noop */ } });
+    }
+  }
+
+  function handleArchive() {
+    const tid = savedTeamId || team?.id;
+    if (!tid) return;
+    archiveTeam.mutate(tid, { onSuccess: onClose });
+  }
+
+  function handleRestore() {
+    const tid = savedTeamId || team?.id;
+    if (!tid) return;
+    unarchiveTeam.mutate(tid, { onSuccess: onClose });
+  }
+
+  const teamColor = identity.color;
+  const isNew = mode === 'new';
+  const primaryLabel = teamSaved ? 'Save changes' : 'Create team';
+  const membersLocked = !teamSaved;
+
+  return createPortal(
+    <div
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 1000,
+      }}
+    >
+      <div
+        style={{
+          width: 580, maxHeight: '90vh', background: '#21262d',
+          border: '1px solid #30363d', borderRadius: 14,
+          boxShadow: '0 24px 64px rgba(0,0,0,.6)',
+          display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        }}
+      >
+        {/* Header — identity widget + editable name */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          padding: '16px 20px', borderBottom: '1px solid #30363d',
+        }}>
+          <IdentityWidget identity={identity} name={name} shape="square" onChange={setIdentity} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.6px', textTransform: 'uppercase', marginBottom: 3 }}>
+              {isNew ? 'New team' : 'Edit team'}
+            </div>
+            {nameEditing ? (
+              <input
+                ref={nameInputRef}
+                value={name}
+                onChange={e => setName(e.target.value)}
+                onBlur={() => setNameEditing(false)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') { setNameEditing(false); }
+                  // Escape is handled globally above
+                }}
+                placeholder="Team name…"
+                style={{
+                  background: 'transparent', border: 'none',
+                  borderBottom: '1px solid #484f58',
+                  color: '#e6edf3', fontSize: 16, fontWeight: 600,
+                  fontFamily: 'inherit', width: '100%', outline: 'none',
+                  padding: '0 0 2px 0',
+                }}
+              />
+            ) : (
+              <div
+                onClick={() => setNameEditing(true)}
+                title="Click to edit name"
+                style={{
+                  fontSize: 16, fontWeight: 600,
+                  color: name ? '#e6edf3' : '#484f58',
+                  cursor: 'text',
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}
+              >
+                {name || 'Click to name this team…'}
+              </div>
+            )}
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 4, display: 'flex' }}>
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Saved banner */}
+        {showBanner && (
+          <div style={{
+            padding: '8px 20px',
+            background: `${teamColor}18`,
+            borderBottom: `1px solid ${teamColor}44`,
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+            <span style={{ fontSize: 14, color: teamColor }}>✓</span>
+            <span style={{ fontSize: 12, color: teamColor }}>Team created — you can now add members.</span>
+          </div>
+        )}
+
+        {/* Tab bar */}
+        <div style={{ display: 'flex', padding: '0 20px', borderBottom: '1px solid #30363d' }}>
+          {(['settings', 'members', 'statuses'] as Tab[]).map(t => {
+            const isActive = tab === t;
+            const locked = t === 'members' && membersLocked || t === 'statuses' && membersLocked;
+            return (
+              <div key={t} style={{ position: 'relative' }}>
+                <button
+                  onClick={() => !locked && setTab(t)}
+                  title={locked ? 'Save the team first to add members' : undefined}
+                  style={{
+                    padding: '10px 14px', fontSize: 13, fontWeight: 500, background: 'none', border: 'none',
+                    borderBottom: `2px solid ${isActive ? teamColor : 'transparent'}`,
+                    color: isActive ? '#e6edf3' : '#8b949e',
+                    cursor: locked ? 'not-allowed' : 'pointer',
+                    opacity: locked ? 0.45 : 1,
+                    marginBottom: -1, fontFamily: 'inherit',
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    textTransform: 'capitalize',
+                  }}
+                >
+                  {t === 'statuses' ? 'Status Templates' : t}
+                  {t === 'members' && teamSaved && (
+                    <span style={{ fontSize: 11, color: '#484f58', background: '#2d333b', borderRadius: 99, padding: '1px 6px' }}>
+                      {members.length}
+                    </span>
+                  )}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {showArchiveConfirm ? (
+            <ArchiveDialog
+              teamName={name || 'this team'}
+              onCancel={() => setShowArchiveConfirm(false)}
+              onConfirm={handleArchive}
+              busy={archiveTeam.isPending}
+            />
+          ) : tab === 'settings' ? (
+            <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
+              {/* Description */}
+              <div>
+                <label style={labelStyle}>Description</label>
+                <input
+                  autoFocus={mode === 'edit'}
+                  value={description}
+                  onChange={e => setDescription(e.target.value)}
+                  placeholder="Short description of this team…"
+                  style={inputStyle}
+                />
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label style={labelStyle}>Notes</label>
+                <textarea
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  placeholder="Internal notes, context, links…"
+                  rows={4}
+                  style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5 }}
+                />
+              </div>
+
+              {createTeam.isError && (
+                <div style={{ fontSize: 12, color: '#ef4444' }}>
+                  Something went wrong — refer to logs for details.
+                </div>
+              )}
+              {updateTeam.isError && (
+                <div style={{ fontSize: 12, color: '#ef4444' }}>
+                  Something went wrong — refer to logs for details.
+                </div>
+              )}
+            </div>
+          ) : tab === 'statuses' ? (
+            <StatusTemplatesTab
+              teamId={activeTeamId}
+              isAdmin={isAdmin}
+              teamColor={teamColor}
+            />
+          ) : (
+            // Members tab
+            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+              {/* Search / add input */}
+              {isAdmin && (
+                <div>
+                  <label style={labelStyle}>Add member or invite by email</label>
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      value={searchQ}
+                      onChange={e => setSearchQ(e.target.value)}
+                      placeholder="Search by name or email…"
+                      style={{ ...inputStyle, paddingRight: 36 }}
+                    />
+                    {searchQ && (
+                      <button
+                        onClick={() => setSearchQ('')}
+                        style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Search results */}
+                  {searchQ.length >= 2 && (
+                    <div style={{ background: '#2d333b', border: '1px solid #30363d', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
+                      {searchResults.length === 0 ? (
+                        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <span style={{ fontSize: 12, color: '#8b949e' }}>No users found for "{searchQ}"</span>
+                          <button
+                            onClick={() => {
+                              // Trigger email invite
+                              const email = searchQ.includes('@') ? searchQ : null;
+                              if (!email) return;
+                              fetch(`/teams/${activeTeamId}/invites`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('accessToken') ?? ''}` },
+                                body: JSON.stringify({ email }),
+                              }).then(() => setSearchQ(''));
+                            }}
+                            style={{ fontSize: 11, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit' }}
+                          >
+                            <Mail size={11} style={{ display: 'inline', marginRight: 4 }} />
+                            Invite
+                          </button>
+                        </div>
+                      ) : (
+                        searchResults.map(u => {
+                          const alreadyMember = members.some(m => m.userId === u.id);
+                          return (
+                            <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: '1px solid #30363d' }}>
+                              <Badge identity={{ color: '#8b949e', icon: '__name_1__' }} name={u.displayName} shape="circle" size={22} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13, color: '#e6edf3' }}>{u.displayName}</div>
+                                <div style={{ fontSize: 11, color: '#484f58' }}>{u.email}</div>
+                              </div>
+                              {alreadyMember ? (
+                                <span style={{ fontSize: 11, color: '#484f58' }}>Already added</span>
+                              ) : (
+                                <button
+                                  onClick={() => addMember.mutate({ userId: u.id }, { onSuccess: () => setSearchQ('') })}
+                                  style={{ fontSize: 11, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4 }}
+                                >
+                                  <Plus size={11} />
+                                  Add
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Participant creation form */}
+              {isAdmin && (
+                <div>
+                  {!showParticipantForm ? (
+                    <button
+                      onClick={() => setShowParticipantForm(true)}
+                      style={{ fontSize: 12, color: '#F59E0B', background: '#F59E0B14', border: '1px solid #F59E0B44', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                    >
+                      <Plus size={12} />
+                      Add participant (no login)
+                    </button>
+                  ) : (
+                    <div style={{ background: '#2d333b', border: '1px solid #30363d', borderRadius: 8, padding: 14 }}>
+                      <label style={labelStyle}>New participant</label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <IdentityWidget
+                          identity={participantIdentity}
+                          name={participantName}
+                          shape="circle"
+                          onChange={setParticipantIdentity}
+                        />
+                        <input
+                          value={participantName}
+                          onChange={e => setParticipantName(e.target.value)}
+                          placeholder="Display name (required)…"
+                          style={{ ...inputStyle, flex: 1 }}
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => {
+                            if (!participantName.trim()) return;
+                            createParticipant.mutate({
+                              name: participantName.trim(),
+                              color: participantIdentity.color,
+                              icon: participantIdentity.icon,
+                            }, {
+                              onSuccess: () => { setParticipantName(''); setShowParticipantForm(false); },
+                            });
+                          }}
+                          disabled={!participantName.trim() || createParticipant.isPending}
+                          style={{ background: '#F59E0B', color: '#000', fontWeight: 600, fontSize: 12, padding: '7px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0, opacity: !participantName.trim() ? 0.5 : 1 }}
+                        >
+                          Create
+                        </button>
+                        <button onClick={() => setShowParticipantForm(false)} style={{ ...cancelBtnStyle, padding: '7px 10px' }}>
+                          <X size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Role-change error banner */}
+              {updateMember.isError && (
+                <div style={{ fontSize: 12, color: '#F59E0B', background: '#F59E0B10', border: '1px solid #F59E0B33', borderRadius: 7, padding: '7px 12px' }}>
+                  {(updateMember.error as { message?: string })?.message ?? 'Could not update role.'}
+                </div>
+              )}
+
+              {/* Member list */}
+              <div>
+                <label style={labelStyle}>Members ({members.length})</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {members.map((m: TeamMemberWithUser) => {
+                    const isParticipant = !m.userId;
+                    const isInactive = Boolean(m.archivedAt);
+                    const memberRole: MemberRole = isParticipant ? 'participant' : (m.role as MemberRole);
+                    const removeError = removeErrors[m.id];
+                    return (
+                      <div key={m.id}>
+                        <div
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 10,
+                            padding: '7px 10px', borderRadius: 7,
+                            background: isInactive ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)',
+                            opacity: isInactive ? 0.5 : 1,
+                          }}
+                        >
+                          <div style={{ flexShrink: 0, border: isParticipant ? '1.5px dashed #484f58' : 'none', borderRadius: '50%' }}>
+                            <Badge
+                              identity={{ color: m.color ?? '#8b949e', icon: m.icon ?? '__name_words__' }}
+                              name={m.displayName}
+                              shape="circle"
+                              size={24}
+                            />
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ fontSize: 13, color: '#e6edf3', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.displayName}</span>
+                              {isParticipant && <span style={{ fontSize: 10, fontWeight: 600, background: '#F59E0B20', border: '1px solid #F59E0B44', color: '#F59E0B', borderRadius: 99, padding: '0px 5px', flexShrink: 0 }}>No login</span>}
+                            </div>
+                            {!isParticipant && <div style={{ fontSize: 11, color: '#484f58', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>}
+                          </div>
+                          {isAdmin && (
+                            <RoleDropdown
+                              value={memberRole}
+                              onChange={role => {
+                                if (isParticipant || role === 'participant') return;
+                                updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
+                              }}
+                              disabled={isParticipant || m.userId === currentUserId}
+                              hideParticipant={!isParticipant}
+                            />
+                          )}
+                          {isAdmin && (
+                            <div style={{ display: 'flex', gap: 4 }}>
+                              {isInactive ? (
+                                <button
+                                  title="Reactivate member"
+                                  onClick={() => unarchiveMember.mutate(m.id)}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
+                                  onMouseEnter={e => (e.currentTarget.style.color = '#1A97A2')}
+                                  onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
+                                >
+                                  <RefreshCw size={13} />
+                                </button>
+                              ) : (
+                                <button
+                                  title="Inactivate member"
+                                  onClick={() => archiveMember.mutate(m.id)}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
+                                  onMouseEnter={e => (e.currentTarget.style.color = '#F59E0B')}
+                                  onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
+                                >
+                                  <UserMinus size={13} />
+                                </button>
+                              )}
+                              <button
+                                title="Remove from team"
+                                onClick={() => {
+                                  setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; });
+                                  deleteMember.mutate(m.id, {
+                                    onError: (err) => {
+                                      if (err instanceof ApiError && err.code === 'MEMBER_HAS_ASSIGNMENTS') {
+                                        const count = (err.data?.assignmentCount as number) ?? 0;
+                                        setRemoveErrors(prev => ({ ...prev, [m.id]: count }));
+                                      }
+                                    },
+                                  });
+                                }}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 3, display: 'flex' }}
+                                onMouseEnter={e => (e.currentTarget.style.color = '#EF4444')}
+                                onMouseLeave={e => (e.currentTarget.style.color = '#484f58')}
+                              >
+                                <Minus size={13} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        {removeError !== undefined && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#F59E0B', padding: '4px 10px 4px 44px' }}>
+                            <span>{removeError} assignment{removeError === 1 ? '' : 's'} — can't remove.</span>
+                            <button
+                              onClick={() => {
+                                archiveMember.mutate(m.id, {
+                                  onSuccess: () => setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; }),
+                                });
+                              }}
+                              style={{ fontSize: 12, color: '#F59E0B', background: 'none', border: '1px solid #F59E0B66', borderRadius: 5, padding: '2px 8px', cursor: 'pointer', fontFamily: 'inherit' }}
+                            >
+                              Inactivate instead
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Pending invitations */}
+              {isAdmin && invites.length > 0 && (
+                <div>
+                  <label style={labelStyle}>Pending invitations ({invites.length})</label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    {invites.map(inv => (
+                      <div key={inv.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)' }}>
+                        <div style={{ width: 24, height: 24, borderRadius: '50%', border: '1.5px dashed #30363d', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          <Mail size={11} color="#484f58" />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, color: '#8b949e', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.email}</div>
+                          <div style={{ fontSize: 11, color: '#484f58' }}>
+                            Sent {new Date(inv.createdAt).toLocaleDateString()} · expires {new Date(inv.expiresAt).toLocaleDateString()}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => revokeInvite.mutate(inv.id)}
+                          style={{ fontSize: 11, color: '#EF4444', background: '#EF444414', border: '1px solid #EF444444', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit' }}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Invite link */}
+              {isAdmin && (
+                <div>
+                  <label style={labelStyle}>
+                    <Link2 size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Invite link
+                  </label>
+                  {inviteLink?.token ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <input
+                          readOnly
+                          value={`${window.location.origin}/register?token=${inviteLink.token}`}
+                          style={{ ...inputStyle, color: '#8b949e', flex: 1 }}
+                          onClick={e => (e.target as HTMLInputElement).select()}
+                        />
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(`${window.location.origin}/register?token=${inviteLink.token!}`);
+                            setCopyLinkLabel('copied');
+                            if (copyTimer.current) clearTimeout(copyTimer.current);
+                            copyTimer.current = setTimeout(() => setCopyLinkLabel('copy'), 2000);
+                          }}
+                          style={{
+                            background: copyLinkLabel === 'copied' ? '#1A97A222' : '#2d333b',
+                            border: `1px solid ${copyLinkLabel === 'copied' ? '#1A97A244' : '#30363d'}`,
+                            color: copyLinkLabel === 'copied' ? '#1A97A2' : '#8b949e',
+                            borderRadius: 7, padding: '0 14px', cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontFamily: 'inherit',
+                            transition: 'all 0.15s', flexShrink: 0,
+                          }}
+                        >
+                          {copyLinkLabel === 'copied' ? <Check size={12} /> : <Copy size={12} />}
+                          {copyLinkLabel === 'copied' ? 'Copied!' : 'Copy link'}
+                        </button>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <span style={{ fontSize: 11, color: '#484f58', flex: 1, lineHeight: 1.5 }}>
+                          Anyone with this link can join the team as a member.
+                        </span>
+                        <button
+                          onClick={() => createInviteLink.mutate()}
+                          style={{ fontSize: 11, color: '#8b949e', background: 'none', border: '1px solid #30363d', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
+                        >
+                          <RefreshCw size={11} /> Regenerate
+                        </button>
+                        <button
+                          onClick={() => revokeInviteLink.mutate()}
+                          style={{ fontSize: 11, color: '#EF4444', background: 'none', border: '1px solid #EF444444', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: 12, color: '#484f58' }}>No invite link — generate one to share a reusable join URL.</span>
+                      <button
+                        onClick={() => createInviteLink.mutate()}
+                        style={{ fontSize: 12, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                      >
+                        Generate
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '12px 20px', borderTop: '1px solid #30363d',
+        }}>
+          <div>
+            {mode === 'edit' && !showArchiveConfirm && (
+              isArchived ? (
+                <button
+                  onClick={handleRestore}
+                  disabled={busy}
+                  style={{
+                    background: 'none', border: '1px solid #30363d', color: '#8b949e',
+                    fontSize: 12, padding: '6px 14px', borderRadius: 7, cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit',
+                    opacity: busy ? 0.6 : 1,
+                  }}
+                >
+                  <Archive size={13} />
+                  Restore team
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowArchiveConfirm(true)}
+                  style={{
+                    background: 'none', border: '1px solid #30363d', color: '#484f58',
+                    fontSize: 12, padding: '6px 14px', borderRadius: 7, cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit',
+                  }}
+                >
+                  <Archive size={13} />
+                  Archive team
+                </button>
+              )
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={onClose} style={cancelBtnStyle}>Cancel</button>
+            <button
+              onClick={handleSave}
+              disabled={busy || !name.trim()}
+              style={{
+                background: teamColor, color: '#fff', fontWeight: 600,
+                fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
+                border: 'none', opacity: (busy || !name.trim()) ? 0.6 : 1,
+                fontFamily: 'inherit',
+              }}
+            >
+              {busy ? 'Saving…' : primaryLabel}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+````
+
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 ````
 
@@ -25858,6 +27320,12 @@ func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Seed the default "Simple" status template for the new team.
+	if err := s.statuses.SeedDefaultTemplate(team.ID, claims.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
+		return
+	}
+
 	writeJSON(w, http.StatusCreated, team)
 }
 
@@ -26834,6 +28302,256 @@ func flatten[T any](s []*T) []T {
 }
 ````
 
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	SetArchived(id string, at *time.Time) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
+````
+
 ## File: packages/api/internal/models/models.go
 ````go
 // Package models holds the domain types shared across the API, db,
@@ -27068,6 +28786,47 @@ type RevokeUserResult struct {
 	MembershipsRemoved     int  `json:"membershipsRemoved"`
 }
 
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
 // Invite is a single-use token that grants an email address the right to
 // join a Team. AcceptedAt is non-nil once consumed; expired or accepted
 // invites are rejected by the registration handler.
@@ -27081,240 +28840,6 @@ type Invite struct {
 	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
 	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
 	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
-}
-````
-
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	SetArchived(id string, at *time.Time) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
 }
 ````
 
@@ -28150,6 +29675,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/teams/{teamId}/status-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List all status templates for a team */
+        get: operations["listStatusTemplates"];
+        put?: never;
+        /** Create a status template */
+        post: operations["createStatusTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/status-templates/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a status template (blocked if it is the last one) */
+        delete: operations["deleteStatusTemplate"];
+        options?: never;
+        head?: never;
+        /** Rename or reorder a status template */
+        patch: operations["updateStatusTemplate"];
+        trace?: never;
+    };
+    "/status-templates/{id}/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add an item to a status template */
+        post: operations["createStatusTemplateItem"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/status-template-items/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a template item (blocked if it is the last one in the template) */
+        delete: operations["deleteStatusTemplateItem"];
+        options?: never;
+        head?: never;
+        /** Rename, recolor, reicon, toggle is_closed, or reorder a template item */
+        patch: operations["updateStatusTemplateItem"];
+        trace?: never;
+    };
+    "/teams/{teamId}/timelines/{timelineId}/statuses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List statuses for a specific timeline */
+        get: operations["listTimelineStatuses"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/timelines/share/{token}": {
         parameters: {
             query?: never;
@@ -28427,6 +30040,69 @@ export interface components {
             membershipsInactivated: number;
             membershipsRemoved: number;
         };
+        StatusTemplateItem: {
+            id: string;
+            templateId: string;
+            name: string;
+            /** @description Hex color string (e.g. "#3B82F6"). */
+            color: string;
+            /** @description Identity icon ID. Null if not set. */
+            icon?: string | null;
+            /** @description Closed statuses filter activities out of active views. */
+            isClosed: boolean;
+            position: number;
+        };
+        StatusTemplate: {
+            id: string;
+            teamId: string;
+            name: string;
+            description?: string | null;
+            position: number;
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            items: components["schemas"]["StatusTemplateItem"][];
+        };
+        Status: {
+            id: string;
+            timelineId: string;
+            name: string;
+            /** @description Hex color string (e.g. "#3B82F6"). */
+            color: string;
+            /** @description Identity icon ID. Null if not set. */
+            icon?: string | null;
+            /** @description Closed statuses filter activities out of active views. */
+            isClosed: boolean;
+            position: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        CreateStatusTemplateInput: {
+            name: string;
+            description?: string | null;
+        };
+        PatchStatusTemplateInput: {
+            name?: string;
+            description?: string | null;
+            position?: number;
+        };
+        CreateStatusTemplateItemInput: {
+            name: string;
+            color?: string;
+            icon?: string | null;
+            isClosed?: boolean;
+        };
+        PatchStatusTemplateItemInput: {
+            name?: string;
+            color?: string;
+            icon?: string | null;
+            isClosed?: boolean;
+            position?: number;
+        };
     };
     responses: {
         /** @description Invalid request body or parameters. */
@@ -28493,6 +30169,8 @@ export interface components {
         timelineId: string;
         /** @description Saved filter ID. */
         savedFilterId: string;
+        /** @description Resource ID. */
+        id: string;
         /** @description Public share token for a timeline. */
         shareToken: string;
     };
@@ -30321,6 +31999,244 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
+    listStatusTemplates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of status templates with their items. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusTemplate"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createStatusTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateStatusTemplateInput"];
+            };
+        };
+        responses: {
+            /** @description Created status template (with empty items array). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusTemplate"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteStatusTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Cannot delete the last template on the team. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    updateStatusTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchStatusTemplateInput"];
+            };
+        };
+        responses: {
+            /** @description Updated status template. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusTemplate"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createStatusTemplateItem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateStatusTemplateItemInput"];
+            };
+        };
+        responses: {
+            /** @description Created template item. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusTemplateItem"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteStatusTemplateItem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Cannot delete the last item in a template. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    updateStatusTemplateItem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchStatusTemplateItemInput"];
+            };
+        };
+        responses: {
+            /** @description Updated template item. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusTemplateItem"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listTimelineStatuses: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: string;
+                timelineId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of timeline statuses in position order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Status"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     getTimelineByShareToken: {
         parameters: {
             query?: never;
@@ -30886,6 +32802,136 @@ components:
         membershipsRemoved:
           type: integer
 
+    StatusTemplateItem:
+      type: object
+      required: [id, templateId, name, color, isClosed, position]
+      properties:
+        id:
+          type: string
+        templateId:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          description: Hex color string (e.g. "#3B82F6").
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID. Null if not set.
+        isClosed:
+          type: boolean
+          description: Closed statuses filter activities out of active views.
+        position:
+          type: integer
+
+    StatusTemplate:
+      type: object
+      required: [id, teamId, name, position, createdBy, createdAt, updatedAt, items]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        position:
+          type: integer
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/StatusTemplateItem"
+
+    Status:
+      type: object
+      required: [id, timelineId, name, color, isClosed, position, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        timelineId:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          description: Hex color string (e.g. "#3B82F6").
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID. Null if not set.
+        isClosed:
+          type: boolean
+          description: Closed statuses filter activities out of active views.
+        position:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateStatusTemplateInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+
+    PatchStatusTemplateInput:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        position:
+          type: integer
+
+    CreateStatusTemplateItemInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+
+    PatchStatusTemplateItemInput:
+      type: object
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+        position:
+          type: integer
+
   # ────────────────────────────────────────────────────────────
   # Reusable responses
   # ────────────────────────────────────────────────────────────
@@ -30965,6 +33011,14 @@ components:
       in: path
       required: true
       description: Saved filter ID.
+      schema:
+        type: string
+
+    id:
+      name: id
+      in: path
+      required: true
+      description: Resource ID.
       schema:
         type: string
 
@@ -32791,6 +34845,221 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /teams/{teamId}/status-templates:
+    get:
+      operationId: listStatusTemplates
+      summary: List all status templates for a team
+      tags: [statusTemplates]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of status templates with their items.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StatusTemplate"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createStatusTemplate
+      summary: Create a status template
+      tags: [statusTemplates]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStatusTemplateInput"
+      responses:
+        "201":
+          description: Created status template (with empty items array).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /status-templates/{id}:
+    patch:
+      operationId: updateStatusTemplate
+      summary: Rename or reorder a status template
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchStatusTemplateInput"
+      responses:
+        "200":
+          description: Updated status template.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteStatusTemplate
+      summary: Delete a status template (blocked if it is the last one)
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot delete the last template on the team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /status-templates/{id}/items:
+    post:
+      operationId: createStatusTemplateItem
+      summary: Add an item to a status template
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStatusTemplateItemInput"
+      responses:
+        "201":
+          description: Created template item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplateItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /status-template-items/{id}:
+    patch:
+      operationId: updateStatusTemplateItem
+      summary: Rename, recolor, reicon, toggle is_closed, or reorder a template item
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchStatusTemplateItemInput"
+      responses:
+        "200":
+          description: Updated template item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplateItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteStatusTemplateItem
+      summary: Delete a template item (blocked if it is the last one in the template)
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot delete the last item in a template.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /teams/{teamId}/timelines/{timelineId}/statuses:
+    get:
+      operationId: listTimelineStatuses
+      summary: List statuses for a specific timeline
+      tags: [statuses]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: timelineId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of timeline statuses in position order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Status"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /timelines/share/{token}:
     get:
       operationId: getTimelineByShareToken
@@ -34450,22 +36719,46 @@ Closes data-integrity and access-revocation gaps from 10.1.2. Protects historica
 
 ---
 
-### Team Statuses & Member Colors (Phase 10.2)
+### Status Templates & Timeline Statuses (Phase 10.2)
 API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
 
-**API:**
-- [ ] `team_statuses` migration and repository
-- [ ] Seed default statuses (Planned / In Progress / Done) on team creation
-- [ ] `GET /teams/:id/statuses` — list in order
-- [ ] `POST /teams/:id/statuses` — create
-- [ ] `PATCH /statuses/:id` — rename, recolor, reorder
-- [ ] `DELETE /statuses/:id` — requires `replacementStatusId`; migrates events
-- [ ] Self-protect: cannot delete the last remaining status
+**Schema (migration 012):**
+- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
+- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
+- [x] Update `migrations_test.go` — 2026-05-27
 
-**Web (`/settings/team/:id` Statuses tab):**
-- [ ] Drag-to-reorder list with inline rename + color picker
-- [ ] Delete-with-replacement dialog: lists affected event count, picker for replacement
-- [ ] Member identity picker in Members tab uses `<IdentityWidget>` (Phase 9.6, wired in 10.1.2) confirmed working with color + icon fields
+**Go API:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
+- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
+- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
+- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
+- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
+- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
+- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
+- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
+- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
+- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
+- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
+
+**OpenAPI + types:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
+- [x] All new endpoint paths — 2026-05-27
+- [x] Regenerate TypeScript types — 2026-05-27
+
+**Web:**
+- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
+- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
+- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
+
+**Testing & verification:**
+- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
+- [ ] Manual: create second template, add items, rename/recolor items
+- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
+- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
+- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
 
 ---
 
@@ -35173,8 +37466,8 @@ This document organizes development into discrete phases with effort estimates a
 | 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
 | 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | 🔄 |
 | 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | 🔄 |
-| 10.2 | [Team Statuses & Member Colors (API + UI)](#phase-102--team-statuses--member-colors-api--ui) | M — 1–2 days | ⬜ |
-| 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2 days | ⬜ |
+| 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | 🔄 In Progress |
+| 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | ⬜ |
 | 10.4 | [Preference Consumption, Branding & Backup](#phase-104--preference-consumption-branding--backup-admin) | S — 1 day | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
@@ -35981,41 +38274,59 @@ Hard-delete of a `team_members` row is only ever permitted when the member has z
 
 ---
 
-### Phase 10.2 — Team Statuses & Member Colors (API + UI)
-**Status:** ⬜ | **Effort:** M (1–2 days)
+### Phase 10.2 — Status Templates & Timeline Statuses
+**Status:** 🔄 In Progress — 2026-05-27, all automated checks pass; manual Docker verification still needed | **Effort:** M (2–3 days)
 
-Statuses are team-scoped configuration; pairing them with the Statuses tab UI in one phase keeps the API and the only consumer of that API shipping together. Required before Phase 11.3 (Kanban) so admins can configure columns. Depends on 10.1.2 (Members) because the statuses tab sits alongside the Members tab in team settings.
+Statuses represent phases for an activity (e.g., Planned → In Progress → Done). They are **timeline-scoped** — each timeline has its own set. To reduce setup friction, teams maintain **status templates** (reusable presets). When a timeline is created, a template's items are copied into timeline-specific status rows; from that point the timeline's statuses are independent of the template. Activities default to null status (no auto-assignment). Required before Phase 11.3 (Kanban) so admins can configure columns.
+
+**Data model:**
+
+*`status_templates` (team-level reusable presets):*
+- `id`, `team_id` (FK teams), `name`, `description`, `position`, `created_by` (FK users), `created_at`, `updated_at`
+
+*`status_template_items` (statuses within a template):*
+- `id`, `template_id` (FK status_templates CASCADE), `name`, `color`, `icon`, `is_closed` (boolean — closure flag for filtering), `position`
+
+*`statuses` (live statuses on a timeline, copied from template):*
+- `id`, `timeline_id` (FK timelines CASCADE), `name`, `color`, `icon`, `is_closed`, `position`, `created_at`, `updated_at`
+
+*Migration:* `activities.status_id` FK moves from `team_statuses` → `statuses`; drop `team_statuses`.
 
 **Scope:**
 
-*API:*
-- `team_statuses` migration and repository
-- Seed default statuses (Planned / In Progress / Done) on team creation
-- `GET /teams/:id/statuses`, `POST /teams/:id/statuses`
-- `PATCH /statuses/:id` — rename, recolor, reorder
-- `DELETE /statuses/:id` — requires `replacementStatusId`; migrates events
-- Self-protect: cannot delete the last remaining status on a team
-- `color` field on `team_members` (already established in 10.1 via member PATCH; reaffirmed here)
+*API — templates (team-level):*
+- Seed one default template ("Simple": Planned / In Progress / Done; Done is `is_closed`) on team creation
+- `GET /teams/:id/status-templates` — list templates with items
+- `POST /teams/:id/status-templates` — create template
+- `PATCH /status-templates/:id` — rename, reorder
+- `DELETE /status-templates/:id` — blocked if last template on team
+- `POST /status-templates/:id/items` — add item
+- `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder
+- `DELETE /status-template-items/:id` — blocked if last item in template
 
-*Web:*
-- `/settings/team/:id` — Statuses tab: drag-to-reorder list, inline rename, color picker
-- Delete-with-replacement dialog: lists affected event count, requires picking a replacement status before confirming
-- Member color picker in Members tab (already shipped in 10.1) — confirmed wired to the same color field
+*API — timeline statuses:*
+- On timeline creation, copy items from chosen template (or team's first template) into `statuses`
+- `GET /timelines/:id/statuses` — list statuses for a timeline
+
+*Web — Team Modal → "Status Templates" tab:*
+- List templates with expand/collapse to show items
+- Create template, rename, delete (with guard)
+- Within a template: add/remove/reorder items, inline edit name + identity (color/icon) + is_closed toggle
+- Drag-to-reorder items
 
 **Exit criteria — safe to pause when:**
-- A newly created team has exactly 3 seeded statuses
-- Statuses can be renamed, recolored, and reordered from the UI; changes persist
-- Deleting a status without a replacement is blocked at both API and UI levels
-- Deleting a status with a replacement migrates all associated events
-- Deleting the last remaining status is blocked
-- Member color changes from the Members tab reflect immediately wherever members are shown
+- New team gets one "Simple" template with 3 statuses (last marked closed)
+- Templates can be created, edited, reordered, deleted from team modal
+- Creating a timeline copies the selected template's statuses into `statuses` table
+- `GET /timelines/:id/statuses` returns the copied statuses
+- `is_closed` flag stored and returned in API responses
 
 ---
 
 ### Phase 10.3 — Timelines — Full CRUD (API + UI)
-**Status:** ⬜ | **Effort:** M (2 days)
+**Status:** ⬜ | **Effort:** M (2–3 days)
 
-Closes the Timelines cornerstone. Same problem space as 10.1: today timelines can be created in the wizard and never managed afterward, and access lists exist in the schema (Phase 8.0) with no CRUD endpoints.
+Closes the Timelines cornerstone. Same problem space as 10.1: today timelines can be created in the wizard and never managed afterward, and access lists exist in the schema (Phase 8.0) with no CRUD endpoints. Also wires the status system from 10.2 into the timeline and activity UIs.
 
 **Scope:**
 
@@ -36024,20 +38335,38 @@ Closes the Timelines cornerstone. Same problem space as 10.1: today timelines ca
 - `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (depends on Phase 9)
 - `DELETE /timelines/:id` — hard delete; admin only; confirms via second action
 
+*API — timeline statuses (editing):*
+- `POST /timelines/:id/statuses` — add a status
+- `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder
+- `DELETE /statuses/:id` — requires `replacementStatusId` if activities reference it; blocked if last status
+
 *API — access-list:*
 - `GET /timelines/:id/access` — list current grants (team member + role)
 - `PUT /timelines/:id/access/:memberId` — grant or update role (admin / member)
 - `DELETE /timelines/:id/access/:memberId` — revoke grant
 
-*Web:*
-- "New timeline" affordance in the sidebar timelines list → create-timeline modal (name, date range)
-- Edit-timeline modal reachable from each timeline in the sidebar (or a `/settings/team/:id/timelines` sub-route): rename, change date range, archive, delete
+*Web — timeline CRUD:*
+- "New timeline" affordance in the sidebar → create-timeline modal (name, date range, **template picker** with status preview)
+- Edit-timeline modal reachable from each timeline in the sidebar: rename, change date range, archive, delete
 - Access-list management UI: search-pick team members, role toggle, remove
 - Sidebar shows archived timelines under a collapsed "Archived" group; unarchive from there
 
+*Web — status uplifts (wiring 10.2 into the UI):*
+- **Timeline status management:** within edit-timeline modal, a "Statuses" tab where admins can add, rename, reorder, delete statuses; delete-with-replacement dialog shows affected activity count; identity (color/icon) and is_closed toggle inline
+- **Activity detail status picker:** `ActivityDetailPanel` gets a status dropdown populated from `GET /timelines/:id/statuses`; shows identity (color dot + icon) next to each option; null = "No status"
+- **"Hide closed" filter toggle:** in the Gantt toolbar filter area, hides activities whose status has `is_closed = true`
+
+*Deferred:*
+- "Re-apply template" (replace timeline statuses from a template with merge semantics) — future effort
+- Gantt bar status indicator (small color dot/icon on bars) — polish pass
+
 **Exit criteria — safe to pause when:**
 - A user can create a second timeline without going through the first-run wizard
-- A timeline admin can rename a timeline and change its date range; events outside the new range are not deleted, just hidden from default views
+- Timeline creation modal shows template picker; selected template's statuses are previewed and copied
+- A timeline admin can rename a timeline and change its date range; activities outside the new range are not deleted, just hidden from default views
+- Timeline status management: add, rename, reorder, delete (with replacement) all work from the UI
+- Activity detail panel shows status dropdown; selected status persists across reload
+- "Hide closed" toggle hides activities with a closed status; removing the filter restores them
 - Archiving a timeline removes it from the active sidebar; unarchive restores it
 - The access-list UI lets an admin grant / revoke access for any team member; a non-admin attempting these actions is rejected
 - A team member without an access grant cannot open the timeline (existing 8.0 enforcement) — verified end-to-end through the new UI
@@ -36438,6 +38767,30 @@ By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), an
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-05-27 — Phase 10.2 — Status Templates & Timeline Statuses
+
+**Backend:**
+- Migration 012: replaced `team_statuses` table with three new tables — `status_templates` (team-level reusable presets), `status_template_items` (items within a template), `statuses` (live timeline-specific statuses copied from a template)
+- `activities.status_id` FK updated to reference `statuses(id) ON DELETE SET NULL` instead of the now-dropped `team_statuses`
+- New `StatusTemplate`, `StatusTemplateItem`, `Status` models in `models.go`
+- New `StatusRepo` (`internal/db/status_repo.go`): full CRUD for templates, template items, and statuses; `SeedDefaultTemplate` creates the "Simple" preset (Planned / In Progress / Done, Done is `is_closed`); `CopyTemplateToTimeline` copies the team's first template into live statuses on timeline creation
+- `handleCreateTeam` now seeds the default template after team creation
+- `handleCreateTimeline` now calls `CopyTemplateToTimeline` so every new timeline gets statuses from the template
+- New API endpoints: `GET/POST /teams/{id}/status-templates`, `PATCH/DELETE /status-templates/{id}`, `POST /status-templates/{id}/items`, `PATCH/DELETE /status-template-items/{id}`, `GET /teams/{id}/timelines/{timelineId}/statuses`
+- Note: `GET /timelines/{id}/statuses` conflicts with `GET /timelines/share/{token}` in Go 1.22's mux (both are 3-segment wildcard paths, ambiguous on `/timelines/share/statuses`); resolved by using the team-scoped URL `/teams/{id}/timelines/{timelineId}/statuses`
+- OpenAPI spec updated with `StatusTemplate`, `StatusTemplateItem`, `Status`, and all input schemas; TypeScript types regenerated
+
+**Tests:**
+- `status_handler_test.go`: 5 tests covering default seeding on team create, admin-only template creation, last-template deletion guard, template item add/delete, and timeline status copy-from-template
+- `migrations_test.go` updated: `team_statuses` removed from expected tables; `status_templates`, `status_template_items`, `statuses` added; `activities.status_id` FK target verified
+
+**Frontend:**
+- `useStatusTemplates.ts` — hooks for all status template and timeline status endpoints
+- `StatusTemplatesTab.tsx` — standalone component: expandable template cards with inline item editing (name, color swatch picker, `is_closed` toggle), add/delete items with last-item guard, create/delete templates with last-template guard
+- `TeamModal.tsx` — added "Status Templates" tab (3rd tab alongside Settings and Members); tab is locked until the team is saved
 
 ---
 
