@@ -7,7 +7,7 @@
 import { createContext, useContext, useState } from 'react'
 
 export type ActiveFilter =
-  | { kind: 'preset'; id: 'all' | 'upcoming' | 'my' }
+  | { kind: 'preset'; id: 'all' | 'upcoming' | 'my' | 'overdue' | 'noassign' }
   | { kind: 'member'; userId: string }
   | { kind: 'saved'; id: string }
 

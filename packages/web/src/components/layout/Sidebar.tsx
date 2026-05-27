@@ -403,7 +403,7 @@ function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit
  */
 const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
 
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, onUnarchiveTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
   const { user } = useAuth();
   const currentUserId = (user as { id?: string } | null)?.id;
   const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
@@ -676,34 +676,13 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                   </span>
                 </button>
                 {archivedTeamsOpen && archivedTeams.map(t => (
-                  <div key={t.id} style={{ display: 'flex', alignItems: 'center' }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <TeamRow
-                        team={t}
-                        isActive={false}
-                        canEdit={false}
-                        onEdit={() => onEditTeam?.(t)}
-                      />
-                    </div>
-                    <button
-                      title="Restore team"
-                      onClick={() => onUnarchiveTeam?.(t.id)}
-                      style={{
-                        flexShrink: 0,
-                        marginRight: 8,
-                        fontSize: 10,
-                        padding: '2px 7px',
-                        borderRadius: 4,
-                        border: '1px solid rgba(255,255,255,0.15)',
-                        background: 'none',
-                        color: 'rgba(255,255,255,0.45)',
-                        cursor: 'pointer',
-                        fontFamily: 'inherit',
-                      }}
-                    >
-                      Restore
-                    </button>
-                  </div>
+                  <TeamRow
+                    key={t.id}
+                    team={t}
+                    isActive={false}
+                    canEdit={Boolean(onNewTeam)}
+                    onEdit={() => onEditTeam?.(t)}
+                  />
                 ))}
               </div>
             )}
