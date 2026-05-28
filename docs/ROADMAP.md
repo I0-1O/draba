@@ -40,7 +40,8 @@ This document organizes development into discrete phases with effort estimates a
 | 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | 🔄 |
 | 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | ✅ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | 🔄 |
-| 10.4 | [Preference Consumption, Branding & Backup](#phase-104--preference-consumption-branding--backup-admin) | S — 1 day | ⬜ |
+| 10.4.1 | [Preference Consumption & Session Handling](#phase-1041--preference-consumption--session-handling) | S–M — 1–2 days | ⬜ |
+| 10.4.2 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1042--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
 | 10.7 | [Localization & Language Support](#phase-107--localization--language-support) | L — 3–5 days | ⬜ |
@@ -52,6 +53,7 @@ This document organizes development into discrete phases with effort estimates a
 | 14 | [Data Portability & Exports](#phase-14-data-portability--exports) | L — 1 wk | ⬜ |
 | 15 | [External Connectors (Webhooks)](#phase-15-external-connectors-webhooks) | M — 3–5 days | ⬜ |
 | 16 | [Global Search](#phase-16-global-search) | M — 2–3 days | ⬜ |
+| 17 | [Backup & Restore](#phase-17--backup--restore) | M — 2–3 days | ⬜ |
 
 **Parking Lot (v2):** MySQL/Postgres adapters, CLI, MCP server, mobile apps, Microsoft/Outlook sync, multi-tenant hosting, SSO, notifications.
 
@@ -413,7 +415,7 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 - `POST /timelines/:id/archive`, `POST /timelines/:id/unarchive`
 - List endpoints exclude archived records by default; `?archived=true` to include
 
-> **Note:** Phase 9 ships the API surface only. The token management **UI** (create / list / revoke from a settings page) lands in [Phase 10.4 — Profile, Tokens & Admin Settings](#phase-104--profile-tokens--admin-settings-web). Until 10.4 ships, tokens are created via direct API calls or a temporary admin script.
+> **Note:** Phase 9 ships the API surface only. The token management **UI** (create / list / revoke from a settings page) lands in [Phase 10.1.3 — Settings](#phase-1013--settings--profile-tokens--admin). Until 10.1.3 ships, tokens are created via direct API calls or a temporary admin script.
 
 **Exit criteria — safe to pause when:**
 - Can create an API token and use its value as a Bearer token on a GET request
@@ -553,7 +555,7 @@ Teams are the outermost data scope — everything else (timelines, activities, m
 *Web — team picker + settings shell:*
 - "New team" affordance in the team picker dropdown → opens Team Modal in `new` mode
 - Existing team gear/edit icon → opens Team Modal in `edit` mode
-- `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4)
+- `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2)
 - Archived teams surfaced in team picker under a collapsed "Archived" section with unarchive affordance
 
 *OpenAPI + types:*
@@ -741,7 +743,7 @@ Builds out the `/settings` page shell (already scaffolded in 10.1.1) into a work
 - **Defaults:** default team (dropdown of user's teams), default timeline (filtered by selected team) — stored via existing `PUT /users/me/preferences`
 - **Regional:** timezone (IANA selector), date format (`MMM D, YYYY` / `MM/DD/YYYY` / `DD/MM/YYYY` / `YYYY-MM-DD`), week starts on (Monday / Sunday)
 - **Appearance:** theme toggle (Light / Dark / System) — already partially wired via localStorage; this phase persists it server-side
-- All preferences use the existing `user_preferences` API; this phase adds the UI and stores the values but does **not** require the Gantt or other views to consume them yet (that lands in 10.4)
+- All preferences use the existing `user_preferences` API; this phase adds the UI and stores the values but does **not** require the Gantt or other views to consume them yet (that lands in 10.4.1)
 
 *Web — API Tokens (`/settings/tokens`):*
 - Table: name, scope badge, last used (relative time), created date, revoke button
@@ -945,32 +947,81 @@ Closes the Timelines cornerstone. Same problem space as 10.1: today timelines ca
 
 ---
 
-### Phase 10.4 — Preference Consumption, Branding & Backup (Admin)
-**Status:** ⬜ | **Effort:** S (1 day)
+### Phase 10.4.1 — Preference Consumption & Session Handling
+**Status:** ⬜ | **Effort:** S–M (1–2 days)
 
-Wires the user and instance preferences stored in 10.1.3 into the rest of the system, and adds cosmetic branding + backup visibility for admins.
+Wires the user and instance preferences stored in 10.1.3 into the rest of the system, fixes the broken session lifecycle, and adds cosmetic branding for admins.
+
+**Why now:** User preferences for date format, week start, and theme are stored (Phase 10.1.3) but not consumed by any view. The Gantt hardcodes Monday week-start and `en-US` date formatting. Additionally, access tokens expire after 15 minutes with no refresh interceptor — after 15 minutes of use, every API call silently fails.
 
 **Scope:**
 
-*Preference consumption (system-wide):*
-- Gantt, List, and Calendar views respect user's date format and week-start preferences
-- Public/shared timeline views fall back to instance-level defaults when no user is logged in
-- Theme preference synced from server on login (currently localStorage-only)
-- Default team/timeline applied on login to skip the team selector step
+*Session lifecycle (token refresh):*
+- Add a 401 interceptor to `apiFetch` in `packages/web/src/lib/api.ts`: on 401, attempt silent refresh using stored refresh token, retry the original request with the new access token; if refresh also fails (expired/revoked), clear tokens and redirect to `/login`
+- Use a mutex/queue so concurrent 401s don't fire multiple refresh calls
+- Completely invisible to the user — no toast, no banner (standard SPA pattern)
+- Best practice: short-lived access token (15 min — already correct) + silent refresh on 401 + hard redirect when refresh fails
 
-*Admin (`/settings/admin`, superadmin only — extends the admin section from 10.1.3):*
-- Instance name + branding: custom instance name (shown in browser tab title and login page), accent color override, optional logo upload
-- Backup status: read-only surface showing DB file path, size, and last-modified timestamp
-- Instance name and accent color stored in `instance_settings` (table shipped in 10.1.3)
+*Preference consumption (system-wide):*
+- **Date format:** Create a `useFormatDate()` hook that reads user's `date_format` preference and returns a formatter; wire into `granularity.ts` `formatLabel()` (currently hardcoded to `en-US`), `ActivityDetailPanel` date displays, and any other date-displaying surface
+- **Week start:** Pass user's `week_start` preference into `granularity.ts` `startOfWeek()` (currently hardcodes Monday); Gantt column alignment shifts to match the user's chosen start day
+- **Timezone:** Stored and displayed; actual date math conversion deferred (complex, low urgency for self-hosted single-timezone teams)
+- **Theme sync:** On login, read server-side theme preference and apply it; `useDarkMode.ts` currently ignores the server value and only reads localStorage
+- **Instance defaults fallback:** For public/shared timeline views (no logged-in user), read instance-level defaults from `GET /admin/settings`
+
+*Admin — branding (`/settings/admin`, superadmin only — extends 10.1.3):*
+- Instance name field (stored in `instance_settings`); shown in browser tab title and login page
+- Accent color override (stored in `instance_settings`); applies globally via CSS custom property
+- Optional logo upload (stretch)
 
 **Exit criteria — safe to pause when:**
+- After 15+ minutes of use, API calls silently refresh the access token; if the refresh token is also expired, the user is redirected to `/login` cleanly
 - Gantt view renders dates using the user's chosen date format; public views use instance defaults
-- Week-start preference shifts the Gantt grid column alignment
-- A user's default team/timeline loads automatically on login
+- Week-start preference shifts the Gantt grid column alignment (e.g., Sunday start when configured)
+- Theme persists across devices — logging in on a new browser picks up the server-side theme
 - A superadmin can set a custom instance name; it appears in the browser tab title and on the login page
 - A superadmin can set an accent color override; the change applies globally
-- Backup status section shows the current DB path and last-modified time
 - Settings persist across container restarts
+
+---
+
+### Phase 10.4.2 — UI Consistency — Modals, Sidebar & Toolbar
+**Status:** ⬜ | **Effort:** M (1–2 days)
+
+Standardizes visual patterns across the three main modals (Team, Member, Timeline), the sidebar, and the Gantt toolbar. Today these surfaces use three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and a mix of hardcoded hex colors vs CSS variables.
+
+**Why now:** Every new modal or surface built from here forward will inherit whatever pattern exists. Standardizing now prevents compounding inconsistency as the UI grows through Phase 11 (views) and beyond.
+
+**Scope:**
+
+*Inline name editing (3 patterns → 1):*
+- Current: `MemberModal` uses always-input with focus underline; `TeamModal` toggles between div and input via a state machine; `TimelineModal` uses always-input with no visual cue
+- Standardize to: always-input with subtle bottom border on hover/focus (refined MemberModal pattern); extract to a shared `InlineEditableTitle` component used by all three modals
+
+*Archive/restore buttons (3 styles → 1):*
+- Current: `MemberModal` uses amber background + border + icon (most prominent); `TeamModal` uses neutral gray that looks disabled; `TimelineModal` uses amber border-only with no icon
+- Standardize to: consistent amber styling with Archive icon for archive, teal for restore; extract shared button style constants or a small `ArchiveButton` / `RestoreButton` component
+
+*Confirmation dialogs (3 implementations → 1):*
+- Current: `MemberModal` uses a custom `ConfirmDialog`; `TeamModal` uses `ArchiveDialog`; `TimelineModal` uses inline confirmation panels
+- Standardize to: single `ConfirmDialog` component with color variants (red = destructive, amber = archive, indigo = promote, teal = restore)
+
+*Color system (mixed → CSS variables):*
+- Current: `TeamModal` and `MemberModal` hardcode hex colors (`#21262d`, `#30363d`, etc.); `TimelineModal` uses CSS variables (`var(--card)`, `var(--border)`)
+- Standardize to: CSS variables everywhere; migrate all hardcoded hex values in modal components
+
+*Sidebar & toolbar audit:*
+- Sidebar member/timeline rows: verify Badge usage, hover states, and gear icon consistency across all row types
+- Gantt toolbar controls: verify button styling consistency with the new modal patterns
+- Fix any inconsistencies found
+
+**Exit criteria — safe to pause when:**
+- All three modals use the same `InlineEditableTitle` component for name editing — identical visual behavior
+- Archive and restore buttons look identical across all three modals (amber archive, teal restore, both with icons)
+- All confirmation dialogs use the same `ConfirmDialog` component with appropriate color variants
+- No hardcoded hex colors remain in modal components; all use CSS variables or design-token references
+- Sidebar member rows and timeline rows have consistent hover states and gear icon placement
+- Gantt toolbar buttons are visually consistent with modal footer button patterns
 
 ---
 
@@ -1325,6 +1376,50 @@ By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), an
 - Selecting a result navigates to the correct timeline and the event is visibly highlighted on arrival
 - Users with no access to a team never see that team's events in results
 - Search returns within ~200ms for a database with 10k events
+
+---
+
+### Phase 17 — Backup & Restore
+**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
+
+Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container.
+
+**Directional scope (to be firmed up before the phase):**
+
+*Backup status (read-only admin surface):*
+- `/settings/admin/backup` page: current DB file path, file size, last-modified timestamp, WAL size (SQLite), connection count
+- Health indicator: green when last backup < 24h old, amber when 1–7 days, red when > 7 days or no backup exists
+- For MySQL/Postgres adapters: show connection string (masked), database size, last `pg_dump`/`mysqldump` timestamp if available
+
+*Manual backup:*
+- "Back up now" button → triggers a hot copy of the SQLite file (using `VACUUM INTO` or the backup API) to a configurable backup directory
+- For MySQL/Postgres: trigger `pg_dump`/`mysqldump` to the backup directory
+- Download backup file directly from the admin UI (optional — evaluate security implications)
+
+*Scheduled backups:*
+- Cron-style schedule configuration (daily at 2am, every 6 hours, etc.)
+- Retention policy: keep last N backups, or keep backups for N days
+- Backup location: local directory (default), or S3-compatible object storage (stretch)
+- Notification on backup failure (via SMTP if configured)
+
+*API:*
+- `GET /admin/backup/status` — current backup state (superadmin only)
+- `POST /admin/backup` — trigger immediate backup (superadmin only)
+- `GET /admin/backup/history` — list recent backups with size and status
+- `GET/PUT /admin/backup/schedule` — read/update backup schedule config
+- `DELETE /admin/backup/:id` — delete a specific backup file
+
+**Open questions (resolve before starting):**
+- Should backup files be downloadable from the admin UI, or only stored on the server filesystem? (Security tradeoff: convenience vs. risk of unauthorized download)
+- For SQLite, `VACUUM INTO` vs. the SQLite backup API — which handles concurrent writes better under WAL mode?
+- Do we need backup encryption at rest? (Probably not for v1 if the backup directory is on the same host)
+
+**Exit criteria (placeholder — refine in-phase):**
+- A superadmin can see the current DB status (path, size, last modified) on the admin backup page
+- "Back up now" creates a usable copy of the database in the configured backup directory
+- A scheduled backup runs at the configured interval and produces a valid backup file
+- Retention policy automatically cleans up old backups beyond the configured limit
+- Backup history shows the last N backups with timestamps and sizes
 
 ---
 

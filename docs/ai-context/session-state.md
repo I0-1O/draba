@@ -18,7 +18,7 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.2 | Status Templates & Timeline Statuses | ✅ | ✅ Docker verified |
 | 10.3 | Timelines — Full CRUD (API + UI) | ✅ | ⬜ needs Docker verification |
 
-Next phase to build: **10.4** — Preference Consumption, Branding & Backup.
+Next phase to build: **10.4.1** — Preference Consumption & Session Handling (token refresh, date format/week start in Gantt, theme sync, branding). Then **10.4.2** — UI Consistency (modals, sidebar, toolbar). Backup moved to Phase 17.
 
 ---
 

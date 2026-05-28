@@ -336,7 +336,7 @@ Closes the Teams data entity. Ships the Team Modal with Settings tab functional;
 **Web — team picker + settings shell:**
 - [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
 - [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
-- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4) — 2026-05-25
+- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
 - [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
 - [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
 
@@ -703,24 +703,59 @@ Closes the Timelines cornerstone. Today timelines can be created in the wizard a
 
 ---
 
-### Preference Consumption, Branding & Backup (Phase 10.4)
-Wires user and instance preferences (stored in 10.1.3) into views. Adds cosmetic branding and backup visibility for admins.
+### Preference Consumption & Session Handling (Phase 10.4.1)
+Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
+
+**Session lifecycle:**
+- [ ] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
+- [ ] Mutex/queue so concurrent 401s don't fire multiple refresh calls
+- [ ] Invisible to user — no toast, no banner (standard SPA pattern)
 
 **Preference consumption:**
-- [ ] Gantt view: render dates using user's `date_format` preference; fall back to instance default
-- [ ] Gantt view: shift column alignment based on user's `week_start` preference
-- [ ] List view (Phase 11.1): same date format consumption
-- [ ] Public/shared timeline views: use instance-level defaults when no user is logged in
-- [ ] Theme: sync server-side preference on login (currently localStorage-only)
-- [ ] Default team/timeline: auto-select on login to skip team selector
+- [ ] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
+- [ ] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
+- [ ] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
+- [ ] `ActivityDetailPanel` and other date displays: consume date format preference
+- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in
+- [ ] Theme: sync server-side preference on login (`useDarkMode.ts` currently ignores server value, reads localStorage only)
 
 **Admin — branding (`/settings/admin`):**
 - [ ] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
 - [ ] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
 - [ ] Optional logo upload (stretch)
 
-**Admin — backup status:**
-- [ ] Read-only surface: DB file path, file size, last-modified timestamp
+---
+
+### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.2)
+Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
+
+**Inline name editing (3 → 1):**
+- [ ] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus
+- [ ] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle`
+- [ ] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle`
+- [ ] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle`
+
+**Archive/restore buttons (3 → 1):**
+- [ ] Standardize archive button: amber styling with Archive icon (align with MemberModal's prominence)
+- [ ] Standardize restore button: teal styling with Archive icon
+- [ ] Fix `TeamModal.tsx` archive button (currently neutral gray, looks disabled)
+- [ ] Fix `TimelineModal.tsx` archive button (currently no icon, border-only)
+
+**Confirmation dialogs (3 → 1):**
+- [ ] Consolidate into single `ConfirmDialog` component with color variants (red=destructive, amber=archive, indigo=promote, teal=restore)
+- [ ] Replace `MemberModal.tsx` custom ConfirmDialog
+- [ ] Replace `TeamModal.tsx` ArchiveDialog
+- [ ] Replace `TimelineModal.tsx` inline confirmation panels
+
+**Color system (mixed → CSS variables):**
+- [ ] Migrate `TeamModal.tsx` hardcoded hex colors (`#21262d`, `#30363d`, etc.) to CSS variables
+- [ ] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables
+- [ ] Verify `TimelineModal.tsx` CSS variable usage is consistent
+
+**Sidebar & toolbar audit:**
+- [ ] Sidebar member/timeline rows: verify Badge usage, hover states, gear icon consistency
+- [ ] Gantt toolbar controls: verify button styling matches modal footer patterns
+- [ ] Fix any inconsistencies found
 
 ---
 
