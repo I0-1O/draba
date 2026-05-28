@@ -383,70 +383,6 @@ Run the automated test suite for the phase specified in $ARGUMENTS (e.g. "2" or 
 7. Report the table back to the user. Do not modify any source code.
 ````
 
-## File: .github/workflows/ci.yml
-````yaml
-name: CI
-
-on:
-  pull_request:
-    branches: [master]
-  push:
-    branches: [master]
-
-jobs:
-  api:
-    name: API (Go)
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    defaults:
-      run:
-        working-directory: packages/api
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test ./... -race -count=1
-
-      - name: Lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          working-directory: packages/api
-          args: --config ../../.golangci.yml
-          skip-cache: true
-
-  web:
-    name: Web (React)
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - uses: pnpm/action-setup@v4
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build
-        run: pnpm --filter @draba/web build
-````
-
 ## File: .github/workflows/docker-publish.yml
 ````yaml
 name: Publish Docker Image
@@ -1135,6 +1071,73 @@ jobs:
 </html>
 ````
 
+## File: docs/design/RBAC_REFACTOR.md
+````markdown
+# Role-Based Access Control (RBAC) & Participants Refactor Plan
+
+## Overview
+This document outlines the planned changes to Draba's authorization model to support more granular roles (Superadmin, Team Admin, Timeline Admin) and to allow scheduling "Participants" (e.g., external contractors or placeholders) who do not have a registered Draba account.
+
+## 1. Participation Levels
+Draba will support four distinct levels of participation:
+
+*   **Team Admins:** Manage the team overall. Can invite new people to the team and can create multiple teams.
+*   **Timeline Admins:** Scoped to specific timelines. Can configure those timelines and add/remove people (from the team) to their timelines.
+*   **Users:** Have a standard login. Can participate in timelines assigned to them.
+*   **Participants:** Do not have a login. They are managed as team members so they can be scheduled on timelines and assigned colors without needing account access.
+
+*(Note: There is also a system-level **Superadmin** designation, typically granted to the first user, who has global permissions like creating new teams).*
+
+## 2. Database Schema Changes
+
+To support these new levels, the database schema requires several structural updates:
+
+### `users` Table
+*   Add `is_superadmin BOOLEAN NOT NULL DEFAULT 0`.
+*   *Migration:* The very first user created in the system should automatically be granted `is_superadmin = true`.
+
+### `team_members` Table
+This table needs a major overhaul to support login-less participants.
+*   Add `id TEXT PRIMARY KEY`.
+*   Change `user_id` to be `NULLABLE`. (If `NULL`, this represents a Participant).
+*   Add `display_name TEXT`. (Populated for Participants since they don't have a `users` record to draw from. Coalesced with `users.display_name` in queries).
+*   *Roles:* The `role` column will continue to represent Team-level roles (`admin` or `member`).
+
+### `event_assignments` Table
+*   Change foreign key from `user_id` to `team_member_id` (FK → `team_members.id`).
+*   This ensures events can be assigned to Participants who lack a `user_id`.
+
+### `timeline_access` Table
+*   Change foreign key from `user_id` to `team_member_id`.
+*   Add `role` column (e.g., `admin` | `member`) to designate Timeline Admins vs. regular timeline viewers.
+
+### `timelines` Table
+*   Remove the `visibility` column (e.g., `public` vs `restricted`). Visibility and access will now be governed entirely by the `timeline_access` table and the user's role.
+
+## 3. API & Backend Implementation Steps
+
+1.  **Migrations:** Write and apply SQL migrations for the schema changes above.
+2.  **Models Update:** Update Go structs in `packages/api/internal/models/models.go` to match the new schema (`TeamMember` needs `ID`, nullable `UserID`, etc.).
+3.  **Repository Updates:**
+    *   Update `TeamRepo` to handle the new `team_members` schema, generate IDs on insert, and handle the `COALESCE` for display names.
+    *   Update `TimelineRepo` to drop visibility checks and enforce the new `timeline_access` rules based on `team_member_id`.
+    *   Update `EventRepo` to join on `team_member_id` instead of `user_id`.
+4.  **Handler Updates:**
+    *   `auth_handler.go`: Grant `is_superadmin` to the first registered user. Ensure registering via an invite links to the correct `team_member_id`.
+    *   `team_handler.go`: Ensure team creation handles the new `TeamMember` structure. Restrict team creation to `is_superadmin` (if that is the desired behavior).
+    *   `timeline_handler.go`: Update timeline creation and fetching to use the new access control model.
+5.  **Test Fixes:** Update all unit tests and mock repositories to reflect the schema and logic changes.
+
+## 4. UI Implementation Steps
+
+1.  **Team Management:** Update the team members UI to allow adding "Participants" without an email address.
+2.  **Timeline Assignment:** Update UI dropdowns for event assignment to use `team_member_id` instead of `user_id`.
+3.  **Access Control:** Render admin controls (settings, delete, invite) conditionally based on whether the logged-in user is a Team Admin or a Timeline Admin for the current context.
+
+---
+*Note: The previous work session also included partial implementations for "External Connectors" (inbound webhooks for Asana, Jira). Those features are distinct from the RBAC refactor and will be tracked as a separate architectural update.*
+````
+
 ## File: docs/CONVENTIONS.md
 ````markdown
 # Conventions
@@ -1766,6 +1769,25 @@ func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request)
 }
 ````
 
+## File: packages/api/internal/api/setup_handler.go
+````go
+package api
+
+import "net/http"
+
+// handleSetupStatus handles GET /setup/status.
+// Returns whether the app needs first-run setup (no users registered yet).
+// Public — no auth required.
+func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
+	count, err := s.users.Count()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to check setup status")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"needsSetup": count == 0})
+}
+````
+
 ## File: packages/api/internal/auth/jwt.go
 ````go
 package auth
@@ -2044,6 +2066,125 @@ CREATE TABLE IF NOT EXISTS saved_filters (
 );
 
 CREATE INDEX IF NOT EXISTS idx_saved_filters_team_user ON saved_filters(team_id, user_id);
+````
+
+## File: packages/api/internal/db/migrations/003_rbac_participants.sql
+````sql
+-- RBAC & Participants refactor.
+--
+-- Changes:
+--   users           → add is_superadmin (first registered user gets true)
+--   team_members    → add id PK, nullable user_id, display_name
+--   event_assignments → swap user_id FK for team_member_id FK
+--   timeline_access → swap user_id FK for team_member_id FK, add role column
+--   timelines       → drop visibility column
+--
+-- SQLite requires a full table-rebuild to drop columns or change PKs.
+-- Rather than toggling PRAGMA foreign_keys (a no-op inside implicit
+-- transactions), we drop child tables first (safe with FK=ON), stash their
+-- data in temp tables, then rebuild parents, and finally recreate the
+-- children with the new schema.
+
+-- 1. users: add superadmin flag; DEFAULT 0 leaves existing rows as non-superadmin.
+ALTER TABLE users ADD COLUMN is_superadmin BOOLEAN NOT NULL DEFAULT 0;
+
+-- 2. Stash child-table data before dropping them.
+--    Explicit CREATE + INSERT avoids driver-level compatibility issues with
+--    CREATE TABLE … AS SELECT.
+CREATE TABLE tmp_event_assignments (
+    event_id TEXT NOT NULL,
+    user_id  TEXT NOT NULL
+);
+INSERT INTO tmp_event_assignments (event_id, user_id)
+    SELECT event_id, user_id FROM event_assignments;
+
+CREATE TABLE tmp_timeline_access (
+    timeline_id TEXT NOT NULL,
+    user_id     TEXT NOT NULL
+);
+INSERT INTO tmp_timeline_access (timeline_id, user_id)
+    SELECT timeline_id, user_id FROM timeline_access;
+
+-- 3. Drop child tables (the tables that own the outgoing FKs).
+--    Dropping a table that holds FKs is always safe regardless of FK enforcement.
+DROP TABLE event_assignments;
+DROP TABLE timeline_access;
+
+-- 4. team_members: add id PK, make user_id nullable, add display_name.
+--    Nothing in the remaining schema references team_members, so this is safe.
+CREATE TABLE team_members_new (
+    id           TEXT NOT NULL,
+    team_id      TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    user_id      TEXT REFERENCES users(id) ON DELETE CASCADE,
+    display_name TEXT,
+    role         TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+    color        TEXT,
+    joined_at    DATETIME NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (id)
+);
+
+INSERT INTO team_members_new (id, team_id, user_id, display_name, role, color, joined_at)
+    SELECT lower(hex(randomblob(16))), team_id, user_id, NULL, role, color, joined_at
+    FROM team_members;
+
+DROP TABLE team_members;
+ALTER TABLE team_members_new RENAME TO team_members;
+
+-- 5. timelines: drop the visibility column.
+--    timeline_access was dropped above, so timelines is no longer referenced.
+CREATE TABLE timelines_new (
+    id          TEXT PRIMARY KEY,
+    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    start_date  TEXT NOT NULL,
+    end_date    TEXT NOT NULL,
+    share_token TEXT NOT NULL UNIQUE,
+    ical_token  TEXT NOT NULL UNIQUE,
+    created_by  TEXT NOT NULL REFERENCES users(id),
+    created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    archived_at DATETIME
+);
+
+INSERT INTO timelines_new (id, team_id, name, start_date, end_date, share_token, ical_token, created_by, created_at, updated_at, archived_at)
+    SELECT id, team_id, name, start_date, end_date, share_token, ical_token, created_by, created_at, updated_at, archived_at
+    FROM timelines;
+
+DROP TABLE timelines;
+ALTER TABLE timelines_new RENAME TO timelines;
+
+-- 6. Recreate event_assignments with team_member_id FK.
+--    Join through events to find the team, then match team_members by user_id.
+CREATE TABLE event_assignments (
+    event_id       TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    team_member_id TEXT NOT NULL REFERENCES team_members(id) ON DELETE CASCADE,
+    PRIMARY KEY (event_id, team_member_id)
+);
+
+INSERT INTO event_assignments (event_id, team_member_id)
+    SELECT ea.event_id, tm.id
+    FROM tmp_event_assignments ea
+    JOIN events e ON e.id = ea.event_id
+    JOIN team_members tm ON tm.team_id = e.team_id AND tm.user_id = ea.user_id;
+
+DROP TABLE tmp_event_assignments;
+
+-- 7. Recreate timeline_access with team_member_id FK and role column.
+--    Migrated rows default to role='member'.
+CREATE TABLE timeline_access (
+    timeline_id    TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+    team_member_id TEXT NOT NULL REFERENCES team_members(id) ON DELETE CASCADE,
+    role           TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
+    PRIMARY KEY (timeline_id, team_member_id)
+);
+
+INSERT INTO timeline_access (timeline_id, team_member_id, role)
+    SELECT ta.timeline_id, tm.id, 'member'
+    FROM tmp_timeline_access ta
+    JOIN timelines t ON t.id = ta.timeline_id
+    JOIN team_members tm ON tm.team_id = t.team_id AND tm.user_id = ta.user_id;
+
+DROP TABLE tmp_timeline_access;
 ````
 
 ## File: packages/api/internal/db/db.go
@@ -3156,6 +3297,53 @@ export default function DarkModeToggle() {
 }
 ````
 
+## File: packages/web/src/components/ProtectedRoute.tsx
+````typescript
+/**
+ * Wraps protected routes. Unauthenticated users are redirected to /login
+ * with the original path preserved in state so they land back after logging in.
+ * On a fresh install (no users exist) they are redirected to /setup instead.
+ * Shows nothing while the session is being restored or the setup check is in flight.
+ */
+
+import { Navigate, Outlet, useLocation } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { API_BASE } from '@/lib/api'
+
+interface SetupStatus {
+  needsSetup: boolean
+}
+
+export default function ProtectedRoute() {
+  const { accessToken, initializing } = useAuth()
+  const location = useLocation()
+
+  // Only fetch setup status when the user isn't logged in — once setup is
+  // done the result never changes back, so we cache it indefinitely.
+  const { data: setup, isLoading: setupLoading } = useQuery<SetupStatus>({
+    queryKey: ['setup-status'],
+    queryFn: () =>
+      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
+    enabled: !initializing && !accessToken,
+    staleTime: Infinity,
+  })
+
+  if (initializing || (!accessToken && setupLoading)) {
+    return null
+  }
+
+  if (!accessToken) {
+    if (setup?.needsSetup) {
+      return <Navigate to="/setup" replace />
+    }
+    return <Navigate to="/login" state={{ from: location }} replace />
+  }
+
+  return <Outlet />
+}
+````
+
 ## File: packages/web/src/hooks/useDarkMode.ts
 ````typescript
 /**
@@ -3931,6 +4119,74 @@ JSX — extract to a variable or sub-component instead.
 - [ ] `pnpm --filter web lint` and `pnpm --filter web build` pass.
 ````
 
+## File: .gitignore
+````
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.nuxt/
+.vite/
+
+# Environment variables — never commit secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime / OS
+.DS_Store
+Thumbs.db
+*.pem
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# TypeScript
+*.tsbuildinfo
+
+# Go
+packages/api/tmp/
+
+# Embedded web build artifacts — populated by Docker; not checked in
+packages/api/ui/static/*
+!packages/api/ui/static/.gitkeep
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Database
+*.db
+
+# Claude Code — personal/local settings only
+# (CLAUDE.md, skills/, and .claude/commands/ are committed — they're shared team context)
+.claude/settings.local.json
+.claude/todos
+.claude/launch.json
+.claude/mockups/
+GEMINI.md
+````
+
 ## File: .golangci.yml
 ````yaml
 run:
@@ -4292,6 +4548,70 @@ services:
 ## License
 
 [MIT License](LICENSE)
+````
+
+## File: .github/workflows/ci.yml
+````yaml
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  api:
+    name: API (Go)
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    defaults:
+      run:
+        working-directory: packages/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -race -count=1 -timeout 20m
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: packages/api
+          args: --config ../../.golangci.yml
+          skip-cache: true
+
+  web:
+    name: Web (React)
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm --filter @draba/web build
 ````
 
 ## File: docs/design/assets/Icon Color Picker.html
@@ -8782,73 +9102,6 @@ No migration needed. The `icon` column stores the `iconId`; the `color` column c
 - Convert existing `team_members.color` hex values → color IDs using the mapping table
 ````
 
-## File: docs/design/RBAC_REFACTOR.md
-````markdown
-# Role-Based Access Control (RBAC) & Participants Refactor Plan
-
-## Overview
-This document outlines the planned changes to Draba's authorization model to support more granular roles (Superadmin, Team Admin, Timeline Admin) and to allow scheduling "Participants" (e.g., external contractors or placeholders) who do not have a registered Draba account.
-
-## 1. Participation Levels
-Draba will support four distinct levels of participation:
-
-*   **Team Admins:** Manage the team overall. Can invite new people to the team and can create multiple teams.
-*   **Timeline Admins:** Scoped to specific timelines. Can configure those timelines and add/remove people (from the team) to their timelines.
-*   **Users:** Have a standard login. Can participate in timelines assigned to them.
-*   **Participants:** Do not have a login. They are managed as team members so they can be scheduled on timelines and assigned colors without needing account access.
-
-*(Note: There is also a system-level **Superadmin** designation, typically granted to the first user, who has global permissions like creating new teams).*
-
-## 2. Database Schema Changes
-
-To support these new levels, the database schema requires several structural updates:
-
-### `users` Table
-*   Add `is_superadmin BOOLEAN NOT NULL DEFAULT 0`.
-*   *Migration:* The very first user created in the system should automatically be granted `is_superadmin = true`.
-
-### `team_members` Table
-This table needs a major overhaul to support login-less participants.
-*   Add `id TEXT PRIMARY KEY`.
-*   Change `user_id` to be `NULLABLE`. (If `NULL`, this represents a Participant).
-*   Add `display_name TEXT`. (Populated for Participants since they don't have a `users` record to draw from. Coalesced with `users.display_name` in queries).
-*   *Roles:* The `role` column will continue to represent Team-level roles (`admin` or `member`).
-
-### `event_assignments` Table
-*   Change foreign key from `user_id` to `team_member_id` (FK → `team_members.id`).
-*   This ensures events can be assigned to Participants who lack a `user_id`.
-
-### `timeline_access` Table
-*   Change foreign key from `user_id` to `team_member_id`.
-*   Add `role` column (e.g., `admin` | `member`) to designate Timeline Admins vs. regular timeline viewers.
-
-### `timelines` Table
-*   Remove the `visibility` column (e.g., `public` vs `restricted`). Visibility and access will now be governed entirely by the `timeline_access` table and the user's role.
-
-## 3. API & Backend Implementation Steps
-
-1.  **Migrations:** Write and apply SQL migrations for the schema changes above.
-2.  **Models Update:** Update Go structs in `packages/api/internal/models/models.go` to match the new schema (`TeamMember` needs `ID`, nullable `UserID`, etc.).
-3.  **Repository Updates:**
-    *   Update `TeamRepo` to handle the new `team_members` schema, generate IDs on insert, and handle the `COALESCE` for display names.
-    *   Update `TimelineRepo` to drop visibility checks and enforce the new `timeline_access` rules based on `team_member_id`.
-    *   Update `EventRepo` to join on `team_member_id` instead of `user_id`.
-4.  **Handler Updates:**
-    *   `auth_handler.go`: Grant `is_superadmin` to the first registered user. Ensure registering via an invite links to the correct `team_member_id`.
-    *   `team_handler.go`: Ensure team creation handles the new `TeamMember` structure. Restrict team creation to `is_superadmin` (if that is the desired behavior).
-    *   `timeline_handler.go`: Update timeline creation and fetching to use the new access control model.
-5.  **Test Fixes:** Update all unit tests and mock repositories to reflect the schema and logic changes.
-
-## 4. UI Implementation Steps
-
-1.  **Team Management:** Update the team members UI to allow adding "Participants" without an email address.
-2.  **Timeline Assignment:** Update UI dropdowns for event assignment to use `team_member_id` instead of `user_id`.
-3.  **Access Control:** Render admin controls (settings, delete, invite) conditionally based on whether the logged-in user is a Team Admin or a Timeline Admin for the current context.
-
----
-*Note: The previous work session also included partial implementations for "External Connectors" (inbound webhooks for Asana, Jira). Those features are distinct from the RBAC refactor and will be tracked as a separate architectural update.*
-````
-
 ## File: docs/design/UX_PATTERNS.md
 ````markdown
 # UX Patterns
@@ -9814,25 +10067,6 @@ func newToken() string {
 }
 ````
 
-## File: packages/api/internal/api/setup_handler.go
-````go
-package api
-
-import "net/http"
-
-// handleSetupStatus handles GET /setup/status.
-// Returns whether the app needs first-run setup (no users registered yet).
-// Public — no auth required.
-func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
-	count, err := s.users.Count()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to check setup status")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"needsSetup": count == 0})
-}
-````
-
 ## File: packages/api/internal/api/status_types.go
 ````go
 package api
@@ -9914,125 +10148,6 @@ func HashAPIToken(raw string) string {
 func LooksLikeAPIToken(raw string) bool {
 	return strings.HasPrefix(raw, APITokenPrefix)
 }
-````
-
-## File: packages/api/internal/db/migrations/003_rbac_participants.sql
-````sql
--- RBAC & Participants refactor.
---
--- Changes:
---   users           → add is_superadmin (first registered user gets true)
---   team_members    → add id PK, nullable user_id, display_name
---   event_assignments → swap user_id FK for team_member_id FK
---   timeline_access → swap user_id FK for team_member_id FK, add role column
---   timelines       → drop visibility column
---
--- SQLite requires a full table-rebuild to drop columns or change PKs.
--- Rather than toggling PRAGMA foreign_keys (a no-op inside implicit
--- transactions), we drop child tables first (safe with FK=ON), stash their
--- data in temp tables, then rebuild parents, and finally recreate the
--- children with the new schema.
-
--- 1. users: add superadmin flag; DEFAULT 0 leaves existing rows as non-superadmin.
-ALTER TABLE users ADD COLUMN is_superadmin BOOLEAN NOT NULL DEFAULT 0;
-
--- 2. Stash child-table data before dropping them.
---    Explicit CREATE + INSERT avoids driver-level compatibility issues with
---    CREATE TABLE … AS SELECT.
-CREATE TABLE tmp_event_assignments (
-    event_id TEXT NOT NULL,
-    user_id  TEXT NOT NULL
-);
-INSERT INTO tmp_event_assignments (event_id, user_id)
-    SELECT event_id, user_id FROM event_assignments;
-
-CREATE TABLE tmp_timeline_access (
-    timeline_id TEXT NOT NULL,
-    user_id     TEXT NOT NULL
-);
-INSERT INTO tmp_timeline_access (timeline_id, user_id)
-    SELECT timeline_id, user_id FROM timeline_access;
-
--- 3. Drop child tables (the tables that own the outgoing FKs).
---    Dropping a table that holds FKs is always safe regardless of FK enforcement.
-DROP TABLE event_assignments;
-DROP TABLE timeline_access;
-
--- 4. team_members: add id PK, make user_id nullable, add display_name.
---    Nothing in the remaining schema references team_members, so this is safe.
-CREATE TABLE team_members_new (
-    id           TEXT NOT NULL,
-    team_id      TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    user_id      TEXT REFERENCES users(id) ON DELETE CASCADE,
-    display_name TEXT,
-    role         TEXT NOT NULL CHECK (role IN ('admin', 'member')),
-    color        TEXT,
-    joined_at    DATETIME NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (id)
-);
-
-INSERT INTO team_members_new (id, team_id, user_id, display_name, role, color, joined_at)
-    SELECT lower(hex(randomblob(16))), team_id, user_id, NULL, role, color, joined_at
-    FROM team_members;
-
-DROP TABLE team_members;
-ALTER TABLE team_members_new RENAME TO team_members;
-
--- 5. timelines: drop the visibility column.
---    timeline_access was dropped above, so timelines is no longer referenced.
-CREATE TABLE timelines_new (
-    id          TEXT PRIMARY KEY,
-    team_id     TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    name        TEXT NOT NULL,
-    start_date  TEXT NOT NULL,
-    end_date    TEXT NOT NULL,
-    share_token TEXT NOT NULL UNIQUE,
-    ical_token  TEXT NOT NULL UNIQUE,
-    created_by  TEXT NOT NULL REFERENCES users(id),
-    created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at  DATETIME NOT NULL DEFAULT (datetime('now')),
-    archived_at DATETIME
-);
-
-INSERT INTO timelines_new (id, team_id, name, start_date, end_date, share_token, ical_token, created_by, created_at, updated_at, archived_at)
-    SELECT id, team_id, name, start_date, end_date, share_token, ical_token, created_by, created_at, updated_at, archived_at
-    FROM timelines;
-
-DROP TABLE timelines;
-ALTER TABLE timelines_new RENAME TO timelines;
-
--- 6. Recreate event_assignments with team_member_id FK.
---    Join through events to find the team, then match team_members by user_id.
-CREATE TABLE event_assignments (
-    event_id       TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    team_member_id TEXT NOT NULL REFERENCES team_members(id) ON DELETE CASCADE,
-    PRIMARY KEY (event_id, team_member_id)
-);
-
-INSERT INTO event_assignments (event_id, team_member_id)
-    SELECT ea.event_id, tm.id
-    FROM tmp_event_assignments ea
-    JOIN events e ON e.id = ea.event_id
-    JOIN team_members tm ON tm.team_id = e.team_id AND tm.user_id = ea.user_id;
-
-DROP TABLE tmp_event_assignments;
-
--- 7. Recreate timeline_access with team_member_id FK and role column.
---    Migrated rows default to role='member'.
-CREATE TABLE timeline_access (
-    timeline_id    TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
-    team_member_id TEXT NOT NULL REFERENCES team_members(id) ON DELETE CASCADE,
-    role           TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
-    PRIMARY KEY (timeline_id, team_member_id)
-);
-
-INSERT INTO timeline_access (timeline_id, team_member_id, role)
-    SELECT ta.timeline_id, tm.id, 'member'
-    FROM tmp_timeline_access ta
-    JOIN timelines t ON t.id = ta.timeline_id
-    JOIN team_members tm ON tm.team_id = t.team_id AND tm.user_id = ta.user_id;
-
-DROP TABLE tmp_timeline_access;
 ````
 
 ## File: packages/api/internal/db/migrations/004_user_preferences.sql
@@ -11577,53 +11692,6 @@ export default function ActivityPanel({ activity, members, onClose, onChange, on
 }
 ````
 
-## File: packages/web/src/components/ProtectedRoute.tsx
-````typescript
-/**
- * Wraps protected routes. Unauthenticated users are redirected to /login
- * with the original path preserved in state so they land back after logging in.
- * On a fresh install (no users exist) they are redirected to /setup instead.
- * Shows nothing while the session is being restored or the setup check is in flight.
- */
-
-import { Navigate, Outlet, useLocation } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { API_BASE } from '@/lib/api'
-
-interface SetupStatus {
-  needsSetup: boolean
-}
-
-export default function ProtectedRoute() {
-  const { accessToken, initializing } = useAuth()
-  const location = useLocation()
-
-  // Only fetch setup status when the user isn't logged in — once setup is
-  // done the result never changes back, so we cache it indefinitely.
-  const { data: setup, isLoading: setupLoading } = useQuery<SetupStatus>({
-    queryKey: ['setup-status'],
-    queryFn: () =>
-      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
-    enabled: !initializing && !accessToken,
-    staleTime: Infinity,
-  })
-
-  if (initializing || (!accessToken && setupLoading)) {
-    return null
-  }
-
-  if (!accessToken) {
-    if (setup?.needsSetup) {
-      return <Navigate to="/setup" replace />
-    }
-    return <Navigate to="/login" state={{ from: location }} replace />
-  }
-
-  return <Outlet />
-}
-````
-
 ## File: packages/web/src/components/RoleDropdown.tsx
 ````typescript
 /**
@@ -12673,74 +12741,6 @@ COMMIT;
 --     'Roadmap Review',
 --     'Competitive Research'
 -- );
-````
-
-## File: .gitignore
-````
-# Dependencies
-node_modules/
-.pnp
-.pnp.js
-
-# Build outputs
-dist/
-build/
-out/
-.next/
-.nuxt/
-.vite/
-
-# Environment variables — never commit secrets
-.env
-.env.local
-.env.*.local
-
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Runtime / OS
-.DS_Store
-Thumbs.db
-*.pem
-
-# Editor
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Test coverage
-coverage/
-.nyc_output/
-
-# TypeScript
-*.tsbuildinfo
-
-# Go
-packages/api/tmp/
-
-# Embedded web build artifacts — populated by Docker; not checked in
-packages/api/ui/static/*
-!packages/api/ui/static/.gitkeep
-*.exe
-*.dll
-*.so
-*.dylib
-
-# Database
-*.db
-
-# Claude Code — personal/local settings only
-# (CLAUDE.md, skills/, and .claude/commands/ are committed — they're shared team context)
-.claude/settings.local.json
-.claude/todos
-.claude/launch.json
-.claude/mockups/
-GEMINI.md
 ````
 
 ## File: CLAUDE.md
@@ -17048,6 +17048,902 @@ jobs:
           file_pattern: docs/ai-context/repomap.md
 ````
 
+## File: packages/api/internal/api/auth_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+	"unicode"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleRegister handles POST /auth/register. The first user on a fresh
+// install registers without an invite (bootstrap); every subsequent user
+// must present a valid invite token. Tier user limits are enforced before
+// hashing the password to avoid wasted bcrypt work.
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var req RegisterJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+
+	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
+		return
+	}
+	if !isValidPassword(req.Password) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	// First user may register without an invite; all subsequent users require one.
+	count, err := s.users.Count()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	if err := s.tier.CheckUserLimit(count); err != nil {
+		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
+		return
+	}
+
+	var invite *models.Invite
+	var inviteLinkTeamID string // non-empty when a reusable invite link was used
+	if count > 0 {
+		if req.InviteToken == nil || *req.InviteToken == "" {
+			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
+			return
+		}
+		// Try as a one-time invite first.
+		inv, err := s.invites.GetValid(*req.InviteToken)
+		if err != nil {
+			// Not a valid one-time invite — check if it's a reusable invite link token.
+			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
+			if linkErr != nil {
+				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
+				return
+			}
+			inviteLinkTeamID = team.ID
+		} else {
+			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
+				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
+				return
+			}
+			invite = inv
+		}
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	now := time.Now()
+	user := &models.User{
+		ID:           newID(),
+		Email:        string(req.Email),
+		PasswordHash: hash,
+		DisplayName:  req.DisplayName,
+		IsSuperadmin: count == 0,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.users.Create(user); err != nil {
+		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
+		return
+	}
+
+	if invite != nil {
+		if err := s.invites.MarkAccepted(invite.ID); err != nil {
+			// User and tokens are still returned — email uniqueness prevents a
+			// second registration. Log so the open invite is visible in monitoring.
+			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
+		}
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   invite.TeamID,
+			UserID:   &userID,
+			Role:     invite.Role,
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
+		}
+	} else if inviteLinkTeamID != "" {
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   inviteLinkTeamID,
+			UserID:   &userID,
+			Role:     "member",
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
+		}
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleLogin handles POST /auth/login. Returns the same generic
+// INVALID_CREDENTIALS error for both unknown email and bad password so
+// the endpoint cannot be used as an account-existence oracle.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req LoginJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	if req.Email == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
+		return
+	}
+
+	user, err := s.users.GetByEmail(string(req.Email))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	if user.ArchivedAt != nil {
+		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
+		return
+	}
+
+	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
+// token for a new access token; the refresh token itself is not rotated.
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	var req RefreshTokenJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accessToken": access,
+	})
+}
+
+// handleMe handles GET /auth/me and returns the authenticated user's
+// profile. Must be mounted behind authMiddleware.
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
+// address, generates a 1-hour reset token, stores the hash, and sends a
+// reset link via SMTP. Always returns 200 to prevent email enumeration.
+// When SMTP is not configured the email is silently skipped.
+func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+	if body.Email == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
+		return
+	}
+
+	// Always return 200 regardless of whether the email exists.
+	w.Header().Set("Content-Type", "application/json")
+	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
+
+	user, err := s.users.GetByEmail(body.Email)
+	if err != nil {
+		// No user — return 200 without error (prevent enumeration).
+		return
+	}
+	if user.ArchivedAt != nil {
+		return
+	}
+
+	rawToken := newToken()
+	expiresAt := time.Now().Add(time.Hour)
+	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
+		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
+		return
+	}
+
+	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
+	// when not set so the email still contains useful info.
+	baseURL := strings.TrimRight(getBaseURL(), "/")
+	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
+
+	subject := "Reset your draba password"
+	body2 := "<html><body>" +
+		"<p>You requested a password reset for your draba account.</p>" +
+		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
+		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
+		"</body></html>"
+
+	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
+		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
+	}
+}
+
+// handleResetPassword handles POST /auth/reset-password. Accepts a token and
+// new password; validates the token, hashes the new password, and marks the
+// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
+// or already used.
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token       string `json:"token"`
+		NewPassword string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.Token == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	resetToken, err := s.passwordTokens.GetValid(body.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
+		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
+func getBaseURL() string {
+	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:8080"
+}
+
+// isValidPassword applies the minimum policy: at least 8 characters and
+// no whitespace. Strength rules beyond length are intentionally lenient —
+// length is what matters most against offline cracking.
+func isValidPassword(p string) bool {
+	if len(p) < 8 {
+		return false
+	}
+	for _, r := range p {
+		if unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
+````
+
+## File: packages/api/internal/db/timeline_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// TimelineRepo is the persistence layer for Timeline records and their access
+// control entries.
+type TimelineRepo struct {
+	db *sqlx.DB
+}
+
+// NewTimelineRepo returns a TimelineRepo backed by db.
+func NewTimelineRepo(db *sqlx.DB) *TimelineRepo {
+	return &TimelineRepo{db: db}
+}
+
+// Create inserts a new Timeline row.
+func (r *TimelineRepo) Create(t *models.Timeline) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO timelines (
+			id, team_id, name, description, notes,
+			start_date, end_date, color, icon,
+			share_token, ical_token,
+			created_by, created_at, updated_at
+		) VALUES (
+			:id, :team_id, :name, :description, :notes,
+			:start_date, :end_date, :color, :icon,
+			:share_token, :ical_token,
+			:created_by, :created_at, :updated_at
+		)
+	`, t)
+	if err != nil {
+		return fmt.Errorf("creating timeline: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Timeline by primary key, including archived rows so the
+// archive/unarchive handlers can operate on them. Callers that should reject
+// archived timelines must check ArchivedAt explicitly.
+func (r *TimelineRepo) GetByID(id string) (*models.Timeline, error) {
+	var t models.Timeline
+	err := r.db.Get(&t, `SELECT * FROM timelines WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting timeline: %w", err)
+	}
+	return &t, nil
+}
+
+// SetArchived sets or clears archived_at on a timeline. Pass a non-nil time
+// to archive; pass nil to unarchive.
+func (r *TimelineRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE timelines SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting timeline archived_at: %w", err)
+	}
+	return nil
+}
+
+// GetByShareToken fetches a non-archived Timeline by its public share token.
+// Archived timelines are intentionally excluded — public share URLs should
+// 404 once a timeline is archived.
+// Returns sql.ErrNoRows (wrapped) when no row matches.
+func (r *TimelineRepo) GetByShareToken(token string) (*models.Timeline, error) {
+	var t models.Timeline
+	err := r.db.Get(&t, `SELECT * FROM timelines WHERE share_token = ? AND archived_at IS NULL`, token)
+	if err != nil {
+		return nil, fmt.Errorf("getting timeline by share token: %w", err)
+	}
+	return &t, nil
+}
+
+// ListByTeam returns timelines for a team ordered by creation date
+// descending. When includeArchived is false, archived rows are excluded.
+func (r *TimelineRepo) ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error) {
+	ts := make([]*models.Timeline, 0)
+	query := `SELECT * FROM timelines WHERE team_id = ?`
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
+	query += ` ORDER BY created_at DESC`
+	err := r.db.Select(&ts, query, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("listing timelines: %w", err)
+	}
+	return ts, nil
+}
+
+// HasAccess reports whether teamMemberID has an entry in timeline_access for
+// the given timeline. Returns false (not an error) when the row is absent.
+func (r *TimelineRepo) HasAccess(timelineID, teamMemberID string) (bool, error) {
+	var count int
+	err := r.db.Get(&count,
+		`SELECT COUNT(*) FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("checking timeline access: %w", err)
+	}
+	return count > 0, nil
+}
+
+// GrantAccess inserts a timeline_access row with the given role. On conflict
+// (row already exists) the role is updated to the supplied value.
+func (r *TimelineRepo) GrantAccess(timelineID, teamMemberID, role string) error {
+	_, err := r.db.Exec(
+		`INSERT INTO timeline_access (timeline_id, team_member_id, role)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(timeline_id, team_member_id) DO UPDATE SET role = excluded.role`,
+		timelineID, teamMemberID, role,
+	)
+	if err != nil {
+		return fmt.Errorf("granting timeline access: %w", err)
+	}
+	return nil
+}
+
+// RevokeAccess removes a timeline_access row. It is a no-op when the row
+// does not exist.
+func (r *TimelineRepo) RevokeAccess(timelineID, teamMemberID string) error {
+	_, err := r.db.Exec(
+		`DELETE FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		return fmt.Errorf("revoking timeline access: %w", err)
+	}
+	return nil
+}
+
+// GetAccessRole returns the role for a member in timeline_access, or "" if
+// no entry exists. Returns sql.ErrNoRows (wrapped) only on DB errors.
+func (r *TimelineRepo) GetAccessRole(timelineID, teamMemberID string) (string, error) {
+	var role string
+	err := r.db.Get(&role,
+		`SELECT role FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		// No row means no access — return empty string, not an error.
+		return "", nil
+	}
+	return role, nil
+}
+
+// ListAccess returns all access grants for a timeline, joined with member
+// display info, ordered by joined_at.
+func (r *TimelineRepo) ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error) {
+	entries := make([]*models.TimelineAccessEntry, 0)
+	err := r.db.Select(&entries, `
+		SELECT
+			ta.timeline_id,
+			ta.team_member_id,
+			ta.role,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			COALESCE(u.email, '')                           AS email,
+			tm.color,
+			tm.icon,
+			tm.user_id
+		FROM timeline_access ta
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE ta.timeline_id = ?
+		ORDER BY tm.joined_at
+	`, timelineID)
+	if err != nil {
+		return nil, fmt.Errorf("listing timeline access: %w", err)
+	}
+	return entries, nil
+}
+
+// Update writes mutable timeline fields: name, description, notes, start_date,
+// end_date, color, icon.
+func (r *TimelineRepo) Update(t *models.Timeline) error {
+	_, err := r.db.Exec(`
+		UPDATE timelines
+		SET name = ?, description = ?, notes = ?,
+		    start_date = ?, end_date = ?,
+		    color = ?, icon = ?, updated_at = ?
+		WHERE id = ?
+	`, t.Name, t.Description, t.Notes, t.StartDate, t.EndDate, t.Color, t.Icon, t.UpdatedAt, t.ID)
+	if err != nil {
+		return fmt.Errorf("updating timeline: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a timeline and all its child rows (statuses,
+// timeline_access cascade via FK).
+func (r *TimelineRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM timelines WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting timeline: %w", err)
+	}
+	return nil
+}
+````
+
+## File: packages/api/internal/db/user_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// UserRepo is the persistence layer for User records.
+type UserRepo struct {
+	db *sqlx.DB
+}
+
+// NewUserRepo returns a UserRepo backed by db.
+func NewUserRepo(db *sqlx.DB) *UserRepo {
+	return &UserRepo{db: db}
+}
+
+// Create inserts u. Returns an error if the email already exists
+// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
+func (r *UserRepo) Create(u *models.User) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
+		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
+	`, u)
+	if err != nil {
+		return fmt.Errorf("creating user: %w", err)
+	}
+	return nil
+}
+
+// GetByEmail looks up a user by exact email match. Callers are expected to
+// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
+// when no row matches.
+func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by email: %w", err)
+	}
+	return &u, nil
+}
+
+// GetByID looks up a user by primary key.
+func (r *UserRepo) GetByID(id string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by id: %w", err)
+	}
+	return &u, nil
+}
+
+// UpdatePasswordByEmail replaces the password hash for the user with the
+// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
+func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
+	res, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
+		passwordHash, email,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("updating password: no user with email %q", email)
+	}
+	return nil
+}
+
+// Count returns the total number of users. Used by the registration flow
+// to detect first-user bootstrap and to enforce tier user limits.
+func (r *UserRepo) Count() (int, error) {
+	var count int
+	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
+	if err != nil {
+		return 0, fmt.Errorf("counting users: %w", err)
+	}
+	return count, nil
+}
+
+// SearchByNameOrEmail returns up to 20 users whose display_name or email
+// contains the query (case-insensitive). Archived users are excluded.
+func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
+	var users []*models.User
+	like := "%" + q + "%"
+	err := r.db.Select(&users, `
+		SELECT * FROM users
+		WHERE archived_at IS NULL
+		  AND (display_name LIKE ? OR email LIKE ?)
+		ORDER BY display_name ASC
+		LIMIT 20
+	`, like, like)
+	if err != nil {
+		return nil, fmt.Errorf("searching users: %w", err)
+	}
+	return users, nil
+}
+
+// SetSuperadmin sets or clears the is_superadmin flag on a user.
+func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		isSuperadmin, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting superadmin: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
+func (r *UserRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		at, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting user archived: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a user row. The caller must verify the user is deletable
+// (no active activities, single team membership) before calling this.
+func (r *UserRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting user: %w", err)
+	}
+	return nil
+}
+
+// UpdateProfile sets display_name, color, and icon on a user. When color or
+// icon changes, the new value is propagated to all team_members rows for the
+// user where the member's value currently matches the user's old value or is NULL
+// (i.e. has not been explicitly overridden by a team admin).
+func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
+	// Fetch old values for propagation comparison.
+	var old models.User
+	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("fetching user for profile update: %w", err)
+	}
+
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning profile update transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Exec(
+		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		displayName, color, icon, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating user profile: %w", err)
+	}
+
+	// Propagate color if changed: update team_members rows where color matches
+	// the old value or is NULL (not explicitly overridden).
+	if !ptrEqual(old.Color, color) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
+			color, id, old.Color,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating color to team_members: %w", err)
+		}
+	}
+
+	if !ptrEqual(old.Icon, icon) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
+			icon, id, old.Icon,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating icon to team_members: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing profile update: %w", err)
+	}
+	return nil
+}
+
+// UpdatePassword sets the password_hash on a user.
+func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		passwordHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	return nil
+}
+
+// ListAll returns all users with their active team membership count.
+// When orphanedOnly is true, only users with zero active memberships are returned.
+func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
+	q := `
+		SELECT u.*,
+		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
+		FROM users u
+		ORDER BY u.display_name ASC
+	`
+	if orphanedOnly {
+		q = `
+			SELECT u.*,
+			       0 AS team_count
+			FROM users u
+			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
+			ORDER BY u.display_name ASC
+		`
+	}
+	var rows []*models.AdminUserRow
+	if err := r.db.Select(&rows, q); err != nil {
+		return nil, fmt.Errorf("listing admin users: %w", err)
+	}
+	return rows, nil
+}
+
+// RevokeUser atomically revokes all access for a user:
+//  1. Sets users.archived_at (blocks login everywhere).
+//  2. For each team_members row for the user:
+//     – if assignment count is 0: deletes timeline_access then the row.
+//     – otherwise: sets team_members.archived_at (inactivates without data loss).
+//
+// Returns a summary of the actions taken. The caller must ensure the user
+// exists and is not a participant before calling.
+func (r *UserRepo) RevokeUser(userID string) (*models.RevokeUserResult, error) {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return nil, fmt.Errorf("beginning revoke transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now()
+
+	// Step 1: deactivate the account.
+	if _, err := tx.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		now, userID,
+	); err != nil {
+		return nil, fmt.Errorf("deactivating user account: %w", err)
+	}
+
+	// Step 2: collect all team_members rows for the user.
+	var memberIDs []string
+	if err := tx.Select(&memberIDs,
+		`SELECT id FROM team_members WHERE user_id = ?`, userID,
+	); err != nil {
+		return nil, fmt.Errorf("listing memberships: %w", err)
+	}
+
+	result := &models.RevokeUserResult{AccountDeactivated: true}
+
+	for _, memberID := range memberIDs {
+		var assignCount int
+		if err := tx.Get(&assignCount,
+			`SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?`, memberID,
+		); err != nil {
+			return nil, fmt.Errorf("counting assignments for member %s: %w", memberID, err)
+		}
+
+		if assignCount == 0 {
+			// No history — delete timeline_access then the member row.
+			if _, err := tx.Exec(
+				`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("deleting timeline access for member %s: %w", memberID, err)
+			}
+			if _, err := tx.Exec(
+				`DELETE FROM team_members WHERE id = ?`, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("deleting member %s: %w", memberID, err)
+			}
+			result.MembershipsRemoved++
+		} else {
+			// Has activity history — inactivate without deleting.
+			if _, err := tx.Exec(
+				`UPDATE team_members SET archived_at = ? WHERE id = ?`, now, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("inactivating member %s: %w", memberID, err)
+			}
+			result.MembershipsInactivated++
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing revoke transaction: %w", err)
+	}
+	return result, nil
+}
+
+// ptrEqual reports whether two string pointers point to equal values,
+// treating nil and a pointer to "" as distinct.
+func ptrEqual(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+````
+
 ## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
 ````typescript
 /**
@@ -18799,6 +19695,565 @@ describe('matchActivities', () => {
 })
 ````
 
+## File: packages/web/src/pages/SetupPage.tsx
+````typescript
+/**
+ * First-run setup wizard. Shown once when no users exist.
+ * Collects account, team, and timeline details then creates all three on Finish.
+ */
+
+import { useState } from 'react'
+import { Navigate, useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { API_BASE, apiFetch, ApiError } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type Step = 1 | 2 | 3
+
+interface WizardData {
+  displayName: string
+  email: string
+  password: string
+  teamName: string
+  timelineName: string
+  startDate: string
+  endDate: string
+}
+
+// ---------------------------------------------------------------------------
+// Step indicator
+// ---------------------------------------------------------------------------
+
+const STEP_LABELS: Record<Step, string> = {
+  1: 'Account',
+  2: 'Team',
+  3: 'Timeline',
+}
+
+function StepIndicator({ current }: { current: Step }) {
+  const steps: Step[] = [1, 2, 3]
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 0,
+        marginBottom: 32,
+      }}
+    >
+      {steps.map((n, i) => {
+        const done = n < current
+        const active = n === current
+        return (
+          <div key={n} style={{ display: 'flex', alignItems: 'center' }}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 4,
+              }}
+            >
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background:
+                    done || active ? 'var(--primary)' : 'transparent',
+                  border:
+                    done || active
+                      ? 'none'
+                      : '2px solid var(--border)',
+                  color:
+                    done || active
+                      ? 'var(--primary-foreground)'
+                      : 'var(--muted-foreground)',
+                  fontSize: 13,
+                  fontWeight: 700,
+                  transition: 'background 0.2s',
+                }}
+              >
+                {done ? '✓' : n}
+              </div>
+              <span
+                style={{
+                  fontSize: 11,
+                  fontWeight: active ? 600 : 400,
+                  color: active
+                    ? 'var(--foreground)'
+                    : 'var(--muted-foreground)',
+                }}
+              >
+                {STEP_LABELS[n]}
+              </span>
+            </div>
+
+            {i < steps.length - 1 && (
+              <div
+                style={{
+                  width: 48,
+                  height: 2,
+                  // Shift up to align with the circle, not the label
+                  marginBottom: 20,
+                  background: done ? 'var(--primary)' : 'var(--border)',
+                  transition: 'background 0.2s',
+                }}
+              />
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Step content
+// ---------------------------------------------------------------------------
+
+interface StepProps {
+  data: WizardData
+  onChange: (patch: Partial<WizardData>) => void
+}
+
+function Step1({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <p
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: 'var(--primary)',
+            margin: '0 0 4px',
+          }}
+        >
+          Welcome to draba!
+        </p>
+        <CardTitle>Create your account</CardTitle>
+        <CardDescription>
+          You're the first person here, so this account will have full admin
+          access — you'll be able to create teams, invite users, and manage the
+          workspace.
+        </CardDescription>
+      </CardHeader>
+      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="displayName">Your name</Label>
+          <Input
+            id="displayName"
+            placeholder="Jane Smith"
+            autoComplete="name"
+            value={data.displayName}
+            onChange={e => onChange({ displayName: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="email">Email</Label>
+          <Input
+            id="email"
+            type="email"
+            placeholder="you@example.com"
+            autoComplete="email"
+            value={data.email}
+            onChange={e => onChange({ email: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="password">Password</Label>
+          <Input
+            id="password"
+            type="password"
+            placeholder="At least 8 characters"
+            autoComplete="new-password"
+            value={data.password}
+            onChange={e => onChange({ password: e.target.value })}
+          />
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+function Step2({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <CardTitle>Name your team</CardTitle>
+        <CardDescription>
+          A team is your shared workspace. Everyone you invite will work within
+          it, and all your timelines and events live inside one. You can
+          customize and add members after setup.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="teamName">Team name</Label>
+          <Input
+            id="teamName"
+            placeholder="Product Marketing"
+            autoComplete="off"
+            value={data.teamName}
+            onChange={e => onChange({ teamName: e.target.value })}
+          />
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+function Step3({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <CardTitle>Your first timeline</CardTitle>
+        <CardDescription>
+          A timeline is a named date window over your team's events — it's how
+          you see who's working on what, and when. Pick a range that fits your
+          next planning horizon.
+        </CardDescription>
+      </CardHeader>
+      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="timelineName">Timeline name</Label>
+          <Input
+            id="timelineName"
+            placeholder="Q3 Roadmap"
+            autoComplete="off"
+            value={data.timelineName}
+            onChange={e => onChange({ timelineName: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="startDate">Start date</Label>
+            <Input
+              id="startDate"
+              type="date"
+              value={data.startDate}
+              onChange={e => onChange({ startDate: e.target.value })}
+            />
+          </div>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="endDate">End date</Label>
+            <Input
+              id="endDate"
+              type="date"
+              value={data.endDate}
+              onChange={e => onChange({ endDate: e.target.value })}
+            />
+          </div>
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+function validateStep(step: Step, data: WizardData): string | null {
+  if (step === 1) {
+    if (!data.displayName.trim()) return 'Please enter your name.'
+    if (!data.email.trim()) return 'Please enter your email.'
+    if (data.password.length < 8) return 'Password must be at least 8 characters.'
+    if (/\s/.test(data.password)) return 'Password must not contain spaces.'
+  }
+  if (step === 2) {
+    if (!data.teamName.trim()) return 'Please enter a team name.'
+  }
+  if (step === 3) {
+    if (!data.timelineName.trim()) return 'Please enter a timeline name.'
+    if (!data.startDate) return 'Please choose a start date.'
+    if (!data.endDate) return 'Please choose an end date.'
+    if (data.endDate < data.startDate) return 'End date must be on or after the start date.'
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Date helpers
+// ---------------------------------------------------------------------------
+
+function toDateString(d: Date): string {
+  return d.toISOString().split('T')[0]
+}
+
+function defaultDates(): { startDate: string; endDate: string } {
+  const start = new Date()
+  const end = new Date()
+  end.setMonth(end.getMonth() + 3)
+  return { startDate: toDateString(start), endDate: toDateString(end) }
+}
+
+// ---------------------------------------------------------------------------
+// Main wizard
+// ---------------------------------------------------------------------------
+
+interface SetupStatus {
+  needsSetup: boolean
+}
+
+export default function SetupPage() {
+  const { register, user } = useAuth()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+
+  // If setup has already been completed redirect to login rather than showing
+  // a broken wizard (handles back-navigation and direct URL access after setup).
+  const { data: setupStatus, isLoading: statusLoading } = useQuery<SetupStatus>({
+    queryKey: ['setup-status'],
+    queryFn: () =>
+      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
+    staleTime: Infinity,
+  })
+
+  const [step, setStep] = useState<Step>(1)
+  const [data, setData] = useState<WizardData>({
+    displayName: '',
+    email: '',
+    password: '',
+    teamName: '',
+    timelineName: '',
+    ...defaultDates(),
+  })
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  // Wait for the status check before rendering anything.
+  if (statusLoading) return null
+
+  // Setup already done — logged-in users go home, others go to login.
+  if (setupStatus && !setupStatus.needsSetup) {
+    return <Navigate to={user ? '/' : '/login'} replace />
+  }
+
+  function handleChange(patch: Partial<WizardData>) {
+    setData(d => ({ ...d, ...patch }))
+    setError(null)
+  }
+
+  function handleBack() {
+    setError(null)
+    setStep(s => (s > 1 ? ((s - 1) as Step) : s))
+  }
+
+  function handleNext() {
+    const err = validateStep(step, data)
+    if (err) {
+      setError(err)
+      return
+    }
+    setError(null)
+    setStep(s => (s < 3 ? ((s + 1) as Step) : s))
+  }
+
+  async function handleFinish() {
+    const err = validateStep(3, data)
+    if (err) {
+      setError(err)
+      return
+    }
+
+    setError(null)
+    setLoading(true)
+
+    try {
+      // 1. Create account — returns token directly to avoid racing the async
+      //    setState inside register() before the next render cycle.
+      const token = await register(data.email, data.password, data.displayName)
+
+      // 2. Create team
+      const team = await apiFetch<{ id: string }>('/teams', {
+        method: 'POST',
+        body: JSON.stringify({ name: data.teamName }),
+        accessToken: token,
+      })
+
+      // 3. Create timeline
+      await apiFetch(`/teams/${team.id}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: data.timelineName,
+          startDate: data.startDate,
+          endDate: data.endDate,
+        }),
+        accessToken: token,
+      })
+
+      // Mark setup as done in the query cache so ProtectedRoute doesn't
+      // replay the stale needsSetup:true value after the user logs out.
+      queryClient.setQueryData<SetupStatus>(['setup-status'], { needsSetup: false })
+      navigate('/', { replace: true })
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--background)',
+        padding: '24px',
+      }}
+    >
+      <div style={{ position: 'fixed', top: 16, right: 16 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Logo */}
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 2,
+          marginBottom: 24,
+        }}
+      >
+        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
+        <span
+          style={{
+            fontSize: 36,
+            fontWeight: 700,
+            color: 'var(--foreground)',
+            letterSpacing: '-0.02em',
+          }}
+        >
+          draba
+        </span>
+      </div>
+
+      <Card style={{ width: '100%', maxWidth: 440 }}>
+        <div style={{ padding: '24px 24px 0' }}>
+          <StepIndicator current={step} />
+        </div>
+
+        {step === 1 && <Step1 data={data} onChange={handleChange} />}
+        {step === 2 && <Step2 data={data} onChange={handleChange} />}
+        {step === 3 && <Step3 data={data} onChange={handleChange} />}
+
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+            padding: '0 24px 24px',
+          }}
+        >
+          {error && (
+            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>
+              {error}
+            </p>
+          )}
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button
+              variant="outline"
+              onClick={handleBack}
+              disabled={step === 1 || loading}
+              style={{ flex: 1 }}
+            >
+              Back
+            </Button>
+
+            {step < 3 ? (
+              <Button onClick={handleNext} disabled={loading} style={{ flex: 1 }}>
+                Next
+              </Button>
+            ) : (
+              <Button onClick={handleFinish} disabled={loading} style={{ flex: 1 }}>
+                {loading ? 'Setting up…' : 'Finish'}
+              </Button>
+            )}
+          </div>
+        </div>
+      </Card>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/App.tsx
+````typescript
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AuthProvider } from '@/contexts/AuthContext'
+import ProtectedRoute from '@/components/ProtectedRoute'
+import LoginPage from '@/pages/LoginPage'
+import RegisterPage from '@/pages/RegisterPage'
+import DashboardPage from '@/pages/DashboardPage'
+import SetupPage from '@/pages/SetupPage'
+import SettingsPage from '@/pages/SettingsPage'
+import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
+import ResetPasswordPage from '@/pages/ResetPasswordPage'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
+    },
+  },
+})
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <Routes>
+            {/* First-run setup — public, shown before any users exist */}
+            <Route path="/setup" element={<SetupPage />} />
+
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/settings/*" element={<SettingsPage />} />
+            </Route>
+
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  )
+}
+````
+
 ## File: packages/api/internal/api/api_types.gen.go
 ````go
 // Package api provides primitives to interact with the openapi HTTP API.
@@ -19307,376 +20762,6 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
-## File: packages/api/internal/api/auth_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"log/slog"
-	"net/http"
-	"net/url"
-	"os"
-	"strings"
-	"time"
-	"unicode"
-
-	openapi_types "github.com/oapi-codegen/runtime/types"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleRegister handles POST /auth/register. The first user on a fresh
-// install registers without an invite (bootstrap); every subsequent user
-// must present a valid invite token. Tier user limits are enforced before
-// hashing the password to avoid wasted bcrypt work.
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req RegisterJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	req.DisplayName = strings.TrimSpace(req.DisplayName)
-
-	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
-		return
-	}
-	if !isValidPassword(req.Password) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	// First user may register without an invite; all subsequent users require one.
-	count, err := s.users.Count()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	if err := s.tier.CheckUserLimit(count); err != nil {
-		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
-		return
-	}
-
-	var invite *models.Invite
-	var inviteLinkTeamID string // non-empty when a reusable invite link was used
-	if count > 0 {
-		if req.InviteToken == nil || *req.InviteToken == "" {
-			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
-			return
-		}
-		// Try as a one-time invite first.
-		inv, err := s.invites.GetValid(*req.InviteToken)
-		if err != nil {
-			// Not a valid one-time invite — check if it's a reusable invite link token.
-			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
-			if linkErr != nil {
-				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
-				return
-			}
-			inviteLinkTeamID = team.ID
-		} else {
-			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
-				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
-				return
-			}
-			invite = inv
-		}
-	}
-
-	hash, err := auth.HashPassword(req.Password)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	now := time.Now()
-	user := &models.User{
-		ID:           newID(),
-		Email:        string(req.Email),
-		PasswordHash: hash,
-		DisplayName:  req.DisplayName,
-		IsSuperadmin: count == 0,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.users.Create(user); err != nil {
-		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
-		return
-	}
-
-	if invite != nil {
-		if err := s.invites.MarkAccepted(invite.ID); err != nil {
-			// User and tokens are still returned — email uniqueness prevents a
-			// second registration. Log so the open invite is visible in monitoring.
-			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
-		}
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   invite.TeamID,
-			UserID:   &userID,
-			Role:     invite.Role,
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
-		}
-	} else if inviteLinkTeamID != "" {
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   inviteLinkTeamID,
-			UserID:   &userID,
-			Role:     "member",
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
-		}
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleLogin handles POST /auth/login. Returns the same generic
-// INVALID_CREDENTIALS error for both unknown email and bad password so
-// the endpoint cannot be used as an account-existence oracle.
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req LoginJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	if req.Email == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
-		return
-	}
-
-	user, err := s.users.GetByEmail(string(req.Email))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	if user.ArchivedAt != nil {
-		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
-		return
-	}
-
-	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
-// token for a new access token; the refresh token itself is not rotated.
-func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	var req RefreshTokenJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"accessToken": access,
-	})
-}
-
-// handleMe handles GET /auth/me and returns the authenticated user's
-// profile. Must be mounted behind authMiddleware.
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
-		return
-	}
-	writeJSON(w, http.StatusOK, user)
-}
-
-// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
-// address, generates a 1-hour reset token, stores the hash, and sends a
-// reset link via SMTP. Always returns 200 to prevent email enumeration.
-// When SMTP is not configured the email is silently skipped.
-func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Email string `json:"email"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
-	if body.Email == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
-		return
-	}
-
-	// Always return 200 regardless of whether the email exists.
-	w.Header().Set("Content-Type", "application/json")
-	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
-
-	user, err := s.users.GetByEmail(body.Email)
-	if err != nil {
-		// No user — return 200 without error (prevent enumeration).
-		return
-	}
-	if user.ArchivedAt != nil {
-		return
-	}
-
-	rawToken := newToken()
-	expiresAt := time.Now().Add(time.Hour)
-	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
-		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
-		return
-	}
-
-	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
-	// when not set so the email still contains useful info.
-	baseURL := strings.TrimRight(getBaseURL(), "/")
-	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
-
-	subject := "Reset your draba password"
-	body2 := "<html><body>" +
-		"<p>You requested a password reset for your draba account.</p>" +
-		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
-		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
-		"</body></html>"
-
-	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
-		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
-	}
-}
-
-// handleResetPassword handles POST /auth/reset-password. Accepts a token and
-// new password; validates the token, hashes the new password, and marks the
-// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
-// or already used.
-func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Token       string `json:"token"`
-		NewPassword string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if body.Token == "" || body.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
-		return
-	}
-	if !isValidPassword(body.NewPassword) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	resetToken, err := s.passwordTokens.GetValid(body.Token)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
-		return
-	}
-
-	hash, err := auth.HashPassword(body.NewPassword)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
-		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
-func getBaseURL() string {
-	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
-		return v
-	}
-	return "http://localhost:8080"
-}
-
-// isValidPassword applies the minimum policy: at least 8 characters and
-// no whitespace. Strength rules beyond length are intentionally lenient —
-// length is what matters most against offline cracking.
-func isValidPassword(p string) bool {
-	if len(p) < 8 {
-		return false
-	}
-	for _, r := range p {
-		if unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
-}
-````
-
 ## File: packages/api/internal/db/status_repo.go
 ````go
 // Package db — StatusRepo manages status templates, template items,
@@ -20058,532 +21143,6 @@ func newRepoID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
-}
-````
-
-## File: packages/api/internal/db/timeline_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// TimelineRepo is the persistence layer for Timeline records and their access
-// control entries.
-type TimelineRepo struct {
-	db *sqlx.DB
-}
-
-// NewTimelineRepo returns a TimelineRepo backed by db.
-func NewTimelineRepo(db *sqlx.DB) *TimelineRepo {
-	return &TimelineRepo{db: db}
-}
-
-// Create inserts a new Timeline row.
-func (r *TimelineRepo) Create(t *models.Timeline) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO timelines (
-			id, team_id, name, description, notes,
-			start_date, end_date, color, icon,
-			share_token, ical_token,
-			created_by, created_at, updated_at
-		) VALUES (
-			:id, :team_id, :name, :description, :notes,
-			:start_date, :end_date, :color, :icon,
-			:share_token, :ical_token,
-			:created_by, :created_at, :updated_at
-		)
-	`, t)
-	if err != nil {
-		return fmt.Errorf("creating timeline: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Timeline by primary key, including archived rows so the
-// archive/unarchive handlers can operate on them. Callers that should reject
-// archived timelines must check ArchivedAt explicitly.
-func (r *TimelineRepo) GetByID(id string) (*models.Timeline, error) {
-	var t models.Timeline
-	err := r.db.Get(&t, `SELECT * FROM timelines WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting timeline: %w", err)
-	}
-	return &t, nil
-}
-
-// SetArchived sets or clears archived_at on a timeline. Pass a non-nil time
-// to archive; pass nil to unarchive.
-func (r *TimelineRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE timelines SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting timeline archived_at: %w", err)
-	}
-	return nil
-}
-
-// GetByShareToken fetches a non-archived Timeline by its public share token.
-// Archived timelines are intentionally excluded — public share URLs should
-// 404 once a timeline is archived.
-// Returns sql.ErrNoRows (wrapped) when no row matches.
-func (r *TimelineRepo) GetByShareToken(token string) (*models.Timeline, error) {
-	var t models.Timeline
-	err := r.db.Get(&t, `SELECT * FROM timelines WHERE share_token = ? AND archived_at IS NULL`, token)
-	if err != nil {
-		return nil, fmt.Errorf("getting timeline by share token: %w", err)
-	}
-	return &t, nil
-}
-
-// ListByTeam returns timelines for a team ordered by creation date
-// descending. When includeArchived is false, archived rows are excluded.
-func (r *TimelineRepo) ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error) {
-	ts := make([]*models.Timeline, 0)
-	query := `SELECT * FROM timelines WHERE team_id = ?`
-	if !includeArchived {
-		query += ` AND archived_at IS NULL`
-	}
-	query += ` ORDER BY created_at DESC`
-	err := r.db.Select(&ts, query, teamID)
-	if err != nil {
-		return nil, fmt.Errorf("listing timelines: %w", err)
-	}
-	return ts, nil
-}
-
-// HasAccess reports whether teamMemberID has an entry in timeline_access for
-// the given timeline. Returns false (not an error) when the row is absent.
-func (r *TimelineRepo) HasAccess(timelineID, teamMemberID string) (bool, error) {
-	var count int
-	err := r.db.Get(&count,
-		`SELECT COUNT(*) FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
-		timelineID, teamMemberID,
-	)
-	if err != nil {
-		return false, fmt.Errorf("checking timeline access: %w", err)
-	}
-	return count > 0, nil
-}
-
-// GrantAccess inserts a timeline_access row with the given role. On conflict
-// (row already exists) the role is updated to the supplied value.
-func (r *TimelineRepo) GrantAccess(timelineID, teamMemberID, role string) error {
-	_, err := r.db.Exec(
-		`INSERT INTO timeline_access (timeline_id, team_member_id, role)
-		 VALUES (?, ?, ?)
-		 ON CONFLICT(timeline_id, team_member_id) DO UPDATE SET role = excluded.role`,
-		timelineID, teamMemberID, role,
-	)
-	if err != nil {
-		return fmt.Errorf("granting timeline access: %w", err)
-	}
-	return nil
-}
-
-// RevokeAccess removes a timeline_access row. It is a no-op when the row
-// does not exist.
-func (r *TimelineRepo) RevokeAccess(timelineID, teamMemberID string) error {
-	_, err := r.db.Exec(
-		`DELETE FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
-		timelineID, teamMemberID,
-	)
-	if err != nil {
-		return fmt.Errorf("revoking timeline access: %w", err)
-	}
-	return nil
-}
-
-// GetAccessRole returns the role for a member in timeline_access, or "" if
-// no entry exists. Returns sql.ErrNoRows (wrapped) only on DB errors.
-func (r *TimelineRepo) GetAccessRole(timelineID, teamMemberID string) (string, error) {
-	var role string
-	err := r.db.Get(&role,
-		`SELECT role FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
-		timelineID, teamMemberID,
-	)
-	if err != nil {
-		// No row means no access — return empty string, not an error.
-		return "", nil
-	}
-	return role, nil
-}
-
-// ListAccess returns all access grants for a timeline, joined with member
-// display info, ordered by joined_at.
-func (r *TimelineRepo) ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error) {
-	entries := make([]*models.TimelineAccessEntry, 0)
-	err := r.db.Select(&entries, `
-		SELECT
-			ta.timeline_id,
-			ta.team_member_id,
-			ta.role,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			COALESCE(u.email, '')                           AS email,
-			tm.color,
-			tm.icon,
-			tm.user_id
-		FROM timeline_access ta
-		JOIN team_members tm ON tm.id = ta.team_member_id
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE ta.timeline_id = ?
-		ORDER BY tm.joined_at
-	`, timelineID)
-	if err != nil {
-		return nil, fmt.Errorf("listing timeline access: %w", err)
-	}
-	return entries, nil
-}
-
-// Update writes mutable timeline fields: name, description, notes, start_date,
-// end_date, color, icon.
-func (r *TimelineRepo) Update(t *models.Timeline) error {
-	_, err := r.db.Exec(`
-		UPDATE timelines
-		SET name = ?, description = ?, notes = ?,
-		    start_date = ?, end_date = ?,
-		    color = ?, icon = ?, updated_at = ?
-		WHERE id = ?
-	`, t.Name, t.Description, t.Notes, t.StartDate, t.EndDate, t.Color, t.Icon, t.UpdatedAt, t.ID)
-	if err != nil {
-		return fmt.Errorf("updating timeline: %w", err)
-	}
-	return nil
-}
-
-// Delete hard-deletes a timeline and all its child rows (statuses,
-// timeline_access cascade via FK).
-func (r *TimelineRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM timelines WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting timeline: %w", err)
-	}
-	return nil
-}
-````
-
-## File: packages/api/internal/db/user_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// UserRepo is the persistence layer for User records.
-type UserRepo struct {
-	db *sqlx.DB
-}
-
-// NewUserRepo returns a UserRepo backed by db.
-func NewUserRepo(db *sqlx.DB) *UserRepo {
-	return &UserRepo{db: db}
-}
-
-// Create inserts u. Returns an error if the email already exists
-// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
-func (r *UserRepo) Create(u *models.User) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
-		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
-	`, u)
-	if err != nil {
-		return fmt.Errorf("creating user: %w", err)
-	}
-	return nil
-}
-
-// GetByEmail looks up a user by exact email match. Callers are expected to
-// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
-// when no row matches.
-func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by email: %w", err)
-	}
-	return &u, nil
-}
-
-// GetByID looks up a user by primary key.
-func (r *UserRepo) GetByID(id string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by id: %w", err)
-	}
-	return &u, nil
-}
-
-// UpdatePasswordByEmail replaces the password hash for the user with the
-// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
-func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
-	res, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
-		passwordHash, email,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	if n == 0 {
-		return fmt.Errorf("updating password: no user with email %q", email)
-	}
-	return nil
-}
-
-// Count returns the total number of users. Used by the registration flow
-// to detect first-user bootstrap and to enforce tier user limits.
-func (r *UserRepo) Count() (int, error) {
-	var count int
-	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
-	if err != nil {
-		return 0, fmt.Errorf("counting users: %w", err)
-	}
-	return count, nil
-}
-
-// SearchByNameOrEmail returns up to 20 users whose display_name or email
-// contains the query (case-insensitive). Archived users are excluded.
-func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
-	var users []*models.User
-	like := "%" + q + "%"
-	err := r.db.Select(&users, `
-		SELECT * FROM users
-		WHERE archived_at IS NULL
-		  AND (display_name LIKE ? OR email LIKE ?)
-		ORDER BY display_name ASC
-		LIMIT 20
-	`, like, like)
-	if err != nil {
-		return nil, fmt.Errorf("searching users: %w", err)
-	}
-	return users, nil
-}
-
-// SetSuperadmin sets or clears the is_superadmin flag on a user.
-func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		isSuperadmin, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting superadmin: %w", err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
-func (r *UserRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		at, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting user archived: %w", err)
-	}
-	return nil
-}
-
-// Delete hard-deletes a user row. The caller must verify the user is deletable
-// (no active activities, single team membership) before calling this.
-func (r *UserRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting user: %w", err)
-	}
-	return nil
-}
-
-// UpdateProfile sets display_name, color, and icon on a user. When color or
-// icon changes, the new value is propagated to all team_members rows for the
-// user where the member's value currently matches the user's old value or is NULL
-// (i.e. has not been explicitly overridden by a team admin).
-func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
-	// Fetch old values for propagation comparison.
-	var old models.User
-	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("fetching user for profile update: %w", err)
-	}
-
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning profile update transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	_, err = tx.Exec(
-		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		displayName, color, icon, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating user profile: %w", err)
-	}
-
-	// Propagate color if changed: update team_members rows where color matches
-	// the old value or is NULL (not explicitly overridden).
-	if !ptrEqual(old.Color, color) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
-			color, id, old.Color,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating color to team_members: %w", err)
-		}
-	}
-
-	if !ptrEqual(old.Icon, icon) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
-			icon, id, old.Icon,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating icon to team_members: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing profile update: %w", err)
-	}
-	return nil
-}
-
-// UpdatePassword sets the password_hash on a user.
-func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		passwordHash, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	return nil
-}
-
-// ListAll returns all users with their active team membership count.
-// When orphanedOnly is true, only users with zero active memberships are returned.
-func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
-	q := `
-		SELECT u.*,
-		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
-		FROM users u
-		ORDER BY u.display_name ASC
-	`
-	if orphanedOnly {
-		q = `
-			SELECT u.*,
-			       0 AS team_count
-			FROM users u
-			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
-			ORDER BY u.display_name ASC
-		`
-	}
-	var rows []*models.AdminUserRow
-	if err := r.db.Select(&rows, q); err != nil {
-		return nil, fmt.Errorf("listing admin users: %w", err)
-	}
-	return rows, nil
-}
-
-// RevokeUser atomically revokes all access for a user:
-//  1. Sets users.archived_at (blocks login everywhere).
-//  2. For each team_members row for the user:
-//     – if assignment count is 0: deletes timeline_access then the row.
-//     – otherwise: sets team_members.archived_at (inactivates without data loss).
-//
-// Returns a summary of the actions taken. The caller must ensure the user
-// exists and is not a participant before calling.
-func (r *UserRepo) RevokeUser(userID string) (*models.RevokeUserResult, error) {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return nil, fmt.Errorf("beginning revoke transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	now := time.Now()
-
-	// Step 1: deactivate the account.
-	if _, err := tx.Exec(
-		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		now, userID,
-	); err != nil {
-		return nil, fmt.Errorf("deactivating user account: %w", err)
-	}
-
-	// Step 2: collect all team_members rows for the user.
-	var memberIDs []string
-	if err := tx.Select(&memberIDs,
-		`SELECT id FROM team_members WHERE user_id = ?`, userID,
-	); err != nil {
-		return nil, fmt.Errorf("listing memberships: %w", err)
-	}
-
-	result := &models.RevokeUserResult{AccountDeactivated: true}
-
-	for _, memberID := range memberIDs {
-		var assignCount int
-		if err := tx.Get(&assignCount,
-			`SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?`, memberID,
-		); err != nil {
-			return nil, fmt.Errorf("counting assignments for member %s: %w", memberID, err)
-		}
-
-		if assignCount == 0 {
-			// No history — delete timeline_access then the member row.
-			if _, err := tx.Exec(
-				`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("deleting timeline access for member %s: %w", memberID, err)
-			}
-			if _, err := tx.Exec(
-				`DELETE FROM team_members WHERE id = ?`, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("deleting member %s: %w", memberID, err)
-			}
-			result.MembershipsRemoved++
-		} else {
-			// Has activity history — inactivate without deleting.
-			if _, err := tx.Exec(
-				`UPDATE team_members SET archived_at = ? WHERE id = ?`, now, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("inactivating member %s: %w", memberID, err)
-			}
-			result.MembershipsInactivated++
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("committing revoke transaction: %w", err)
-	}
-	return result, nil
-}
-
-// ptrEqual reports whether two string pointers point to equal values,
-// treating nil and a pointer to "" as distinct.
-func ptrEqual(a, b *string) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
 }
 ````
 
@@ -22302,511 +22861,6 @@ export default function LoginPage() {
 }
 ````
 
-## File: packages/web/src/pages/SetupPage.tsx
-````typescript
-/**
- * First-run setup wizard. Shown once when no users exist.
- * Collects account, team, and timeline details then creates all three on Finish.
- */
-
-import { useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { API_BASE, apiFetch, ApiError } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-type Step = 1 | 2 | 3
-
-interface WizardData {
-  displayName: string
-  email: string
-  password: string
-  teamName: string
-  timelineName: string
-  startDate: string
-  endDate: string
-}
-
-// ---------------------------------------------------------------------------
-// Step indicator
-// ---------------------------------------------------------------------------
-
-const STEP_LABELS: Record<Step, string> = {
-  1: 'Account',
-  2: 'Team',
-  3: 'Timeline',
-}
-
-function StepIndicator({ current }: { current: Step }) {
-  const steps: Step[] = [1, 2, 3]
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 0,
-        marginBottom: 32,
-      }}
-    >
-      {steps.map((n, i) => {
-        const done = n < current
-        const active = n === current
-        return (
-          <div key={n} style={{ display: 'flex', alignItems: 'center' }}>
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 4,
-              }}
-            >
-              <div
-                style={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: '50%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background:
-                    done || active ? 'var(--primary)' : 'transparent',
-                  border:
-                    done || active
-                      ? 'none'
-                      : '2px solid var(--border)',
-                  color:
-                    done || active
-                      ? 'var(--primary-foreground)'
-                      : 'var(--muted-foreground)',
-                  fontSize: 13,
-                  fontWeight: 700,
-                  transition: 'background 0.2s',
-                }}
-              >
-                {done ? '✓' : n}
-              </div>
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: active ? 600 : 400,
-                  color: active
-                    ? 'var(--foreground)'
-                    : 'var(--muted-foreground)',
-                }}
-              >
-                {STEP_LABELS[n]}
-              </span>
-            </div>
-
-            {i < steps.length - 1 && (
-              <div
-                style={{
-                  width: 48,
-                  height: 2,
-                  // Shift up to align with the circle, not the label
-                  marginBottom: 20,
-                  background: done ? 'var(--primary)' : 'var(--border)',
-                  transition: 'background 0.2s',
-                }}
-              />
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Step content
-// ---------------------------------------------------------------------------
-
-interface StepProps {
-  data: WizardData
-  onChange: (patch: Partial<WizardData>) => void
-}
-
-function Step1({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <p
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: 'var(--primary)',
-            margin: '0 0 4px',
-          }}
-        >
-          Welcome to draba!
-        </p>
-        <CardTitle>Create your account</CardTitle>
-        <CardDescription>
-          You're the first person here, so this account will have full admin
-          access — you'll be able to create teams, invite users, and manage the
-          workspace.
-        </CardDescription>
-      </CardHeader>
-      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="displayName">Your name</Label>
-          <Input
-            id="displayName"
-            placeholder="Jane Smith"
-            autoComplete="name"
-            value={data.displayName}
-            onChange={e => onChange({ displayName: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="email">Email</Label>
-          <Input
-            id="email"
-            type="email"
-            placeholder="you@example.com"
-            autoComplete="email"
-            value={data.email}
-            onChange={e => onChange({ email: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="password">Password</Label>
-          <Input
-            id="password"
-            type="password"
-            placeholder="At least 8 characters"
-            autoComplete="new-password"
-            value={data.password}
-            onChange={e => onChange({ password: e.target.value })}
-          />
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-function Step2({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <CardTitle>Name your team</CardTitle>
-        <CardDescription>
-          A team is your shared workspace. Everyone you invite will work within
-          it, and all your timelines and events live inside one. You can
-          customize and add members after setup.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="teamName">Team name</Label>
-          <Input
-            id="teamName"
-            placeholder="Product Marketing"
-            autoComplete="off"
-            value={data.teamName}
-            onChange={e => onChange({ teamName: e.target.value })}
-          />
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-function Step3({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <CardTitle>Your first timeline</CardTitle>
-        <CardDescription>
-          A timeline is a named date window over your team's events — it's how
-          you see who's working on what, and when. Pick a range that fits your
-          next planning horizon.
-        </CardDescription>
-      </CardHeader>
-      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="timelineName">Timeline name</Label>
-          <Input
-            id="timelineName"
-            placeholder="Q3 Roadmap"
-            autoComplete="off"
-            value={data.timelineName}
-            onChange={e => onChange({ timelineName: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', gap: 12 }}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="startDate">Start date</Label>
-            <Input
-              id="startDate"
-              type="date"
-              value={data.startDate}
-              onChange={e => onChange({ startDate: e.target.value })}
-            />
-          </div>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="endDate">End date</Label>
-            <Input
-              id="endDate"
-              type="date"
-              value={data.endDate}
-              onChange={e => onChange({ endDate: e.target.value })}
-            />
-          </div>
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
-
-function validateStep(step: Step, data: WizardData): string | null {
-  if (step === 1) {
-    if (!data.displayName.trim()) return 'Please enter your name.'
-    if (!data.email.trim()) return 'Please enter your email.'
-    if (data.password.length < 8) return 'Password must be at least 8 characters.'
-    if (/\s/.test(data.password)) return 'Password must not contain spaces.'
-  }
-  if (step === 2) {
-    if (!data.teamName.trim()) return 'Please enter a team name.'
-  }
-  if (step === 3) {
-    if (!data.timelineName.trim()) return 'Please enter a timeline name.'
-    if (!data.startDate) return 'Please choose a start date.'
-    if (!data.endDate) return 'Please choose an end date.'
-    if (data.endDate < data.startDate) return 'End date must be on or after the start date.'
-  }
-  return null
-}
-
-// ---------------------------------------------------------------------------
-// Date helpers
-// ---------------------------------------------------------------------------
-
-function toDateString(d: Date): string {
-  return d.toISOString().split('T')[0]
-}
-
-function defaultDates(): { startDate: string; endDate: string } {
-  const start = new Date()
-  const end = new Date()
-  end.setMonth(end.getMonth() + 3)
-  return { startDate: toDateString(start), endDate: toDateString(end) }
-}
-
-// ---------------------------------------------------------------------------
-// Main wizard
-// ---------------------------------------------------------------------------
-
-interface SetupStatus {
-  needsSetup: boolean
-}
-
-export default function SetupPage() {
-  const { register, user } = useAuth()
-  const navigate = useNavigate()
-  const queryClient = useQueryClient()
-
-  // If setup has already been completed redirect to login rather than showing
-  // a broken wizard (handles back-navigation and direct URL access after setup).
-  const { data: setupStatus, isLoading: statusLoading } = useQuery<SetupStatus>({
-    queryKey: ['setup-status'],
-    queryFn: () =>
-      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
-    staleTime: Infinity,
-  })
-
-  const [step, setStep] = useState<Step>(1)
-  const [data, setData] = useState<WizardData>({
-    displayName: '',
-    email: '',
-    password: '',
-    teamName: '',
-    timelineName: '',
-    ...defaultDates(),
-  })
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  // Wait for the status check before rendering anything.
-  if (statusLoading) return null
-
-  // Setup already done — logged-in users go home, others go to login.
-  if (setupStatus && !setupStatus.needsSetup) {
-    return <Navigate to={user ? '/' : '/login'} replace />
-  }
-
-  function handleChange(patch: Partial<WizardData>) {
-    setData(d => ({ ...d, ...patch }))
-    setError(null)
-  }
-
-  function handleBack() {
-    setError(null)
-    setStep(s => (s > 1 ? ((s - 1) as Step) : s))
-  }
-
-  function handleNext() {
-    const err = validateStep(step, data)
-    if (err) {
-      setError(err)
-      return
-    }
-    setError(null)
-    setStep(s => (s < 3 ? ((s + 1) as Step) : s))
-  }
-
-  async function handleFinish() {
-    const err = validateStep(3, data)
-    if (err) {
-      setError(err)
-      return
-    }
-
-    setError(null)
-    setLoading(true)
-
-    try {
-      // 1. Create account — returns token directly to avoid racing the async
-      //    setState inside register() before the next render cycle.
-      const token = await register(data.email, data.password, data.displayName)
-
-      // 2. Create team
-      const team = await apiFetch<{ id: string }>('/teams', {
-        method: 'POST',
-        body: JSON.stringify({ name: data.teamName }),
-        accessToken: token,
-      })
-
-      // 3. Create timeline
-      await apiFetch(`/teams/${team.id}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify({
-          name: data.timelineName,
-          startDate: data.startDate,
-          endDate: data.endDate,
-        }),
-        accessToken: token,
-      })
-
-      // Mark setup as done in the query cache so ProtectedRoute doesn't
-      // replay the stale needsSetup:true value after the user logs out.
-      queryClient.setQueryData<SetupStatus>(['setup-status'], { needsSetup: false })
-      navigate('/', { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--background)',
-        padding: '24px',
-      }}
-    >
-      <div style={{ position: 'fixed', top: 16, right: 16 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Logo */}
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: 2,
-          marginBottom: 24,
-        }}
-      >
-        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
-        <span
-          style={{
-            fontSize: 36,
-            fontWeight: 700,
-            color: 'var(--foreground)',
-            letterSpacing: '-0.02em',
-          }}
-        >
-          draba
-        </span>
-      </div>
-
-      <Card style={{ width: '100%', maxWidth: 440 }}>
-        <div style={{ padding: '24px 24px 0' }}>
-          <StepIndicator current={step} />
-        </div>
-
-        {step === 1 && <Step1 data={data} onChange={handleChange} />}
-        {step === 2 && <Step2 data={data} onChange={handleChange} />}
-        {step === 3 && <Step3 data={data} onChange={handleChange} />}
-
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 12,
-            padding: '0 24px 24px',
-          }}
-        >
-          {error && (
-            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>
-              {error}
-            </p>
-          )}
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Button
-              variant="outline"
-              onClick={handleBack}
-              disabled={step === 1 || loading}
-              style={{ flex: 1 }}
-            >
-              Back
-            </Button>
-
-            {step < 3 ? (
-              <Button onClick={handleNext} disabled={loading} style={{ flex: 1 }}>
-                Next
-              </Button>
-            ) : (
-              <Button onClick={handleFinish} disabled={loading} style={{ flex: 1 }}>
-                {loading ? 'Setting up…' : 'Finish'}
-              </Button>
-            )}
-          </div>
-        </div>
-      </Card>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/types/index.ts
 ````typescript
 /**
@@ -22855,60 +22909,6 @@ export const STATUS_LABELS: Record<ActivityStatus, string> = {
   'in-progress': 'In progress',
   'done':        'Done',
 };
-````
-
-## File: packages/web/src/App.tsx
-````typescript
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AuthProvider } from '@/contexts/AuthContext'
-import ProtectedRoute from '@/components/ProtectedRoute'
-import LoginPage from '@/pages/LoginPage'
-import RegisterPage from '@/pages/RegisterPage'
-import DashboardPage from '@/pages/DashboardPage'
-import SetupPage from '@/pages/SetupPage'
-import SettingsPage from '@/pages/SettingsPage'
-import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
-import ResetPasswordPage from '@/pages/ResetPasswordPage'
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
-})
-
-export default function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          <Routes>
-            {/* First-run setup — public, shown before any users exist */}
-            <Route path="/setup" element={<SetupPage />} />
-
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/reset-password" element={<ResetPasswordPage />} />
-
-            {/* Protected routes */}
-            <Route element={<ProtectedRoute />}>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/settings/*" element={<SettingsPage />} />
-            </Route>
-
-            {/* Fallback */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
-  )
-}
 ````
 
 ## File: docs/REQUIREMENTS.md
@@ -23115,6 +23115,523 @@ Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visu
 - SSO / SAML / OAuth login (email + password only for v1)
 - MCP server integration (parking lot — token auth system is designed to support it when ready)
 - CLI binary (parking lot — token auth system is designed to support it when ready)
+````
+
+## File: packages/api/internal/api/timeline_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
+// list the non-archived timelines for a team.
+func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timelines)
+}
+
+// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
+// user must be a member of the team. The creator is automatically granted
+// timeline-admin access.
+func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	member, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	var req createTimelineBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if req.StartDate == "" || req.EndDate == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startDate and endDate are required")
+		return
+	}
+
+	const dateLayout = "2006-01-02"
+	startDate, err := time.Parse(dateLayout, req.StartDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startDate format")
+		return
+	}
+	endDate, err := time.Parse(dateLayout, req.EndDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endDate format")
+		return
+	}
+
+	if endDate.Before(startDate) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
+		return
+	}
+
+	now := time.Now()
+	timeline := &models.Timeline{
+		ID:          newID(),
+		TeamID:      teamID,
+		Name:        strings.TrimSpace(req.Name),
+		Description: req.Description,
+		Notes:       req.Notes,
+		StartDate:   startDate.Format(dateLayout),
+		EndDate:     endDate.Format(dateLayout),
+		Color:       req.Color,
+		Icon:        req.Icon,
+		ShareToken:  newID(),
+		IcalToken:   newID(),
+		CreatedBy:   claims.UserID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.timelines.Create(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	// Always grant the creator timeline-admin access so they can manage it.
+	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	// Copy the selected (or first) status template into live statuses for this timeline.
+	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID, req.TemplateID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusCreated, timeline)
+}
+
+// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
+// be a member of the timeline's team. Team admins may access any timeline;
+// other members require an entry in timeline_access.
+func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	// Hide archived timelines from the standard read path unless ?archived=true.
+	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	// Team admins can access all timelines; members need an explicit grant.
+	if member.Role != "admin" {
+		ok, err := s.timelines.HasAccess(timelineID, member.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
+// admins or timeline admins may archive.
+func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, true)
+}
+
+// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
+func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, false)
+}
+
+// setTimelineArchive is the shared archive/unarchive implementation. Access
+// is admin-only: the caller must be a team admin, or hold timeline_access
+// with role='admin' for this timeline.
+func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+	// Team admins always pass. Per-timeline admin grants are not consulted
+	// here — granular timeline-admin checks are tracked for Phase 10.3.
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+	}
+	if err := s.timelines.SetArchived(timelineID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+	timeline.ArchivedAt = at
+	timeline.UpdatedAt = time.Now().UTC()
+
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleUpdateTimeline handles PATCH /timelines/{id}. Only a team admin or a
+// member with timeline_access role='admin' may rename or change dates.
+func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	var req PatchTimelineJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		timeline.Name = name
+	}
+	if req.StartDate != nil {
+		timeline.StartDate = *req.StartDate
+	}
+	if req.EndDate != nil {
+		timeline.EndDate = *req.EndDate
+	}
+	if req.Color != nil {
+		timeline.Color = req.Color
+	}
+	if req.Icon != nil {
+		timeline.Icon = req.Icon
+	}
+	if req.Description != nil {
+		timeline.Description = req.Description
+	}
+	if req.Notes != nil {
+		timeline.Notes = req.Notes
+	}
+	timeline.UpdatedAt = time.Now().UTC()
+
+	if err := s.timelines.Update(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleDeleteTimeline handles DELETE /timelines/{id}. Hard-deletes the
+// timeline; only a team admin may delete. Cascades to statuses and
+// timeline_access via foreign key.
+func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	if err := s.timelines.Delete(timelineID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListTimelineAccess handles GET /teams/{id}/timelines/{timelineId}/access.
+// Team members may list the access grants for any timeline they can view.
+func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+
+	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleGrantTimelineAccess handles PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may manage the access list.
+func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	// Verify the target member belongs to the same team.
+	if _, err := s.teams.GetMemberByID(targetMemberID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	var req GrantTimelineAccessJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Role != "admin" && req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	if err := s.timelines.GrantAccess(timelineID, targetMemberID, req.Role); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleRevokeTimelineAccess handles DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may revoke access.
+func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	if err := s.timelines.RevokeAccess(timelineID, targetMemberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// canAdminTimeline reports whether a team member may perform admin operations
+// on a timeline. Team admins always pass; members must hold timeline_access
+// with role='admin'.
+func (s *Server) canAdminTimeline(member *models.TeamMember, timelineID string) bool {
+	if member.Role == "admin" {
+		return true
+	}
+	role, err := s.timelines.GetAccessRole(timelineID, member.ID)
+	if err != nil {
+		return false
+	}
+	return role == "admin"
+}
+
+// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
+// authentication is required; the token itself is the credential.
+func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	timeline, err := s.timelines.GetByShareToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
+}
 ````
 
 ## File: packages/api/internal/api/user_handler.go
@@ -23911,523 +24428,6 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-````
-
-## File: packages/api/internal/api/timeline_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
-// list the non-archived timelines for a team.
-func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
-		return
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timelines)
-}
-
-// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
-// user must be a member of the team. The creator is automatically granted
-// timeline-admin access.
-func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	var req createTimelineBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if strings.TrimSpace(req.Name) == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-	if req.StartDate == "" || req.EndDate == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startDate and endDate are required")
-		return
-	}
-
-	const dateLayout = "2006-01-02"
-	startDate, err := time.Parse(dateLayout, req.StartDate)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startDate format")
-		return
-	}
-	endDate, err := time.Parse(dateLayout, req.EndDate)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endDate format")
-		return
-	}
-
-	if endDate.Before(startDate) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
-		return
-	}
-
-	now := time.Now()
-	timeline := &models.Timeline{
-		ID:          newID(),
-		TeamID:      teamID,
-		Name:        strings.TrimSpace(req.Name),
-		Description: req.Description,
-		Notes:       req.Notes,
-		StartDate:   startDate.Format(dateLayout),
-		EndDate:     endDate.Format(dateLayout),
-		Color:       req.Color,
-		Icon:        req.Icon,
-		ShareToken:  newID(),
-		IcalToken:   newID(),
-		CreatedBy:   claims.UserID,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	if err := s.timelines.Create(timeline); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	// Always grant the creator timeline-admin access so they can manage it.
-	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	// Copy the selected (or first) status template into live statuses for this timeline.
-	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID, req.TemplateID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusCreated, timeline)
-}
-
-// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
-// be a member of the timeline's team. Team admins may access any timeline;
-// other members require an entry in timeline_access.
-func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	// Hide archived timelines from the standard read path unless ?archived=true.
-	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	// Team admins can access all timelines; members need an explicit grant.
-	if member.Role != "admin" {
-		ok, err := s.timelines.HasAccess(timelineID, member.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-			return
-		}
-		if !ok {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
-// admins or timeline admins may archive.
-func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, true)
-}
-
-// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
-func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, false)
-}
-
-// setTimelineArchive is the shared archive/unarchive implementation. Access
-// is admin-only: the caller must be a team admin, or hold timeline_access
-// with role='admin' for this timeline.
-func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	// Team admins always pass. Per-timeline admin grants are not consulted
-	// here — granular timeline-admin checks are tracked for Phase 10.3.
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-	}
-	if err := s.timelines.SetArchived(timelineID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	timeline.ArchivedAt = at
-	timeline.UpdatedAt = time.Now().UTC()
-
-	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleUpdateTimeline handles PATCH /timelines/{id}. Only a team admin or a
-// member with timeline_access role='admin' may rename or change dates.
-func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	var req PatchTimelineJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
-			return
-		}
-		timeline.Name = name
-	}
-	if req.StartDate != nil {
-		timeline.StartDate = *req.StartDate
-	}
-	if req.EndDate != nil {
-		timeline.EndDate = *req.EndDate
-	}
-	if req.Color != nil {
-		timeline.Color = req.Color
-	}
-	if req.Icon != nil {
-		timeline.Icon = req.Icon
-	}
-	if req.Description != nil {
-		timeline.Description = req.Description
-	}
-	if req.Notes != nil {
-		timeline.Notes = req.Notes
-	}
-	timeline.UpdatedAt = time.Now().UTC()
-
-	if err := s.timelines.Update(timeline); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleDeleteTimeline handles DELETE /timelines/{id}. Hard-deletes the
-// timeline; only a team admin may delete. Cascades to statuses and
-// timeline_access via foreign key.
-func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	if err := s.timelines.Delete(timelineID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleListTimelineAccess handles GET /teams/{id}/timelines/{timelineId}/access.
-// Team members may list the access grants for any timeline they can view.
-func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
-		return
-	}
-
-	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
-		return
-	}
-
-	entries, err := s.timelines.ListAccess(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
-		return
-	}
-	writeJSON(w, http.StatusOK, entries)
-}
-
-// handleGrantTimelineAccess handles PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
-// Only team admins or timeline admins may manage the access list.
-func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	targetMemberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	// Verify the target member belongs to the same team.
-	if _, err := s.teams.GetMemberByID(targetMemberID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-
-	var req GrantTimelineAccessJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Role != "admin" && req.Role != "member" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
-		return
-	}
-
-	if err := s.timelines.GrantAccess(timelineID, targetMemberID, req.Role); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-
-	entries, err := s.timelines.ListAccess(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-	writeJSON(w, http.StatusOK, entries)
-}
-
-// handleRevokeTimelineAccess handles DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}.
-// Only team admins or timeline admins may revoke access.
-func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	targetMemberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
-		return
-	}
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	if err := s.timelines.RevokeAccess(timelineID, targetMemberID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// canAdminTimeline reports whether a team member may perform admin operations
-// on a timeline. Team admins always pass; members must hold timeline_access
-// with role='admin'.
-func (s *Server) canAdminTimeline(member *models.TeamMember, timelineID string) bool {
-	if member.Role == "admin" {
-		return true
-	}
-	role, err := s.timelines.GetAccessRole(timelineID, member.ID)
-	if err != nil {
-		return false
-	}
-	return role == "admin"
-}
-
-// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
-// authentication is required; the token itself is the credential.
-func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	timeline, err := s.timelines.GetByShareToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
 }
 ````
 
@@ -25354,6 +25354,62 @@ export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
 }
 ````
 
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/statuses': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
+````
+
 ## File: packages/web/src/components/layout/TopBar.tsx
 ````typescript
 /**
@@ -25936,62 +25992,6 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
     document.body,
   )
 }
-````
-
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/status-templates': { target: apiTarget, changeOrigin: true },
-        '/status-template-items': { target: apiTarget, changeOrigin: true },
-        '/statuses': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
 ````
 
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
