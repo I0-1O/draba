@@ -15,7 +15,7 @@ const MEMBERS: Member[] = [
 
 function makeActivity(overrides: Partial<ApiActivity> & { id: string; title: string }): ApiActivity {
   return {
-    teamId: 'team-1',
+    timelineId: 'timeline-1',
     startAt: '2026-01-01T00:00:00Z',
     endAt: '2026-01-07T00:00:00Z',
     allDay: true,
