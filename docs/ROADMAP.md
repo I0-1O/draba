@@ -40,7 +40,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | 🔄 |
 | 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | ✅ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | 🔄 |
-| 10.4.1 | [Preference Consumption & Session Handling](#phase-1041--preference-consumption--session-handling) | S–M — 1–2 days | ⬜ |
+| 10.4.1 | [Preference Consumption & Session Handling](#phase-1041--preference-consumption--session-handling) | S–M — 1–2 days | 🔄 |
 | 10.4.2 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1042--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
@@ -948,7 +948,7 @@ Closes the Timelines cornerstone. Same problem space as 10.1: today timelines ca
 ---
 
 ### Phase 10.4.1 — Preference Consumption & Session Handling
-**Status:** ⬜ | **Effort:** S–M (1–2 days)
+**Status:** 🔄 In Progress — 2026-05-28, all automated checks pass; manual Docker verification still needed | **Effort:** S–M (1–2 days)
 
 Wires the user and instance preferences stored in 10.1.3 into the rest of the system, fixes the broken session lifecycle, and adds cosmetic branding for admins.
 

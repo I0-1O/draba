@@ -19,6 +19,7 @@ import {
   API_BASE,
   ApiError,
   clearStoredRefreshToken,
+  configureSilentRefresh,
   getStoredRefreshToken,
   storeRefreshToken,
 } from '@/lib/api'
@@ -136,6 +137,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearStoredRefreshToken()
     setState({ user: null, accessToken: null, initializing: false })
   }, [])
+
+  // Register a silent-refresh callback with the API layer so that any 401
+  // anywhere in the app triggers a token refresh rather than a hard failure.
+  // On refresh failure, clear the session and redirect to /login.
+  useEffect(() => {
+    const silentRefresh = async (): Promise<string | null> => {
+      const refresh = getStoredRefreshToken()
+      if (!refresh) {
+        logout()
+        window.location.replace('/login')
+        return null
+      }
+      try {
+        const { accessToken: newToken } = await postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
+        setState(s => ({ ...s, accessToken: newToken }))
+        return newToken
+      } catch {
+        clearStoredRefreshToken()
+        setState({ user: null, accessToken: null, initializing: false })
+        window.location.replace('/login')
+        return null
+      }
+    }
+    configureSilentRefresh(silentRefresh)
+    return () => configureSilentRefresh(null)
+  }, [logout])
 
   const patchUser = useCallback((patch: Partial<User>) => {
     setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)

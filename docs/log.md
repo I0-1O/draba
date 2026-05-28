@@ -2,6 +2,43 @@
 
 ---
 
+## 2026-05-28 — Phase 10.4.1 — Preference Consumption & Session Handling
+
+**Session lifecycle (401 interceptor):**
+- `packages/web/src/lib/api.ts`: Added `configureSilentRefresh(fn)` export and module-level mutex (`_refreshInFlight`); `createAuthFetch` now catches 401, calls `doSilentRefresh()`, retries with new token
+- `packages/web/src/contexts/AuthContext.tsx`: Added `silentRefresh` function (calls `/auth/refresh`, updates state, falls back to `window.location.replace('/login')` on failure); registers via `configureSilentRefresh` in a `useEffect`, deregisters on unmount
+- Concurrent 401s share a single in-flight refresh call — no duplicate refresh requests
+
+**Preference consumption:**
+- `packages/web/src/hooks/useFormatDate.ts`: New hook — reads `date_format` pref, returns formatter for `MMM D, YYYY` / `MM/DD/YYYY` / `DD/MM/YYYY` / `YYYY-MM-DD`
+- `packages/web/src/components/gantt/granularity.ts`: `startOfWeek` accepts `weekStart` param; `formatLabel` accepts `locale` param; `generateColumns` accepts `GenerateColumnsOptions { weekStart, locale }`
+- `packages/web/src/components/gantt/GanttView.tsx`: Reads `week_start` from global preferences via `usePreferenceMap`, passes to `generateColumns`
+- `packages/web/src/hooks/useDarkMode.ts`: Added `applyTheme(t)` function for explicit theme setting
+- `packages/web/src/components/ThemeSync.tsx`: New null-render component — on auth init applies server-side `theme` preference once per session
+- `packages/web/src/pages/settings/PreferencesPage.tsx`: Added theme toggle (Light/Dark) — applies immediately and persists server-side on Save
+
+**Admin branding:**
+- `packages/api/internal/api/admin_handler.go`: Added `accent_color` to allowed `GET/PATCH /admin/settings` keys; added `handleGetPublicBranding` for `GET /settings/branding`
+- `packages/api/internal/api/server.go`: Registered `GET /settings/branding` as public (no auth)
+- `packages/web/vite.config.ts`: Added `/settings` proxy entry for dev
+- `packages/web/src/hooks/usePublicSettings.ts`: New hook — fetches `/settings/branding` without auth
+- `packages/web/src/components/BrandingSync.tsx`: New null-render component — sets `document.title` from `instanceName`, applies `accentColor` as `--accent-override` CSS variable
+- `packages/web/src/App.tsx`: Mounts `ThemeSync` and `BrandingSync` inside `AuthProvider`
+- `packages/web/src/pages/LoginPage.tsx`: Shows `instanceName` from branding API instead of hardcoded "draba"
+- `packages/web/src/pages/settings/OrganizationPage.tsx`: Added accent color field (color picker + hex input + Reset)
+
+**Deferred (documented in TASKS.md):**
+- `ActivityDetailPanel` date display: native `<input type="date">` already uses browser locale; no read-only date label surface exists yet
+- Public/shared timeline view fallback: deferred to Phase 13 (Shares)
+- Logo upload: stretch goal, deferred
+
+**Checks:**
+- `golangci-lint run` — clean
+- `go test ./...` — all pass
+- `pnpm --filter web lint` (tsc --noEmit) — clean
+
+---
+
 ## 2026-05-27 — /test-phase 10.3
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

@@ -4,6 +4,7 @@ import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
 import { ApiError } from '@/lib/api'
 import DarkModeToggle from '@/components/DarkModeToggle'
+import { usePublicSettings } from '@/hooks/usePublicSettings'
 
 // ── Floating-label input ─────────────────────────────────────────────────────
 
@@ -134,6 +135,8 @@ export default function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+  const { data: branding } = usePublicSettings()
+  const instanceName = branding?.instanceName || 'draba'
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -258,7 +261,7 @@ export default function LoginPage() {
 
           <div style={{ position: 'relative', textAlign: 'center' }}>
             <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
-              draba
+              {instanceName}
             </div>
             <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
               Team coordination,<br />simplified.

@@ -28,6 +28,7 @@ import {
 import { matchEvents } from '@/lib/findMatcher';
 import { useFind } from '@/contexts/FindContext';
 import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
 
 type ApiActivity = components['schemas']['Activity'];
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
@@ -255,6 +256,9 @@ export default function GanttView({
   const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
   const { activeFilter } = useFilter();
 
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -289,8 +293,8 @@ export default function GanttView({
   }, [granularity, viewStart, viewEnd, containerWidth]);
 
   const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity),
-    [viewStart, viewEnd, resolvedGranularity],
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart],
   );
 
   const todayIdx = useMemo(

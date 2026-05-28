@@ -33,5 +33,8 @@ export function useDarkMode() {
 
   const toggle = () => setTheme(t => (t === 'dark' ? 'light' : 'dark'))
 
-  return { theme, toggle, isDark: theme === 'dark' } as const
+  /** Explicitly set the theme (used when syncing from server-side preference). */
+  const applyTheme = (t: Theme) => setTheme(t)
+
+  return { theme, toggle, applyTheme, isDark: theme === 'dark' } as const
 }

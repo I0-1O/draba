@@ -1,11 +1,12 @@
 /**
  * /settings/preferences — Regional settings, appearance theme, default team/timeline.
  * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * View consumption (Gantt date format, etc.) is deferred to Phase 10.4.
+ * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
  */
 
 import { useState, useEffect } from 'react'
 import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { useDarkMode } from '@/hooks/useDarkMode'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 
@@ -40,17 +41,26 @@ const selectCls = 'bg-popover border border-border rounded-md text-foreground px
 export default function PreferencesPage() {
   const prefMap = usePreferenceMap()
   const upsert = useUpsertPreference()
+  const { theme: currentTheme, applyTheme } = useDarkMode()
 
   const [timezone, setTimezone] = useState('UTC')
   const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
   const [weekStart, setWeekStart] = useState('monday')
+  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
   useEffect(() => {
     setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
     setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
     setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-  }, [JSON.stringify(prefMap)])
+    const savedTheme = prefMap['theme'] as string | undefined
+    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
+  }, [JSON.stringify(prefMap)]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function handleThemeChange(t: 'light' | 'dark') {
+    setTheme(t)
+    applyTheme(t)
+  }
 
   async function handleSave() {
     setFeedback(null)
@@ -59,6 +69,7 @@ export default function PreferencesPage() {
         upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
         upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
         upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
+        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
       ])
       setFeedback({ type: 'success', msg: 'Preferences saved.' })
       setTimeout(() => setFeedback(null), 2000)
@@ -126,6 +137,34 @@ export default function PreferencesPage() {
               </button>
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* Appearance */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Appearance
+        </h3>
+        <div className="flex flex-col gap-1.5 mb-2">
+          <Label>Theme</Label>
+          <div className="flex gap-2">
+            {(['light', 'dark'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  theme === t
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground m-0">
+            Applies immediately. Persisted server-side so it syncs across devices.
+          </p>
         </div>
       </div>
 

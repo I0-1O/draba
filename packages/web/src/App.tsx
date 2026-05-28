@@ -2,6 +2,8 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AuthProvider } from '@/contexts/AuthContext'
 import ProtectedRoute from '@/components/ProtectedRoute'
+import ThemeSync from '@/components/ThemeSync'
+import BrandingSync from '@/components/BrandingSync'
 import LoginPage from '@/pages/LoginPage'
 import RegisterPage from '@/pages/RegisterPage'
 import DashboardPage from '@/pages/DashboardPage'
@@ -24,6 +26,9 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <AuthProvider>
+          {/* Side-effect components — render nothing but apply global state. */}
+          <ThemeSync />
+          <BrandingSync />
           <Routes>
             {/* First-run setup — public, shown before any users exist */}
             <Route path="/setup" element={<SetupPage />} />

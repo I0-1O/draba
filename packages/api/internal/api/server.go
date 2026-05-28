@@ -135,6 +135,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
 	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
 
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
 	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
 	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
 	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))

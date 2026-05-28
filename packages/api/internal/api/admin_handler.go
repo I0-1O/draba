@@ -142,7 +142,7 @@ func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name"}
+	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name", "accent_color"}
 	settings := make(map[string]string, len(keys))
 	for _, k := range keys {
 		v, err := s.instanceSets.Get(k)
@@ -190,6 +190,7 @@ func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request
 		"default_date_format": true,
 		"default_week_start":  true,
 		"instance_name":       true,
+		"accent_color":        true,
 	}
 	for k := range body {
 		if !allowed[k] {
@@ -214,6 +215,18 @@ func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
+}
+
+// handleGetPublicBranding handles GET /settings/branding. Returns the
+// instance name and accent color without requiring authentication, so the
+// login page and shared timeline views can display branding before sign-in.
+func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
+	name, _ := s.instanceSets.Get("instance_name")
+	accent, _ := s.instanceSets.Get("accent_color")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"instanceName": name,
+		"accentColor":  accent,
+	})
 }
 
 func smtpTestBody() string {

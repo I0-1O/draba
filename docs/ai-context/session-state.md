@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short._
 
-**Last updated:** 2026-05-27 (Phase 10.3 UI bug fixes)
+**Last updated:** 2026-05-28 (Phase 10.4.1 complete — automated checks pass)
 
 ---
 
@@ -17,8 +17,39 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.1.4 | Member Access & Data Lifecycle | ✅ | ⬜ needs Docker verification |
 | 10.2 | Status Templates & Timeline Statuses | ✅ | ✅ Docker verified |
 | 10.3 | Timelines — Full CRUD (API + UI) | ✅ | ⬜ needs Docker verification |
+| 10.4.1 | Preference Consumption & Session Handling | ✅ | ⬜ needs Docker verification |
 
-Next phase to build: **10.4.1** — Preference Consumption & Session Handling (token refresh, date format/week start in Gantt, theme sync, branding). Then **10.4.2** — UI Consistency (modals, sidebar, toolbar). Backup moved to Phase 17.
+Next phase to build: **10.4.2** — UI Consistency (modals, sidebar, toolbar). Backup moved to Phase 17.
+
+---
+
+## Phase 10.4.1 — Preference Consumption & Session Handling (2026-05-28 — not yet Docker-verified)
+
+**Backend:**
+- `admin_handler.go`: Added `accent_color` to `GET/PATCH /admin/settings` allowed keys
+- `admin_handler.go`: Added `handleGetPublicBranding` → `GET /settings/branding` (public, no auth) — returns `instanceName` + `accentColor`
+- `server.go`: Registered `GET /settings/branding` without auth middleware
+- `vite.config.ts`: Added `/settings` proxy
+
+**Frontend:**
+- `lib/api.ts`: 401 interceptor + in-flight mutex in `createAuthFetch`; `configureSilentRefresh` registered by AuthProvider
+- `contexts/AuthContext.tsx`: `silentRefresh` callback — calls `/auth/refresh`, updates state; on failure clears tokens + redirects to `/login`
+- `hooks/useDarkMode.ts`: Added `applyTheme(t)` for explicit theme application
+- `hooks/useFormatDate.ts`: New hook — reads `date_format` pref, returns formatter function
+- `hooks/usePublicSettings.ts`: New hook — fetches `/settings/branding` without auth
+- `components/ThemeSync.tsx`: Null-render — applies server `theme` pref once after auth initializes
+- `components/BrandingSync.tsx`: Null-render — sets `document.title` from `instanceName`, applies `--accent-override` CSS var from `accentColor`
+- `components/gantt/granularity.ts`: `startOfWeek` / `periodStart` / `formatLabel` / `generateColumns` parameterized for `weekStart` and `locale`
+- `components/gantt/GanttView.tsx`: Reads `week_start` pref via `usePreferenceMap`, passes to `generateColumns`
+- `App.tsx`: Mounts `ThemeSync` + `BrandingSync` inside `AuthProvider`
+- `pages/LoginPage.tsx`: Shows `instanceName` from branding API (falls back to "draba")
+- `pages/settings/OrganizationPage.tsx`: Added accent color field (color picker + hex input + Reset)
+- `pages/settings/PreferencesPage.tsx`: Added theme toggle (Light/Dark) — applies immediately + saves server-side
+
+**Deferred:**
+- `ActivityDetailPanel` date format: native `<input type="date">` uses browser locale; no read-only label surface yet
+- Public/shared timeline view fallback: Phase 13
+- Logo upload: stretch, deferred
 
 ---
 

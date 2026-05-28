@@ -5,6 +5,9 @@
  *   - Access token: kept in memory via the AuthContext; passed as Authorization header.
  *   - Refresh token: persisted in localStorage under REFRESH_TOKEN_KEY.
  *     On a 401, the client attempts one silent refresh then retries the original request.
+ *     Concurrent 401s share a single refresh call (mutex via in-flight promise).
+ *     If refresh also fails, the registered logout handler is called and the user
+ *     is redirected to /login.
  *
  * All callers receive typed JSON or throw an ApiError.
  */
@@ -87,12 +90,53 @@ export async function apiFetch<T>(
   return res.json() as Promise<T>
 }
 
+// ── Silent refresh ───────────────────────────────────────────────────────────
+
+/**
+ * Registered by AuthProvider on mount. Returns the new access token, or null
+ * if the refresh token is expired/invalid (AuthProvider also handles logout
+ * and redirect in that case).
+ */
+let _silentRefresh: (() => Promise<string | null>) | null = null
+
+/** Mutex: if a refresh is already in flight, share it instead of firing a new one. */
+let _refreshInFlight: Promise<string | null> | null = null
+
+/** Called by AuthProvider to register the silent-refresh callback. */
+export function configureSilentRefresh(fn: (() => Promise<string | null>) | null): void {
+  _silentRefresh = fn
+}
+
+async function doSilentRefresh(): Promise<string | null> {
+  if (!_silentRefresh) return null
+  // Reuse an in-flight refresh instead of firing multiple simultaneous calls.
+  if (!_refreshInFlight) {
+    _refreshInFlight = _silentRefresh().finally(() => {
+      _refreshInFlight = null
+    })
+  }
+  return _refreshInFlight
+}
+
 /**
  * Higher-level wrapper that supplies the access token from a getter function.
+ * On a 401, attempts one silent refresh and retries. If the refresh also fails,
+ * the registered silentRefresh callback handles logout and redirect.
+ *
  * Used by TanStack Query hooks so they never capture a stale token closure.
  */
 export function createAuthFetch(getToken: () => string | null) {
-  return function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-    return apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
+  return async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+    try {
+      return await apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
+        const newToken = await doSilentRefresh()
+        if (!newToken) throw err
+        // Retry with the freshly-issued token.
+        return apiFetch<T>(path, { ...init, accessToken: newToken })
+      }
+      throw err
+    }
   }
 }

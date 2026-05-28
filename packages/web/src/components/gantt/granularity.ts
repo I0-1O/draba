@@ -29,11 +29,15 @@ function startOfDay(d: Date): Date {
   return r;
 }
 
-function startOfWeek(d: Date): Date {
+function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
   const r = startOfDay(d);
-  const day = r.getDay();
-  // ISO week: Monday = start
-  r.setDate(r.getDate() - ((day + 6) % 7));
+  const day = r.getDay(); // 0=Sun, 1=Mon, …, 6=Sat
+  if (weekStart === 'sunday') {
+    r.setDate(r.getDate() - day);
+  } else {
+    // Monday = ISO week start
+    r.setDate(r.getDate() - ((day + 6) % 7));
+  }
   return r;
 }
 
@@ -72,10 +76,10 @@ function endOfPeriod(start: Date, gran: TimeGranularity): Date {
   }
 }
 
-function periodStart(d: Date, gran: TimeGranularity): Date {
+function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sunday' = 'monday'): Date {
   switch (gran) {
     case 'day':     return startOfDay(d);
-    case 'week':    return startOfWeek(d);
+    case 'week':    return startOfWeek(d, weekStart);
     case 'month':   return startOfMonth(d);
     case 'quarter': return startOfQuarter(d);
     case 'year':    return startOfYear(d);
@@ -95,21 +99,21 @@ function isoWeekNumber(d: Date): number {
   );
 }
 
-function formatLabel(start: Date, gran: TimeGranularity): string {
+function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
   switch (gran) {
     case 'day':
-      return start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
     case 'week': {
       const end = addDays(start, 6);
       const sameMonth = start.getMonth() === end.getMonth();
-      const s = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
       const e = sameMonth
         ? end.getDate().toString()
-        : end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
       return `${s}–${e}`;
     }
     case 'month':
-      return start.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric' });
     case 'quarter': {
       const q = Math.floor(start.getMonth() / 3) + 1;
       return `Q${q} ${start.getFullYear()}`;
@@ -121,13 +125,23 @@ function formatLabel(start: Date, gran: TimeGranularity): string {
 
 // ── Column generation ───────────────────────────────────────────────────────
 
+export interface GenerateColumnsOptions {
+  /** Which day the week grid starts on. Defaults to 'monday' (ISO). */
+  weekStart?: 'monday' | 'sunday';
+  /** BCP 47 locale tag for month name formatting. Defaults to 'en-US'. */
+  locale?: string;
+}
+
 export function generateColumns(
   viewStart: Date,
   viewEnd: Date,
   granularity: TimeGranularity,
+  options?: GenerateColumnsOptions,
 ): ColumnDef[] {
+  const weekStart = options?.weekStart ?? 'monday';
+  const locale = options?.locale ?? 'en-US';
   const columns: ColumnDef[] = [];
-  let cur = periodStart(viewStart, granularity);
+  let cur = periodStart(viewStart, granularity, weekStart);
 
   while (cur <= viewEnd) {
     const next = endOfPeriod(cur, granularity);
@@ -135,7 +149,7 @@ export function generateColumns(
     const colStart = cur < viewStart ? viewStart : cur;
     const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
     columns.push({
-      label: formatLabel(cur, granularity),
+      label: formatLabel(cur, granularity, locale),
       sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
       start: cur,
       end: next,

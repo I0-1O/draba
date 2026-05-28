@@ -16,6 +16,7 @@ export default function OrganizationPage() {
 
   const settings = data?.settings ?? {}
   const [orgName, setOrgName] = useState('')
+  const [accentColor, setAccentColor] = useState('')
   const [regPolicy, setRegPolicy] = useState('invite_only')
   const [timezone, setTimezone] = useState('UTC')
   const [weekStart, setWeekStart] = useState('monday')
@@ -23,6 +24,7 @@ export default function OrganizationPage() {
 
   useEffect(() => {
     setOrgName(settings.instance_name || '')
+    setAccentColor(settings.accent_color || '')
     setRegPolicy(settings.registration_policy || 'invite_only')
     setTimezone(settings.default_timezone || 'UTC')
     setWeekStart(settings.default_week_start || 'monday')
@@ -33,6 +35,7 @@ export default function OrganizationPage() {
     try {
       await patch.mutateAsync({
         instance_name: orgName,
+        accent_color: accentColor,
         registration_policy: regPolicy,
         default_timezone: timezone,
         default_week_start: weekStart,
@@ -66,6 +69,36 @@ export default function OrganizationPage() {
           />
           <p className="text-xs text-muted-foreground m-0">
             Shown in the browser tab title and login page.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Accent color</Label>
+          <div className="flex items-center gap-3">
+            <input
+              type="color"
+              value={accentColor || '#288C9B'}
+              onChange={e => setAccentColor(e.target.value)}
+              className="h-9 w-14 rounded border border-border cursor-pointer bg-transparent"
+            />
+            <Input
+              value={accentColor}
+              onChange={e => setAccentColor(e.target.value)}
+              placeholder="#288C9B"
+              className="max-w-[140px] font-mono text-[13px]"
+            />
+            {accentColor && (
+              <button
+                type="button"
+                onClick={() => setAccentColor('')}
+                className="text-xs text-muted-foreground hover:text-foreground cursor-pointer bg-transparent border-none"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground m-0">
+            Overrides the primary color globally. Leave blank to use the default teal.
           </p>
         </div>
 

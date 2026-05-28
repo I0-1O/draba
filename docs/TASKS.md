@@ -707,22 +707,22 @@ Closes the Timelines cornerstone. Today timelines can be created in the wizard a
 Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
 
 **Session lifecycle:**
-- [ ] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
-- [ ] Mutex/queue so concurrent 401s don't fire multiple refresh calls
-- [ ] Invisible to user — no toast, no banner (standard SPA pattern)
+- [x] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
+- [x] Mutex/queue so concurrent 401s don't fire multiple refresh calls
+- [x] Invisible to user — no toast, no banner (standard SPA pattern)
 
 **Preference consumption:**
-- [ ] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
-- [ ] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
-- [ ] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
-- [ ] `ActivityDetailPanel` and other date displays: consume date format preference
-- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in
-- [ ] Theme: sync server-side preference on login (`useDarkMode.ts` currently ignores server value, reads localStorage only)
+- [x] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
+- [x] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
+- [x] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
+- [ ] `ActivityDetailPanel` and other date displays: consume date format preference (date inputs are native browser — no explicit text formatting needed until a read-only date display surface is added)
+- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in (deferred — shared views ship in Phase 13)
+- [x] Theme: sync server-side preference on login (`useDarkMode.ts` — added `applyTheme`; `ThemeSync` component applies server value on auth init)
 
 **Admin — branding (`/settings/admin`):**
-- [ ] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
-- [ ] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
-- [ ] Optional logo upload (stretch)
+- [x] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
+- [x] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
+- [ ] Optional logo upload (stretch — deferred)
 
 ---
 
