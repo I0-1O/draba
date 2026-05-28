@@ -409,13 +409,19 @@ func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Verify the target member belongs to the same team.
-	if _, err := s.teams.GetMemberByID(targetMemberID); err != nil {
+	// Verify the target member exists and belongs to the same team as the
+	// timeline — prevents cross-team grants if a member ID is guessed.
+	targetMember, err := s.teams.GetMemberByID(targetMemberID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	if targetMember.TeamID != timeline.TeamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
 		return
 	}
 

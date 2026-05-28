@@ -235,3 +235,207 @@ func TestListTimelineStatuses_CopiedFromTemplate(t *testing.T) {
 	assert.Equal(t, "Complete", statuses[2]["name"])
 	assert.True(t, statuses[2]["isClosed"].(bool), "Complete should be closed")
 }
+
+// ── Phase 10.3: timeline status CRUD ─────────────────────────────────────────
+
+// tlStatusSetup builds on statusTestSetup by also creating a timeline so tests
+// for the timeline-status CRUD endpoints have a ready-to-use timelineID.
+func tlStatusSetup(t *testing.T) (srv http.Handler, aliceToken, teamID, timelineID string) {
+	t.Helper()
+	srv, aliceToken, teamID = statusTestSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "CRUD TL", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&tl))
+	timelineID = tl["id"].(string)
+	return
+}
+
+func TestCreateTimelineStatus_AdminSuccess(t *testing.T) {
+	srv, token, teamID, timelineID := tlStatusSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost,
+		fmt.Sprintf("/teams/%s/timelines/%s/statuses", teamID, timelineID),
+		map[string]any{"name": "In Review", "color": "#f0a500"}, token))
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	var st map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&st))
+	assert.Equal(t, "In Review", st["name"])
+	assert.Equal(t, "#f0a500", st["color"])
+	assert.NotEmpty(t, st["id"])
+}
+
+func TestCreateTimelineStatus_MissingName(t *testing.T) {
+	srv, token, teamID, timelineID := tlStatusSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost,
+		fmt.Sprintf("/teams/%s/timelines/%s/statuses", teamID, timelineID),
+		map[string]any{"color": "#aabbcc"}, token))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestCreateTimelineStatus_NonAdminForbidden(t *testing.T) {
+	srv, aliceToken, teamID, timelineID := tlStatusSetup(t)
+
+	// Alice invites Bob as a regular member.
+	wI := httptest.NewRecorder()
+	srv.ServeHTTP(wI, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob@tlstatus.com", "role": "member"}, aliceToken))
+	require.Equal(t, http.StatusCreated, wI.Code)
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(wI.Body).Decode(&inv))
+	bobToken, _ := seedUserWithInvite(t, srv, "bob@tlstatus.com", "password2", "Bob", inv["token"].(string))
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost,
+		fmt.Sprintf("/teams/%s/timelines/%s/statuses", teamID, timelineID),
+		map[string]any{"name": "Sneaky Status"}, bobToken))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestUpdateStatus_AdminCanRename(t *testing.T) {
+	srv, token, teamID, timelineID := tlStatusSetup(t)
+
+	// Add a fourth status so we have one that isn't a seeded template status.
+	wC := httptest.NewRecorder()
+	srv.ServeHTTP(wC, authReq(http.MethodPost,
+		fmt.Sprintf("/teams/%s/timelines/%s/statuses", teamID, timelineID),
+		map[string]any{"name": "Original"}, token))
+	require.Equal(t, http.StatusCreated, wC.Code)
+	var st map[string]any
+	require.NoError(t, json.NewDecoder(wC.Body).Decode(&st))
+	statusID := st["id"].(string)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPatch,
+		fmt.Sprintf("/statuses/%s", statusID),
+		map[string]any{"name": "Renamed", "isClosed": true}, token))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var updated map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&updated))
+	assert.Equal(t, "Renamed", updated["name"])
+	assert.Equal(t, true, updated["isClosed"])
+}
+
+func TestUpdateStatus_NonAdminForbidden(t *testing.T) {
+	srv, aliceToken, teamID, timelineID := tlStatusSetup(t)
+
+	// Grab a seeded status ID to patch.
+	wL := httptest.NewRecorder()
+	srv.ServeHTTP(wL, authReq(http.MethodGet,
+		fmt.Sprintf("/teams/%s/timelines/%s/statuses", teamID, timelineID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, wL.Code)
+	var statuses []map[string]any
+	require.NoError(t, json.NewDecoder(wL.Body).Decode(&statuses))
+	statusID := statuses[0]["id"].(string)
+
+	// Bob is a regular member.
+	wI := httptest.NewRecorder()
+	srv.ServeHTTP(wI, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob2@tlstatus.com", "role": "member"}, aliceToken))
+	require.Equal(t, http.StatusCreated, wI.Code)
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(wI.Body).Decode(&inv))
+	bobToken, _ := seedUserWithInvite(t, srv, "bob2@tlstatus.com", "password2", "Bob2", inv["token"].(string))
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPatch, fmt.Sprintf("/statuses/%s", statusID),
+		map[string]any{"name": "Sneaky"}, bobToken))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestUpdateStatus_NotFound(t *testing.T) {
+	srv, token, _, _ := tlStatusSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPatch, "/statuses/nonexistent",
+		map[string]any{"name": "Ghost"}, token))
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestDeleteStatus_AdminCanDelete(t *testing.T) {
+	srv, token, teamID, timelineID := tlStatusSetup(t)
+
+	// The timeline is seeded with 3 statuses; add a fourth so we can delete
+	// without hitting the LAST_STATUS guard.
+	wC := httptest.NewRecorder()
+	srv.ServeHTTP(wC, authReq(http.MethodPost,
+		fmt.Sprintf("/teams/%s/timelines/%s/statuses", teamID, timelineID),
+		map[string]any{"name": "Extra"}, token))
+	require.Equal(t, http.StatusCreated, wC.Code)
+	var st map[string]any
+	require.NoError(t, json.NewDecoder(wC.Body).Decode(&st))
+	statusID := st["id"].(string)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodDelete,
+		fmt.Sprintf("/statuses/%s", statusID), nil, token))
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+}
+
+func TestDeleteStatus_LastStatusBlocked(t *testing.T) {
+	srv, token, teamID, timelineID := tlStatusSetup(t)
+
+	// List the seeded statuses and delete all but the last.
+	wL := httptest.NewRecorder()
+	srv.ServeHTTP(wL, authReq(http.MethodGet,
+		fmt.Sprintf("/teams/%s/timelines/%s/statuses", teamID, timelineID), nil, token))
+	require.Equal(t, http.StatusOK, wL.Code)
+	var statuses []map[string]any
+	require.NoError(t, json.NewDecoder(wL.Body).Decode(&statuses))
+
+	for i := 0; i < len(statuses)-1; i++ {
+		wD := httptest.NewRecorder()
+		srv.ServeHTTP(wD, authReq(http.MethodDelete,
+			fmt.Sprintf("/statuses/%s", statuses[i]["id"].(string)), nil, token))
+		require.Equal(t, http.StatusNoContent, wD.Code)
+	}
+
+	// Deleting the last one must return 409 LAST_STATUS.
+	lastID := statuses[len(statuses)-1]["id"].(string)
+	wFinal := httptest.NewRecorder()
+	srv.ServeHTTP(wFinal, authReq(http.MethodDelete,
+		fmt.Sprintf("/statuses/%s", lastID), nil, token))
+	assert.Equal(t, http.StatusConflict, wFinal.Code)
+}
+
+func TestDeleteStatus_NonAdminForbidden(t *testing.T) {
+	srv, aliceToken, teamID, timelineID := tlStatusSetup(t)
+
+	// Grab a seeded status ID to delete.
+	wL := httptest.NewRecorder()
+	srv.ServeHTTP(wL, authReq(http.MethodGet,
+		fmt.Sprintf("/teams/%s/timelines/%s/statuses", teamID, timelineID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, wL.Code)
+	var statuses []map[string]any
+	require.NoError(t, json.NewDecoder(wL.Body).Decode(&statuses))
+	statusID := statuses[0]["id"].(string)
+
+	// Bob is a regular member.
+	wI := httptest.NewRecorder()
+	srv.ServeHTTP(wI, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob3@tlstatus.com", "role": "member"}, aliceToken))
+	require.Equal(t, http.StatusCreated, wI.Code)
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(wI.Body).Decode(&inv))
+	bobToken, _ := seedUserWithInvite(t, srv, "bob3@tlstatus.com", "password2", "Bob3", inv["token"].(string))
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodDelete,
+		fmt.Sprintf("/statuses/%s", statusID), nil, bobToken))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}

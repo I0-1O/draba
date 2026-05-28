@@ -2,6 +2,15 @@
 
 ---
 
+## 2026-05-27 — /test-phase 10.3
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 8 pass (ws-smoke: assertion 2 skipped — single-team test DB; assertion 3 partial — 30s heartbeat cadence, unit tests cover at speed)
+- Smoke target: http://epcot.lan:8081
+- Notes: `GET /activities?from=&to=` returns 400 (param names differ from Phase 3 spec); `POST /auth/register` requires `displayName` field not in spec — both are spec gaps, not runtime failures
+
+---
+
 ## 2026-05-27 — Phase 10.3 — Timelines Full CRUD (API + UI)
 
 **Backend:**

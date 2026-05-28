@@ -150,10 +150,10 @@ Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. T
 - `GET /teams/:id` with non-member token → 403 Forbidden
 - `POST /teams/:id/invites` → returns invite token (201 Created)
 - Register via that token → user appears in `GET /teams/:id/members` (200 OK)
-- `POST /teams/:id/events`, then `GET /teams/:id/events?from=…&to=…` returns it (200 OK)
-- `PATCH /events/:id` updates fields (200 OK); `DELETE /events/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
+- `POST /teams/:id/activities` (body: `name`, `startAt`, `endAt` as RFC3339), then `GET /teams/:id/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
+- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
 - Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
-- Authz: a user not on the team cannot read or mutate that team's events (403 Forbidden)
+- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
 - Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
 
 **security-review**

@@ -621,6 +621,71 @@ func TestDeleteTimeline_NonAdminForbidden(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w3.Code)
 }
 
+func TestArchiveTimeline_AdminCanArchiveAndUnarchive(t *testing.T) {
+	srv, token, teamID := timelineTestSetup(t)
+
+	// Create a timeline.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "Archive Me", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&tl))
+	id := tl["id"].(string)
+
+	// Archive it.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/archive", id), nil, token))
+	assert.Equal(t, http.StatusOK, w2.Code)
+	var archived map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&archived))
+	assert.NotNil(t, archived["archivedAt"], "archivedAt should be set after archive")
+
+	// Unarchive it.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/unarchive", id), nil, token))
+	assert.Equal(t, http.StatusOK, w3.Code)
+	var unarchived map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&unarchived))
+	assert.Nil(t, unarchived["archivedAt"], "archivedAt should be nil after unarchive")
+}
+
+func TestArchiveTimeline_NonAdminForbidden(t *testing.T) {
+	srv, aliceToken, teamID := timelineTestSetup(t)
+
+	// Alice (admin) creates a timeline.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "Admin Only Archive", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&tl))
+	id := tl["id"].(string)
+
+	// Bob is a regular member — may not archive.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob4@tl.com", "role": "member"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
+	bobToken, _ := seedUserWithInvite(t, srv, "bob4@tl.com", "password2", "Bob4", inv["token"].(string))
+
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/archive", id), nil, bobToken))
+	assert.Equal(t, http.StatusForbidden, w3.Code)
+}
+
+func TestArchiveTimeline_NotFound(t *testing.T) {
+	srv, token, _ := timelineTestSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/timelines/nonexistent/archive", nil, token))
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
 func TestTimelineAccessList_GrantAndRevoke(t *testing.T) {
 	srv, aliceToken, teamID := timelineTestSetup(t)
 
