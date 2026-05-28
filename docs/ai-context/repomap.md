@@ -12520,6 +12520,511 @@ export default function ResetPasswordPage() {
 }
 ````
 
+## File: packages/web/src/pages/SetupPage.tsx
+````typescript
+/**
+ * First-run setup wizard. Shown once when no users exist.
+ * Collects account, team, and timeline details then creates all three on Finish.
+ */
+
+import { useState } from 'react'
+import { Navigate, useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { API_BASE, apiFetch, ApiError } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type Step = 1 | 2 | 3
+
+interface WizardData {
+  displayName: string
+  email: string
+  password: string
+  teamName: string
+  timelineName: string
+  startDate: string
+  endDate: string
+}
+
+// ---------------------------------------------------------------------------
+// Step indicator
+// ---------------------------------------------------------------------------
+
+const STEP_LABELS: Record<Step, string> = {
+  1: 'Account',
+  2: 'Team',
+  3: 'Timeline',
+}
+
+function StepIndicator({ current }: { current: Step }) {
+  const steps: Step[] = [1, 2, 3]
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 0,
+        marginBottom: 32,
+      }}
+    >
+      {steps.map((n, i) => {
+        const done = n < current
+        const active = n === current
+        return (
+          <div key={n} style={{ display: 'flex', alignItems: 'center' }}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 4,
+              }}
+            >
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background:
+                    done || active ? 'var(--primary)' : 'transparent',
+                  border:
+                    done || active
+                      ? 'none'
+                      : '2px solid var(--border)',
+                  color:
+                    done || active
+                      ? 'var(--primary-foreground)'
+                      : 'var(--muted-foreground)',
+                  fontSize: 13,
+                  fontWeight: 700,
+                  transition: 'background 0.2s',
+                }}
+              >
+                {done ? '✓' : n}
+              </div>
+              <span
+                style={{
+                  fontSize: 11,
+                  fontWeight: active ? 600 : 400,
+                  color: active
+                    ? 'var(--foreground)'
+                    : 'var(--muted-foreground)',
+                }}
+              >
+                {STEP_LABELS[n]}
+              </span>
+            </div>
+
+            {i < steps.length - 1 && (
+              <div
+                style={{
+                  width: 48,
+                  height: 2,
+                  // Shift up to align with the circle, not the label
+                  marginBottom: 20,
+                  background: done ? 'var(--primary)' : 'var(--border)',
+                  transition: 'background 0.2s',
+                }}
+              />
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Step content
+// ---------------------------------------------------------------------------
+
+interface StepProps {
+  data: WizardData
+  onChange: (patch: Partial<WizardData>) => void
+}
+
+function Step1({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <p
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: 'var(--primary)',
+            margin: '0 0 4px',
+          }}
+        >
+          Welcome to draba!
+        </p>
+        <CardTitle>Create your account</CardTitle>
+        <CardDescription>
+          You're the first person here, so this account will have full admin
+          access — you'll be able to create teams, invite users, and manage the
+          workspace.
+        </CardDescription>
+      </CardHeader>
+      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="displayName">Your name</Label>
+          <Input
+            id="displayName"
+            placeholder="Jane Smith"
+            autoComplete="name"
+            value={data.displayName}
+            onChange={e => onChange({ displayName: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="email">Email</Label>
+          <Input
+            id="email"
+            type="email"
+            placeholder="you@example.com"
+            autoComplete="email"
+            value={data.email}
+            onChange={e => onChange({ email: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="password">Password</Label>
+          <Input
+            id="password"
+            type="password"
+            placeholder="At least 8 characters"
+            autoComplete="new-password"
+            value={data.password}
+            onChange={e => onChange({ password: e.target.value })}
+          />
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+function Step2({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <CardTitle>Name your team</CardTitle>
+        <CardDescription>
+          A team is your shared workspace. Everyone you invite will work within
+          it, and all your timelines and events live inside one. You can
+          customize and add members after setup.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="teamName">Team name</Label>
+          <Input
+            id="teamName"
+            placeholder="Product Marketing"
+            autoComplete="off"
+            value={data.teamName}
+            onChange={e => onChange({ teamName: e.target.value })}
+          />
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+function Step3({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <CardTitle>Your first timeline</CardTitle>
+        <CardDescription>
+          A timeline is a named date window over your team's events — it's how
+          you see who's working on what, and when. Pick a range that fits your
+          next planning horizon.
+        </CardDescription>
+      </CardHeader>
+      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="timelineName">Timeline name</Label>
+          <Input
+            id="timelineName"
+            placeholder="Q3 Roadmap"
+            autoComplete="off"
+            value={data.timelineName}
+            onChange={e => onChange({ timelineName: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="startDate">Start date</Label>
+            <Input
+              id="startDate"
+              type="date"
+              value={data.startDate}
+              onChange={e => onChange({ startDate: e.target.value })}
+            />
+          </div>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="endDate">End date</Label>
+            <Input
+              id="endDate"
+              type="date"
+              value={data.endDate}
+              onChange={e => onChange({ endDate: e.target.value })}
+            />
+          </div>
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+function validateStep(step: Step, data: WizardData): string | null {
+  if (step === 1) {
+    if (!data.displayName.trim()) return 'Please enter your name.'
+    if (!data.email.trim()) return 'Please enter your email.'
+    if (data.password.length < 8) return 'Password must be at least 8 characters.'
+    if (/\s/.test(data.password)) return 'Password must not contain spaces.'
+  }
+  if (step === 2) {
+    if (!data.teamName.trim()) return 'Please enter a team name.'
+  }
+  if (step === 3) {
+    if (!data.timelineName.trim()) return 'Please enter a timeline name.'
+    if (!data.startDate) return 'Please choose a start date.'
+    if (!data.endDate) return 'Please choose an end date.'
+    if (data.endDate < data.startDate) return 'End date must be on or after the start date.'
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Date helpers
+// ---------------------------------------------------------------------------
+
+function toDateString(d: Date): string {
+  return d.toISOString().split('T')[0]
+}
+
+function defaultDates(): { startDate: string; endDate: string } {
+  const start = new Date()
+  const end = new Date()
+  end.setMonth(end.getMonth() + 3)
+  return { startDate: toDateString(start), endDate: toDateString(end) }
+}
+
+// ---------------------------------------------------------------------------
+// Main wizard
+// ---------------------------------------------------------------------------
+
+interface SetupStatus {
+  needsSetup: boolean
+}
+
+export default function SetupPage() {
+  const { register, user } = useAuth()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+
+  // If setup has already been completed redirect to login rather than showing
+  // a broken wizard (handles back-navigation and direct URL access after setup).
+  const { data: setupStatus, isLoading: statusLoading } = useQuery<SetupStatus>({
+    queryKey: ['setup-status'],
+    queryFn: () =>
+      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
+    staleTime: Infinity,
+  })
+
+  const [step, setStep] = useState<Step>(1)
+  const [data, setData] = useState<WizardData>({
+    displayName: '',
+    email: '',
+    password: '',
+    teamName: '',
+    timelineName: '',
+    ...defaultDates(),
+  })
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  // Wait for the status check before rendering anything.
+  if (statusLoading) return null
+
+  // Setup already done — logged-in users go home, others go to login.
+  if (setupStatus && !setupStatus.needsSetup) {
+    return <Navigate to={user ? '/' : '/login'} replace />
+  }
+
+  function handleChange(patch: Partial<WizardData>) {
+    setData(d => ({ ...d, ...patch }))
+    setError(null)
+  }
+
+  function handleBack() {
+    setError(null)
+    setStep(s => (s > 1 ? ((s - 1) as Step) : s))
+  }
+
+  function handleNext() {
+    const err = validateStep(step, data)
+    if (err) {
+      setError(err)
+      return
+    }
+    setError(null)
+    setStep(s => (s < 3 ? ((s + 1) as Step) : s))
+  }
+
+  async function handleFinish() {
+    const err = validateStep(3, data)
+    if (err) {
+      setError(err)
+      return
+    }
+
+    setError(null)
+    setLoading(true)
+
+    try {
+      // 1. Create account — returns token directly to avoid racing the async
+      //    setState inside register() before the next render cycle.
+      const token = await register(data.email, data.password, data.displayName)
+
+      // 2. Create team
+      const team = await apiFetch<{ id: string }>('/teams', {
+        method: 'POST',
+        body: JSON.stringify({ name: data.teamName }),
+        accessToken: token,
+      })
+
+      // 3. Create timeline
+      await apiFetch(`/teams/${team.id}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: data.timelineName,
+          startDate: data.startDate,
+          endDate: data.endDate,
+        }),
+        accessToken: token,
+      })
+
+      // Mark setup as done in the query cache so ProtectedRoute doesn't
+      // replay the stale needsSetup:true value after the user logs out.
+      queryClient.setQueryData<SetupStatus>(['setup-status'], { needsSetup: false })
+      navigate('/', { replace: true })
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--background)',
+        padding: '24px',
+      }}
+    >
+      <div style={{ position: 'fixed', top: 16, right: 16 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Logo */}
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 2,
+          marginBottom: 24,
+        }}
+      >
+        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
+        <span
+          style={{
+            fontSize: 36,
+            fontWeight: 700,
+            color: 'var(--foreground)',
+            letterSpacing: '-0.02em',
+          }}
+        >
+          draba
+        </span>
+      </div>
+
+      <Card style={{ width: '100%', maxWidth: 440 }}>
+        <div style={{ padding: '24px 24px 0' }}>
+          <StepIndicator current={step} />
+        </div>
+
+        {step === 1 && <Step1 data={data} onChange={handleChange} />}
+        {step === 2 && <Step2 data={data} onChange={handleChange} />}
+        {step === 3 && <Step3 data={data} onChange={handleChange} />}
+
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+            padding: '0 24px 24px',
+          }}
+        >
+          {error && (
+            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>
+              {error}
+            </p>
+          )}
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button
+              variant="outline"
+              onClick={handleBack}
+              disabled={step === 1 || loading}
+              style={{ flex: 1 }}
+            >
+              Back
+            </Button>
+
+            {step < 3 ? (
+              <Button onClick={handleNext} disabled={loading} style={{ flex: 1 }}>
+                Next
+              </Button>
+            ) : (
+              <Button onClick={handleFinish} disabled={loading} style={{ flex: 1 }}>
+                {loading ? 'Setting up…' : 'Finish'}
+              </Button>
+            )}
+          </div>
+        </div>
+      </Card>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/types/api.ts
 ````typescript
 /**
@@ -16765,511 +17270,6 @@ export default function TokensPage() {
           </div>
         )}
       </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/SetupPage.tsx
-````typescript
-/**
- * First-run setup wizard. Shown once when no users exist.
- * Collects account, team, and timeline details then creates all three on Finish.
- */
-
-import { useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { API_BASE, apiFetch, ApiError } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-type Step = 1 | 2 | 3
-
-interface WizardData {
-  displayName: string
-  email: string
-  password: string
-  teamName: string
-  timelineName: string
-  startDate: string
-  endDate: string
-}
-
-// ---------------------------------------------------------------------------
-// Step indicator
-// ---------------------------------------------------------------------------
-
-const STEP_LABELS: Record<Step, string> = {
-  1: 'Account',
-  2: 'Team',
-  3: 'Timeline',
-}
-
-function StepIndicator({ current }: { current: Step }) {
-  const steps: Step[] = [1, 2, 3]
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 0,
-        marginBottom: 32,
-      }}
-    >
-      {steps.map((n, i) => {
-        const done = n < current
-        const active = n === current
-        return (
-          <div key={n} style={{ display: 'flex', alignItems: 'center' }}>
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 4,
-              }}
-            >
-              <div
-                style={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: '50%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background:
-                    done || active ? 'var(--primary)' : 'transparent',
-                  border:
-                    done || active
-                      ? 'none'
-                      : '2px solid var(--border)',
-                  color:
-                    done || active
-                      ? 'var(--primary-foreground)'
-                      : 'var(--muted-foreground)',
-                  fontSize: 13,
-                  fontWeight: 700,
-                  transition: 'background 0.2s',
-                }}
-              >
-                {done ? '✓' : n}
-              </div>
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: active ? 600 : 400,
-                  color: active
-                    ? 'var(--foreground)'
-                    : 'var(--muted-foreground)',
-                }}
-              >
-                {STEP_LABELS[n]}
-              </span>
-            </div>
-
-            {i < steps.length - 1 && (
-              <div
-                style={{
-                  width: 48,
-                  height: 2,
-                  // Shift up to align with the circle, not the label
-                  marginBottom: 20,
-                  background: done ? 'var(--primary)' : 'var(--border)',
-                  transition: 'background 0.2s',
-                }}
-              />
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Step content
-// ---------------------------------------------------------------------------
-
-interface StepProps {
-  data: WizardData
-  onChange: (patch: Partial<WizardData>) => void
-}
-
-function Step1({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <p
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: 'var(--primary)',
-            margin: '0 0 4px',
-          }}
-        >
-          Welcome to draba!
-        </p>
-        <CardTitle>Create your account</CardTitle>
-        <CardDescription>
-          You're the first person here, so this account will have full admin
-          access — you'll be able to create teams, invite users, and manage the
-          workspace.
-        </CardDescription>
-      </CardHeader>
-      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="displayName">Your name</Label>
-          <Input
-            id="displayName"
-            placeholder="Jane Smith"
-            autoComplete="name"
-            value={data.displayName}
-            onChange={e => onChange({ displayName: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="email">Email</Label>
-          <Input
-            id="email"
-            type="email"
-            placeholder="you@example.com"
-            autoComplete="email"
-            value={data.email}
-            onChange={e => onChange({ email: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="password">Password</Label>
-          <Input
-            id="password"
-            type="password"
-            placeholder="At least 8 characters"
-            autoComplete="new-password"
-            value={data.password}
-            onChange={e => onChange({ password: e.target.value })}
-          />
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-function Step2({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <CardTitle>Name your team</CardTitle>
-        <CardDescription>
-          A team is your shared workspace. Everyone you invite will work within
-          it, and all your timelines and events live inside one. You can
-          customize and add members after setup.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="teamName">Team name</Label>
-          <Input
-            id="teamName"
-            placeholder="Product Marketing"
-            autoComplete="off"
-            value={data.teamName}
-            onChange={e => onChange({ teamName: e.target.value })}
-          />
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-function Step3({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <CardTitle>Your first timeline</CardTitle>
-        <CardDescription>
-          A timeline is a named date window over your team's events — it's how
-          you see who's working on what, and when. Pick a range that fits your
-          next planning horizon.
-        </CardDescription>
-      </CardHeader>
-      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="timelineName">Timeline name</Label>
-          <Input
-            id="timelineName"
-            placeholder="Q3 Roadmap"
-            autoComplete="off"
-            value={data.timelineName}
-            onChange={e => onChange({ timelineName: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', gap: 12 }}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="startDate">Start date</Label>
-            <Input
-              id="startDate"
-              type="date"
-              value={data.startDate}
-              onChange={e => onChange({ startDate: e.target.value })}
-            />
-          </div>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="endDate">End date</Label>
-            <Input
-              id="endDate"
-              type="date"
-              value={data.endDate}
-              onChange={e => onChange({ endDate: e.target.value })}
-            />
-          </div>
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
-
-function validateStep(step: Step, data: WizardData): string | null {
-  if (step === 1) {
-    if (!data.displayName.trim()) return 'Please enter your name.'
-    if (!data.email.trim()) return 'Please enter your email.'
-    if (data.password.length < 8) return 'Password must be at least 8 characters.'
-    if (/\s/.test(data.password)) return 'Password must not contain spaces.'
-  }
-  if (step === 2) {
-    if (!data.teamName.trim()) return 'Please enter a team name.'
-  }
-  if (step === 3) {
-    if (!data.timelineName.trim()) return 'Please enter a timeline name.'
-    if (!data.startDate) return 'Please choose a start date.'
-    if (!data.endDate) return 'Please choose an end date.'
-    if (data.endDate < data.startDate) return 'End date must be on or after the start date.'
-  }
-  return null
-}
-
-// ---------------------------------------------------------------------------
-// Date helpers
-// ---------------------------------------------------------------------------
-
-function toDateString(d: Date): string {
-  return d.toISOString().split('T')[0]
-}
-
-function defaultDates(): { startDate: string; endDate: string } {
-  const start = new Date()
-  const end = new Date()
-  end.setMonth(end.getMonth() + 3)
-  return { startDate: toDateString(start), endDate: toDateString(end) }
-}
-
-// ---------------------------------------------------------------------------
-// Main wizard
-// ---------------------------------------------------------------------------
-
-interface SetupStatus {
-  needsSetup: boolean
-}
-
-export default function SetupPage() {
-  const { register, user } = useAuth()
-  const navigate = useNavigate()
-  const queryClient = useQueryClient()
-
-  // If setup has already been completed redirect to login rather than showing
-  // a broken wizard (handles back-navigation and direct URL access after setup).
-  const { data: setupStatus, isLoading: statusLoading } = useQuery<SetupStatus>({
-    queryKey: ['setup-status'],
-    queryFn: () =>
-      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
-    staleTime: Infinity,
-  })
-
-  const [step, setStep] = useState<Step>(1)
-  const [data, setData] = useState<WizardData>({
-    displayName: '',
-    email: '',
-    password: '',
-    teamName: '',
-    timelineName: '',
-    ...defaultDates(),
-  })
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  // Wait for the status check before rendering anything.
-  if (statusLoading) return null
-
-  // Setup already done — logged-in users go home, others go to login.
-  if (setupStatus && !setupStatus.needsSetup) {
-    return <Navigate to={user ? '/' : '/login'} replace />
-  }
-
-  function handleChange(patch: Partial<WizardData>) {
-    setData(d => ({ ...d, ...patch }))
-    setError(null)
-  }
-
-  function handleBack() {
-    setError(null)
-    setStep(s => (s > 1 ? ((s - 1) as Step) : s))
-  }
-
-  function handleNext() {
-    const err = validateStep(step, data)
-    if (err) {
-      setError(err)
-      return
-    }
-    setError(null)
-    setStep(s => (s < 3 ? ((s + 1) as Step) : s))
-  }
-
-  async function handleFinish() {
-    const err = validateStep(3, data)
-    if (err) {
-      setError(err)
-      return
-    }
-
-    setError(null)
-    setLoading(true)
-
-    try {
-      // 1. Create account — returns token directly to avoid racing the async
-      //    setState inside register() before the next render cycle.
-      const token = await register(data.email, data.password, data.displayName)
-
-      // 2. Create team
-      const team = await apiFetch<{ id: string }>('/teams', {
-        method: 'POST',
-        body: JSON.stringify({ name: data.teamName }),
-        accessToken: token,
-      })
-
-      // 3. Create timeline
-      await apiFetch(`/teams/${team.id}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify({
-          name: data.timelineName,
-          startDate: data.startDate,
-          endDate: data.endDate,
-        }),
-        accessToken: token,
-      })
-
-      // Mark setup as done in the query cache so ProtectedRoute doesn't
-      // replay the stale needsSetup:true value after the user logs out.
-      queryClient.setQueryData<SetupStatus>(['setup-status'], { needsSetup: false })
-      navigate('/', { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--background)',
-        padding: '24px',
-      }}
-    >
-      <div style={{ position: 'fixed', top: 16, right: 16 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Logo */}
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: 2,
-          marginBottom: 24,
-        }}
-      >
-        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
-        <span
-          style={{
-            fontSize: 36,
-            fontWeight: 700,
-            color: 'var(--foreground)',
-            letterSpacing: '-0.02em',
-          }}
-        >
-          draba
-        </span>
-      </div>
-
-      <Card style={{ width: '100%', maxWidth: 440 }}>
-        <div style={{ padding: '24px 24px 0' }}>
-          <StepIndicator current={step} />
-        </div>
-
-        {step === 1 && <Step1 data={data} onChange={handleChange} />}
-        {step === 2 && <Step2 data={data} onChange={handleChange} />}
-        {step === 3 && <Step3 data={data} onChange={handleChange} />}
-
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 12,
-            padding: '0 24px 24px',
-          }}
-        >
-          {error && (
-            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>
-              {error}
-            </p>
-          )}
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Button
-              variant="outline"
-              onClick={handleBack}
-              disabled={step === 1 || loading}
-              style={{ flex: 1 }}
-            >
-              Back
-            </Button>
-
-            {step < 3 ? (
-              <Button onClick={handleNext} disabled={loading} style={{ flex: 1 }}>
-                Next
-              </Button>
-            ) : (
-              <Button onClick={handleFinish} disabled={loading} style={{ flex: 1 }}>
-                {loading ? 'Setting up…' : 'Finish'}
-              </Button>
-            )}
-          </div>
-        </div>
-      </Card>
     </div>
   )
 }
@@ -38824,7 +38824,7 @@ Closes the Teams data entity. Ships the Team Modal with Settings tab functional;
 **Web — team picker + settings shell:**
 - [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
 - [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
-- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4) — 2026-05-25
+- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
 - [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
 - [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
 
@@ -39191,24 +39191,59 @@ Closes the Timelines cornerstone. Today timelines can be created in the wizard a
 
 ---
 
-### Preference Consumption, Branding & Backup (Phase 10.4)
-Wires user and instance preferences (stored in 10.1.3) into views. Adds cosmetic branding and backup visibility for admins.
+### Preference Consumption & Session Handling (Phase 10.4.1)
+Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
+
+**Session lifecycle:**
+- [ ] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
+- [ ] Mutex/queue so concurrent 401s don't fire multiple refresh calls
+- [ ] Invisible to user — no toast, no banner (standard SPA pattern)
 
 **Preference consumption:**
-- [ ] Gantt view: render dates using user's `date_format` preference; fall back to instance default
-- [ ] Gantt view: shift column alignment based on user's `week_start` preference
-- [ ] List view (Phase 11.1): same date format consumption
-- [ ] Public/shared timeline views: use instance-level defaults when no user is logged in
-- [ ] Theme: sync server-side preference on login (currently localStorage-only)
-- [ ] Default team/timeline: auto-select on login to skip team selector
+- [ ] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
+- [ ] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
+- [ ] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
+- [ ] `ActivityDetailPanel` and other date displays: consume date format preference
+- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in
+- [ ] Theme: sync server-side preference on login (`useDarkMode.ts` currently ignores server value, reads localStorage only)
 
 **Admin — branding (`/settings/admin`):**
 - [ ] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
 - [ ] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
 - [ ] Optional logo upload (stretch)
 
-**Admin — backup status:**
-- [ ] Read-only surface: DB file path, file size, last-modified timestamp
+---
+
+### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.2)
+Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
+
+**Inline name editing (3 → 1):**
+- [ ] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus
+- [ ] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle`
+- [ ] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle`
+- [ ] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle`
+
+**Archive/restore buttons (3 → 1):**
+- [ ] Standardize archive button: amber styling with Archive icon (align with MemberModal's prominence)
+- [ ] Standardize restore button: teal styling with Archive icon
+- [ ] Fix `TeamModal.tsx` archive button (currently neutral gray, looks disabled)
+- [ ] Fix `TimelineModal.tsx` archive button (currently no icon, border-only)
+
+**Confirmation dialogs (3 → 1):**
+- [ ] Consolidate into single `ConfirmDialog` component with color variants (red=destructive, amber=archive, indigo=promote, teal=restore)
+- [ ] Replace `MemberModal.tsx` custom ConfirmDialog
+- [ ] Replace `TeamModal.tsx` ArchiveDialog
+- [ ] Replace `TimelineModal.tsx` inline confirmation panels
+
+**Color system (mixed → CSS variables):**
+- [ ] Migrate `TeamModal.tsx` hardcoded hex colors (`#21262d`, `#30363d`, etc.) to CSS variables
+- [ ] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables
+- [ ] Verify `TimelineModal.tsx` CSS variable usage is consistent
+
+**Sidebar & toolbar audit:**
+- [ ] Sidebar member/timeline rows: verify Badge usage, hover states, gear icon consistency
+- [ ] Gantt toolbar controls: verify button styling matches modal footer patterns
+- [ ] Fix any inconsistencies found
 
 ---
 
@@ -39915,7 +39950,8 @@ This document organizes development into discrete phases with effort estimates a
 | 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | 🔄 |
 | 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | ✅ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | 🔄 |
-| 10.4 | [Preference Consumption, Branding & Backup](#phase-104--preference-consumption-branding--backup-admin) | S — 1 day | ⬜ |
+| 10.4.1 | [Preference Consumption & Session Handling](#phase-1041--preference-consumption--session-handling) | S–M — 1–2 days | ⬜ |
+| 10.4.2 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1042--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
 | 10.7 | [Localization & Language Support](#phase-107--localization--language-support) | L — 3–5 days | ⬜ |
@@ -39927,6 +39963,7 @@ This document organizes development into discrete phases with effort estimates a
 | 14 | [Data Portability & Exports](#phase-14-data-portability--exports) | L — 1 wk | ⬜ |
 | 15 | [External Connectors (Webhooks)](#phase-15-external-connectors-webhooks) | M — 3–5 days | ⬜ |
 | 16 | [Global Search](#phase-16-global-search) | M — 2–3 days | ⬜ |
+| 17 | [Backup & Restore](#phase-17--backup--restore) | M — 2–3 days | ⬜ |
 
 **Parking Lot (v2):** MySQL/Postgres adapters, CLI, MCP server, mobile apps, Microsoft/Outlook sync, multi-tenant hosting, SSO, notifications.
 
@@ -40288,7 +40325,7 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 - `POST /timelines/:id/archive`, `POST /timelines/:id/unarchive`
 - List endpoints exclude archived records by default; `?archived=true` to include
 
-> **Note:** Phase 9 ships the API surface only. The token management **UI** (create / list / revoke from a settings page) lands in [Phase 10.4 — Profile, Tokens & Admin Settings](#phase-104--profile-tokens--admin-settings-web). Until 10.4 ships, tokens are created via direct API calls or a temporary admin script.
+> **Note:** Phase 9 ships the API surface only. The token management **UI** (create / list / revoke from a settings page) lands in [Phase 10.1.3 — Settings](#phase-1013--settings--profile-tokens--admin). Until 10.1.3 ships, tokens are created via direct API calls or a temporary admin script.
 
 **Exit criteria — safe to pause when:**
 - Can create an API token and use its value as a Bearer token on a GET request
@@ -40428,7 +40465,7 @@ Teams are the outermost data scope — everything else (timelines, activities, m
 *Web — team picker + settings shell:*
 - "New team" affordance in the team picker dropdown → opens Team Modal in `new` mode
 - Existing team gear/edit icon → opens Team Modal in `edit` mode
-- `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4)
+- `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2)
 - Archived teams surfaced in team picker under a collapsed "Archived" section with unarchive affordance
 
 *OpenAPI + types:*
@@ -40616,7 +40653,7 @@ Builds out the `/settings` page shell (already scaffolded in 10.1.1) into a work
 - **Defaults:** default team (dropdown of user's teams), default timeline (filtered by selected team) — stored via existing `PUT /users/me/preferences`
 - **Regional:** timezone (IANA selector), date format (`MMM D, YYYY` / `MM/DD/YYYY` / `DD/MM/YYYY` / `YYYY-MM-DD`), week starts on (Monday / Sunday)
 - **Appearance:** theme toggle (Light / Dark / System) — already partially wired via localStorage; this phase persists it server-side
-- All preferences use the existing `user_preferences` API; this phase adds the UI and stores the values but does **not** require the Gantt or other views to consume them yet (that lands in 10.4)
+- All preferences use the existing `user_preferences` API; this phase adds the UI and stores the values but does **not** require the Gantt or other views to consume them yet (that lands in 10.4.1)
 
 *Web — API Tokens (`/settings/tokens`):*
 - Table: name, scope badge, last used (relative time), created date, revoke button
@@ -40820,32 +40857,81 @@ Closes the Timelines cornerstone. Same problem space as 10.1: today timelines ca
 
 ---
 
-### Phase 10.4 — Preference Consumption, Branding & Backup (Admin)
-**Status:** ⬜ | **Effort:** S (1 day)
+### Phase 10.4.1 — Preference Consumption & Session Handling
+**Status:** ⬜ | **Effort:** S–M (1–2 days)
 
-Wires the user and instance preferences stored in 10.1.3 into the rest of the system, and adds cosmetic branding + backup visibility for admins.
+Wires the user and instance preferences stored in 10.1.3 into the rest of the system, fixes the broken session lifecycle, and adds cosmetic branding for admins.
+
+**Why now:** User preferences for date format, week start, and theme are stored (Phase 10.1.3) but not consumed by any view. The Gantt hardcodes Monday week-start and `en-US` date formatting. Additionally, access tokens expire after 15 minutes with no refresh interceptor — after 15 minutes of use, every API call silently fails.
 
 **Scope:**
 
-*Preference consumption (system-wide):*
-- Gantt, List, and Calendar views respect user's date format and week-start preferences
-- Public/shared timeline views fall back to instance-level defaults when no user is logged in
-- Theme preference synced from server on login (currently localStorage-only)
-- Default team/timeline applied on login to skip the team selector step
+*Session lifecycle (token refresh):*
+- Add a 401 interceptor to `apiFetch` in `packages/web/src/lib/api.ts`: on 401, attempt silent refresh using stored refresh token, retry the original request with the new access token; if refresh also fails (expired/revoked), clear tokens and redirect to `/login`
+- Use a mutex/queue so concurrent 401s don't fire multiple refresh calls
+- Completely invisible to the user — no toast, no banner (standard SPA pattern)
+- Best practice: short-lived access token (15 min — already correct) + silent refresh on 401 + hard redirect when refresh fails
 
-*Admin (`/settings/admin`, superadmin only — extends the admin section from 10.1.3):*
-- Instance name + branding: custom instance name (shown in browser tab title and login page), accent color override, optional logo upload
-- Backup status: read-only surface showing DB file path, size, and last-modified timestamp
-- Instance name and accent color stored in `instance_settings` (table shipped in 10.1.3)
+*Preference consumption (system-wide):*
+- **Date format:** Create a `useFormatDate()` hook that reads user's `date_format` preference and returns a formatter; wire into `granularity.ts` `formatLabel()` (currently hardcoded to `en-US`), `ActivityDetailPanel` date displays, and any other date-displaying surface
+- **Week start:** Pass user's `week_start` preference into `granularity.ts` `startOfWeek()` (currently hardcodes Monday); Gantt column alignment shifts to match the user's chosen start day
+- **Timezone:** Stored and displayed; actual date math conversion deferred (complex, low urgency for self-hosted single-timezone teams)
+- **Theme sync:** On login, read server-side theme preference and apply it; `useDarkMode.ts` currently ignores the server value and only reads localStorage
+- **Instance defaults fallback:** For public/shared timeline views (no logged-in user), read instance-level defaults from `GET /admin/settings`
+
+*Admin — branding (`/settings/admin`, superadmin only — extends 10.1.3):*
+- Instance name field (stored in `instance_settings`); shown in browser tab title and login page
+- Accent color override (stored in `instance_settings`); applies globally via CSS custom property
+- Optional logo upload (stretch)
 
 **Exit criteria — safe to pause when:**
+- After 15+ minutes of use, API calls silently refresh the access token; if the refresh token is also expired, the user is redirected to `/login` cleanly
 - Gantt view renders dates using the user's chosen date format; public views use instance defaults
-- Week-start preference shifts the Gantt grid column alignment
-- A user's default team/timeline loads automatically on login
+- Week-start preference shifts the Gantt grid column alignment (e.g., Sunday start when configured)
+- Theme persists across devices — logging in on a new browser picks up the server-side theme
 - A superadmin can set a custom instance name; it appears in the browser tab title and on the login page
 - A superadmin can set an accent color override; the change applies globally
-- Backup status section shows the current DB path and last-modified time
 - Settings persist across container restarts
+
+---
+
+### Phase 10.4.2 — UI Consistency — Modals, Sidebar & Toolbar
+**Status:** ⬜ | **Effort:** M (1–2 days)
+
+Standardizes visual patterns across the three main modals (Team, Member, Timeline), the sidebar, and the Gantt toolbar. Today these surfaces use three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and a mix of hardcoded hex colors vs CSS variables.
+
+**Why now:** Every new modal or surface built from here forward will inherit whatever pattern exists. Standardizing now prevents compounding inconsistency as the UI grows through Phase 11 (views) and beyond.
+
+**Scope:**
+
+*Inline name editing (3 patterns → 1):*
+- Current: `MemberModal` uses always-input with focus underline; `TeamModal` toggles between div and input via a state machine; `TimelineModal` uses always-input with no visual cue
+- Standardize to: always-input with subtle bottom border on hover/focus (refined MemberModal pattern); extract to a shared `InlineEditableTitle` component used by all three modals
+
+*Archive/restore buttons (3 styles → 1):*
+- Current: `MemberModal` uses amber background + border + icon (most prominent); `TeamModal` uses neutral gray that looks disabled; `TimelineModal` uses amber border-only with no icon
+- Standardize to: consistent amber styling with Archive icon for archive, teal for restore; extract shared button style constants or a small `ArchiveButton` / `RestoreButton` component
+
+*Confirmation dialogs (3 implementations → 1):*
+- Current: `MemberModal` uses a custom `ConfirmDialog`; `TeamModal` uses `ArchiveDialog`; `TimelineModal` uses inline confirmation panels
+- Standardize to: single `ConfirmDialog` component with color variants (red = destructive, amber = archive, indigo = promote, teal = restore)
+
+*Color system (mixed → CSS variables):*
+- Current: `TeamModal` and `MemberModal` hardcode hex colors (`#21262d`, `#30363d`, etc.); `TimelineModal` uses CSS variables (`var(--card)`, `var(--border)`)
+- Standardize to: CSS variables everywhere; migrate all hardcoded hex values in modal components
+
+*Sidebar & toolbar audit:*
+- Sidebar member/timeline rows: verify Badge usage, hover states, and gear icon consistency across all row types
+- Gantt toolbar controls: verify button styling consistency with the new modal patterns
+- Fix any inconsistencies found
+
+**Exit criteria — safe to pause when:**
+- All three modals use the same `InlineEditableTitle` component for name editing — identical visual behavior
+- Archive and restore buttons look identical across all three modals (amber archive, teal restore, both with icons)
+- All confirmation dialogs use the same `ConfirmDialog` component with appropriate color variants
+- No hardcoded hex colors remain in modal components; all use CSS variables or design-token references
+- Sidebar member rows and timeline rows have consistent hover states and gear icon placement
+- Gantt toolbar buttons are visually consistent with modal footer button patterns
 
 ---
 
@@ -41200,6 +41286,50 @@ By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), an
 - Selecting a result navigates to the correct timeline and the event is visibly highlighted on arrival
 - Users with no access to a team never see that team's events in results
 - Search returns within ~200ms for a database with 10k events
+
+---
+
+### Phase 17 — Backup & Restore
+**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
+
+Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container.
+
+**Directional scope (to be firmed up before the phase):**
+
+*Backup status (read-only admin surface):*
+- `/settings/admin/backup` page: current DB file path, file size, last-modified timestamp, WAL size (SQLite), connection count
+- Health indicator: green when last backup < 24h old, amber when 1–7 days, red when > 7 days or no backup exists
+- For MySQL/Postgres adapters: show connection string (masked), database size, last `pg_dump`/`mysqldump` timestamp if available
+
+*Manual backup:*
+- "Back up now" button → triggers a hot copy of the SQLite file (using `VACUUM INTO` or the backup API) to a configurable backup directory
+- For MySQL/Postgres: trigger `pg_dump`/`mysqldump` to the backup directory
+- Download backup file directly from the admin UI (optional — evaluate security implications)
+
+*Scheduled backups:*
+- Cron-style schedule configuration (daily at 2am, every 6 hours, etc.)
+- Retention policy: keep last N backups, or keep backups for N days
+- Backup location: local directory (default), or S3-compatible object storage (stretch)
+- Notification on backup failure (via SMTP if configured)
+
+*API:*
+- `GET /admin/backup/status` — current backup state (superadmin only)
+- `POST /admin/backup` — trigger immediate backup (superadmin only)
+- `GET /admin/backup/history` — list recent backups with size and status
+- `GET/PUT /admin/backup/schedule` — read/update backup schedule config
+- `DELETE /admin/backup/:id` — delete a specific backup file
+
+**Open questions (resolve before starting):**
+- Should backup files be downloadable from the admin UI, or only stored on the server filesystem? (Security tradeoff: convenience vs. risk of unauthorized download)
+- For SQLite, `VACUUM INTO` vs. the SQLite backup API — which handles concurrent writes better under WAL mode?
+- Do we need backup encryption at rest? (Probably not for v1 if the backup directory is on the same host)
+
+**Exit criteria (placeholder — refine in-phase):**
+- A superadmin can see the current DB status (path, size, last modified) on the admin backup page
+- "Back up now" creates a usable copy of the database in the configured backup directory
+- A scheduled backup runs at the configured interval and produces a valid backup file
+- Retention policy automatically cleans up old backups beyond the configured limit
+- Backup history shows the last N backups with timestamps and sizes
 
 ---
 
