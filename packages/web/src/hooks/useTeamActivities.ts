@@ -16,6 +16,8 @@ type Activity = components['schemas']['Activity']
 type Team = components['schemas']['Team']
 type Timeline = components['schemas']['Timeline']
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
+type PatchTimelineInput = components['schemas']['PatchTimelineInput']
 
 /** Query key factory — centralises cache key strings. */
 export const keys = {
@@ -180,6 +182,7 @@ interface UpdateActivityInput {
     icon?: string | null
     location?: string | null
     url?: string | null
+    statusId?: string | null
     assignedMemberIds?: string[]
   }
 }
@@ -332,6 +335,152 @@ export function useDeleteActivity(teamId: string) {
         { queryKey: ['teams', teamId, 'activities'] },
         (old) => old?.filter((a) => a.id !== activityId),
       )
+    },
+  })
+}
+
+// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
+
+/** Fetches all timelines for a team, optionally including archived ones. */
+export function useTeamTimelinesWithArchived(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
+    queryFn: async () =>
+      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Creates a new timeline for a team. */
+export function useCreateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null }) =>
+      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** PATCHes a timeline's mutable fields. */
+export function useUpdateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
+      authFetch<Timeline>(`/timelines/${timelineId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Hard-deletes a timeline. */
+export function useDeleteTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Archives a timeline. */
+export function useArchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Restores an archived timeline. */
+export function useUnarchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Fetches the access grant list for a timeline. */
+export function useTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
+    queryFn: async () =>
+      (await authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access`,
+      )) ?? [],
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Grants or updates a member's access to a timeline. */
+export function useGrantTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
+      authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
+        { method: 'PUT', body: JSON.stringify({ role }) },
+      ),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+
+/** Revokes a member's access to a timeline. */
+export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
     },
   })
 }

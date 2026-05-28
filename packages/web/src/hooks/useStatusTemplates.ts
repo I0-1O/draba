@@ -18,6 +18,8 @@ type CreateStatusTemplateInput = components['schemas']['CreateStatusTemplateInpu
 type PatchStatusTemplateInput = components['schemas']['PatchStatusTemplateInput']
 type CreateStatusTemplateItemInput = components['schemas']['CreateStatusTemplateItemInput']
 type PatchStatusTemplateItemInput = components['schemas']['PatchStatusTemplateItemInput']
+type CreateStatusInput = components['schemas']['CreateStatusInput']
+type PatchStatusInput = components['schemas']['PatchStatusInput']
 
 export const statusKeys = {
   templates: (teamId: string) => ['teams', teamId, 'status-templates'] as const,
@@ -138,5 +140,53 @@ export function useTimelineStatuses(teamId: string, timelineId: string) {
     queryFn: async () =>
       (await authFetch<Status[]>(`/teams/${teamId}/timelines/${timelineId}/statuses`)) ?? [],
     enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Adds a status to a timeline. */
+export function useCreateTimelineStatus(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateStatusInput) =>
+      authFetch<Status>(`/teams/${teamId}/timelines/${timelineId}/statuses`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.statuses(teamId, timelineId) }),
+  })
+}
+
+/** Updates a live timeline status (name, color, icon, isClosed, position). */
+export function useUpdateTimelineStatus(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ id, ...patch }: PatchStatusInput & { id: string }) =>
+      authFetch<Status>(`/statuses/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.statuses(teamId, timelineId) }),
+  })
+}
+
+/** Deletes a live timeline status. */
+export function useDeleteTimelineStatus(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ id, replacementStatusId }: { id: string; replacementStatusId?: string }) =>
+      authFetch<void>(`/statuses/${id}`, {
+        method: 'DELETE',
+        body: replacementStatusId ? JSON.stringify({ replacementStatusId }) : undefined,
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.statuses(teamId, timelineId) }),
   })
 }

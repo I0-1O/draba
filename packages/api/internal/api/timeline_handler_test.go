@@ -53,6 +53,21 @@ func (f *fakeTimelineStore) GrantAccess(timelineID, teamMemberID, role string) e
 	}
 	return f.real.GrantAccess(timelineID, teamMemberID, role)
 }
+func (f *fakeTimelineStore) RevokeAccess(timelineID, teamMemberID string) error {
+	return f.real.RevokeAccess(timelineID, teamMemberID)
+}
+func (f *fakeTimelineStore) GetAccessRole(timelineID, teamMemberID string) (string, error) {
+	return f.real.GetAccessRole(timelineID, teamMemberID)
+}
+func (f *fakeTimelineStore) ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error) {
+	return f.real.ListAccess(timelineID)
+}
+func (f *fakeTimelineStore) Update(t *models.Timeline) error {
+	return f.real.Update(t)
+}
+func (f *fakeTimelineStore) Delete(id string) error {
+	return f.real.Delete(id)
+}
 
 // timelineTestSetup creates an in-memory server, registers Alice, creates a
 // team, and returns the handler, Alice's token, and the team ID.
@@ -505,4 +520,172 @@ func TestCreateTimeline_PublishesBusMessage(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("bus did not receive TimelineCreated within timeout")
 	}
+}
+
+// ── Phase 10.3 tests ──────────────────────────────────────────────────────────
+
+func TestUpdateTimeline_AdminCanRename(t *testing.T) {
+	srv, token, teamID := timelineTestSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "Original Name", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&tl))
+	id := tl["id"].(string)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPatch, fmt.Sprintf("/timelines/%s", id),
+		map[string]any{"name": "Updated Name"}, token))
+	assert.Equal(t, http.StatusOK, w2.Code)
+
+	var updated map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&updated))
+	assert.Equal(t, "Updated Name", updated["name"])
+}
+
+func TestUpdateTimeline_NonAdminForbidden(t *testing.T) {
+	srv, aliceToken, teamID := timelineTestSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "Alice TL", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&tl))
+	id := tl["id"].(string)
+
+	// Add Bob as member (not admin).
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob@tl.com", "role": "member"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
+	bobToken, _ := seedUserWithInvite(t, srv, "bob@tl.com", "password2", "Bob", inv["token"].(string))
+
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPatch, fmt.Sprintf("/timelines/%s", id),
+		map[string]any{"name": "Sneaky"}, bobToken))
+	assert.Equal(t, http.StatusForbidden, w3.Code)
+}
+
+func TestDeleteTimeline_AdminCanDelete(t *testing.T) {
+	srv, token, teamID := timelineTestSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "Doomed TL", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&tl))
+	id := tl["id"].(string)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodDelete, fmt.Sprintf("/timelines/%s", id), nil, token))
+	assert.Equal(t, http.StatusNoContent, w2.Code)
+
+	// Confirm it's gone.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodGet, fmt.Sprintf("/timelines/%s", id), nil, token))
+	assert.Equal(t, http.StatusNotFound, w3.Code)
+}
+
+func TestDeleteTimeline_NonAdminForbidden(t *testing.T) {
+	srv, aliceToken, teamID := timelineTestSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "Alice TL2", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&tl))
+	id := tl["id"].(string)
+
+	// Bob is a regular member.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob2@tl.com", "role": "member"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
+	bobToken, _ := seedUserWithInvite(t, srv, "bob2@tl.com", "password2", "Bob2", inv["token"].(string))
+
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodDelete, fmt.Sprintf("/timelines/%s", id), nil, bobToken))
+	assert.Equal(t, http.StatusForbidden, w3.Code)
+}
+
+func TestTimelineAccessList_GrantAndRevoke(t *testing.T) {
+	srv, aliceToken, teamID := timelineTestSetup(t)
+
+	// Alice creates a timeline.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "Access TL", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&tl))
+	timelineID := tl["id"].(string)
+
+	// Add Bob as a member.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob3@tl.com", "role": "member"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&inv))
+	_, bobID := seedUserWithInvite(t, srv, "bob3@tl.com", "password2", "Bob3", inv["token"].(string))
+
+	// Look up Bob's team_member ID.
+	wMembers := httptest.NewRecorder()
+	srv.ServeHTTP(wMembers, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/members", teamID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, wMembers.Code)
+	var members []map[string]any
+	require.NoError(t, json.NewDecoder(wMembers.Body).Decode(&members))
+	var bobMemberID string
+	for _, m := range members {
+		if uid, _ := m["userId"].(string); uid == bobID {
+			bobMemberID = m["id"].(string)
+			break
+		}
+	}
+	require.NotEmpty(t, bobMemberID)
+
+	// Grant Bob access.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPut,
+		fmt.Sprintf("/teams/%s/timelines/%s/access/%s", teamID, timelineID, bobMemberID),
+		map[string]string{"role": "member"}, aliceToken))
+	assert.Equal(t, http.StatusOK, w3.Code)
+
+	// List access — should include Bob.
+	w4 := httptest.NewRecorder()
+	srv.ServeHTTP(w4, authReq(http.MethodGet,
+		fmt.Sprintf("/teams/%s/timelines/%s/access", teamID, timelineID), nil, aliceToken))
+	assert.Equal(t, http.StatusOK, w4.Code)
+	var entries []map[string]any
+	require.NoError(t, json.NewDecoder(w4.Body).Decode(&entries))
+	// Alice (admin) was auto-granted at creation; Bob was just granted.
+	found := false
+	for _, e := range entries {
+		if e["teamMemberId"] == bobMemberID {
+			found = true
+			assert.Equal(t, "member", e["role"])
+		}
+	}
+	assert.True(t, found, "Bob's access entry not found")
+
+	// Revoke Bob's access.
+	w5 := httptest.NewRecorder()
+	srv.ServeHTTP(w5, authReq(http.MethodDelete,
+		fmt.Sprintf("/teams/%s/timelines/%s/access/%s", teamID, timelineID, bobMemberID),
+		nil, aliceToken))
+	assert.Equal(t, http.StatusNoContent, w5.Code)
 }

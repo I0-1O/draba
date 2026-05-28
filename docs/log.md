@@ -2,6 +2,59 @@
 
 ---
 
+## 2026-05-27 — Phase 10.3 — Timelines Full CRUD (API + UI)
+
+**Backend:**
+- New handlers: `PATCH /timelines/{id}`, `DELETE /timelines/{id}`
+- New handlers: `GET/PUT/DELETE /teams/{id}/timelines/{timelineId}/access` — timeline access list CRUD
+- New handlers: `POST /teams/{id}/timelines/{timelineId}/statuses`, `PATCH /statuses/{id}`, `DELETE /statuses/{id}` — live timeline status editing
+- `canAdminTimeline` helper: checks team admin role first, then per-timeline `timeline_access` role='admin'
+- `TimelineStore` interface expanded: `Update`, `Delete`, `ListAccess`, `GetAccessRole`, `RevokeAccess`
+- `TimelineAccessEntry` model added: joins `timeline_access` + `team_members` + `users`
+- `StatusRepo` additions: `CreateStatus`, `UpdateStatus`, `DeleteStatus`, `CountStatuses`, `CountStatusActivities`
+- `DeleteStatus` re-points activities to replacement before deleting; blocked if last status
+- Note: access endpoints use team-scoped URL prefix to avoid Go 1.22 mux conflict with `GET /timelines/share/{token}` on 3-segment paths
+- OpenAPI spec updated: `PatchTimelineInput`, `TimelineAccessEntry`, `CreateStatusInput`, `PatchStatusInput`, `DeleteStatusInput` schemas + all new endpoints; TypeScript types regenerated
+
+**Tests added:**
+- `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden`
+- `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden`
+- `TestTimelineAccessList_GrantAndRevoke`
+
+**Frontend:**
+- `TimelineModal.tsx` — create/edit modal with Settings, Statuses, and Access tabs; archive + delete confirmation dialogs
+- `Sidebar.tsx` — real archived timelines section (Restore button), wired New timeline and settings gear
+- `ActivityDetailPanel.tsx` — status dropdown populated from `useTimelineStatuses`; replaces stub
+- `GanttToolbar.tsx` — `hideClosed` / `onHideClosedChange` props; Hide closed checkbox shown when timeline has closed statuses
+- `GanttView.tsx` — `hideClosed` + `closedStatusIds` props; filters out activities with closed status IDs
+- `useTeamActivities.ts` — `useCreateTimeline`, `useUpdateTimeline`, `useDeleteTimeline`, `useArchiveTimeline`, `useUnarchiveTimeline`, `useTeamTimelinesWithArchived`, `useTimelineAccess`, `useGrantTimelineAccess`, `useRevokeTimelineAccess`
+- `useStatusTemplates.ts` — `useCreateTimelineStatus`, `useUpdateTimelineStatus`, `useDeleteTimelineStatus`
+- `DashboardPage.tsx` — timeline modal state; passes all new props to Sidebar + GanttToolbar + GanttView + ActivityDetailPanel
+
+**Automated:** `golangci-lint run` clean, `go test ./...` all pass, `pnpm --filter web lint` clean.
+
+**Pending manual verification (against epcot.lan:8081):** see TASKS.md checklist.
+
+---
+
+## 2026-05-27 — Phase 10.2 — Review Fixes & Docker Verification
+
+**Review fixes applied:**
+- Aligned `SeedDefaultTemplate` test assertions to match actual seed output ("Default" template with Planning / In Progress / Complete; Complete is `is_closed`)
+- Added three missing tests: `TestUpdateStatusTemplate_AdminCanRename`, `TestUpdateTemplateItem_AdminCanUpdate`, `TestStatusTemplates_NonAdminForbidden` (403 on all 5 mutation routes for non-admin members)
+- Rephrased `is_closed` checkbox label in `StatusTemplatesTab.tsx` to remove forward-reference to "Hide closed" filter (Phase 10.3 scope)
+- Replaced mojibake em-dashes (`â€"`) with hyphens in 4 test files: `team_handler_test.go`, `activity_handler_test.go`, `saved_filter_handler_test.go`, `timeline_handler_test.go`
+
+**Docker verification (epcot.lan:8081):** ✅ passed
+- Default template seeded on team create; template CRUD, item CRUD, and last-item/last-template guards all work from UI
+- New timeline correctly copies template statuses (verified via API)
+- Non-admin sees templates read-only
+- Note: "Create new timeline" UI is Phase 10.3 — statuses verified via direct API call
+
+**Phase 10.2 closed ✅**
+
+---
+
 ## 2026-05-27 — /test-phase 10.2
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 partial-skip (ws-smoke: heartbeat full 3-cycle skipped per time budget; unit tests cover at speed)

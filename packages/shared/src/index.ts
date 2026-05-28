@@ -647,7 +647,47 @@ export interface paths {
         get: operations["getTimeline"];
         put?: never;
         post?: never;
+        /**
+         * Hard-delete a timeline (team admin only)
+         * @description Deletes the timeline and all its statuses. Activities are NOT deleted.
+         */
+        delete: operations["deleteTimeline"];
+        options?: never;
+        head?: never;
+        /** Rename or change dates on a timeline (timeline admin only) */
+        patch: operations["updateTimeline"];
+        trace?: never;
+    };
+    "/teams/{id}/timelines/{timelineId}/access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List access grants for a timeline */
+        get: operations["listTimelineAccess"];
+        put?: never;
+        post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/timelines/{timelineId}/access/{memberId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Grant or update a team member's access to a timeline (timeline admin only) */
+        put: operations["grantTimelineAccess"];
+        post?: never;
+        /** Revoke a team member's access to a timeline (timeline admin only) */
+        delete: operations["revokeTimelineAccess"];
         options?: never;
         head?: never;
         patch?: never;
@@ -909,11 +949,33 @@ export interface paths {
         /** List statuses for a specific timeline */
         get: operations["listTimelineStatuses"];
         put?: never;
-        post?: never;
+        /** Add a status to a timeline (timeline admin only) */
+        post: operations["createTimelineStatus"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/statuses/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a timeline status (timeline admin only)
+         * @description Blocked if it is the last status. Requires replacementStatusId if any activities reference the status.
+         */
+        delete: operations["deleteStatus"];
+        options?: never;
+        head?: never;
+        /** Rename, recolor, or reorder a timeline status (timeline admin only) */
+        patch: operations["updateStatus"];
         trace?: never;
     };
     "/timelines/share/{token}": {
@@ -1256,6 +1318,43 @@ export interface components {
             isClosed?: boolean;
             position?: number;
         };
+        PatchTimelineInput: {
+            name?: string;
+            /** Format: date */
+            startDate?: string;
+            /** Format: date */
+            endDate?: string;
+            color?: string | null;
+            icon?: string | null;
+        };
+        TimelineAccessEntry: {
+            timelineId: string;
+            teamMemberId: string;
+            /** @enum {string} */
+            role: "admin" | "member";
+            displayName: string;
+            email: string;
+            color?: string | null;
+            icon?: string | null;
+            userId?: string | null;
+        };
+        CreateStatusInput: {
+            name: string;
+            color?: string;
+            icon?: string | null;
+            isClosed?: boolean;
+        };
+        PatchStatusInput: {
+            name?: string;
+            color?: string;
+            icon?: string | null;
+            isClosed?: boolean;
+            position?: number;
+        };
+        DeleteStatusInput: {
+            /** @description Required when activities reference the deleted status. */
+            replacementStatusId?: string | null;
+        };
     };
     responses: {
         /** @description Invalid request body or parameters. */
@@ -1320,6 +1419,8 @@ export interface components {
         activityId: string;
         /** @description Timeline ID. */
         timelineId: string;
+        /** @description Timeline ID (nested path parameter). */
+        timelineIdParam: string;
         /** @description Saved filter ID. */
         savedFilterId: string;
         /** @description Resource ID. */
@@ -2768,6 +2869,158 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    deleteTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Timeline ID. */
+                id: components["parameters"]["timelineId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Timeline deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Timeline ID. */
+                id: components["parameters"]["timelineId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchTimelineInput"];
+            };
+        };
+        responses: {
+            /** @description Updated timeline. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Timeline"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listTimelineAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested path parameter). */
+                timelineId: components["parameters"]["timelineIdParam"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of access grants. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimelineAccessEntry"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    grantTimelineAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested path parameter). */
+                timelineId: components["parameters"]["timelineIdParam"];
+                memberId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    role: "admin" | "member";
+                };
+            };
+        };
+        responses: {
+            /** @description Updated access list. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimelineAccessEntry"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    revokeTimelineAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested path parameter). */
+                timelineId: components["parameters"]["timelineIdParam"];
+                memberId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Access revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     listSavedFilters: {
         parameters: {
             query?: never;
@@ -3388,6 +3641,109 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    createTimelineStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: string;
+                timelineId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateStatusInput"];
+            };
+        };
+        responses: {
+            /** @description Status created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Status"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["DeleteStatusInput"];
+            };
+        };
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Last status or activities reference it without a replacement. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchStatusInput"];
+            };
+        };
+        responses: {
+            /** @description Updated status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Status"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
         };
     };
     getTimelineByShareToken: {

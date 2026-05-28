@@ -446,3 +446,225 @@ func (s *Server) handleListTimelineStatuses(w http.ResponseWriter, r *http.Reque
 	}
 	writeJSON(w, http.StatusOK, statuses)
 }
+
+// handleCreateTimelineStatus handles POST /teams/{id}/timelines/{timelineId}/statuses.
+// Only a team admin or timeline admin may add statuses.
+func (s *Server) handleCreateTimelineStatus(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	var req CreateTimelineStatusJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	count, err := s.statuses.CountStatuses(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status")
+		return
+	}
+
+	color := "#8b949e"
+	if req.Color != nil {
+		color = *req.Color
+	}
+
+	now := time.Now()
+	st := &models.Status{
+		ID:         newID(),
+		TimelineID: timelineID,
+		Name:       name,
+		Color:      color,
+		Icon:       req.Icon,
+		Position:   count,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if req.IsClosed != nil {
+		st.IsClosed = *req.IsClosed
+	}
+
+	if err := s.statuses.CreateStatus(st); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status")
+		return
+	}
+	writeJSON(w, http.StatusCreated, st)
+}
+
+// handleUpdateStatus handles PATCH /statuses/{id}.
+// Only a team admin or timeline admin may update statuses.
+func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	statusID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	st, err := s.statuses.GetStatus(statusID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(st.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status")
+		return
+	}
+	if !s.canAdminTimeline(member, st.TimelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	var req PatchStatusJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		st.Name = name
+	}
+	if req.Color != nil {
+		st.Color = *req.Color
+	}
+	if req.Icon != nil {
+		st.Icon = req.Icon
+	}
+	if req.IsClosed != nil {
+		st.IsClosed = *req.IsClosed
+	}
+	if req.Position != nil {
+		st.Position = *req.Position
+	}
+	st.UpdatedAt = time.Now()
+
+	if err := s.statuses.UpdateStatus(st); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status")
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// handleDeleteStatus handles DELETE /statuses/{id}. Blocked if it is the last
+// status on the timeline. If activities reference the status,
+// replacementStatusId must be provided in the request body.
+func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
+	statusID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	st, err := s.statuses.GetStatus(statusID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(st.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+	if !s.canAdminTimeline(member, st.TimelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	count, err := s.statuses.CountStatuses(st.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+	if count <= 1 {
+		writeError(w, http.StatusConflict, "LAST_STATUS", "cannot delete the last status on a timeline")
+		return
+	}
+
+	// Check if activities reference this status.
+	actCount, err := s.statuses.CountStatusActivities(statusID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+
+	var req DeleteStatusJSONBody
+	// Best-effort decode — body is optional when actCount == 0.
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	if actCount > 0 && (req.ReplacementStatusID == nil || *req.ReplacementStatusID == "") {
+		writeError(w, http.StatusConflict, "STATUS_HAS_ACTIVITIES",
+			"activities reference this status; provide replacementStatusId")
+		return
+	}
+
+	replacementID := ""
+	if req.ReplacementStatusID != nil {
+		replacementID = *req.ReplacementStatusID
+	}
+
+	if err := s.statuses.DeleteStatus(statusID, replacementID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

@@ -663,20 +663,43 @@ API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Member
 Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
 
 **API — timeline-level:**
-- [ ] `PATCH /timelines/:id` — rename, change start/end date, change description (admin only)
-- [ ] `DELETE /timelines/:id` — hard delete; admin only; double-confirm
-- [ ] Archive endpoints already in Phase 9
+- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
+- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
+- [x] Archive endpoints already in Phase 9
+
+**API — timeline statuses (editing):**
+- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
+- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
 
 **API — access list:**
-- [ ] `GET /timelines/:id/access` — list current grants (team member + role)
-- [ ] `PUT /timelines/:id/access/:memberId` — grant or update role (admin / member)
-- [ ] `DELETE /timelines/:id/access/:memberId` — revoke grant
+- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
+- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
+- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
 
 **Web:**
-- [ ] "New timeline" affordance in the sidebar timelines list → create-timeline modal (name, date range)
-- [ ] Edit-timeline modal from the sidebar (or a `/settings/team/:id/timelines` sub-route): rename, change date range, archive, delete
-- [ ] Access-list management UI: search-pick team members, role toggle, remove
-- [ ] Archived timelines under a collapsed "Archived" group in the sidebar; unarchive from there
+- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
+- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
+- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
+- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
+- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
+- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
+- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
+- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
+
+**Testing & verification:**
+- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
+- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
+- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
+- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
+- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
+- [ ] Manual: delete timeline → confirm → gone from sidebar
+- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
+- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
 
 ---
 

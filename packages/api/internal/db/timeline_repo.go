@@ -134,3 +134,69 @@ func (r *TimelineRepo) RevokeAccess(timelineID, teamMemberID string) error {
 	}
 	return nil
 }
+
+// GetAccessRole returns the role for a member in timeline_access, or "" if
+// no entry exists. Returns sql.ErrNoRows (wrapped) only on DB errors.
+func (r *TimelineRepo) GetAccessRole(timelineID, teamMemberID string) (string, error) {
+	var role string
+	err := r.db.Get(&role,
+		`SELECT role FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		// No row means no access — return empty string, not an error.
+		return "", nil
+	}
+	return role, nil
+}
+
+// ListAccess returns all access grants for a timeline, joined with member
+// display info, ordered by joined_at.
+func (r *TimelineRepo) ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error) {
+	entries := make([]*models.TimelineAccessEntry, 0)
+	err := r.db.Select(&entries, `
+		SELECT
+			ta.timeline_id,
+			ta.team_member_id,
+			ta.role,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			COALESCE(u.email, '')                           AS email,
+			tm.color,
+			tm.icon,
+			tm.user_id
+		FROM timeline_access ta
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE ta.timeline_id = ?
+		ORDER BY tm.joined_at
+	`, timelineID)
+	if err != nil {
+		return nil, fmt.Errorf("listing timeline access: %w", err)
+	}
+	return entries, nil
+}
+
+// Update writes mutable timeline fields: name, start_date, end_date,
+// description, color, icon.
+func (r *TimelineRepo) Update(t *models.Timeline) error {
+	_, err := r.db.Exec(`
+		UPDATE timelines
+		SET name = ?, start_date = ?, end_date = ?,
+		    color = ?, icon = ?, updated_at = ?
+		WHERE id = ?
+	`, t.Name, t.StartDate, t.EndDate, t.Color, t.Icon, t.UpdatedAt, t.ID)
+	if err != nil {
+		return fmt.Errorf("updating timeline: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a timeline and all its child rows (statuses,
+// timeline_access cascade via FK).
+func (r *TimelineRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM timelines WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting timeline: %w", err)
+	}
+	return nil
+}

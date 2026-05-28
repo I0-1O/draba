@@ -42,6 +42,10 @@ interface Props {
   sortBy: SortBy;
   granularity: TimeGranularity | 'auto';
   colorBy: ColorBy;
+  /** When true, activities with a closed status are hidden. */
+  hideClosed?: boolean;
+  /** Set of status IDs that are marked is_closed. Used with hideClosed. */
+  closedStatusIds?: Set<string>;
   selectedActivityId?: string | null;
   onSelectActivity?: (id: string | null) => void;
   /** Called when the user drags on an empty lane to create an activity. */
@@ -235,6 +239,8 @@ export default function GanttView({
   sortBy,
   granularity,
   colorBy,
+  hideClosed = false,
+  closedStatusIds,
   selectedActivityId = null,
   onSelectActivity = () => {},
   onLaneDrag,
@@ -317,20 +323,25 @@ export default function GanttView({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [members]);
 
+  const visibleActivities = useMemo(() => {
+    if (!hideClosed || !closedStatusIds?.size) return apiActivities
+    return apiActivities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+  }, [apiActivities, hideClosed, closedStatusIds])
+
   const rows: GanttRow[] = useMemo(() => {
-    const richActivities = apiActivities
+    const richActivities = visibleActivities
       .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
       .filter((a): a is RichActivity => a !== null);
     return buildRows(richActivities, members, groupBy, sortBy);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
 
   // ── Find: compute matches and register with context ───────────────────────
 
   const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, apiActivities, members, apiActivities),
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, apiActivities, members],
+    [debouncedQuery, visibleActivities, members],
   );
 
   const matchedSet = useMemo(

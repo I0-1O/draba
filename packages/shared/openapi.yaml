@@ -663,6 +663,87 @@ components:
         position:
           type: integer
 
+    PatchTimelineInput:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+
+    TimelineAccessEntry:
+      type: object
+      required: [timelineId, teamMemberId, role, displayName, email]
+      properties:
+        timelineId:
+          type: string
+        teamMemberId:
+          type: string
+        role:
+          type: string
+          enum: [admin, member]
+        displayName:
+          type: string
+        email:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        userId:
+          type: string
+          nullable: true
+
+    CreateStatusInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+
+    PatchStatusInput:
+      type: object
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+        position:
+          type: integer
+
+    DeleteStatusInput:
+      type: object
+      properties:
+        replacementStatusId:
+          type: string
+          nullable: true
+          description: Required when activities reference the deleted status.
+
   # ────────────────────────────────────────────────────────────
   # Reusable responses
   # ────────────────────────────────────────────────────────────
@@ -734,6 +815,14 @@ components:
       in: path
       required: true
       description: Timeline ID.
+      schema:
+        type: string
+
+    timelineIdParam:
+      name: timelineId
+      in: path
+      required: true
+      description: Timeline ID (nested path parameter).
       schema:
         type: string
 
@@ -2245,6 +2334,149 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+    patch:
+      operationId: updateTimeline
+      summary: Rename or change dates on a timeline (timeline admin only)
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchTimelineInput"
+      responses:
+        "200":
+          description: Updated timeline.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteTimeline
+      summary: Hard-delete a timeline (team admin only)
+      description: Deletes the timeline and all its statuses. Activities are NOT deleted.
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      responses:
+        "204":
+          description: Timeline deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/access:
+    get:
+      operationId: listTimelineAccess
+      summary: List access grants for a timeline
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdParam"
+      responses:
+        "200":
+          description: List of access grants.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TimelineAccessEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/access/{memberId}:
+    put:
+      operationId: grantTimelineAccess
+      summary: Grant or update a team member's access to a timeline (timeline admin only)
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdParam"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  enum: [admin, member]
+      responses:
+        "200":
+          description: Updated access list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TimelineAccessEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: revokeTimelineAccess
+      summary: Revoke a team member's access to a timeline (timeline admin only)
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdParam"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Access revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # ── Saved Filters ────────────────────────────────────────────
 
   /teams/{id}/saved_filters:
@@ -2790,6 +3022,109 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+    post:
+      operationId: createTimelineStatus
+      summary: Add a status to a timeline (timeline admin only)
+      tags: [statuses]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: timelineId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStatusInput"
+      responses:
+        "201":
+          description: Status created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /statuses/{id}:
+    patch:
+      operationId: updateStatus
+      summary: Rename, recolor, or reorder a timeline status (timeline admin only)
+      tags: [statuses]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchStatusInput"
+      responses:
+        "200":
+          description: Updated status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteStatus
+      summary: Delete a timeline status (timeline admin only)
+      description: Blocked if it is the last status. Requires replacementStatusId if any activities reference the status.
+      tags: [statuses]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteStatusInput"
+      responses:
+        "204":
+          description: Deleted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Last status or activities reference it without a replacement.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /timelines/share/{token}:
     get:

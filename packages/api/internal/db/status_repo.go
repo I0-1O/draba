@@ -256,6 +256,70 @@ func (r *StatusRepo) GetStatus(id string) (*models.Status, error) {
 	return &s, nil
 }
 
+// CreateStatus inserts a new live status for a timeline.
+func (r *StatusRepo) CreateStatus(s *models.Status) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+		VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
+	`, s)
+	if err != nil {
+		return fmt.Errorf("creating status: %w", err)
+	}
+	return nil
+}
+
+// UpdateStatus writes mutable status fields: name, color, icon, is_closed, position.
+func (r *StatusRepo) UpdateStatus(s *models.Status) error {
+	_, err := r.db.NamedExec(`
+		UPDATE statuses
+		SET name = :name, color = :color, icon = :icon,
+		    is_closed = :is_closed, position = :position, updated_at = :updated_at
+		WHERE id = :id
+	`, s)
+	if err != nil {
+		return fmt.Errorf("updating status: %w", err)
+	}
+	return nil
+}
+
+// CountStatuses returns the number of live statuses for a timeline.
+func (r *StatusRepo) CountStatuses(timelineID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM statuses WHERE timeline_id = ?`, timelineID); err != nil {
+		return 0, fmt.Errorf("counting statuses: %w", err)
+	}
+	return n, nil
+}
+
+// CountStatusActivities returns the number of activities that reference a
+// specific status ID. Used to guard status deletion.
+func (r *StatusRepo) CountStatusActivities(statusID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM activities WHERE status_id = ?`, statusID); err != nil {
+		return 0, fmt.Errorf("counting status activities: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteStatus deletes a live status. If replacementStatusID is non-empty,
+// activities pointing at the deleted status are re-pointed to the replacement
+// first. Returns an error if replacementStatusID is empty but activities
+// reference the status.
+func (r *StatusRepo) DeleteStatus(id, replacementStatusID string) error {
+	if replacementStatusID != "" {
+		if _, err := r.db.Exec(
+			`UPDATE activities SET status_id = ? WHERE status_id = ?`,
+			replacementStatusID, id,
+		); err != nil {
+			return fmt.Errorf("re-assigning activities before status delete: %w", err)
+		}
+	}
+	if _, err := r.db.Exec(`DELETE FROM statuses WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("deleting status: %w", err)
+	}
+	return nil
+}
+
 // CopyTemplateToTimeline copies a template's items into live statuses for a timeline.
 // If no template is found for the team it is a silent no-op.
 func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string) error {

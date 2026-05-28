@@ -31,15 +31,29 @@ interface ApiTeam {
   archivedAt?: string | null;
 }
 
+interface ApiTimeline {
+  id: string;
+  name: string;
+  startDate?: string;
+  endDate?: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+}
+
 interface Props {
   collapsed: boolean;
   onToggle: () => void;
   onActiveColorChange?: (color: string) => void;
   onActiveNameChange?: (name: string) => void;
   onNewActivity?: () => void;
-  apiTimelines?: Array<{ id: string; name: string; startDate?: string; endDate?: string }>;
+  apiTimelines?: ApiTimeline[];
+  archivedTimelines?: ApiTimeline[];
   activeTimelineId?: string;
   onActiveTimelineChange?: (id: string) => void;
+  onNewTimeline?: () => void;
+  onEditTimeline?: (timelineId: string) => void;
+  onUnarchiveTimeline?: (timelineId: string) => void;
   // Team management
   activeTeam?: ApiTeam;
   /** All non-archived teams. Used to render the switchable team list. */
@@ -403,7 +417,7 @@ function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit
  */
 const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
 
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, onUnarchiveTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
   const { user } = useAuth();
   const currentUserId = (user as { id?: string } | null)?.id;
   const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
@@ -419,12 +433,21 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
     ? apiTimelines.map((t, i) => ({
         id: t.id,
         name: t.name,
-        color: TIMELINE_COLORS[i % TIMELINE_COLORS.length],
+        color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
         icon: <LineChart {...ICON_SM} />,
         startDate: t.startDate,
         endDate: t.endDate,
       }))
     : DEMO_TIMELINES
+
+  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t, i) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? '#64748B',
+    icon: <LineChart {...ICON_SM} />,
+    startDate: t.startDate,
+    endDate: t.endDate,
+  }))
   const activeId = activeTimelineId ?? internalActiveId
   const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0];
 
@@ -778,10 +801,11 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                   active={activeId === tl.id}
                   collapsed={false}
                   onClick={() => { setInternalActiveId(tl.id); onActiveColorChange?.(tl.color); onActiveNameChange?.(tl.name); onActiveTimelineChange?.(tl.id); }}
-                  onSettings={() => {}}
+                  onSettings={() => onEditTimeline?.(tl.id)}
                 />
               ))}
               <button
+                onClick={onNewTimeline}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -791,7 +815,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                   border: 'none',
                   color: 'rgba(255,255,255,0.35)',
                   fontSize: 12,
-                  cursor: 'pointer',
+                  cursor: onNewTimeline ? 'pointer' : 'default',
                   width: '100%',
                   fontFamily: 'var(--font-sans)',
                   marginTop: 2,
@@ -804,40 +828,59 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
               </button>
 
               {/* Archived sub-section */}
-              <button
-                onClick={() => setArchivedOpen(o => !o)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 5,
-                  width: '100%', padding: '6px 12px 4px 16px',
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                  marginTop: 4,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-              >
-                {archivedOpen
-                  ? <ChevronDown {...ICON_XS} />
-                  : <ChevronRight {...ICON_XS} />}
-                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Archived
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4 }}>({DEMO_ARCHIVED.length})</span>
-              </button>
+              {(archivedTimelineItems.length > 0 || apiTimelines?.length) && (
+                <>
+                  <button
+                    onClick={() => setArchivedOpen(o => !o)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 5,
+                      width: '100%', padding: '6px 12px 4px 16px',
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                      marginTop: 4,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                  >
+                    {archivedOpen
+                      ? <ChevronDown {...ICON_XS} />
+                      : <ChevronRight {...ICON_XS} />}
+                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                      Archived
+                    </span>
+                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
+                  </button>
 
-              {archivedOpen && (
-                <div style={{ opacity: 0.5 }}>
-                  {DEMO_ARCHIVED.map(tl => (
-                    <TimelineItem
-                      key={tl.id}
-                      timeline={tl}
-                      active={false}
-                      collapsed={false}
-                      onClick={() => {}}
-                      onSettings={() => {}}
-                    />
-                  ))}
-                </div>
+                  {archivedOpen && (
+                    <div style={{ opacity: 0.6 }}>
+                      {archivedTimelineItems.map(tl => (
+                        <div key={tl.id} style={{ position: 'relative' }}>
+                          <TimelineItem
+                            timeline={tl}
+                            active={false}
+                            collapsed={false}
+                            onClick={() => {}}
+                            onSettings={() => {}}
+                          />
+                          {onUnarchiveTimeline && (
+                            <button
+                              onClick={() => onUnarchiveTimeline(tl.id)}
+                              title="Unarchive"
+                              style={{
+                                position: 'absolute', right: 30, top: '50%', transform: 'translateY(-50%)',
+                                fontSize: 9, padding: '1px 5px', border: '1px solid rgba(255,255,255,0.2)',
+                                borderRadius: 3, background: 'none', color: 'rgba(255,255,255,0.5)',
+                                cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                              }}
+                            >
+                              Restore
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </>
           ) : (

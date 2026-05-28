@@ -13,6 +13,7 @@ import MemberAvatar from '@/components/MemberAvatar'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import type { Identity } from '@/components/identity/identity-constants'
 import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
 
@@ -25,6 +26,7 @@ interface Props {
   open: boolean
   members: Member[]
   teamId: string
+  timelineId?: string
   onClose: () => void
 }
 
@@ -85,9 +87,10 @@ const INPUT: React.CSSProperties = {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function ActivityDetailPanel({ event, open, members, teamId, onClose }: Props) {
+export default function ActivityDetailPanel({ event, open, members, teamId, timelineId, onClose }: Props) {
   const updateMutation = useUpdateActivity(teamId)
   const deleteMutation = useDeleteActivity(teamId)
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId ?? '')
 
   const [title, setTitle] = useState(event?.title ?? '')
   const [description, setDescription] = useState(event?.description ?? '')
@@ -318,19 +321,31 @@ export default function ActivityDetailPanel({ event, open, members, teamId, onCl
           <div style={{ marginBottom: 12 }}>
             <div style={SEC_LABEL}>Classify</div>
 
-            {/* Status stub */}
+            {/* Status picker */}
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
               <span style={FIELD_LABEL}>Status</span>
-              <div style={{ ...STUB_VALUE }}>
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 100,
-                  border: '1px solid var(--border)', lineHeight: 1.5,
-                  display: 'flex', alignItems: 'center', gap: 3,
-                }}>
-                  Planned <ChevronDown size={10} strokeWidth={2} />
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>Phase 10</span>
-              </div>
+              {statuses.length > 0 ? (
+                <div style={{ flex: 1 }}>
+                  <select
+                    value={event?.statusId ?? ''}
+                    onChange={e => save({ statusId: e.target.value || null } as Parameters<typeof save>[0])}
+                    style={{
+                      fontSize: 12, padding: '3px 8px', border: '1px solid var(--border)',
+                      borderRadius: 6, background: 'var(--background)', color: 'var(--foreground)',
+                      cursor: 'pointer', width: '100%',
+                    }}
+                  >
+                    <option value="">— No status —</option>
+                    {statuses.map(s => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div style={{ ...STUB_VALUE }}>
+                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
+                </div>
+              )}
             </div>
 
             {/* Tags stub */}

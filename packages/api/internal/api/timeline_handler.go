@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/I0-1O/draba/packages/api/internal/events"
@@ -212,6 +213,262 @@ func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, arch
 
 	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
 	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleUpdateTimeline handles PATCH /timelines/{id}. Only a team admin or a
+// member with timeline_access role='admin' may rename or change dates.
+func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	var req PatchTimelineJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		timeline.Name = name
+	}
+	if req.StartDate != nil {
+		timeline.StartDate = *req.StartDate
+	}
+	if req.EndDate != nil {
+		timeline.EndDate = *req.EndDate
+	}
+	if req.Color != nil {
+		timeline.Color = req.Color
+	}
+	if req.Icon != nil {
+		timeline.Icon = req.Icon
+	}
+	timeline.UpdatedAt = time.Now().UTC()
+
+	if err := s.timelines.Update(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleDeleteTimeline handles DELETE /timelines/{id}. Hard-deletes the
+// timeline; only a team admin may delete. Cascades to statuses and
+// timeline_access via foreign key.
+func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	if err := s.timelines.Delete(timelineID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListTimelineAccess handles GET /teams/{id}/timelines/{timelineId}/access.
+// Team members may list the access grants for any timeline they can view.
+func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+
+	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleGrantTimelineAccess handles PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may manage the access list.
+func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	// Verify the target member belongs to the same team.
+	if _, err := s.teams.GetMemberByID(targetMemberID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	var req GrantTimelineAccessJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Role != "admin" && req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	if err := s.timelines.GrantAccess(timelineID, targetMemberID, req.Role); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleRevokeTimelineAccess handles DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may revoke access.
+func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	if err := s.timelines.RevokeAccess(timelineID, targetMemberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// canAdminTimeline reports whether a team member may perform admin operations
+// on a timeline. Team admins always pass; members must hold timeline_access
+// with role='admin'.
+func (s *Server) canAdminTimeline(member *models.TeamMember, timelineID string) bool {
+	if member.Role == "admin" {
+		return true
+	}
+	role, err := s.timelines.GetAccessRole(timelineID, member.ID)
+	if err != nil {
+		return false
+	}
+	return role == "admin"
 }
 
 // handleGetTimelineByShareToken handles GET /timelines/share/{token}. No

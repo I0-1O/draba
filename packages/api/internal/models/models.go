@@ -271,6 +271,19 @@ type Status struct {
 	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
 }
 
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
 // Invite is a single-use token that grants an email address the right to
 // join a Team. AcceptedAt is non-nil once consumed; expired or accepted
 // invites are rejected by the registration handler.

@@ -21,15 +21,18 @@ import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/u
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
 import { Badge } from '@/components/identity/Badge'
 import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamActivitySync, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities'
+import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
 import TeamModal from '@/components/TeamModal'
 import MemberModal from '@/components/MemberModal'
+import TimelineModal from '@/components/TimelineModal'
 import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
 
 type ApiActivity = components['schemas']['Activity']
 type ApiTeam = components['schemas']['Team']
+type ApiTimeline = components['schemas']['Timeline']
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
 
 const DROPDOWN_BTN: React.CSSProperties = {
@@ -118,6 +121,14 @@ function DashboardShell() {
   // Member modal state
   const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
 
+  // Timeline modal state
+  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
+  const unarchiveTimeline = useUnarchiveTimeline(teamId)
+
+  // Hide-closed-statuses toggle (GanttToolbar → GanttView filter)
+  const [hideClosed, setHideClosed] = useState(false)
+
   // Fetch all teams including archived for the sidebar's archived section.
   const { data: allTeams = [] } = useMyTeams(true)
   const activeTeams = allTeams.filter(t => !t.archivedAt)
@@ -148,6 +159,9 @@ function DashboardShell() {
   }, [])
 
   const { data: timelines = [] } = useTeamTimelines(teamId)
+  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
+  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
+  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
   const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
   // Initialize activeTimelineId from the saved global pref (selected_timeline),
   // falling back to timelines[0] when no pref is stored or the saved timeline
@@ -233,8 +247,16 @@ function DashboardShell() {
         onActiveColorChange={setActiveTimelineColor}
         onActiveNameChange={setActiveTimelineName}
         apiTimelines={timelines}
+        archivedTimelines={archivedTimelines}
         activeTimelineId={activeTimelineId}
         onActiveTimelineChange={handleTimelineChange}
+        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
+        onEditTimeline={id => {
+          const tl = allTimelines.find(t => t.id === id)
+          setEditingTimeline(tl ?? null)
+          setTimelineModalMode('edit')
+        }}
+        onUnarchiveTimeline={id => unarchiveTimeline.mutate(id)}
         onNewActivity={() => {
           const today = new Date().toISOString().slice(0, 10)
           setSelectedActivityId(null)
@@ -337,6 +359,8 @@ function DashboardShell() {
             onGranularityChange={setGranularity}
             colorBy={colorBy}
             onColorByChange={setColorBy}
+            hideClosed={hideClosed}
+            onHideClosedChange={activeTimelineStatuses.some(s => s.isClosed) ? setHideClosed : undefined}
             onExport={() => {}}
             onShare={() => {}}
           />
@@ -353,6 +377,8 @@ function DashboardShell() {
               sortBy={sortBy}
               granularity={granularity}
               colorBy={colorBy}
+              hideClosed={hideClosed}
+              closedStatusIds={new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))}
               selectedActivityId={selectedActivityId}
               onSelectActivity={(id) => {
                 setSelectedActivityId(id)
@@ -385,6 +411,7 @@ function DashboardShell() {
         event={selectedApiActivity}
         members={ganttMembers}
         teamId={teamId}
+        timelineId={activeTimelineId}
         onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null) }}
       />
 
@@ -428,6 +455,19 @@ function DashboardShell() {
           isAdmin={canEditTeam}
           isSuperadmin={isSuperadmin}
           onClose={() => setEditingMember(null)}
+        />
+      )}
+
+      {/* Timeline modal — create or edit */}
+      {timelineModalMode && (
+        <TimelineModal
+          mode={timelineModalMode}
+          teamId={teamId}
+          timeline={editingTimeline ?? undefined}
+          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
+          onCreated={created => {
+            setActiveTimelineId(created.id)
+          }}
         />
       )}
     </div>

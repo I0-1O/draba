@@ -38,8 +38,8 @@ This document organizes development into discrete phases with effort estimates a
 | 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
 | 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | 🔄 |
 | 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | 🔄 |
-| 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | 🔄 In Progress |
-| 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | ⬜ |
+| 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | ✅ |
+| 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | 🔄 |
 | 10.4 | [Preference Consumption, Branding & Backup](#phase-104--preference-consumption-branding--backup-admin) | S — 1 day | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
@@ -847,7 +847,7 @@ Hard-delete of a `team_members` row is only ever permitted when the member has z
 ---
 
 ### Phase 10.2 — Status Templates & Timeline Statuses
-**Status:** 🔄 In Progress — 2026-05-27, all automated checks pass; manual Docker verification still needed | **Effort:** M (2–3 days)
+**Status:** ✅ Done — 2026-05-27 | **Effort:** M (2–3 days)
 
 Statuses represent phases for an activity (e.g., Planned → In Progress → Done). They are **timeline-scoped** — each timeline has its own set. To reduce setup friction, teams maintain **status templates** (reusable presets). When a timeline is created, a template's items are copied into timeline-specific status rows; from that point the timeline's statuses are independent of the template. Activities default to null status (no auto-assignment). Required before Phase 11.3 (Kanban) so admins can configure columns.
 
@@ -896,7 +896,7 @@ Statuses represent phases for an activity (e.g., Planned → In Progress → Don
 ---
 
 ### Phase 10.3 — Timelines — Full CRUD (API + UI)
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** 🔄 In Progress — 2026-05-27, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
 
 Closes the Timelines cornerstone. Same problem space as 10.1: today timelines can be created in the wizard and never managed afterward, and access lists exist in the schema (Phase 8.0) with no CRUD endpoints. Also wires the status system from 10.2 into the timeline and activity UIs.
 

@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short._
 
-**Last updated:** 2026-05-27 (post-review fixes)
+**Last updated:** 2026-05-27 (Phase 10.3 implemented)
 
 ---
 
@@ -15,18 +15,40 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.1.2 | Members Management | ✅ | ⬜ needs Docker verification |
 | 10.1.3 | Settings — Profile, Tokens & Admin | ✅ | ⬜ needs Docker verification |
 | 10.1.4 | Member Access & Data Lifecycle | ✅ | ⬜ needs Docker verification |
-| 10.2 | Status Templates & Timeline Statuses | ✅ | ⬜ needs Docker verification |
+| 10.2 | Status Templates & Timeline Statuses | ✅ | ✅ Docker verified |
+| 10.3 | Timelines — Full CRUD (API + UI) | ✅ | ⬜ needs Docker verification |
 
-Next phase to build: **10.3** — Timelines — Full CRUD (API + UI).
+Next phase to build: **10.4** — Preference Consumption, Branding & Backup.
 
 ---
 
-## Phase 10.2 Implemented (2026-05-27 — not yet Docker-verified)
+## Phase 10.3 — Timelines Full CRUD (2026-05-27 — not yet Docker-verified)
+
+**Backend:**
+- `PATCH /timelines/{id}` — rename, date range, color, icon; `canAdminTimeline` checks team admin or per-timeline access role='admin'
+- `DELETE /timelines/{id}` — hard delete (team admin only); cascades to statuses and timeline_access
+- `GET/PUT/DELETE /teams/{id}/timelines/{timelineId}/access` — access list CRUD (team-scoped prefix to avoid Go 1.22 mux conflict with `GET /timelines/share/{token}`)
+- `POST /teams/{id}/timelines/{timelineId}/statuses`, `PATCH /statuses/{id}`, `DELETE /statuses/{id}` — live timeline status editing; delete guards last status and prompts for replacement when activities reference it
+- `TimelineStore` interface: added `Update`, `Delete`, `ListAccess`, `GetAccessRole`, `RevokeAccess`
+- `TimelineAccessEntry` model added; `StatusRepo` additions: `CreateStatus`, `UpdateStatus`, `DeleteStatus`, `CountStatuses`, `CountStatusActivities`
+- OpenAPI: `PatchTimelineInput`, `TimelineAccessEntry`, `CreateStatusInput`, `PatchStatusInput`, `DeleteStatusInput`; TypeScript types regenerated
+
+**Frontend:**
+- `TimelineModal.tsx` — create/edit modal (Settings + Statuses + Access tabs); archive + delete confirmation dialogs
+- `Sidebar.tsx` — real archived timelines from API; New timeline wired; settings gear wired to edit modal
+- `ActivityDetailPanel.tsx` — status dropdown replaces stub; reads `useTimelineStatuses`
+- `GanttToolbar.tsx` — Hide closed toggle (shown when timeline has at least one closed status)
+- `GanttView.tsx` — filters out closed-status activities when `hideClosed` is true
+- Hooks: `useCreateTimeline`, `useUpdateTimeline`, `useDeleteTimeline`, `useArchiveTimeline`, `useUnarchiveTimeline`, `useTimelineAccess`, `useGrantTimelineAccess`, `useRevokeTimelineAccess`, `useCreateTimelineStatus`, `useUpdateTimelineStatus`, `useDeleteTimelineStatus`
+
+---
+
+## Phase 10.2 — Status Templates & Timeline Statuses (✅ Done — 2026-05-27)
 
 **Backend:**
 - Migration 012: replaced `team_statuses` with `status_templates` + `status_template_items` + `statuses`; rebuilt `activities` table so `status_id` references `statuses(id) ON DELETE SET NULL`
 - New `StatusRepo` with full CRUD + `SeedDefaultTemplate` + `CopyTemplateToTimeline`
-- `handleCreateTeam` seeds "Simple" template (Planned / In Progress / Done, Done is `is_closed`)
+- `handleCreateTeam` seeds "Default" template (Planning / In Progress / Complete, Complete is `is_closed`)
 - `handleCreateTimeline` copies team's first template into live `statuses` rows
 - Endpoints: `GET/POST /teams/{id}/status-templates`, `PATCH/DELETE /status-templates/{id}`, `POST /status-templates/{id}/items`, `PATCH/DELETE /status-template-items/{id}`, `GET /teams/{id}/timelines/{timelineId}/statuses`
 - Note: statuses endpoint is team-scoped (not `/timelines/{id}/statuses`) to avoid Go 1.22 mux conflict with `/timelines/share/{token}`
@@ -147,17 +169,6 @@ These were found during manual testing of 10.1.2 and fixed 2026-05-25:
 - **repomap.md usage:** Use Grep on it for targeted symbol lookups; do not read it wholesale (1.3 MB, exceeds Read tool limit).
 
 ---
-
-## Manual Verification Checklist for 10.2 (against epcot.lan:8081)
-
-- [ ] Open TeamModal for a new team → create it → switch to "Status Templates" tab → "Simple" template shows with Planned / In Progress / Done items
-- [ ] Click an item name to edit inline → change name/color → save → persists
-- [ ] Toggle is_closed on an item → save → persists
-- [ ] Add a new item to a template → appears in list
-- [ ] Delete a non-last item → success; attempt to delete last item → error message "Cannot delete the last item"
-- [ ] Create a second template → appears in list; delete it → success; delete remaining template → error "Cannot delete the last template"
-- [ ] Create a new timeline → `GET /teams/{id}/timelines/{timelineId}/statuses` returns 3 statuses matching Simple template
-- [ ] Existing timelines (created before migration 012) show empty statuses list (no statuses copied retroactively)
 
 ## Manual Verification Checklist for 10.1.4 (against epcot.lan:8081)
 
