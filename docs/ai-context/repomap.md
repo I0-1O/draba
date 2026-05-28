@@ -1323,231 +1323,6 @@ Used by `/review-phase` (and human reviewers) when evaluating the diff for a com
 `/review-phase` should report findings as a table grouped by severity: **blocker / suggestion / nit**. Each finding cites a `file:line` and a one-line rationale. Empty categories are omitted.
 ````
 
-## File: docs/TESTING.md
-````markdown
-# Testing & Review Procedures
-
-This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
-
-For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
-
----
-
-## Test environment setup (manual, do once per host)
-
-These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
-
-### Step 1 — One-time host prep (manual)
-On the docker host, as the `draba-test` user (created in the SSH setup steps below):
-
-1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
-2. Create `~/.draba-test.env` (chmod 600) with:
-   ```
-   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
-   DRABA_TEST_ADMIN_EMAIL=test-admin@local
-   DRABA_TEST_INVITE_EMAIL=invitee@local
-   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
-   DRABA_CONTAINER=draba
-   ```
-   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
-   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
-
-### Step 2 — Per-run reset (manual or SSH-driven)
-Before each `/test-phase` run that needs a clean DB, run on the docker host:
-```bash
-./scripts/reset-test-env.sh
-```
-This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
-
-### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
-On the machine where you run Claude (this Windows box):
-- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
-- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
-- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
-
-### What's manual vs automated, at a glance
-
-| Step | Where it runs | Who does it |
-|---|---|---|
-| Host prep (Step 1) | Docker host | **You, once** |
-| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
-| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
-| API smoke against live container | Dev box → live container | Claude |
-| Logging the run to `docs/log.md` | Dev box | Claude |
-
----
-
-## Global procedures
-
-These run regardless of phase.
-
-### Static checks
-- `cd packages/api && golangci-lint run`
-- `cd packages/api && go vet ./...`
-- `pnpm --filter web lint`
-- `pnpm --filter web build`
-
-### Unit & integration
-- `cd packages/api && go test -count=1 ./...`
-- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
-
-### Live smoke target
-Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
-1. `DRABA_TEST_URL` environment variable, if set.
-2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
-3. If neither is available, the subagent reports **skipped**, not failed.
-
-### Review checklist (always)
-- CONVENTIONS.md compliance
-- No scope creep beyond the phase's ROADMAP entry
-- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
-- No secrets, no `.env` files, no host-specific values committed
-- Migrations idempotent (re-run produces no diff)
-- `docs/log.md` updated with a dated entry
-
----
-
-## Subagent map
-
-| Subagent | Scope | Active from |
-|---|---|---|
-| `static-check` | lint + vet + web typecheck/build | Phase 1 |
-| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
-| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
-| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
-| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
-| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
-| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
-| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
-
----
-
-## Per-phase procedures
-
-### Phase 1 — Project Infrastructure
-
-**static-check**
-- `go build ./...` from `packages/api/` succeeds with no errors
-- `pnpm build` from `packages/web/` succeeds
-- `golangci-lint run` is clean
-- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
-
-### Phase 2 — API Foundation (DB & Auth)
-
-**unit-test**
-- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
-- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
-  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
-  - `Validate` rejects a token signed with a different secret (tampered signature)
-  - `Validate` rejects an expired token
-  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
-  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
-  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
-- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
-  - `GetValid` returns `sql.ErrNoRows` for an expired invite
-  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
-
-**schema-check**
-- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
-- Restart the container; assert migration runner produces no schema changes (idempotency)
-
-**api-smoke** (against `$DRABA_TEST_URL`)
-- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
-- `POST /auth/register` with an invalid/missing invite token → 4xx
-- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
-- `POST /auth/login` with the registered credentials → 200, returns JWT
-- `POST /auth/login` with a non-existent email → 401
-- `POST /auth/login` with bad credentials → 401
-- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
-- `POST /auth/refresh` with an access token (wrong type) → 401
-- `POST /auth/refresh` with a token signed by a different secret → 401
-- A subsequent authenticated request with the issued JWT → 200 (validates signing)
-
-**security-review**
-- No password fields stored in plaintext (grep migrations + handlers)
-- JWT secret loaded from env/config, not hardcoded
-- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
-- No SQL string concatenation in queries
-
-### Phase 3 — Core API (Events & Teams)
-
-**api-smoke**
-- `POST /teams` → returns team (201 Created)
-- `GET /teams/:id` with member token → 200 OK, returns team
-- `GET /teams/:id` with non-member token → 403 Forbidden
-- `POST /teams/:id/invites` → returns invite token (201 Created)
-- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
-- `POST /teams/:id/events`, then `GET /teams/:id/events?from=…&to=…` returns it (200 OK)
-- `PATCH /events/:id` updates fields (200 OK); `DELETE /events/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
-- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
-- Authz: a user not on the team cannot read or mutate that team's events (403 Forbidden)
-- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
-
-**security-review**
-- Every new route requires auth middleware
-- Team membership enforced on every team-scoped endpoint
-
-### Phase 4 — OpenAPI Spec & Type Generation
-
-**type-sync**
-- `pnpm generate` succeeds with no errors
-- `git diff` after generate is empty (committed types match spec)
-- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
-
-### Phase 5 — Real-Time (WebSocket)
-
-**unit-test**
-- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
-- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
-- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
-
-**ws-smoke**
-- Two clients on team A both receive a delta within 500ms of an event mutation
-- A client on team B does not receive team A's events
-- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
-  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
-
-### Phase 6 — Timelines
-
-**unit-test**
-- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
-  - Grant access then revoke; `HasAccess` returns false after revoke
-  - Revoking access that was never granted is a no-op (no error)
-- `timeline_repo.ListByTeam` — unit test needed:
-  - Returns all non-archived timelines for a team in descending creation order
-  - Returns empty slice (not error) when team has no timelines
-
-**api-smoke**
-- `POST /teams/:id/timelines` with JWT → 201 Created
-- `GET /timelines/:id` with JWT (user on access list) → 200 OK
-- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
-- `GET /timelines/share/:token` → 200 OK without requiring auth
-
-### Phase 7 — Web — Scaffold
-
-**web-e2e**
-- Navigating to protected routes unauthenticated redirects to `/login`
-- Successful login redirects to the main app view and stores the token
-- TanStack Query successfully fetches team/event data from the API
-- WebSocket client successfully connects and maintains a heartbeat
-
-**Known gap — frontend component unit tests**
-No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
-
-### Phase 8+ — Web
-
-*Stubs.* Detailed assertions added when each phase begins.
-
----
-
-## Adding tests for a new phase
-
-1. Find the phase's section in this file (or add one if missing).
-2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
-3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
-4. That's it — `/test-phase` will pick it up on the next run.
-````
-
 ## File: packages/api/cmd/draba/reset_password.go
 ````go
 package main
@@ -3024,6 +2799,56 @@ DRABA_BASE_URL=                 # public URL of the server (used for OAuth callb
 ## Conventions
 See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
 See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
+````
+
+## File: packages/api/Dockerfile
+````
+# ── Web builder ──
+FROM node:22-alpine AS web-builder
+RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /workspace
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/web/package.json packages/web/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install --frozen-lockfile
+COPY packages/web packages/web
+COPY packages/shared packages/shared
+RUN pnpm --filter @draba/web build
+
+# ── Go dependency cache ──
+FROM golang:1.25-alpine AS go-deps
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+
+# ── Production builder — embeds web dist into the Go binary ──
+FROM go-deps AS builder
+COPY packages/api/ .
+COPY --from=web-builder /workspace/packages/web/dist ./ui/static
+RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
+
+# ── Dev stage (used by docker-compose for hot reload) ──
+# Source is provided by the docker-compose volume mount, not baked in here —
+# baking it in caused Air to see a spurious "change" on first mount and restart.
+FROM golang:1.25-alpine AS dev
+RUN go install github.com/air-verse/air@latest
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+CMD ["air", "-c", ".air.toml"]
+
+# ── Production stage ──
+FROM alpine:3.21 AS prod
+RUN apk add --no-cache ca-certificates \
+    && addgroup -g 1000 draba \
+    && adduser -u 1000 -G draba -s /bin/sh -D draba \
+    && mkdir -p /data \
+    && chown draba:draba /data
+COPY --from=builder /draba /usr/local/bin/draba
+WORKDIR /data
+USER draba
+EXPOSE 8080
+CMD ["draba"]
 ````
 
 ## File: packages/api/go.mod
@@ -9498,6 +9323,231 @@ ALTER TABLE activity_assignments RENAME TO event_assignments;
 **Take a DB backup before applying migration 005.** This is the one irreversible step if you don't have a backup.
 ````
 
+## File: docs/TESTING.md
+````markdown
+# Testing & Review Procedures
+
+This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
+
+For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
+
+---
+
+## Test environment setup (manual, do once per host)
+
+These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
+
+### Step 1 — One-time host prep (manual)
+On the docker host, as the `draba-test` user (created in the SSH setup steps below):
+
+1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
+2. Create `~/.draba-test.env` (chmod 600) with:
+   ```
+   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
+   DRABA_TEST_ADMIN_EMAIL=test-admin@local
+   DRABA_TEST_INVITE_EMAIL=invitee@local
+   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
+   DRABA_CONTAINER=draba
+   ```
+   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
+   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
+
+### Step 2 — Per-run reset (manual or SSH-driven)
+Before each `/test-phase` run that needs a clean DB, run on the docker host:
+```bash
+./scripts/reset-test-env.sh
+```
+This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
+
+### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
+On the machine where you run Claude (this Windows box):
+- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
+- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
+- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
+
+### What's manual vs automated, at a glance
+
+| Step | Where it runs | Who does it |
+|---|---|---|
+| Host prep (Step 1) | Docker host | **You, once** |
+| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
+| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
+| API smoke against live container | Dev box → live container | Claude |
+| Logging the run to `docs/log.md` | Dev box | Claude |
+
+---
+
+## Global procedures
+
+These run regardless of phase.
+
+### Static checks
+- `cd packages/api && golangci-lint run`
+- `cd packages/api && go vet ./...`
+- `pnpm --filter web lint`
+- `pnpm --filter web build`
+
+### Unit & integration
+- `cd packages/api && go test -count=1 ./...`
+- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
+
+### Live smoke target
+Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
+1. `DRABA_TEST_URL` environment variable, if set.
+2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
+3. If neither is available, the subagent reports **skipped**, not failed.
+
+### Review checklist (always)
+- CONVENTIONS.md compliance
+- No scope creep beyond the phase's ROADMAP entry
+- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
+- No secrets, no `.env` files, no host-specific values committed
+- Migrations idempotent (re-run produces no diff)
+- `docs/log.md` updated with a dated entry
+
+---
+
+## Subagent map
+
+| Subagent | Scope | Active from |
+|---|---|---|
+| `static-check` | lint + vet + web typecheck/build | Phase 1 |
+| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
+| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
+| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
+| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
+| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
+| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
+| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
+
+---
+
+## Per-phase procedures
+
+### Phase 1 — Project Infrastructure
+
+**static-check**
+- `go build ./...` from `packages/api/` succeeds with no errors
+- `pnpm build` from `packages/web/` succeeds
+- `golangci-lint run` is clean
+- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
+
+### Phase 2 — API Foundation (DB & Auth)
+
+**unit-test**
+- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
+- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
+  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
+  - `Validate` rejects a token signed with a different secret (tampered signature)
+  - `Validate` rejects an expired token
+  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
+  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
+  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
+- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
+  - `GetValid` returns `sql.ErrNoRows` for an expired invite
+  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
+
+**schema-check**
+- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
+- Restart the container; assert migration runner produces no schema changes (idempotency)
+
+**api-smoke** (against `$DRABA_TEST_URL`)
+- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
+- `POST /auth/register` with an invalid/missing invite token → 4xx
+- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
+- `POST /auth/login` with the registered credentials → 200, returns JWT
+- `POST /auth/login` with a non-existent email → 401
+- `POST /auth/login` with bad credentials → 401
+- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
+- `POST /auth/refresh` with an access token (wrong type) → 401
+- `POST /auth/refresh` with a token signed by a different secret → 401
+- A subsequent authenticated request with the issued JWT → 200 (validates signing)
+
+**security-review**
+- No password fields stored in plaintext (grep migrations + handlers)
+- JWT secret loaded from env/config, not hardcoded
+- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
+- No SQL string concatenation in queries
+
+### Phase 3 — Core API (Events & Teams)
+
+**api-smoke**
+- `POST /teams` → returns team (201 Created)
+- `GET /teams/:id` with member token → 200 OK, returns team
+- `GET /teams/:id` with non-member token → 403 Forbidden
+- `POST /teams/:id/invites` → returns invite token (201 Created)
+- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
+- `POST /teams/:id/activities` (body: `name`, `startAt`, `endAt` as RFC3339), then `GET /teams/:id/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
+- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
+- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
+- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
+- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
+
+**security-review**
+- Every new route requires auth middleware
+- Team membership enforced on every team-scoped endpoint
+
+### Phase 4 — OpenAPI Spec & Type Generation
+
+**type-sync**
+- `pnpm generate` succeeds with no errors
+- `git diff` after generate is empty (committed types match spec)
+- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
+
+### Phase 5 — Real-Time (WebSocket)
+
+**unit-test**
+- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
+- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
+- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
+
+**ws-smoke**
+- Two clients on team A both receive a delta within 500ms of an event mutation
+- A client on team B does not receive team A's events
+- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
+  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
+
+### Phase 6 — Timelines
+
+**unit-test**
+- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
+  - Grant access then revoke; `HasAccess` returns false after revoke
+  - Revoking access that was never granted is a no-op (no error)
+- `timeline_repo.ListByTeam` — unit test needed:
+  - Returns all non-archived timelines for a team in descending creation order
+  - Returns empty slice (not error) when team has no timelines
+
+**api-smoke**
+- `POST /teams/:id/timelines` with JWT → 201 Created
+- `GET /timelines/:id` with JWT (user on access list) → 200 OK
+- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
+- `GET /timelines/share/:token` → 200 OK without requiring auth
+
+### Phase 7 — Web — Scaffold
+
+**web-e2e**
+- Navigating to protected routes unauthenticated redirects to `/login`
+- Successful login redirects to the main app view and stores the token
+- TanStack Query successfully fetches team/event data from the API
+- WebSocket client successfully connects and maintains a heartbeat
+
+**Known gap — frontend component unit tests**
+No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
+
+### Phase 8+ — Web
+
+*Stubs.* Detailed assertions added when each phase begins.
+
+---
+
+## Adding tests for a new phase
+
+1. Find the phase's section in this file (or add one if missing).
+2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
+3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
+4. That's it — `/test-phase` will pick it up on the next run.
+````
+
 ## File: packages/api/internal/api/activity_handler.go
 ````go
 package api
@@ -11118,56 +11168,6 @@ func (r *UserPreferenceRepo) Upsert(p *models.UserPreference) error {
 	}
 	return nil
 }
-````
-
-## File: packages/api/Dockerfile
-````
-# ── Web builder ──
-FROM node:22-alpine AS web-builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
-WORKDIR /workspace
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/web/package.json packages/web/
-COPY packages/shared/package.json packages/shared/
-RUN pnpm install --frozen-lockfile
-COPY packages/web packages/web
-COPY packages/shared packages/shared
-RUN pnpm --filter @draba/web build
-
-# ── Go dependency cache ──
-FROM golang:1.25-alpine AS go-deps
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-
-# ── Production builder — embeds web dist into the Go binary ──
-FROM go-deps AS builder
-COPY packages/api/ .
-COPY --from=web-builder /workspace/packages/web/dist ./ui/static
-RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
-
-# ── Dev stage (used by docker-compose for hot reload) ──
-# Source is provided by the docker-compose volume mount, not baked in here —
-# baking it in caused Air to see a spurious "change" on first mount and restart.
-FROM golang:1.25-alpine AS dev
-RUN go install github.com/air-verse/air@latest
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-CMD ["air", "-c", ".air.toml"]
-
-# ── Production stage ──
-FROM alpine:3.21 AS prod
-RUN apk add --no-cache ca-certificates \
-    && addgroup -g 1000 draba \
-    && adduser -u 1000 -G draba -s /bin/sh -D draba \
-    && mkdir -p /data \
-    && chown draba:draba /data
-COPY --from=builder /draba /usr/local/bin/draba
-WORKDIR /data
-USER draba
-EXPOSE 8080
-CMD ["draba"]
 ````
 
 ## File: packages/shared/CLAUDE.md
@@ -15348,6 +15348,167 @@ export default function MemberAvatar({ member, size = 28, className }: Props) {
 }
 ````
 
+## File: packages/web/src/contexts/AuthContext.tsx
+````typescript
+/**
+ * Auth context: current user + access token in memory, refresh token in localStorage.
+ *
+ * Provides login, logout, and register actions so any component can
+ * authenticate without knowing about token storage details.
+ */
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import type { components } from '@draba/shared'
+import {
+  API_BASE,
+  ApiError,
+  clearStoredRefreshToken,
+  getStoredRefreshToken,
+  storeRefreshToken,
+} from '@/lib/api'
+
+type User = components['schemas']['User']
+type AuthResponse = components['schemas']['AuthResponse']
+type RefreshResponse = components['schemas']['RefreshResponse']
+
+interface AuthState {
+  user: User | null
+  accessToken: string | null
+  /** True while checking the stored refresh token on initial mount. */
+  initializing: boolean
+}
+
+interface AuthContextValue extends AuthState {
+  getAccessToken: () => string | null
+  login: (email: string, password: string) => Promise<void>
+  /** Registers a new account and returns the fresh access token directly,
+   *  avoiding a race against the async setState that follows. */
+  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
+  logout: () => void
+  /** Merges fields into the current user object — used after profile updates. */
+  patchUser: (patch: Partial<User>) => void
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null)
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    const err = data as { error: { code: string; message: string } }
+    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
+  }
+  return data as T
+}
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [state, setState] = useState<AuthState>({
+    user: null,
+    accessToken: null,
+    initializing: true,
+  })
+
+  // Stable ref so callbacks never capture a stale token.
+  const tokenRef = useRef<string | null>(null)
+  tokenRef.current = state.accessToken
+
+  const getAccessToken = useCallback(() => tokenRef.current, [])
+
+  // On mount, attempt to restore session via the stored refresh token.
+  // After exchanging the refresh token we also fetch /auth/me so that `user`
+  // is populated — without it, admin checks (canEditTeam etc.) always fail
+  // because userId is '' and no member's userId matches an empty string.
+  useEffect(() => {
+    const refresh = getStoredRefreshToken()
+    if (!refresh) {
+      setState(s => ({ ...s, initializing: false }))
+      return
+    }
+    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
+      .then(async ({ accessToken }) => {
+        try {
+          const res = await fetch(`${API_BASE}/auth/me`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          })
+          const user: User | null = res.ok ? (await res.json() as User) : null
+          setState({ user, accessToken, initializing: false })
+        } catch {
+          // /auth/me failed but the token is still valid — set what we have.
+          setState(s => ({ ...s, accessToken, initializing: false }))
+        }
+      })
+      .catch(() => {
+        clearStoredRefreshToken()
+        setState(s => ({ ...s, initializing: false }))
+      })
+  }, [])
+
+  const login = useCallback(async (email: string, password: string) => {
+    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
+      email,
+      password,
+    })
+    storeRefreshToken(refreshToken)
+    setState({ user, accessToken, initializing: false })
+  }, [])
+
+  const register = useCallback(
+    async (
+      email: string,
+      password: string,
+      displayName: string,
+      inviteToken?: string,
+    ): Promise<string> => {
+      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
+        '/auth/register',
+        { email, password, displayName, inviteToken },
+      )
+      storeRefreshToken(refreshToken)
+      setState({ user, accessToken, initializing: false })
+      // Return the token directly so callers don't race against the async
+      // setState — tokenRef won't update until the next render cycle.
+      return accessToken
+    },
+    [],
+  )
+
+  const logout = useCallback(() => {
+    clearStoredRefreshToken()
+    setState({ user: null, accessToken: null, initializing: false })
+  }, [])
+
+  const patchUser = useCallback((patch: Partial<User>) => {
+    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
+  }, [])
+
+  const value = useMemo<AuthContextValue>(
+    () => ({ ...state, getAccessToken, login, register, logout, patchUser }),
+    [state, getAccessToken, login, register, logout, patchUser],
+  )
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+/** Returns the auth context. Throws if used outside of AuthProvider. */
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext)
+  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
+  return ctx
+}
+````
+
 ## File: packages/web/src/contexts/FindContext.tsx
 ````typescript
 /**
@@ -16604,6 +16765,511 @@ export default function TokensPage() {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/SetupPage.tsx
+````typescript
+/**
+ * First-run setup wizard. Shown once when no users exist.
+ * Collects account, team, and timeline details then creates all three on Finish.
+ */
+
+import { useState } from 'react'
+import { Navigate, useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { API_BASE, apiFetch, ApiError } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type Step = 1 | 2 | 3
+
+interface WizardData {
+  displayName: string
+  email: string
+  password: string
+  teamName: string
+  timelineName: string
+  startDate: string
+  endDate: string
+}
+
+// ---------------------------------------------------------------------------
+// Step indicator
+// ---------------------------------------------------------------------------
+
+const STEP_LABELS: Record<Step, string> = {
+  1: 'Account',
+  2: 'Team',
+  3: 'Timeline',
+}
+
+function StepIndicator({ current }: { current: Step }) {
+  const steps: Step[] = [1, 2, 3]
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 0,
+        marginBottom: 32,
+      }}
+    >
+      {steps.map((n, i) => {
+        const done = n < current
+        const active = n === current
+        return (
+          <div key={n} style={{ display: 'flex', alignItems: 'center' }}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 4,
+              }}
+            >
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background:
+                    done || active ? 'var(--primary)' : 'transparent',
+                  border:
+                    done || active
+                      ? 'none'
+                      : '2px solid var(--border)',
+                  color:
+                    done || active
+                      ? 'var(--primary-foreground)'
+                      : 'var(--muted-foreground)',
+                  fontSize: 13,
+                  fontWeight: 700,
+                  transition: 'background 0.2s',
+                }}
+              >
+                {done ? '✓' : n}
+              </div>
+              <span
+                style={{
+                  fontSize: 11,
+                  fontWeight: active ? 600 : 400,
+                  color: active
+                    ? 'var(--foreground)'
+                    : 'var(--muted-foreground)',
+                }}
+              >
+                {STEP_LABELS[n]}
+              </span>
+            </div>
+
+            {i < steps.length - 1 && (
+              <div
+                style={{
+                  width: 48,
+                  height: 2,
+                  // Shift up to align with the circle, not the label
+                  marginBottom: 20,
+                  background: done ? 'var(--primary)' : 'var(--border)',
+                  transition: 'background 0.2s',
+                }}
+              />
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Step content
+// ---------------------------------------------------------------------------
+
+interface StepProps {
+  data: WizardData
+  onChange: (patch: Partial<WizardData>) => void
+}
+
+function Step1({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <p
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: 'var(--primary)',
+            margin: '0 0 4px',
+          }}
+        >
+          Welcome to draba!
+        </p>
+        <CardTitle>Create your account</CardTitle>
+        <CardDescription>
+          You're the first person here, so this account will have full admin
+          access — you'll be able to create teams, invite users, and manage the
+          workspace.
+        </CardDescription>
+      </CardHeader>
+      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="displayName">Your name</Label>
+          <Input
+            id="displayName"
+            placeholder="Jane Smith"
+            autoComplete="name"
+            value={data.displayName}
+            onChange={e => onChange({ displayName: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="email">Email</Label>
+          <Input
+            id="email"
+            type="email"
+            placeholder="you@example.com"
+            autoComplete="email"
+            value={data.email}
+            onChange={e => onChange({ email: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="password">Password</Label>
+          <Input
+            id="password"
+            type="password"
+            placeholder="At least 8 characters"
+            autoComplete="new-password"
+            value={data.password}
+            onChange={e => onChange({ password: e.target.value })}
+          />
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+function Step2({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <CardTitle>Name your team</CardTitle>
+        <CardDescription>
+          A team is your shared workspace. Everyone you invite will work within
+          it, and all your timelines and events live inside one. You can
+          customize and add members after setup.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="teamName">Team name</Label>
+          <Input
+            id="teamName"
+            placeholder="Product Marketing"
+            autoComplete="off"
+            value={data.teamName}
+            onChange={e => onChange({ teamName: e.target.value })}
+          />
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+function Step3({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <CardTitle>Your first timeline</CardTitle>
+        <CardDescription>
+          A timeline is a named date window over your team's events — it's how
+          you see who's working on what, and when. Pick a range that fits your
+          next planning horizon.
+        </CardDescription>
+      </CardHeader>
+      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="timelineName">Timeline name</Label>
+          <Input
+            id="timelineName"
+            placeholder="Q3 Roadmap"
+            autoComplete="off"
+            value={data.timelineName}
+            onChange={e => onChange({ timelineName: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="startDate">Start date</Label>
+            <Input
+              id="startDate"
+              type="date"
+              value={data.startDate}
+              onChange={e => onChange({ startDate: e.target.value })}
+            />
+          </div>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="endDate">End date</Label>
+            <Input
+              id="endDate"
+              type="date"
+              value={data.endDate}
+              onChange={e => onChange({ endDate: e.target.value })}
+            />
+          </div>
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+function validateStep(step: Step, data: WizardData): string | null {
+  if (step === 1) {
+    if (!data.displayName.trim()) return 'Please enter your name.'
+    if (!data.email.trim()) return 'Please enter your email.'
+    if (data.password.length < 8) return 'Password must be at least 8 characters.'
+    if (/\s/.test(data.password)) return 'Password must not contain spaces.'
+  }
+  if (step === 2) {
+    if (!data.teamName.trim()) return 'Please enter a team name.'
+  }
+  if (step === 3) {
+    if (!data.timelineName.trim()) return 'Please enter a timeline name.'
+    if (!data.startDate) return 'Please choose a start date.'
+    if (!data.endDate) return 'Please choose an end date.'
+    if (data.endDate < data.startDate) return 'End date must be on or after the start date.'
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Date helpers
+// ---------------------------------------------------------------------------
+
+function toDateString(d: Date): string {
+  return d.toISOString().split('T')[0]
+}
+
+function defaultDates(): { startDate: string; endDate: string } {
+  const start = new Date()
+  const end = new Date()
+  end.setMonth(end.getMonth() + 3)
+  return { startDate: toDateString(start), endDate: toDateString(end) }
+}
+
+// ---------------------------------------------------------------------------
+// Main wizard
+// ---------------------------------------------------------------------------
+
+interface SetupStatus {
+  needsSetup: boolean
+}
+
+export default function SetupPage() {
+  const { register, user } = useAuth()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+
+  // If setup has already been completed redirect to login rather than showing
+  // a broken wizard (handles back-navigation and direct URL access after setup).
+  const { data: setupStatus, isLoading: statusLoading } = useQuery<SetupStatus>({
+    queryKey: ['setup-status'],
+    queryFn: () =>
+      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
+    staleTime: Infinity,
+  })
+
+  const [step, setStep] = useState<Step>(1)
+  const [data, setData] = useState<WizardData>({
+    displayName: '',
+    email: '',
+    password: '',
+    teamName: '',
+    timelineName: '',
+    ...defaultDates(),
+  })
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  // Wait for the status check before rendering anything.
+  if (statusLoading) return null
+
+  // Setup already done — logged-in users go home, others go to login.
+  if (setupStatus && !setupStatus.needsSetup) {
+    return <Navigate to={user ? '/' : '/login'} replace />
+  }
+
+  function handleChange(patch: Partial<WizardData>) {
+    setData(d => ({ ...d, ...patch }))
+    setError(null)
+  }
+
+  function handleBack() {
+    setError(null)
+    setStep(s => (s > 1 ? ((s - 1) as Step) : s))
+  }
+
+  function handleNext() {
+    const err = validateStep(step, data)
+    if (err) {
+      setError(err)
+      return
+    }
+    setError(null)
+    setStep(s => (s < 3 ? ((s + 1) as Step) : s))
+  }
+
+  async function handleFinish() {
+    const err = validateStep(3, data)
+    if (err) {
+      setError(err)
+      return
+    }
+
+    setError(null)
+    setLoading(true)
+
+    try {
+      // 1. Create account — returns token directly to avoid racing the async
+      //    setState inside register() before the next render cycle.
+      const token = await register(data.email, data.password, data.displayName)
+
+      // 2. Create team
+      const team = await apiFetch<{ id: string }>('/teams', {
+        method: 'POST',
+        body: JSON.stringify({ name: data.teamName }),
+        accessToken: token,
+      })
+
+      // 3. Create timeline
+      await apiFetch(`/teams/${team.id}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: data.timelineName,
+          startDate: data.startDate,
+          endDate: data.endDate,
+        }),
+        accessToken: token,
+      })
+
+      // Mark setup as done in the query cache so ProtectedRoute doesn't
+      // replay the stale needsSetup:true value after the user logs out.
+      queryClient.setQueryData<SetupStatus>(['setup-status'], { needsSetup: false })
+      navigate('/', { replace: true })
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--background)',
+        padding: '24px',
+      }}
+    >
+      <div style={{ position: 'fixed', top: 16, right: 16 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Logo */}
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 2,
+          marginBottom: 24,
+        }}
+      >
+        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
+        <span
+          style={{
+            fontSize: 36,
+            fontWeight: 700,
+            color: 'var(--foreground)',
+            letterSpacing: '-0.02em',
+          }}
+        >
+          draba
+        </span>
+      </div>
+
+      <Card style={{ width: '100%', maxWidth: 440 }}>
+        <div style={{ padding: '24px 24px 0' }}>
+          <StepIndicator current={step} />
+        </div>
+
+        {step === 1 && <Step1 data={data} onChange={handleChange} />}
+        {step === 2 && <Step2 data={data} onChange={handleChange} />}
+        {step === 3 && <Step3 data={data} onChange={handleChange} />}
+
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+            padding: '0 24px 24px',
+          }}
+        >
+          {error && (
+            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>
+              {error}
+            </p>
+          )}
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button
+              variant="outline"
+              onClick={handleBack}
+              disabled={step === 1 || loading}
+              style={{ flex: 1 }}
+            >
+              Back
+            </Button>
+
+            {step < 3 ? (
+              <Button onClick={handleNext} disabled={loading} style={{ flex: 1 }}>
+                Next
+              </Button>
+            ) : (
+              <Button onClick={handleFinish} disabled={loading} style={{ flex: 1 }}>
+                {loading ? 'Setting up…' : 'Finish'}
+              </Button>
+            )}
+          </div>
+        </div>
+      </Card>
     </div>
   )
 }
@@ -19100,167 +19766,6 @@ export default function TimelineModal({ mode, teamId, timeline, canAdmin = false
 }
 ````
 
-## File: packages/web/src/contexts/AuthContext.tsx
-````typescript
-/**
- * Auth context: current user + access token in memory, refresh token in localStorage.
- *
- * Provides login, logout, and register actions so any component can
- * authenticate without knowing about token storage details.
- */
-
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
-import type { components } from '@draba/shared'
-import {
-  API_BASE,
-  ApiError,
-  clearStoredRefreshToken,
-  getStoredRefreshToken,
-  storeRefreshToken,
-} from '@/lib/api'
-
-type User = components['schemas']['User']
-type AuthResponse = components['schemas']['AuthResponse']
-type RefreshResponse = components['schemas']['RefreshResponse']
-
-interface AuthState {
-  user: User | null
-  accessToken: string | null
-  /** True while checking the stored refresh token on initial mount. */
-  initializing: boolean
-}
-
-interface AuthContextValue extends AuthState {
-  getAccessToken: () => string | null
-  login: (email: string, password: string) => Promise<void>
-  /** Registers a new account and returns the fresh access token directly,
-   *  avoiding a race against the async setState that follows. */
-  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
-  logout: () => void
-  /** Merges fields into the current user object — used after profile updates. */
-  patchUser: (patch: Partial<User>) => void
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null)
-
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const data = await res.json()
-  if (!res.ok) {
-    const err = data as { error: { code: string; message: string } }
-    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
-  }
-  return data as T
-}
-
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<AuthState>({
-    user: null,
-    accessToken: null,
-    initializing: true,
-  })
-
-  // Stable ref so callbacks never capture a stale token.
-  const tokenRef = useRef<string | null>(null)
-  tokenRef.current = state.accessToken
-
-  const getAccessToken = useCallback(() => tokenRef.current, [])
-
-  // On mount, attempt to restore session via the stored refresh token.
-  // After exchanging the refresh token we also fetch /auth/me so that `user`
-  // is populated — without it, admin checks (canEditTeam etc.) always fail
-  // because userId is '' and no member's userId matches an empty string.
-  useEffect(() => {
-    const refresh = getStoredRefreshToken()
-    if (!refresh) {
-      setState(s => ({ ...s, initializing: false }))
-      return
-    }
-    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
-      .then(async ({ accessToken }) => {
-        try {
-          const res = await fetch(`${API_BASE}/auth/me`, {
-            headers: { Authorization: `Bearer ${accessToken}` },
-          })
-          const user: User | null = res.ok ? (await res.json() as User) : null
-          setState({ user, accessToken, initializing: false })
-        } catch {
-          // /auth/me failed but the token is still valid — set what we have.
-          setState(s => ({ ...s, accessToken, initializing: false }))
-        }
-      })
-      .catch(() => {
-        clearStoredRefreshToken()
-        setState(s => ({ ...s, initializing: false }))
-      })
-  }, [])
-
-  const login = useCallback(async (email: string, password: string) => {
-    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
-      email,
-      password,
-    })
-    storeRefreshToken(refreshToken)
-    setState({ user, accessToken, initializing: false })
-  }, [])
-
-  const register = useCallback(
-    async (
-      email: string,
-      password: string,
-      displayName: string,
-      inviteToken?: string,
-    ): Promise<string> => {
-      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
-        '/auth/register',
-        { email, password, displayName, inviteToken },
-      )
-      storeRefreshToken(refreshToken)
-      setState({ user, accessToken, initializing: false })
-      // Return the token directly so callers don't race against the async
-      // setState — tokenRef won't update until the next render cycle.
-      return accessToken
-    },
-    [],
-  )
-
-  const logout = useCallback(() => {
-    clearStoredRefreshToken()
-    setState({ user: null, accessToken: null, initializing: false })
-  }, [])
-
-  const patchUser = useCallback((patch: Partial<User>) => {
-    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
-  }, [])
-
-  const value = useMemo<AuthContextValue>(
-    () => ({ ...state, getAccessToken, login, register, logout, patchUser }),
-    [state, getAccessToken, login, register, logout, patchUser],
-  )
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
-}
-
-/** Returns the auth context. Throws if used outside of AuthProvider. */
-export function useAuth(): AuthContextValue {
-  const ctx = useContext(AuthContext)
-  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
-  return ctx
-}
-````
-
 ## File: packages/web/src/hooks/useMemberManagement.ts
 ````typescript
 /**
@@ -19693,511 +20198,6 @@ describe('matchActivities', () => {
     expect(results[0].activityId).toBe('bare')
   })
 })
-````
-
-## File: packages/web/src/pages/SetupPage.tsx
-````typescript
-/**
- * First-run setup wizard. Shown once when no users exist.
- * Collects account, team, and timeline details then creates all three on Finish.
- */
-
-import { useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { API_BASE, apiFetch, ApiError } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-type Step = 1 | 2 | 3
-
-interface WizardData {
-  displayName: string
-  email: string
-  password: string
-  teamName: string
-  timelineName: string
-  startDate: string
-  endDate: string
-}
-
-// ---------------------------------------------------------------------------
-// Step indicator
-// ---------------------------------------------------------------------------
-
-const STEP_LABELS: Record<Step, string> = {
-  1: 'Account',
-  2: 'Team',
-  3: 'Timeline',
-}
-
-function StepIndicator({ current }: { current: Step }) {
-  const steps: Step[] = [1, 2, 3]
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 0,
-        marginBottom: 32,
-      }}
-    >
-      {steps.map((n, i) => {
-        const done = n < current
-        const active = n === current
-        return (
-          <div key={n} style={{ display: 'flex', alignItems: 'center' }}>
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 4,
-              }}
-            >
-              <div
-                style={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: '50%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background:
-                    done || active ? 'var(--primary)' : 'transparent',
-                  border:
-                    done || active
-                      ? 'none'
-                      : '2px solid var(--border)',
-                  color:
-                    done || active
-                      ? 'var(--primary-foreground)'
-                      : 'var(--muted-foreground)',
-                  fontSize: 13,
-                  fontWeight: 700,
-                  transition: 'background 0.2s',
-                }}
-              >
-                {done ? '✓' : n}
-              </div>
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: active ? 600 : 400,
-                  color: active
-                    ? 'var(--foreground)'
-                    : 'var(--muted-foreground)',
-                }}
-              >
-                {STEP_LABELS[n]}
-              </span>
-            </div>
-
-            {i < steps.length - 1 && (
-              <div
-                style={{
-                  width: 48,
-                  height: 2,
-                  // Shift up to align with the circle, not the label
-                  marginBottom: 20,
-                  background: done ? 'var(--primary)' : 'var(--border)',
-                  transition: 'background 0.2s',
-                }}
-              />
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Step content
-// ---------------------------------------------------------------------------
-
-interface StepProps {
-  data: WizardData
-  onChange: (patch: Partial<WizardData>) => void
-}
-
-function Step1({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <p
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: 'var(--primary)',
-            margin: '0 0 4px',
-          }}
-        >
-          Welcome to draba!
-        </p>
-        <CardTitle>Create your account</CardTitle>
-        <CardDescription>
-          You're the first person here, so this account will have full admin
-          access — you'll be able to create teams, invite users, and manage the
-          workspace.
-        </CardDescription>
-      </CardHeader>
-      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="displayName">Your name</Label>
-          <Input
-            id="displayName"
-            placeholder="Jane Smith"
-            autoComplete="name"
-            value={data.displayName}
-            onChange={e => onChange({ displayName: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="email">Email</Label>
-          <Input
-            id="email"
-            type="email"
-            placeholder="you@example.com"
-            autoComplete="email"
-            value={data.email}
-            onChange={e => onChange({ email: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="password">Password</Label>
-          <Input
-            id="password"
-            type="password"
-            placeholder="At least 8 characters"
-            autoComplete="new-password"
-            value={data.password}
-            onChange={e => onChange({ password: e.target.value })}
-          />
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-function Step2({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <CardTitle>Name your team</CardTitle>
-        <CardDescription>
-          A team is your shared workspace. Everyone you invite will work within
-          it, and all your timelines and events live inside one. You can
-          customize and add members after setup.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="teamName">Team name</Label>
-          <Input
-            id="teamName"
-            placeholder="Product Marketing"
-            autoComplete="off"
-            value={data.teamName}
-            onChange={e => onChange({ teamName: e.target.value })}
-          />
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-function Step3({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <CardTitle>Your first timeline</CardTitle>
-        <CardDescription>
-          A timeline is a named date window over your team's events — it's how
-          you see who's working on what, and when. Pick a range that fits your
-          next planning horizon.
-        </CardDescription>
-      </CardHeader>
-      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="timelineName">Timeline name</Label>
-          <Input
-            id="timelineName"
-            placeholder="Q3 Roadmap"
-            autoComplete="off"
-            value={data.timelineName}
-            onChange={e => onChange({ timelineName: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', gap: 12 }}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="startDate">Start date</Label>
-            <Input
-              id="startDate"
-              type="date"
-              value={data.startDate}
-              onChange={e => onChange({ startDate: e.target.value })}
-            />
-          </div>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="endDate">End date</Label>
-            <Input
-              id="endDate"
-              type="date"
-              value={data.endDate}
-              onChange={e => onChange({ endDate: e.target.value })}
-            />
-          </div>
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
-
-function validateStep(step: Step, data: WizardData): string | null {
-  if (step === 1) {
-    if (!data.displayName.trim()) return 'Please enter your name.'
-    if (!data.email.trim()) return 'Please enter your email.'
-    if (data.password.length < 8) return 'Password must be at least 8 characters.'
-    if (/\s/.test(data.password)) return 'Password must not contain spaces.'
-  }
-  if (step === 2) {
-    if (!data.teamName.trim()) return 'Please enter a team name.'
-  }
-  if (step === 3) {
-    if (!data.timelineName.trim()) return 'Please enter a timeline name.'
-    if (!data.startDate) return 'Please choose a start date.'
-    if (!data.endDate) return 'Please choose an end date.'
-    if (data.endDate < data.startDate) return 'End date must be on or after the start date.'
-  }
-  return null
-}
-
-// ---------------------------------------------------------------------------
-// Date helpers
-// ---------------------------------------------------------------------------
-
-function toDateString(d: Date): string {
-  return d.toISOString().split('T')[0]
-}
-
-function defaultDates(): { startDate: string; endDate: string } {
-  const start = new Date()
-  const end = new Date()
-  end.setMonth(end.getMonth() + 3)
-  return { startDate: toDateString(start), endDate: toDateString(end) }
-}
-
-// ---------------------------------------------------------------------------
-// Main wizard
-// ---------------------------------------------------------------------------
-
-interface SetupStatus {
-  needsSetup: boolean
-}
-
-export default function SetupPage() {
-  const { register, user } = useAuth()
-  const navigate = useNavigate()
-  const queryClient = useQueryClient()
-
-  // If setup has already been completed redirect to login rather than showing
-  // a broken wizard (handles back-navigation and direct URL access after setup).
-  const { data: setupStatus, isLoading: statusLoading } = useQuery<SetupStatus>({
-    queryKey: ['setup-status'],
-    queryFn: () =>
-      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
-    staleTime: Infinity,
-  })
-
-  const [step, setStep] = useState<Step>(1)
-  const [data, setData] = useState<WizardData>({
-    displayName: '',
-    email: '',
-    password: '',
-    teamName: '',
-    timelineName: '',
-    ...defaultDates(),
-  })
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  // Wait for the status check before rendering anything.
-  if (statusLoading) return null
-
-  // Setup already done — logged-in users go home, others go to login.
-  if (setupStatus && !setupStatus.needsSetup) {
-    return <Navigate to={user ? '/' : '/login'} replace />
-  }
-
-  function handleChange(patch: Partial<WizardData>) {
-    setData(d => ({ ...d, ...patch }))
-    setError(null)
-  }
-
-  function handleBack() {
-    setError(null)
-    setStep(s => (s > 1 ? ((s - 1) as Step) : s))
-  }
-
-  function handleNext() {
-    const err = validateStep(step, data)
-    if (err) {
-      setError(err)
-      return
-    }
-    setError(null)
-    setStep(s => (s < 3 ? ((s + 1) as Step) : s))
-  }
-
-  async function handleFinish() {
-    const err = validateStep(3, data)
-    if (err) {
-      setError(err)
-      return
-    }
-
-    setError(null)
-    setLoading(true)
-
-    try {
-      // 1. Create account — returns token directly to avoid racing the async
-      //    setState inside register() before the next render cycle.
-      const token = await register(data.email, data.password, data.displayName)
-
-      // 2. Create team
-      const team = await apiFetch<{ id: string }>('/teams', {
-        method: 'POST',
-        body: JSON.stringify({ name: data.teamName }),
-        accessToken: token,
-      })
-
-      // 3. Create timeline
-      await apiFetch(`/teams/${team.id}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify({
-          name: data.timelineName,
-          startDate: data.startDate,
-          endDate: data.endDate,
-        }),
-        accessToken: token,
-      })
-
-      // Mark setup as done in the query cache so ProtectedRoute doesn't
-      // replay the stale needsSetup:true value after the user logs out.
-      queryClient.setQueryData<SetupStatus>(['setup-status'], { needsSetup: false })
-      navigate('/', { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--background)',
-        padding: '24px',
-      }}
-    >
-      <div style={{ position: 'fixed', top: 16, right: 16 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Logo */}
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: 2,
-          marginBottom: 24,
-        }}
-      >
-        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
-        <span
-          style={{
-            fontSize: 36,
-            fontWeight: 700,
-            color: 'var(--foreground)',
-            letterSpacing: '-0.02em',
-          }}
-        >
-          draba
-        </span>
-      </div>
-
-      <Card style={{ width: '100%', maxWidth: 440 }}>
-        <div style={{ padding: '24px 24px 0' }}>
-          <StepIndicator current={step} />
-        </div>
-
-        {step === 1 && <Step1 data={data} onChange={handleChange} />}
-        {step === 2 && <Step2 data={data} onChange={handleChange} />}
-        {step === 3 && <Step3 data={data} onChange={handleChange} />}
-
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 12,
-            padding: '0 24px 24px',
-          }}
-        >
-          {error && (
-            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>
-              {error}
-            </p>
-          )}
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Button
-              variant="outline"
-              onClick={handleBack}
-              disabled={step === 1 || loading}
-              style={{ flex: 1 }}
-            >
-              Back
-            </Button>
-
-            {step < 3 ? (
-              <Button onClick={handleNext} disabled={loading} style={{ flex: 1 }}>
-                Next
-              </Button>
-            ) : (
-              <Button onClick={handleFinish} disabled={loading} style={{ flex: 1 }}>
-                {loading ? 'Setting up…' : 'Finish'}
-              </Button>
-            )}
-          </div>
-        </div>
-      </Card>
-    </div>
-  )
-}
 ````
 
 ## File: packages/web/src/App.tsx
@@ -23117,523 +23117,6 @@ Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visu
 - CLI binary (parking lot — token auth system is designed to support it when ready)
 ````
 
-## File: packages/api/internal/api/timeline_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
-// list the non-archived timelines for a team.
-func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
-		return
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timelines)
-}
-
-// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
-// user must be a member of the team. The creator is automatically granted
-// timeline-admin access.
-func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	var req createTimelineBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if strings.TrimSpace(req.Name) == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-	if req.StartDate == "" || req.EndDate == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startDate and endDate are required")
-		return
-	}
-
-	const dateLayout = "2006-01-02"
-	startDate, err := time.Parse(dateLayout, req.StartDate)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startDate format")
-		return
-	}
-	endDate, err := time.Parse(dateLayout, req.EndDate)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endDate format")
-		return
-	}
-
-	if endDate.Before(startDate) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
-		return
-	}
-
-	now := time.Now()
-	timeline := &models.Timeline{
-		ID:          newID(),
-		TeamID:      teamID,
-		Name:        strings.TrimSpace(req.Name),
-		Description: req.Description,
-		Notes:       req.Notes,
-		StartDate:   startDate.Format(dateLayout),
-		EndDate:     endDate.Format(dateLayout),
-		Color:       req.Color,
-		Icon:        req.Icon,
-		ShareToken:  newID(),
-		IcalToken:   newID(),
-		CreatedBy:   claims.UserID,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	if err := s.timelines.Create(timeline); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	// Always grant the creator timeline-admin access so they can manage it.
-	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	// Copy the selected (or first) status template into live statuses for this timeline.
-	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID, req.TemplateID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusCreated, timeline)
-}
-
-// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
-// be a member of the timeline's team. Team admins may access any timeline;
-// other members require an entry in timeline_access.
-func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	// Hide archived timelines from the standard read path unless ?archived=true.
-	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	// Team admins can access all timelines; members need an explicit grant.
-	if member.Role != "admin" {
-		ok, err := s.timelines.HasAccess(timelineID, member.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-			return
-		}
-		if !ok {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
-// admins or timeline admins may archive.
-func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, true)
-}
-
-// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
-func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, false)
-}
-
-// setTimelineArchive is the shared archive/unarchive implementation. Access
-// is admin-only: the caller must be a team admin, or hold timeline_access
-// with role='admin' for this timeline.
-func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	// Team admins always pass. Per-timeline admin grants are not consulted
-	// here — granular timeline-admin checks are tracked for Phase 10.3.
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-	}
-	if err := s.timelines.SetArchived(timelineID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	timeline.ArchivedAt = at
-	timeline.UpdatedAt = time.Now().UTC()
-
-	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleUpdateTimeline handles PATCH /timelines/{id}. Only a team admin or a
-// member with timeline_access role='admin' may rename or change dates.
-func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	var req PatchTimelineJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
-			return
-		}
-		timeline.Name = name
-	}
-	if req.StartDate != nil {
-		timeline.StartDate = *req.StartDate
-	}
-	if req.EndDate != nil {
-		timeline.EndDate = *req.EndDate
-	}
-	if req.Color != nil {
-		timeline.Color = req.Color
-	}
-	if req.Icon != nil {
-		timeline.Icon = req.Icon
-	}
-	if req.Description != nil {
-		timeline.Description = req.Description
-	}
-	if req.Notes != nil {
-		timeline.Notes = req.Notes
-	}
-	timeline.UpdatedAt = time.Now().UTC()
-
-	if err := s.timelines.Update(timeline); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleDeleteTimeline handles DELETE /timelines/{id}. Hard-deletes the
-// timeline; only a team admin may delete. Cascades to statuses and
-// timeline_access via foreign key.
-func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	if err := s.timelines.Delete(timelineID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleListTimelineAccess handles GET /teams/{id}/timelines/{timelineId}/access.
-// Team members may list the access grants for any timeline they can view.
-func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
-		return
-	}
-
-	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
-		return
-	}
-
-	entries, err := s.timelines.ListAccess(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
-		return
-	}
-	writeJSON(w, http.StatusOK, entries)
-}
-
-// handleGrantTimelineAccess handles PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
-// Only team admins or timeline admins may manage the access list.
-func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	targetMemberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	// Verify the target member belongs to the same team.
-	if _, err := s.teams.GetMemberByID(targetMemberID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-
-	var req GrantTimelineAccessJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Role != "admin" && req.Role != "member" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
-		return
-	}
-
-	if err := s.timelines.GrantAccess(timelineID, targetMemberID, req.Role); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-
-	entries, err := s.timelines.ListAccess(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-	writeJSON(w, http.StatusOK, entries)
-}
-
-// handleRevokeTimelineAccess handles DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}.
-// Only team admins or timeline admins may revoke access.
-func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	targetMemberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
-		return
-	}
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	if err := s.timelines.RevokeAccess(timelineID, targetMemberID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// canAdminTimeline reports whether a team member may perform admin operations
-// on a timeline. Team admins always pass; members must hold timeline_access
-// with role='admin'.
-func (s *Server) canAdminTimeline(member *models.TeamMember, timelineID string) bool {
-	if member.Role == "admin" {
-		return true
-	}
-	role, err := s.timelines.GetAccessRole(timelineID, member.ID)
-	if err != nil {
-		return false
-	}
-	return role == "admin"
-}
-
-// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
-// authentication is required; the token itself is the credential.
-func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	timeline, err := s.timelines.GetByShareToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
-}
-````
-
 ## File: packages/api/internal/api/user_handler.go
 ````go
 package api
@@ -24428,6 +23911,529 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+````
+
+## File: packages/api/internal/api/timeline_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
+// list the non-archived timelines for a team.
+func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timelines)
+}
+
+// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
+// user must be a member of the team. The creator is automatically granted
+// timeline-admin access.
+func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	member, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	var req createTimelineBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if req.StartDate == "" || req.EndDate == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startDate and endDate are required")
+		return
+	}
+
+	const dateLayout = "2006-01-02"
+	startDate, err := time.Parse(dateLayout, req.StartDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startDate format")
+		return
+	}
+	endDate, err := time.Parse(dateLayout, req.EndDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endDate format")
+		return
+	}
+
+	if endDate.Before(startDate) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
+		return
+	}
+
+	now := time.Now()
+	timeline := &models.Timeline{
+		ID:          newID(),
+		TeamID:      teamID,
+		Name:        strings.TrimSpace(req.Name),
+		Description: req.Description,
+		Notes:       req.Notes,
+		StartDate:   startDate.Format(dateLayout),
+		EndDate:     endDate.Format(dateLayout),
+		Color:       req.Color,
+		Icon:        req.Icon,
+		ShareToken:  newID(),
+		IcalToken:   newID(),
+		CreatedBy:   claims.UserID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.timelines.Create(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	// Always grant the creator timeline-admin access so they can manage it.
+	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	// Copy the selected (or first) status template into live statuses for this timeline.
+	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID, req.TemplateID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusCreated, timeline)
+}
+
+// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
+// be a member of the timeline's team. Team admins may access any timeline;
+// other members require an entry in timeline_access.
+func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	// Hide archived timelines from the standard read path unless ?archived=true.
+	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	// Team admins can access all timelines; members need an explicit grant.
+	if member.Role != "admin" {
+		ok, err := s.timelines.HasAccess(timelineID, member.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
+// admins or timeline admins may archive.
+func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, true)
+}
+
+// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
+func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, false)
+}
+
+// setTimelineArchive is the shared archive/unarchive implementation. Access
+// is admin-only: the caller must be a team admin, or hold timeline_access
+// with role='admin' for this timeline.
+func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+	// Team admins always pass. Per-timeline admin grants are not consulted
+	// here — granular timeline-admin checks are tracked for Phase 10.3.
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+	}
+	if err := s.timelines.SetArchived(timelineID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+	timeline.ArchivedAt = at
+	timeline.UpdatedAt = time.Now().UTC()
+
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleUpdateTimeline handles PATCH /timelines/{id}. Only a team admin or a
+// member with timeline_access role='admin' may rename or change dates.
+func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	var req PatchTimelineJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		timeline.Name = name
+	}
+	if req.StartDate != nil {
+		timeline.StartDate = *req.StartDate
+	}
+	if req.EndDate != nil {
+		timeline.EndDate = *req.EndDate
+	}
+	if req.Color != nil {
+		timeline.Color = req.Color
+	}
+	if req.Icon != nil {
+		timeline.Icon = req.Icon
+	}
+	if req.Description != nil {
+		timeline.Description = req.Description
+	}
+	if req.Notes != nil {
+		timeline.Notes = req.Notes
+	}
+	timeline.UpdatedAt = time.Now().UTC()
+
+	if err := s.timelines.Update(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleDeleteTimeline handles DELETE /timelines/{id}. Hard-deletes the
+// timeline; only a team admin may delete. Cascades to statuses and
+// timeline_access via foreign key.
+func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	if err := s.timelines.Delete(timelineID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListTimelineAccess handles GET /teams/{id}/timelines/{timelineId}/access.
+// Team members may list the access grants for any timeline they can view.
+func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+
+	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleGrantTimelineAccess handles PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may manage the access list.
+func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	// Verify the target member exists and belongs to the same team as the
+	// timeline — prevents cross-team grants if a member ID is guessed.
+	targetMember, err := s.teams.GetMemberByID(targetMemberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	if targetMember.TeamID != timeline.TeamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
+		return
+	}
+
+	var req GrantTimelineAccessJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Role != "admin" && req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	if err := s.timelines.GrantAccess(timelineID, targetMemberID, req.Role); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleRevokeTimelineAccess handles DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may revoke access.
+func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	if err := s.timelines.RevokeAccess(timelineID, targetMemberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// canAdminTimeline reports whether a team member may perform admin operations
+// on a timeline. Team admins always pass; members must hold timeline_access
+// with role='admin'.
+func (s *Server) canAdminTimeline(member *models.TeamMember, timelineID string) bool {
+	if member.Role == "admin" {
+		return true
+	}
+	role, err := s.timelines.GetAccessRole(timelineID, member.ID)
+	if err != nil {
+		return false
+	}
+	return role == "admin"
+}
+
+// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
+// authentication is required; the token itself is the credential.
+func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	timeline, err := s.timelines.GetByShareToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
 }
 ````
 
@@ -41208,6 +41214,15 @@ By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), an
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-05-27 — /test-phase 10.3
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 8 pass (ws-smoke: assertion 2 skipped — single-team test DB; assertion 3 partial — 30s heartbeat cadence, unit tests cover at speed)
+- Smoke target: http://epcot.lan:8081
+- Notes: `GET /activities?from=&to=` returns 400 (param names differ from Phase 3 spec); `POST /auth/register` requires `displayName` field not in spec — both are spec gaps, not runtime failures
 
 ---
 
