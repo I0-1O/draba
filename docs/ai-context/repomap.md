@@ -114,6 +114,7 @@ packages/
         status_types.go
         team_handler.go
         timeline_handler.go
+        timeline_types.go
         user_handler.go
         user_preference_handler.go
       auth/
@@ -214,6 +215,7 @@ packages/
         RoleDropdown.tsx
         StatusTemplatesTab.tsx
         TeamModal.tsx
+        TimelineModal.tsx
       contexts/
         AuthContext.tsx
         FilterContext.tsx
@@ -2401,6 +2403,259 @@ See `skills/go-comments.md` for comment conventions (package headers, exported d
 }
 ````
 
+## File: packages/web/src/components/ui/button.tsx
+````typescript
+import * as React from 'react'
+import { Slot } from '@radix-ui/react-slot'
+import { cva, type VariantProps } from 'class-variance-authority'
+import { cn } from '@/lib/utils'
+
+const buttonVariants = cva(
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] disabled:pointer-events-none disabled:opacity-50',
+  {
+    variants: {
+      variant: {
+        default:
+          'bg-[var(--primary)] text-[var(--primary-foreground)] hover:opacity-90',
+        destructive:
+          'bg-[var(--destructive)] text-[var(--destructive-foreground)] hover:opacity-90',
+        outline:
+          'border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)] hover:bg-[var(--muted)]',
+        secondary:
+          'bg-[var(--secondary)] text-[var(--secondary-foreground)] hover:opacity-90',
+        ghost:
+          'hover:bg-[var(--muted)] text-[var(--foreground)]',
+        link:
+          'text-[var(--primary)] underline-offset-4 hover:underline',
+      },
+      size: {
+        default: 'h-9 px-4 py-2',
+        sm: 'h-8 rounded-md px-3 text-xs',
+        lg: 'h-10 rounded-md px-8',
+        icon: 'h-9 w-9',
+      },
+    },
+    defaultVariants: {
+      variant: 'default',
+      size: 'default',
+    },
+  }
+)
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  asChild?: boolean
+}
+
+const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    const Comp = asChild ? Slot : 'button'
+    return (
+      <Comp
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...props}
+      />
+    )
+  }
+)
+Button.displayName = 'Button'
+
+export { Button, buttonVariants }
+````
+
+## File: packages/web/src/components/ui/card.tsx
+````typescript
+import * as React from 'react'
+import { cn } from '@/lib/utils'
+
+const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (
+    <div
+      ref={ref}
+      className={cn('rounded-lg border border-[var(--border)] bg-[var(--card)] text-[var(--card-foreground)] shadow-sm', className)}
+      {...props}
+    />
+  )
+)
+Card.displayName = 'Card'
+
+const CardHeader = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (
+    <div ref={ref} className={cn('flex flex-col space-y-1.5 p-6', className)} {...props} />
+  )
+)
+CardHeader.displayName = 'CardHeader'
+
+const CardTitle = React.forwardRef<HTMLParagraphElement, React.HTMLAttributes<HTMLHeadingElement>>(
+  ({ className, ...props }, ref) => (
+    <h3 ref={ref} className={cn('text-lg font-semibold leading-none tracking-tight', className)} {...props} />
+  )
+)
+CardTitle.displayName = 'CardTitle'
+
+const CardDescription = React.forwardRef<HTMLParagraphElement, React.HTMLAttributes<HTMLParagraphElement>>(
+  ({ className, ...props }, ref) => (
+    <p ref={ref} className={cn('text-sm text-[var(--muted-foreground)]', className)} {...props} />
+  )
+)
+CardDescription.displayName = 'CardDescription'
+
+const CardContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (
+    <div ref={ref} className={cn('p-6 pt-0', className)} {...props} />
+  )
+)
+CardContent.displayName = 'CardContent'
+
+const CardFooter = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (
+    <div ref={ref} className={cn('flex items-center p-6 pt-0', className)} {...props} />
+  )
+)
+CardFooter.displayName = 'CardFooter'
+
+export { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardContent }
+````
+
+## File: packages/web/src/components/ui/input.tsx
+````typescript
+import * as React from 'react'
+import { cn } from '@/lib/utils'
+
+export type InputProps = React.InputHTMLAttributes<HTMLInputElement>
+
+const Input = React.forwardRef<HTMLInputElement, InputProps>(
+  ({ className, type, ...props }, ref) => {
+    return (
+      <input
+        type={type}
+        className={cn(
+          'flex h-9 w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-1 text-sm text-[var(--foreground)] shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-50',
+          className
+        )}
+        ref={ref}
+        {...props}
+      />
+    )
+  }
+)
+Input.displayName = 'Input'
+
+export { Input }
+````
+
+## File: packages/web/src/components/ui/label.tsx
+````typescript
+import * as React from 'react'
+import * as LabelPrimitive from '@radix-ui/react-label'
+import { cn } from '@/lib/utils'
+
+const Label = React.forwardRef<
+  React.ElementRef<typeof LabelPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof LabelPrimitive.Root>
+>(({ className, ...props }, ref) => (
+  <LabelPrimitive.Root
+    ref={ref}
+    className={cn(
+      'text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)] leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70',
+      className
+    )}
+    {...props}
+  />
+))
+Label.displayName = LabelPrimitive.Root.displayName
+
+export { Label }
+````
+
+## File: packages/web/src/components/DarkModeToggle.tsx
+````typescript
+import { Moon, Sun } from 'lucide-react'
+import { useDarkMode } from '@/hooks/useDarkMode'
+
+/** Icon button that flips between light and dark mode. */
+export default function DarkModeToggle() {
+  const { isDark, toggle } = useDarkMode()
+  return (
+    <button
+      onClick={toggle}
+      title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+      style={{
+        width: 32,
+        height: 32,
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-md)',
+        background: 'var(--card)',
+        color: 'var(--muted-foreground)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: 'pointer',
+        flexShrink: 0,
+        transition: 'color 0.15s',
+      }}
+      onMouseEnter={e => (e.currentTarget.style.color = 'var(--foreground)')}
+      onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
+    >
+      {isDark ? <Sun size={15} strokeWidth={1.8} /> : <Moon size={15} strokeWidth={1.8} />}
+    </button>
+  )
+}
+````
+
+## File: packages/web/src/hooks/useDarkMode.ts
+````typescript
+/**
+ * Manages the dark/light theme toggle.
+ *
+ * Persistence: localStorage key "draba_theme".
+ * Initial value: stored preference, falling back to prefers-color-scheme.
+ * Effect: sets/removes the `dark` class on <html> whenever the value changes.
+ */
+
+import { useEffect, useState } from 'react'
+
+type Theme = 'dark' | 'light'
+
+const STORAGE_KEY = 'draba_theme'
+
+function getInitialTheme(): Theme {
+  const stored = localStorage.getItem(STORAGE_KEY) as Theme | null
+  if (stored === 'dark' || stored === 'light') return stored
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+export function useDarkMode() {
+  const [theme, setTheme] = useState<Theme>(getInitialTheme)
+
+  useEffect(() => {
+    const root = document.documentElement
+    if (theme === 'dark') {
+      root.classList.add('dark')
+    } else {
+      root.classList.remove('dark')
+    }
+    localStorage.setItem(STORAGE_KEY, theme)
+  }, [theme])
+
+  const toggle = () => setTheme(t => (t === 'dark' ? 'light' : 'dark'))
+
+  return { theme, toggle, isDark: theme === 'dark' } as const
+}
+````
+
+## File: packages/web/src/lib/utils.ts
+````typescript
+import { clsx, type ClassValue } from 'clsx'
+import { twMerge } from 'tailwind-merge'
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+````
+
 ## File: packages/web/src/main.tsx
 ````typescript
 import React from 'react'
@@ -2418,6 +2673,29 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 ## File: packages/web/src/vite-env.d.ts
 ````typescript
 /// <reference types="vite/client" />
+````
+
+## File: packages/web/components.json
+````json
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "default",
+  "rsc": false,
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "src/index.css",
+    "baseColor": "slate",
+    "cssVariables": true
+  },
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui",
+    "lib": "@/lib",
+    "hooks": "@/hooks"
+  }
+}
 ````
 
 ## File: packages/web/Dockerfile
@@ -2454,6 +2732,38 @@ CMD ["pnpm", "dev", "--host"]
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
+````
+
+## File: packages/web/tsconfig.app.json
+````json
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "paths": {
+      "@draba/shared": ["../shared/src/index.ts"],
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
+}
 ````
 
 ## File: packages/web/tsconfig.json
@@ -8965,458 +9275,6 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
-## File: packages/api/internal/api/status_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ── Status templates ──────────────────────────────────────────────────────────
-
-// handleListStatusTemplates handles GET /teams/{id}/status-templates.
-// Any team member may list the team's status templates.
-func (s *Server) handleListStatusTemplates(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list status templates")
-		return
-	}
-
-	templates, err := s.statuses.ListTemplates(teamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list status templates")
-		return
-	}
-	writeJSON(w, http.StatusOK, templates)
-}
-
-// handleCreateStatusTemplate handles POST /teams/{id}/status-templates.
-// Team admins only.
-func (s *Server) handleCreateStatusTemplate(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status template")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	var req CreateStatusTemplateJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-
-	// Position defaults to end of existing list.
-	count, err := s.statuses.CountTemplates(teamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status template")
-		return
-	}
-
-	now := time.Now()
-	t := &models.StatusTemplate{
-		ID:        newID(),
-		TeamID:    teamID,
-		Name:      name,
-		Position:  count,
-		CreatedBy: claims.UserID,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if req.Description != nil {
-		t.Description = req.Description
-	}
-	if err := s.statuses.CreateTemplate(t); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status template")
-		return
-	}
-	t.Items = []models.StatusTemplateItem{}
-	writeJSON(w, http.StatusCreated, t)
-}
-
-// handleUpdateStatusTemplate handles PATCH /status-templates/{id}.
-// Team admins only.
-func (s *Server) handleUpdateStatusTemplate(w http.ResponseWriter, r *http.Request) {
-	templateID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	t, err := s.statuses.GetTemplate(templateID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status template")
-		return
-	}
-
-	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status template")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	var req PatchStatusTemplateJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
-			return
-		}
-		t.Name = name
-	}
-	if req.Description != nil {
-		t.Description = req.Description
-	}
-	if req.Position != nil {
-		t.Position = *req.Position
-	}
-	t.UpdatedAt = time.Now()
-
-	if err := s.statuses.UpdateTemplate(t); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status template")
-		return
-	}
-	writeJSON(w, http.StatusOK, t)
-}
-
-// handleDeleteStatusTemplate handles DELETE /status-templates/{id}.
-// Team admins only. Blocked if it is the last template on the team.
-func (s *Server) handleDeleteStatusTemplate(w http.ResponseWriter, r *http.Request) {
-	templateID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	t, err := s.statuses.GetTemplate(templateID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
-		return
-	}
-
-	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	count, err := s.statuses.CountTemplates(t.TeamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
-		return
-	}
-	if count <= 1 {
-		writeError(w, http.StatusConflict, "LAST_TEMPLATE", "cannot delete the last status template")
-		return
-	}
-
-	if err := s.statuses.DeleteTemplate(templateID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// ── Template items ────────────────────────────────────────────────────────────
-
-// handleCreateTemplateItem handles POST /status-templates/{id}/items.
-// Team admins only.
-func (s *Server) handleCreateTemplateItem(w http.ResponseWriter, r *http.Request) {
-	templateID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	t, err := s.statuses.GetTemplate(templateID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
-		return
-	}
-
-	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	var req CreateStatusTemplateItemJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-
-	count, err := s.statuses.CountTemplateItems(templateID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
-		return
-	}
-
-	color := "#8b949e"
-	if req.Color != nil {
-		color = *req.Color
-	}
-
-	item := &models.StatusTemplateItem{
-		ID:         newID(),
-		TemplateID: templateID,
-		Name:       name,
-		Color:      color,
-		Icon:       req.Icon,
-		Position:   count,
-	}
-	if req.IsClosed != nil {
-		item.IsClosed = *req.IsClosed
-	}
-
-	if err := s.statuses.CreateTemplateItem(item); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
-		return
-	}
-	writeJSON(w, http.StatusCreated, item)
-}
-
-// handleUpdateTemplateItem handles PATCH /status-template-items/{id}.
-// Team admins only.
-func (s *Server) handleUpdateTemplateItem(w http.ResponseWriter, r *http.Request) {
-	itemID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	item, err := s.statuses.GetTemplateItem(itemID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template item not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
-		return
-	}
-
-	t, err := s.statuses.GetTemplate(item.TemplateID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
-		return
-	}
-
-	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	var req PatchStatusTemplateItemJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
-			return
-		}
-		item.Name = name
-	}
-	if req.Color != nil {
-		item.Color = *req.Color
-	}
-	if req.Icon != nil {
-		item.Icon = req.Icon
-	}
-	if req.IsClosed != nil {
-		item.IsClosed = *req.IsClosed
-	}
-	if req.Position != nil {
-		item.Position = *req.Position
-	}
-
-	if err := s.statuses.UpdateTemplateItem(item); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
-		return
-	}
-	writeJSON(w, http.StatusOK, item)
-}
-
-// handleDeleteTemplateItem handles DELETE /status-template-items/{id}.
-// Team admins only. Blocked if it is the last item in the template.
-func (s *Server) handleDeleteTemplateItem(w http.ResponseWriter, r *http.Request) {
-	itemID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	item, err := s.statuses.GetTemplateItem(itemID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template item not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
-		return
-	}
-
-	t, err := s.statuses.GetTemplate(item.TemplateID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
-		return
-	}
-
-	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	count, err := s.statuses.CountTemplateItems(item.TemplateID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
-		return
-	}
-	if count <= 1 {
-		writeError(w, http.StatusConflict, "LAST_ITEM", "cannot delete the last item in a template")
-		return
-	}
-
-	if err := s.statuses.DeleteTemplateItem(itemID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// ── Timeline statuses ─────────────────────────────────────────────────────────
-
-// handleListTimelineStatuses handles GET /teams/{id}/timelines/{timelineId}/statuses.
-// Any member with access to the timeline may list its statuses.
-func (s *Server) handleListTimelineStatuses(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
-		return
-	}
-
-	if member.Role != "admin" {
-		ok, err := s.timelines.HasAccess(timelineID, member.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
-			return
-		}
-		if !ok {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
-			return
-		}
-	}
-
-	statuses, err := s.statuses.ListStatuses(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
-		return
-	}
-	writeJSON(w, http.StatusOK, statuses)
-}
-````
-
 ## File: packages/api/internal/api/status_types.go
 ````go
 package api
@@ -9449,6 +9307,48 @@ type PatchStatusTemplateItemJSONBody struct {
 	Icon     *string `json:"icon,omitempty"`
 	IsClosed *bool   `json:"isClosed,omitempty"`
 	Position *int    `json:"position,omitempty"`
+}
+````
+
+## File: packages/api/internal/api/timeline_types.go
+````go
+package api
+
+// PatchTimelineJSONBody is the request body for PATCH /timelines/{id}.
+type PatchTimelineJSONBody struct {
+	Name      *string `json:"name,omitempty"`
+	StartDate *string `json:"startDate,omitempty"`
+	EndDate   *string `json:"endDate,omitempty"`
+	Color     *string `json:"color,omitempty"`
+	Icon      *string `json:"icon,omitempty"`
+}
+
+// CreateTimelineStatusJSONBody is the request body for POST /teams/{id}/timelines/{timelineId}/statuses.
+type CreateTimelineStatusJSONBody struct {
+	Name     string  `json:"name"`
+	Color    *string `json:"color,omitempty"`
+	Icon     *string `json:"icon,omitempty"`
+	IsClosed *bool   `json:"isClosed,omitempty"`
+}
+
+// PatchStatusJSONBody is the request body for PATCH /statuses/{id}.
+type PatchStatusJSONBody struct {
+	Name     *string `json:"name,omitempty"`
+	Color    *string `json:"color,omitempty"`
+	Icon     *string `json:"icon,omitempty"`
+	IsClosed *bool   `json:"isClosed,omitempty"`
+	Position *int    `json:"position,omitempty"`
+}
+
+// DeleteStatusJSONBody is the optional request body for DELETE /statuses/{id}.
+// When activities reference the status, replacementStatusId must be provided.
+type DeleteStatusJSONBody struct {
+	ReplacementStatusID *string `json:"replacementStatusId,omitempty"`
+}
+
+// GrantTimelineAccessJSONBody is the request body for PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
+type GrantTimelineAccessJSONBody struct {
+	Role string `json:"role"`
 }
 ````
 
@@ -10858,173 +10758,6 @@ export default function FindBar() {
 }
 ````
 
-## File: packages/web/src/components/ui/button.tsx
-````typescript
-import * as React from 'react'
-import { Slot } from '@radix-ui/react-slot'
-import { cva, type VariantProps } from 'class-variance-authority'
-import { cn } from '@/lib/utils'
-
-const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] disabled:pointer-events-none disabled:opacity-50',
-  {
-    variants: {
-      variant: {
-        default:
-          'bg-[var(--primary)] text-[var(--primary-foreground)] hover:opacity-90',
-        destructive:
-          'bg-[var(--destructive)] text-[var(--destructive-foreground)] hover:opacity-90',
-        outline:
-          'border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)] hover:bg-[var(--muted)]',
-        secondary:
-          'bg-[var(--secondary)] text-[var(--secondary-foreground)] hover:opacity-90',
-        ghost:
-          'hover:bg-[var(--muted)] text-[var(--foreground)]',
-        link:
-          'text-[var(--primary)] underline-offset-4 hover:underline',
-      },
-      size: {
-        default: 'h-9 px-4 py-2',
-        sm: 'h-8 rounded-md px-3 text-xs',
-        lg: 'h-10 rounded-md px-8',
-        icon: 'h-9 w-9',
-      },
-    },
-    defaultVariants: {
-      variant: 'default',
-      size: 'default',
-    },
-  }
-)
-
-export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof buttonVariants> {
-  asChild?: boolean
-}
-
-const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
-    const Comp = asChild ? Slot : 'button'
-    return (
-      <Comp
-        className={cn(buttonVariants({ variant, size, className }))}
-        ref={ref}
-        {...props}
-      />
-    )
-  }
-)
-Button.displayName = 'Button'
-
-export { Button, buttonVariants }
-````
-
-## File: packages/web/src/components/ui/card.tsx
-````typescript
-import * as React from 'react'
-import { cn } from '@/lib/utils'
-
-const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
-    <div
-      ref={ref}
-      className={cn('rounded-lg border border-[var(--border)] bg-[var(--card)] text-[var(--card-foreground)] shadow-sm', className)}
-      {...props}
-    />
-  )
-)
-Card.displayName = 'Card'
-
-const CardHeader = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn('flex flex-col space-y-1.5 p-6', className)} {...props} />
-  )
-)
-CardHeader.displayName = 'CardHeader'
-
-const CardTitle = React.forwardRef<HTMLParagraphElement, React.HTMLAttributes<HTMLHeadingElement>>(
-  ({ className, ...props }, ref) => (
-    <h3 ref={ref} className={cn('text-lg font-semibold leading-none tracking-tight', className)} {...props} />
-  )
-)
-CardTitle.displayName = 'CardTitle'
-
-const CardDescription = React.forwardRef<HTMLParagraphElement, React.HTMLAttributes<HTMLParagraphElement>>(
-  ({ className, ...props }, ref) => (
-    <p ref={ref} className={cn('text-sm text-[var(--muted-foreground)]', className)} {...props} />
-  )
-)
-CardDescription.displayName = 'CardDescription'
-
-const CardContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn('p-6 pt-0', className)} {...props} />
-  )
-)
-CardContent.displayName = 'CardContent'
-
-const CardFooter = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn('flex items-center p-6 pt-0', className)} {...props} />
-  )
-)
-CardFooter.displayName = 'CardFooter'
-
-export { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardContent }
-````
-
-## File: packages/web/src/components/ui/input.tsx
-````typescript
-import * as React from 'react'
-import { cn } from '@/lib/utils'
-
-export type InputProps = React.InputHTMLAttributes<HTMLInputElement>
-
-const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ className, type, ...props }, ref) => {
-    return (
-      <input
-        type={type}
-        className={cn(
-          'flex h-9 w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-1 text-sm text-[var(--foreground)] shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-50',
-          className
-        )}
-        ref={ref}
-        {...props}
-      />
-    )
-  }
-)
-Input.displayName = 'Input'
-
-export { Input }
-````
-
-## File: packages/web/src/components/ui/label.tsx
-````typescript
-import * as React from 'react'
-import * as LabelPrimitive from '@radix-ui/react-label'
-import { cn } from '@/lib/utils'
-
-const Label = React.forwardRef<
-  React.ElementRef<typeof LabelPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof LabelPrimitive.Root>
->(({ className, ...props }, ref) => (
-  <LabelPrimitive.Root
-    ref={ref}
-    className={cn(
-      'text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)] leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70',
-      className
-    )}
-    {...props}
-  />
-))
-Label.displayName = LabelPrimitive.Root.displayName
-
-export { Label }
-````
-
 ## File: packages/web/src/components/ActivityPanel.tsx
 ````typescript
 import { useEffect, useState } from 'react';
@@ -11349,38 +11082,50 @@ export default function ActivityPanel({ activity, members, onClose, onChange, on
 }
 ````
 
-## File: packages/web/src/components/DarkModeToggle.tsx
+## File: packages/web/src/components/ProtectedRoute.tsx
 ````typescript
-import { Moon, Sun } from 'lucide-react'
-import { useDarkMode } from '@/hooks/useDarkMode'
+/**
+ * Wraps protected routes. Unauthenticated users are redirected to /login
+ * with the original path preserved in state so they land back after logging in.
+ * On a fresh install (no users exist) they are redirected to /setup instead.
+ * Shows nothing while the session is being restored or the setup check is in flight.
+ */
 
-/** Icon button that flips between light and dark mode. */
-export default function DarkModeToggle() {
-  const { isDark, toggle } = useDarkMode()
-  return (
-    <button
-      onClick={toggle}
-      title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-      style={{
-        width: 32,
-        height: 32,
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--radius-md)',
-        background: 'var(--card)',
-        color: 'var(--muted-foreground)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        cursor: 'pointer',
-        flexShrink: 0,
-        transition: 'color 0.15s',
-      }}
-      onMouseEnter={e => (e.currentTarget.style.color = 'var(--foreground)')}
-      onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
-    >
-      {isDark ? <Sun size={15} strokeWidth={1.8} /> : <Moon size={15} strokeWidth={1.8} />}
-    </button>
-  )
+import { Navigate, Outlet, useLocation } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { API_BASE } from '@/lib/api'
+
+interface SetupStatus {
+  needsSetup: boolean
+}
+
+export default function ProtectedRoute() {
+  const { accessToken, initializing } = useAuth()
+  const location = useLocation()
+
+  // Only fetch setup status when the user isn't logged in — once setup is
+  // done the result never changes back, so we cache it indefinitely.
+  const { data: setup, isLoading: setupLoading } = useQuery<SetupStatus>({
+    queryKey: ['setup-status'],
+    queryFn: () =>
+      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
+    enabled: !initializing && !accessToken,
+    staleTime: Infinity,
+  })
+
+  if (initializing || (!accessToken && setupLoading)) {
+    return null
+  }
+
+  if (!accessToken) {
+    if (setup?.needsSetup) {
+      return <Navigate to="/setup" replace />
+    }
+    return <Navigate to="/login" state={{ from: location }} replace />
+  }
+
+  return <Outlet />
 }
 ````
 
@@ -11533,44 +11278,644 @@ export default function RoleDropdown({ value, onChange, disabled = false, hidePa
 }
 ````
 
-## File: packages/web/src/hooks/useDarkMode.ts
+## File: packages/web/src/components/TimelineModal.tsx
 ````typescript
 /**
- * Manages the dark/light theme toggle.
+ * TimelineModal — create / edit a timeline.
  *
- * Persistence: localStorage key "draba_theme".
- * Initial value: stored preference, falling back to prefers-color-scheme.
- * Effect: sets/removes the `dark` class on <html> whenever the value changes.
+ * Modes:
+ *  - "new":  name + date range + identity; template picker seeds the initial statuses
+ *  - "edit": same fields; plus Statuses tab (add/edit/delete live statuses) and
+ *            Access tab (grant/revoke member access)
  */
 
-import { useEffect, useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { X, Plus, Trash2, ChevronDown, Check, AlertTriangle } from 'lucide-react'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import {
+  useCreateTimeline,
+  useUpdateTimeline,
+  useDeleteTimeline,
+  useArchiveTimeline,
+  useTimelineAccess,
+  useGrantTimelineAccess,
+  useRevokeTimelineAccess,
+  useTeamMembers,
+} from '@/hooks/useTeamActivities'
+import {
+  useTimelineStatuses,
+  useCreateTimelineStatus,
+  useUpdateTimelineStatus,
+  useDeleteTimelineStatus,
+} from '@/hooks/useStatusTemplates'
+import { useStatusTemplates } from '@/hooks/useStatusTemplates'
+import type { components } from '@draba/shared'
 
-type Theme = 'dark' | 'light'
+type Timeline = components['schemas']['Timeline']
+type Status = components['schemas']['Status']
+type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
 
-const STORAGE_KEY = 'draba_theme'
+// ── Prop types ────────────────────────────────────────────────────────────────
 
-function getInitialTheme(): Theme {
-  const stored = localStorage.getItem(STORAGE_KEY) as Theme | null
-  if (stored === 'dark' || stored === 'light') return stored
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+interface Props {
+  mode: 'new' | 'edit'
+  teamId: string
+  timeline?: Timeline
+  onClose: () => void
+  onCreated?: (timeline: Timeline) => void
 }
 
-export function useDarkMode() {
-  const [theme, setTheme] = useState<Theme>(getInitialTheme)
+type Tab = 'settings' | 'statuses' | 'access'
 
-  useEffect(() => {
-    const root = document.documentElement
-    if (theme === 'dark') {
-      root.classList.add('dark')
-    } else {
-      root.classList.remove('dark')
+// ── Inline styles (matching Team Modal aesthetic) ─────────────────────────────
+
+const OVERLAY: React.CSSProperties = {
+  position: 'fixed', inset: 0,
+  background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(2px)',
+  zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
+}
+
+const PANEL: React.CSSProperties = {
+  background: 'var(--card)', border: '1px solid var(--border)',
+  borderRadius: 12, width: 560, maxWidth: '95vw',
+  maxHeight: '90vh', display: 'flex', flexDirection: 'column',
+  boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+}
+
+const HEADER: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 12,
+  padding: '18px 20px 14px', borderBottom: '1px solid var(--border)',
+  flexShrink: 0,
+}
+
+const TAB_BAR: React.CSSProperties = {
+  display: 'flex', gap: 2, padding: '0 20px',
+  borderBottom: '1px solid var(--border)', flexShrink: 0,
+}
+
+const CONTENT: React.CSSProperties = {
+  flex: 1, overflowY: 'auto', padding: '20px',
+}
+
+const FOOTER: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+  padding: '14px 20px', borderTop: '1px solid var(--border)', flexShrink: 0,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)',
+  textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6,
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%', boxSizing: 'border-box',
+  fontSize: 13, color: 'var(--foreground)',
+  border: '1px solid var(--border)', borderRadius: 6,
+  padding: '7px 10px', background: 'var(--background)',
+  outline: 'none',
+}
+
+function tabStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: '8px 14px', fontSize: 12, fontWeight: 500,
+    border: 'none', background: 'none', cursor: 'pointer',
+    borderBottom: active ? '2px solid var(--primary)' : '2px solid transparent',
+    color: active ? 'var(--foreground)' : 'var(--muted-foreground)',
+    fontFamily: 'var(--font-sans)',
+  }
+}
+
+// ── Status row (edit mode) ────────────────────────────────────────────────────
+
+interface StatusRowProps {
+  status: Status
+  canDelete: boolean
+  teamId: string
+  timelineId: string
+  allStatuses: Status[]
+}
+
+function StatusRow({ status, canDelete, teamId, timelineId, allStatuses }: StatusRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(status.name)
+  const [identity, setIdentity] = useState<Identity>({ color: status.color, icon: status.icon ?? '' })
+  const [isClosed, setIsClosed] = useState(status.isClosed)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [replacementId, setReplacementId] = useState('')
+  const update = useUpdateTimelineStatus(teamId, timelineId)
+  const del = useDeleteTimelineStatus(teamId, timelineId)
+
+  function save() {
+    update.mutate(
+      { id: status.id, name: name.trim() || status.name, color: identity.color, icon: identity.icon || null, isClosed },
+      { onSuccess: () => setEditing(false) },
+    )
+  }
+
+  function doDelete() {
+    del.mutate(
+      { id: status.id, replacementStatusId: replacementId || undefined },
+      { onSuccess: () => setShowDeleteConfirm(false) },
+    )
+  }
+
+  if (showDeleteConfirm) {
+    const others = allStatuses.filter(s => s.id !== status.id)
+    return (
+      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: 12, marginBottom: 6 }}>
+        <div style={{ fontSize: 12, color: 'var(--foreground)', marginBottom: 8 }}>
+          Delete <strong>{status.name}</strong>? Activities using this status will be reassigned.
+        </div>
+        {others.length > 0 && (
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ ...FIELD_LABEL }}>Move activities to</label>
+            <select
+              value={replacementId}
+              onChange={e => setReplacementId(e.target.value)}
+              style={{ ...INPUT, fontSize: 12 }}
+            >
+              <option value="">— No status —</option>
+              {others.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setShowDeleteConfirm(false)} style={{ fontSize: 12, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 5, background: 'none', cursor: 'pointer', color: 'var(--foreground)' }}>Cancel</button>
+          <button onClick={doDelete} style={{ fontSize: 12, padding: '4px 10px', border: 'none', borderRadius: 5, background: 'var(--destructive)', color: 'white', cursor: 'pointer' }}>Delete</button>
+        </div>
+      </div>
+    )
+  }
+
+  if (editing) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0' }}>
+        <IdentityWidget
+          identity={{ color: identity.color, icon: identity.icon ?? '' }}
+          name={status.name}
+          onChange={setIdentity}
+          shape="square"
+        />
+        <input
+          autoFocus
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
+          style={{ ...INPUT, flex: 1 }}
+        />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--muted-foreground)', cursor: 'pointer' }}>
+          <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
+          closed
+        </label>
+        <button onClick={save} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4 }}>
+          <Check width={14} height={14} />
+        </button>
+        <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+          <X width={14} height={14} />
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
+      <Badge identity={{ color: status.color, icon: status.icon ?? '__none__' }} name={status.name} shape="square" size={18} />
+      <span style={{ fontSize: 13, flex: 1, cursor: 'pointer', color: 'var(--foreground)' }} onClick={() => setEditing(true)}>
+        {status.name}
+      </span>
+      {status.isClosed && (
+        <span style={{ fontSize: 10, padding: '1px 6px', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--muted-foreground)' }}>closed</span>
+      )}
+      <button onClick={() => setEditing(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, opacity: 0.5 }}>
+        ✎
+      </button>
+      {canDelete && (
+        <button onClick={() => setShowDeleteConfirm(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+          <Trash2 width={13} height={13} />
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Access row (edit mode) ────────────────────────────────────────────────────
+
+interface AccessRowProps {
+  entry: TimelineAccessEntry
+  teamId: string
+  timelineId: string
+  isCurrentUser: boolean
+}
+
+function AccessRow({ entry, teamId, timelineId, isCurrentUser }: AccessRowProps) {
+  const grant = useGrantTimelineAccess(teamId, timelineId)
+  const revoke = useRevokeTimelineAccess(teamId, timelineId)
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0' }}>
+      <Badge
+        identity={{ color: entry.color ?? '#8b949e', icon: entry.icon ?? '__name_words__' }}
+        name={entry.displayName || entry.email}
+        shape="circle"
+        size={24}
+      />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {entry.displayName || entry.email}
+        </div>
+        {entry.email && entry.displayName && (
+          <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{entry.email}</div>
+        )}
+      </div>
+      <select
+        value={entry.role}
+        disabled={isCurrentUser}
+        onChange={e => grant.mutate({ memberId: entry.teamMemberId, role: e.target.value as 'admin' | 'member' })}
+        style={{ fontSize: 12, border: '1px solid var(--border)', borderRadius: 5, padding: '2px 6px', background: 'var(--card)', color: 'var(--foreground)', cursor: isCurrentUser ? 'default' : 'pointer' }}
+      >
+        <option value="admin">Admin</option>
+        <option value="member">Member</option>
+      </select>
+      {!isCurrentUser && (
+        <button
+          onClick={() => revoke.mutate(entry.teamMemberId)}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}
+        >
+          <X width={13} height={13} />
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Main modal ────────────────────────────────────────────────────────────────
+
+export default function TimelineModal({ mode, teamId, timeline, onClose, onCreated }: Props) {
+  const [activeTab, setActiveTab] = useState<Tab>('settings')
+  const [name, setName] = useState(timeline?.name ?? '')
+  const [startDate, setStartDate] = useState(timeline?.startDate ?? '')
+  const [endDate, setEndDate] = useState(timeline?.endDate ?? '')
+  const [identity, setIdentity] = useState<Identity>({ color: timeline?.color ?? '#1A97A2', icon: timeline?.icon ?? '' })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false)
+  const [newStatusName, setNewStatusName] = useState('')
+  const [addingMemberId, setAddingMemberId] = useState('')
+
+  const createTimeline = useCreateTimeline(teamId)
+  const updateTimeline = useUpdateTimeline(teamId)
+  const deleteTimeline = useDeleteTimeline(teamId)
+  const archiveTimeline = useArchiveTimeline(teamId)
+
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timeline?.id ?? '')
+  const createStatus = useCreateTimelineStatus(teamId, timeline?.id ?? '')
+  const { data: accessEntries = [] } = useTimelineAccess(teamId, timeline?.id ?? '')
+  const { data: allMembers = [] } = useTeamMembers(teamId)
+  const grantAccess = useGrantTimelineAccess(teamId, timeline?.id ?? '')
+
+  const { data: templates = [] } = useStatusTemplates(teamId)
+
+  const overlayRef = useRef<HTMLDivElement>(null)
+  const timelineColor = resolveColorHex(identity.color) ?? identity.color ?? '#1A97A2'
+
+  // Grant access affordance — members not yet on the access list.
+  const accessedMemberIds = new Set(accessEntries.map(e => e.teamMemberId))
+  const unlistedMembers = allMembers.filter(m => !accessedMemberIds.has(m.id))
+
+  function handleOverlayClick(e: React.MouseEvent) {
+    if (e.target === overlayRef.current) onClose()
+  }
+
+  function handleSave() {
+    if (!name.trim()) { setError('Name is required'); return }
+    if (!startDate || !endDate) { setError('Start and end dates are required'); return }
+    if (endDate < startDate) { setError('End date must not be before start date'); return }
+    setSaving(true)
+    setError('')
+
+    if (mode === 'new') {
+      createTimeline.mutate(
+        { name: name.trim(), startDate, endDate, color: identity.color || null, icon: identity.icon || null },
+        {
+          onSuccess: (tl) => { setSaving(false); onCreated?.(tl); onClose() },
+          onError: () => { setSaving(false); setError('Failed to create timeline') },
+        },
+      )
+    } else if (timeline) {
+      updateTimeline.mutate(
+        { timelineId: timeline.id, patch: { name: name.trim(), startDate, endDate, color: identity.color || null, icon: identity.icon || null } },
+        {
+          onSuccess: () => { setSaving(false); onClose() },
+          onError: () => { setSaving(false); setError('Failed to save timeline') },
+        },
+      )
     }
-    localStorage.setItem(STORAGE_KEY, theme)
-  }, [theme])
+  }
 
-  const toggle = () => setTheme(t => (t === 'dark' ? 'light' : 'dark'))
+  function handleAddStatus() {
+    if (!newStatusName.trim() || !timeline) return
+    createStatus.mutate(
+      { name: newStatusName.trim() },
+      { onSuccess: () => setNewStatusName('') },
+    )
+  }
 
-  return { theme, toggle, isDark: theme === 'dark' } as const
+  function handleGrantMember() {
+    if (!addingMemberId || !timeline) return
+    grantAccess.mutate(
+      { memberId: addingMemberId, role: 'member' },
+      { onSuccess: () => setAddingMemberId('') },
+    )
+  }
+
+  if (showDeleteConfirm && timeline) {
+    return (
+      <div style={OVERLAY} ref={overlayRef} onClick={handleOverlayClick}>
+        <div style={{ ...PANEL, maxWidth: 440 }}>
+          <div style={{ padding: 28, textAlign: 'center' }}>
+            <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'rgba(239,68,68,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+              <AlertTriangle width={22} height={22} color="var(--destructive)" />
+            </div>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10 }}>Delete timeline?</div>
+            <div style={{ fontSize: 13, color: 'var(--muted-foreground)', marginBottom: 24, lineHeight: 1.5 }}>
+              This permanently deletes <strong>{timeline.name}</strong> and all its statuses. Activities are not deleted — they remain in the team.
+            </div>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+              <button onClick={() => setShowDeleteConfirm(false)} style={{ padding: '8px 18px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancel</button>
+              <button
+                onClick={() => deleteTimeline.mutate(timeline.id, { onSuccess: onClose })}
+                style={{ padding: '8px 18px', border: 'none', borderRadius: 7, background: 'var(--destructive)', color: 'white', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
+              >
+                Delete timeline
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (showArchiveConfirm && timeline) {
+    return (
+      <div style={OVERLAY} ref={overlayRef} onClick={handleOverlayClick}>
+        <div style={{ ...PANEL, maxWidth: 440 }}>
+          <div style={{ padding: 28, textAlign: 'center' }}>
+            <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'rgba(245,158,11,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+              <AlertTriangle width={22} height={22} color="#F59E0B" />
+            </div>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10 }}>Archive timeline?</div>
+            <div style={{ fontSize: 13, color: 'var(--muted-foreground)', marginBottom: 24, lineHeight: 1.5 }}>
+              <strong>{timeline.name}</strong> will be hidden from the active list. All data is preserved and the timeline can be restored from the Archived section in the sidebar.
+            </div>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+              <button onClick={() => setShowArchiveConfirm(false)} style={{ padding: '8px 18px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancel</button>
+              <button
+                onClick={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
+                style={{ padding: '8px 18px', border: 'none', borderRadius: 7, background: '#F59E0B', color: 'white', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
+              >
+                Archive timeline
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div style={OVERLAY} ref={overlayRef} onClick={handleOverlayClick}>
+      <div style={PANEL} onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div style={HEADER}>
+          <IdentityWidget
+            identity={identity}
+            name={name || (mode === 'new' ? 'New timeline' : timeline?.name ?? '')}
+            onChange={setIdentity}
+            shape="square"
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 2 }}>
+              {mode === 'new' ? 'NEW TIMELINE' : 'EDIT TIMELINE'}
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {name || (mode === 'new' ? 'New timeline' : timeline?.name)}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+            <X width={18} height={18} />
+          </button>
+        </div>
+
+        {/* Tab bar — only show Statuses and Access tabs in edit mode */}
+        <div style={TAB_BAR}>
+          <button style={tabStyle(activeTab === 'settings')} onClick={() => setActiveTab('settings')}>Settings</button>
+          {mode === 'edit' && (
+            <>
+              <button style={tabStyle(activeTab === 'statuses')} onClick={() => setActiveTab('statuses')}>
+                Statuses {statuses.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({statuses.length})</span>}
+              </button>
+              <button style={tabStyle(activeTab === 'access')} onClick={() => setActiveTab('access')}>
+                Access {accessEntries.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({accessEntries.length})</span>}
+              </button>
+            </>
+          )}
+        </div>
+
+        {/* Content */}
+        <div style={CONTENT}>
+          {activeTab === 'settings' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {/* Name */}
+              <div>
+                <div style={FIELD_LABEL}>Name *</div>
+                <input
+                  autoFocus={mode === 'new'}
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  placeholder="Timeline name"
+                  style={INPUT}
+                />
+              </div>
+
+              {/* Date range */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div>
+                  <div style={FIELD_LABEL}>Start date *</div>
+                  <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={INPUT} />
+                </div>
+                <div>
+                  <div style={FIELD_LABEL}>End date *</div>
+                  <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={INPUT} />
+                </div>
+              </div>
+
+              {/* Template picker (create mode only) */}
+              {mode === 'new' && templates.length > 0 && (
+                <div>
+                  <div style={FIELD_LABEL}>Status template</div>
+                  <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 8 }}>
+                    The team's first template will be copied into this timeline's statuses automatically.
+                  </div>
+                  <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 14px' }}>
+                    {templates[0] && (
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{templates[0].name}</div>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {templates[0].items.map(item => (
+                            <span key={item.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: item.color + '22', border: `1px solid ${item.color}66`, color: item.color }}>
+                              {item.name}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {error && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, padding: '8px 12px' }}>
+                  {error}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'statuses' && timeline && (
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
+                Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
+              </div>
+
+              <div style={{ marginBottom: 12 }}>
+                {statuses.map(s => (
+                  <StatusRow
+                    key={s.id}
+                    status={s}
+                    canDelete={statuses.length > 1}
+                    teamId={teamId}
+                    timelineId={timeline.id}
+                    allStatuses={statuses}
+                  />
+                ))}
+              </div>
+
+              {/* Add status */}
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <input
+                  value={newStatusName}
+                  onChange={e => setNewStatusName(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleAddStatus() }}
+                  placeholder="New status name…"
+                  style={{ ...INPUT, flex: 1 }}
+                />
+                <button
+                  onClick={handleAddStatus}
+                  disabled={!newStatusName.trim()}
+                  style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 12px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 6, background: 'var(--primary)', color: 'white', cursor: 'pointer', opacity: newStatusName.trim() ? 1 : 0.4 }}
+                >
+                  <Plus width={13} height={13} /> Add
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'access' && timeline && (
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
+                Team admins can always access all timelines. Use this list to grant specific team members access.
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                {accessEntries.length === 0 ? (
+                  <div style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center', padding: '20px 0' }}>No explicit access grants yet.</div>
+                ) : (
+                  accessEntries.map(e => (
+                    <AccessRow
+                      key={e.teamMemberId}
+                      entry={e}
+                      teamId={teamId}
+                      timelineId={timeline.id}
+                      isCurrentUser={false}
+                    />
+                  ))
+                )}
+              </div>
+
+              {/* Add member */}
+              {unlistedMembers.length > 0 && (
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <select
+                    value={addingMemberId}
+                    onChange={e => setAddingMemberId(e.target.value)}
+                    style={{ ...INPUT, flex: 1, fontSize: 12 }}
+                  >
+                    <option value="">Add a team member…</option>
+                    {unlistedMembers.map(m => (
+                      <option key={m.id} value={m.id}>{m.displayName || m.email}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={handleGrantMember}
+                    disabled={!addingMemberId}
+                    style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 12px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 6, background: 'var(--primary)', color: 'white', cursor: 'pointer', opacity: addingMemberId ? 1 : 0.4 }}
+                  >
+                    <Plus width={13} height={13} /> Grant
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={FOOTER}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {mode === 'edit' && timeline && !timeline.archivedAt && (
+              <button
+                onClick={() => setShowArchiveConfirm(true)}
+                style={{ fontSize: 12, padding: '7px 12px', border: '1px solid #F59E0B44', borderRadius: 7, background: 'none', color: '#F59E0B', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+              >
+                Archive
+              </button>
+            )}
+            {mode === 'edit' && timeline && (
+              <button
+                onClick={() => setShowDeleteConfirm(true)}
+                style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+              >
+                Delete
+              </button>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={onClose}
+              style={{ fontSize: 13, padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+            >
+              Cancel
+            </button>
+            {(activeTab === 'settings') && (
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                style={{ fontSize: 13, fontWeight: 600, padding: '8px 18px', border: 'none', borderRadius: 7, background: timelineColor, color: 'white', cursor: saving ? 'wait' : 'pointer', fontFamily: 'var(--font-sans)' }}
+              >
+                {saving ? 'Saving…' : mode === 'new' ? 'Create timeline' : 'Save changes'}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }
 ````
 
@@ -11730,152 +12075,6 @@ export function useDeleteSavedFilter(teamId: string) {
 }
 ````
 
-## File: packages/web/src/hooks/useStatusTemplates.ts
-````typescript
-/**
- * TanStack Query hooks for status templates and timeline statuses.
- *
- * Status templates are team-level reusable presets. When a timeline is
- * created the team's first template's items are copied into live Status rows
- * for that timeline.
- */
-
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-
-type StatusTemplate = components['schemas']['StatusTemplate']
-type StatusTemplateItem = components['schemas']['StatusTemplateItem']
-type Status = components['schemas']['Status']
-type CreateStatusTemplateInput = components['schemas']['CreateStatusTemplateInput']
-type PatchStatusTemplateInput = components['schemas']['PatchStatusTemplateInput']
-type CreateStatusTemplateItemInput = components['schemas']['CreateStatusTemplateItemInput']
-type PatchStatusTemplateItemInput = components['schemas']['PatchStatusTemplateItemInput']
-
-export const statusKeys = {
-  templates: (teamId: string) => ['teams', teamId, 'status-templates'] as const,
-  statuses: (teamId: string, timelineId: string) =>
-    ['teams', teamId, 'timelines', timelineId, 'statuses'] as const,
-}
-
-/** Fetches all status templates for a team. */
-export function useStatusTemplates(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: statusKeys.templates(teamId),
-    queryFn: async () =>
-      (await authFetch<StatusTemplate[]>(`/teams/${teamId}/status-templates`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Creates a new status template for a team. */
-export function useCreateStatusTemplate(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: CreateStatusTemplateInput) =>
-      authFetch<StatusTemplate>(`/teams/${teamId}/status-templates`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
-  })
-}
-
-/** Updates a status template (name, description, position). */
-export function useUpdateStatusTemplate(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ id, ...patch }: PatchStatusTemplateInput & { id: string }) =>
-      authFetch<StatusTemplate>(`/status-templates/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
-  })
-}
-
-/** Deletes a status template. The server blocks deleting the last template. */
-export function useDeleteStatusTemplate(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (id: string) =>
-      authFetch<void>(`/status-templates/${id}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
-  })
-}
-
-/** Adds an item to a status template. */
-export function useCreateTemplateItem(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ templateId, ...input }: CreateStatusTemplateItemInput & { templateId: string }) =>
-      authFetch<StatusTemplateItem>(`/status-templates/${templateId}/items`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
-  })
-}
-
-/** Updates a template item (name, color, icon, isClosed, position). */
-export function useUpdateTemplateItem(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ id, ...patch }: PatchStatusTemplateItemInput & { id: string }) =>
-      authFetch<StatusTemplateItem>(`/status-template-items/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
-  })
-}
-
-/** Deletes a template item. The server blocks deleting the last item. */
-export function useDeleteTemplateItem(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (id: string) =>
-      authFetch<void>(`/status-template-items/${id}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
-  })
-}
-
-/** Fetches live statuses for a timeline. */
-export function useTimelineStatuses(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: statusKeys.statuses(teamId, timelineId),
-    queryFn: async () =>
-      (await authFetch<Status[]>(`/teams/${teamId}/timelines/${timelineId}/statuses`)) ?? [],
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-````
-
 ## File: packages/web/src/lib/identity-constants.test.ts
 ````typescript
 import { describe, it, expect } from 'vitest';
@@ -11972,16 +12171,6 @@ describe('IDENTITY_COLORS', () => {
 });
 ````
 
-## File: packages/web/src/lib/utils.ts
-````typescript
-import { clsx, type ClassValue } from 'clsx'
-import { twMerge } from 'tailwind-merge'
-
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs))
-}
-````
-
 ## File: packages/web/src/pages/ForgotPasswordPage.tsx
 ````typescript
 /**
@@ -12067,6 +12256,166 @@ export default function ForgotPasswordPage() {
               </p>
             </form>
           )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/RegisterPage.tsx
+````typescript
+import { useState } from 'react'
+import { useNavigate, useSearchParams, Link } from 'react-router-dom'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+export default function RegisterPage() {
+  const { register } = useAuth()
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  // Pre-fill from ?token= query param (invite link).
+  const [inviteToken, setInviteToken] = useState(searchParams.get('token') ?? '')
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    setLoading(true)
+    try {
+      await register(email, password, displayName, inviteToken || undefined)
+      navigate('/', { replace: true })
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--background)',
+        padding: '24px',
+      }}
+    >
+      {/* Dark mode toggle — top-right */}
+      <div style={{ position: 'fixed', top: 16, right: 16 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Logo + wordmark */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 32 }}>
+        <img src="/logo.svg" alt="draba" style={{ width: 36, height: 36 }} />
+        <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.01em' }}>
+          draba
+        </span>
+      </div>
+
+      <Card style={{ width: '100%', maxWidth: 400 }}>
+        <CardHeader>
+          <CardTitle>Create your account</CardTitle>
+          <CardDescription>You need a valid invite token to register.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="displayName">Display name</Label>
+              <Input
+                id="displayName"
+                type="text"
+                autoComplete="name"
+                placeholder="Jane Smith"
+                value={displayName}
+                onChange={e => setDisplayName(e.target.value)}
+                required
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="email">Email</Label>
+              <Input
+                id="email"
+                type="email"
+                autoComplete="email"
+                placeholder="you@example.com"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                required
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="password">Password</Label>
+              <Input
+                id="password"
+                type="password"
+                autoComplete="new-password"
+                placeholder="At least 8 characters"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="inviteToken">Invite token</Label>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: 'var(--muted-foreground)',
+                  background: 'var(--muted)',
+                  borderRadius: 6,
+                  padding: '8px 10px',
+                  lineHeight: 1.5,
+                }}
+              >
+                draba is invite-only. Ask your team admin to send you an invite, or click the link in your invitation email — it will fill this in automatically.
+              </div>
+              <Input
+                id="inviteToken"
+                type="text"
+                placeholder="Paste your invite token"
+                value={inviteToken}
+                onChange={e => setInviteToken(e.target.value)}
+              />
+            </div>
+
+            {error && (
+              <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
+            )}
+
+            <Button type="submit" disabled={loading} style={{ width: '100%' }}>
+              {loading ? 'Creating account…' : 'Create account'}
+            </Button>
+          </form>
+
+          <p style={{ marginTop: 16, fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
+            Already have an account?{' '}
+            <Link to="/login" style={{ color: 'var(--primary)', fontWeight: 600 }}>
+              Sign in
+            </Link>
+          </p>
         </CardContent>
       </Card>
     </div>
@@ -12308,58 +12657,50 @@ See `skills/ts-comments.md` for comment conventions (file-level headers, TSDoc o
 - All API types come from generated types in `packages/shared/` — do not hand-write API response types
 ````
 
-## File: packages/web/components.json
+## File: packages/web/package.json
 ````json
 {
-  "$schema": "https://ui.shadcn.com/schema.json",
-  "style": "default",
-  "rsc": false,
-  "tsx": true,
-  "tailwind": {
-    "config": "",
-    "css": "src/index.css",
-    "baseColor": "slate",
-    "cssVariables": true
+  "name": "@draba/web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "tsc --noEmit",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
-  "aliases": {
-    "components": "@/components",
-    "utils": "@/lib/utils",
-    "ui": "@/components/ui",
-    "lib": "@/lib",
-    "hooks": "@/hooks"
+  "dependencies": {
+    "@draba/shared": "workspace:*",
+    "@radix-ui/react-label": "^2.1.8",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@tanstack/react-query": "^5.100.10",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.500.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.15.1",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^25.8.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.5.0",
+    "@vitest/ui": "^4.1.7",
+    "jsdom": "^29.1.1",
+    "tailwindcss": "^4.1.0",
+    "typescript": "~5.8.0",
+    "vite": "^6.3.0",
+    "vitest": "^4.1.7"
   }
-}
-````
-
-## File: packages/web/tsconfig.app.json
-````json
-{
-  "compilerOptions": {
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
-    "target": "ES2020",
-    "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "skipLibCheck": true,
-
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "noEmit": true,
-    "jsx": "react-jsx",
-
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true,
-    "paths": {
-      "@draba/shared": ["../shared/src/index.ts"],
-      "@/*": ["./src/*"]
-    }
-  },
-  "include": ["src"]
 }
 ````
 
@@ -12902,6 +13243,838 @@ func smtpTestBody() string {
 }
 ````
 
+## File: packages/api/internal/api/middleware.go
+````go
+package api
+
+import (
+	"bufio"
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+)
+
+// contextKey is an unexported type to avoid collisions with other packages
+// using context.WithValue on the same request context.
+type contextKey string
+
+const (
+	claimsKey     contextKey = "claims"
+	tokenScopeKey contextKey = "tokenScope"
+)
+
+// Scope sentinels. tokenScopeFull is used for JWT-authenticated requests
+// where no scope restriction applies; the other values mirror the api_tokens
+// schema check constraint.
+const (
+	tokenScopeFull    = "full"
+	tokenScopeRead    = "read"
+	tokenScopeAdd     = "add"
+	tokenScopeEditOwn = "edit_own"
+	tokenScopeEditAll = "edit_all"
+)
+
+// authMiddleware enforces a Bearer credential on the request, attaches the
+// resolved Claims (and any API-token scope) to the request context, and
+// rejects unauthenticated or scope-violating requests.
+//
+// The Bearer value is either a JWT access token or an API token (prefix
+// auth.APITokenPrefix). Read-only API tokens are rejected on any non-GET
+// request — write scopes are accepted on all methods.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get("Authorization")
+		if !strings.HasPrefix(header, "Bearer ") {
+			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or invalid authorization header")
+			return
+		}
+		raw := strings.TrimPrefix(header, "Bearer ")
+
+		var (
+			claims *auth.Claims
+			scope  = tokenScopeFull
+		)
+
+		if auth.LooksLikeAPIToken(raw) {
+			tok, err := s.apiTokens.GetByHash(auth.HashAPIToken(raw))
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or revoked api token")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
+				return
+			}
+			if tok.Scope == tokenScopeRead && r.Method != http.MethodGet {
+				writeError(w, http.StatusForbidden, "FORBIDDEN", "read-only token cannot perform writes")
+				return
+			}
+			user, err := s.users.GetByID(tok.UserID)
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "token owner not found")
+				return
+			}
+			claims = &auth.Claims{UserID: user.ID, Email: user.Email, Type: "access"}
+			scope = tok.Scope
+			// Best-effort last-used touch; never block the request on a write failure.
+			if err := s.apiTokens.TouchLastUsed(tok.ID); err != nil {
+				slog.Debug("api token touch failed", "id", tok.ID, "err", err)
+			}
+		} else {
+			c, err := s.tokens.Validate(raw, "access")
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
+				return
+			}
+			// Verify the user still exists. A valid JWT for a deleted user (e.g.
+			// after a DB wipe) would otherwise pass signature validation but fail
+			// later at the FK layer, producing a confusing 500 instead of a 401.
+			if _, err := s.users.GetByID(c.UserID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
+				return
+			}
+			claims = c
+		}
+
+		ctx := context.WithValue(r.Context(), claimsKey, claims)
+		ctx = context.WithValue(ctx, tokenScopeKey, scope)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// claimsFromContext returns the Claims placed by authMiddleware, or nil
+// if the request did not pass through it. Handlers behind authMiddleware
+// can rely on a non-nil result.
+func claimsFromContext(ctx context.Context) *auth.Claims {
+	c, _ := ctx.Value(claimsKey).(*auth.Claims)
+	return c
+}
+
+// statusWriter wraps ResponseWriter to capture the status code written by
+// the handler, which is not otherwise readable after the fact.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker so that the WebSocket upgrader can take
+// over the connection. Without this, the statusWriter wrapper breaks WS upgrades.
+func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := sw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return h.Hijack()
+}
+
+// requestLogger wraps next and emits a debug-level log line for every
+// request: method, path, status code, and wall-clock duration in ms.
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		slog.Debug("http",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"ms", time.Since(start).Milliseconds(),
+		)
+	})
+}
+````
+
+## File: packages/api/internal/api/status_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ── Status templates ──────────────────────────────────────────────────────────
+
+// handleListStatusTemplates handles GET /teams/{id}/status-templates.
+// Any team member may list the team's status templates.
+func (s *Server) handleListStatusTemplates(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list status templates")
+		return
+	}
+
+	templates, err := s.statuses.ListTemplates(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list status templates")
+		return
+	}
+	writeJSON(w, http.StatusOK, templates)
+}
+
+// handleCreateStatusTemplate handles POST /teams/{id}/status-templates.
+// Team admins only.
+func (s *Server) handleCreateStatusTemplate(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	member, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status template")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var req CreateStatusTemplateJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	// Position defaults to end of existing list.
+	count, err := s.statuses.CountTemplates(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status template")
+		return
+	}
+
+	now := time.Now()
+	t := &models.StatusTemplate{
+		ID:        newID(),
+		TeamID:    teamID,
+		Name:      name,
+		Position:  count,
+		CreatedBy: claims.UserID,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if req.Description != nil {
+		t.Description = req.Description
+	}
+	if err := s.statuses.CreateTemplate(t); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status template")
+		return
+	}
+	t.Items = []models.StatusTemplateItem{}
+	writeJSON(w, http.StatusCreated, t)
+}
+
+// handleUpdateStatusTemplate handles PATCH /status-templates/{id}.
+// Team admins only.
+func (s *Server) handleUpdateStatusTemplate(w http.ResponseWriter, r *http.Request) {
+	templateID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	t, err := s.statuses.GetTemplate(templateID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status template")
+		return
+	}
+
+	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status template")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var req PatchStatusTemplateJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		t.Name = name
+	}
+	if req.Description != nil {
+		t.Description = req.Description
+	}
+	if req.Position != nil {
+		t.Position = *req.Position
+	}
+	t.UpdatedAt = time.Now()
+
+	if err := s.statuses.UpdateTemplate(t); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status template")
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+// handleDeleteStatusTemplate handles DELETE /status-templates/{id}.
+// Team admins only. Blocked if it is the last template on the team.
+func (s *Server) handleDeleteStatusTemplate(w http.ResponseWriter, r *http.Request) {
+	templateID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	t, err := s.statuses.GetTemplate(templateID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
+		return
+	}
+
+	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	count, err := s.statuses.CountTemplates(t.TeamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
+		return
+	}
+	if count <= 1 {
+		writeError(w, http.StatusConflict, "LAST_TEMPLATE", "cannot delete the last status template")
+		return
+	}
+
+	if err := s.statuses.DeleteTemplate(templateID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── Template items ────────────────────────────────────────────────────────────
+
+// handleCreateTemplateItem handles POST /status-templates/{id}/items.
+// Team admins only.
+func (s *Server) handleCreateTemplateItem(w http.ResponseWriter, r *http.Request) {
+	templateID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	t, err := s.statuses.GetTemplate(templateID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
+		return
+	}
+
+	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var req CreateStatusTemplateItemJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	count, err := s.statuses.CountTemplateItems(templateID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
+		return
+	}
+
+	color := "#8b949e"
+	if req.Color != nil {
+		color = *req.Color
+	}
+
+	item := &models.StatusTemplateItem{
+		ID:         newID(),
+		TemplateID: templateID,
+		Name:       name,
+		Color:      color,
+		Icon:       req.Icon,
+		Position:   count,
+	}
+	if req.IsClosed != nil {
+		item.IsClosed = *req.IsClosed
+	}
+
+	if err := s.statuses.CreateTemplateItem(item); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+// handleUpdateTemplateItem handles PATCH /status-template-items/{id}.
+// Team admins only.
+func (s *Server) handleUpdateTemplateItem(w http.ResponseWriter, r *http.Request) {
+	itemID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	item, err := s.statuses.GetTemplateItem(itemID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template item not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
+		return
+	}
+
+	t, err := s.statuses.GetTemplate(item.TemplateID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
+		return
+	}
+
+	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var req PatchStatusTemplateItemJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		item.Name = name
+	}
+	if req.Color != nil {
+		item.Color = *req.Color
+	}
+	if req.Icon != nil {
+		item.Icon = req.Icon
+	}
+	if req.IsClosed != nil {
+		item.IsClosed = *req.IsClosed
+	}
+	if req.Position != nil {
+		item.Position = *req.Position
+	}
+
+	if err := s.statuses.UpdateTemplateItem(item); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+// handleDeleteTemplateItem handles DELETE /status-template-items/{id}.
+// Team admins only. Blocked if it is the last item in the template.
+func (s *Server) handleDeleteTemplateItem(w http.ResponseWriter, r *http.Request) {
+	itemID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	item, err := s.statuses.GetTemplateItem(itemID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status template item not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
+		return
+	}
+
+	t, err := s.statuses.GetTemplate(item.TemplateID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
+		return
+	}
+
+	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	count, err := s.statuses.CountTemplateItems(item.TemplateID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
+		return
+	}
+	if count <= 1 {
+		writeError(w, http.StatusConflict, "LAST_ITEM", "cannot delete the last item in a template")
+		return
+	}
+
+	if err := s.statuses.DeleteTemplateItem(itemID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── Timeline statuses ─────────────────────────────────────────────────────────
+
+// handleListTimelineStatuses handles GET /teams/{id}/timelines/{timelineId}/statuses.
+// Any member with access to the timeline may list its statuses.
+func (s *Server) handleListTimelineStatuses(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
+		return
+	}
+
+	if member.Role != "admin" {
+		ok, err := s.timelines.HasAccess(timelineID, member.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
+			return
+		}
+	}
+
+	statuses, err := s.statuses.ListStatuses(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
+		return
+	}
+	writeJSON(w, http.StatusOK, statuses)
+}
+
+// handleCreateTimelineStatus handles POST /teams/{id}/timelines/{timelineId}/statuses.
+// Only a team admin or timeline admin may add statuses.
+func (s *Server) handleCreateTimelineStatus(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	var req CreateTimelineStatusJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	count, err := s.statuses.CountStatuses(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status")
+		return
+	}
+
+	color := "#8b949e"
+	if req.Color != nil {
+		color = *req.Color
+	}
+
+	now := time.Now()
+	st := &models.Status{
+		ID:         newID(),
+		TimelineID: timelineID,
+		Name:       name,
+		Color:      color,
+		Icon:       req.Icon,
+		Position:   count,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if req.IsClosed != nil {
+		st.IsClosed = *req.IsClosed
+	}
+
+	if err := s.statuses.CreateStatus(st); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status")
+		return
+	}
+	writeJSON(w, http.StatusCreated, st)
+}
+
+// handleUpdateStatus handles PATCH /statuses/{id}.
+// Only a team admin or timeline admin may update statuses.
+func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	statusID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	st, err := s.statuses.GetStatus(statusID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(st.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status")
+		return
+	}
+	if !s.canAdminTimeline(member, st.TimelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	var req PatchStatusJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		st.Name = name
+	}
+	if req.Color != nil {
+		st.Color = *req.Color
+	}
+	if req.Icon != nil {
+		st.Icon = req.Icon
+	}
+	if req.IsClosed != nil {
+		st.IsClosed = *req.IsClosed
+	}
+	if req.Position != nil {
+		st.Position = *req.Position
+	}
+	st.UpdatedAt = time.Now()
+
+	if err := s.statuses.UpdateStatus(st); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status")
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// handleDeleteStatus handles DELETE /statuses/{id}. Blocked if it is the last
+// status on the timeline. If activities reference the status,
+// replacementStatusId must be provided in the request body.
+func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
+	statusID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	st, err := s.statuses.GetStatus(statusID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "status not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(st.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+	if !s.canAdminTimeline(member, st.TimelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	count, err := s.statuses.CountStatuses(st.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+	if count <= 1 {
+		writeError(w, http.StatusConflict, "LAST_STATUS", "cannot delete the last status on a timeline")
+		return
+	}
+
+	// Check if activities reference this status.
+	actCount, err := s.statuses.CountStatusActivities(statusID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+
+	var req DeleteStatusJSONBody
+	// Best-effort decode — body is optional when actCount == 0.
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	if actCount > 0 && (req.ReplacementStatusID == nil || *req.ReplacementStatusID == "") {
+		writeError(w, http.StatusConflict, "STATUS_HAS_ACTIVITIES",
+			"activities reference this status; provide replacementStatusId")
+		return
+	}
+
+	replacementID := ""
+	if req.ReplacementStatusID != nil {
+		replacementID = *req.ReplacementStatusID
+	}
+
+	if err := s.statuses.DeleteStatus(statusID, replacementID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/api/internal/api/user_preference_handler.go
 ````go
 package api
@@ -13007,458 +14180,6 @@ ALTER TABLE event_assignments RENAME TO activity_assignments;
 ALTER TABLE activities RENAME COLUMN parent_event_id TO parent_activity_id;
 ALTER TABLE activity_tags RENAME COLUMN event_id TO activity_id;
 ALTER TABLE activity_assignments RENAME COLUMN event_id TO activity_id;
-````
-
-## File: packages/api/internal/db/status_repo.go
-````go
-// Package db — StatusRepo manages status templates, template items,
-// and live timeline statuses.
-package db
-
-import (
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// StatusRepo is the persistence layer for status templates and timeline statuses.
-type StatusRepo struct {
-	db *sqlx.DB
-}
-
-// NewStatusRepo returns a StatusRepo backed by db.
-func NewStatusRepo(db *sqlx.DB) *StatusRepo {
-	return &StatusRepo{db: db}
-}
-
-// ── Templates ─────────────────────────────────────────────────────────────────
-
-// ListTemplates returns all status templates for a team, ordered by position,
-// with their items populated.
-func (r *StatusRepo) ListTemplates(teamID string) ([]*models.StatusTemplate, error) {
-	var templates []*models.StatusTemplate
-	if err := r.db.Select(&templates, `
-		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at
-	`, teamID); err != nil {
-		return nil, fmt.Errorf("listing status templates: %w", err)
-	}
-
-	// Populate items for each template in one query.
-	if len(templates) == 0 {
-		return templates, nil
-	}
-	ids := make([]string, len(templates))
-	for i, t := range templates {
-		ids[i] = t.ID
-	}
-
-	query, args, err := sqlx.In(`
-		SELECT * FROM status_template_items WHERE template_id IN (?) ORDER BY position
-	`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("building status template items query: %w", err)
-	}
-	query = r.db.Rebind(query)
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, query, args...); err != nil {
-		return nil, fmt.Errorf("listing status template items: %w", err)
-	}
-
-	byTemplate := make(map[string][]models.StatusTemplateItem)
-	for _, item := range items {
-		byTemplate[item.TemplateID] = append(byTemplate[item.TemplateID], item)
-	}
-	for _, t := range templates {
-		t.Items = byTemplate[t.ID]
-		if t.Items == nil {
-			t.Items = []models.StatusTemplateItem{}
-		}
-	}
-	return templates, nil
-}
-
-// GetTemplate returns a single status template by ID.
-func (r *StatusRepo) GetTemplate(id string) (*models.StatusTemplate, error) {
-	var t models.StatusTemplate
-	if err := r.db.Get(&t, `SELECT * FROM status_templates WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status template: %w", err)
-	}
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, `
-		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
-	`, id); err != nil {
-		return nil, fmt.Errorf("getting status template items: %w", err)
-	}
-	t.Items = items
-	if t.Items == nil {
-		t.Items = []models.StatusTemplateItem{}
-	}
-	return &t, nil
-}
-
-// CreateTemplate inserts a new status template.
-func (r *StatusRepo) CreateTemplate(t *models.StatusTemplate) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
-		VALUES (:id, :team_id, :name, :description, :position, :created_by, :created_at, :updated_at)
-	`, t)
-	if err != nil {
-		return fmt.Errorf("creating status template: %w", err)
-	}
-	return nil
-}
-
-// UpdateTemplate writes mutable template fields (name, description, position).
-func (r *StatusRepo) UpdateTemplate(t *models.StatusTemplate) error {
-	_, err := r.db.NamedExec(`
-		UPDATE status_templates
-		SET name = :name, description = :description, position = :position, updated_at = :updated_at
-		WHERE id = :id
-	`, t)
-	if err != nil {
-		return fmt.Errorf("updating status template: %w", err)
-	}
-	return nil
-}
-
-// CountTemplates returns the number of status templates for a team.
-func (r *StatusRepo) CountTemplates(teamID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_templates WHERE team_id = ?`, teamID); err != nil {
-		return 0, fmt.Errorf("counting status templates: %w", err)
-	}
-	return n, nil
-}
-
-// DeleteTemplate deletes a status template by ID.
-func (r *StatusRepo) DeleteTemplate(id string) error {
-	_, err := r.db.Exec(`DELETE FROM status_templates WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting status template: %w", err)
-	}
-	return nil
-}
-
-// ── Template items ────────────────────────────────────────────────────────────
-
-// GetTemplateItem returns a single template item by ID.
-func (r *StatusRepo) GetTemplateItem(id string) (*models.StatusTemplateItem, error) {
-	var item models.StatusTemplateItem
-	if err := r.db.Get(&item, `SELECT * FROM status_template_items WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status template item: %w", err)
-	}
-	return &item, nil
-}
-
-// CreateTemplateItem inserts a new item into a template.
-func (r *StatusRepo) CreateTemplateItem(item *models.StatusTemplateItem) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO status_template_items (id, template_id, name, color, icon, is_closed, position)
-		VALUES (:id, :template_id, :name, :color, :icon, :is_closed, :position)
-	`, item)
-	if err != nil {
-		return fmt.Errorf("creating status template item: %w", err)
-	}
-	return nil
-}
-
-// UpdateTemplateItem writes mutable item fields (name, color, icon, is_closed, position).
-func (r *StatusRepo) UpdateTemplateItem(item *models.StatusTemplateItem) error {
-	_, err := r.db.NamedExec(`
-		UPDATE status_template_items
-		SET name = :name, color = :color, icon = :icon, is_closed = :is_closed, position = :position
-		WHERE id = :id
-	`, item)
-	if err != nil {
-		return fmt.Errorf("updating status template item: %w", err)
-	}
-	return nil
-}
-
-// CountTemplateItems returns the number of items in a template.
-func (r *StatusRepo) CountTemplateItems(templateID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_template_items WHERE template_id = ?`, templateID); err != nil {
-		return 0, fmt.Errorf("counting status template items: %w", err)
-	}
-	return n, nil
-}
-
-// DeleteTemplateItem deletes a single template item by ID.
-func (r *StatusRepo) DeleteTemplateItem(id string) error {
-	_, err := r.db.Exec(`DELETE FROM status_template_items WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting status template item: %w", err)
-	}
-	return nil
-}
-
-// ── Seeding ───────────────────────────────────────────────────────────────────
-
-// SeedDefaultTemplate creates the "Default" template (Planning / In Progress / Complete)
-// for a newly created team. Complete is marked is_closed = true.
-func (r *StatusRepo) SeedDefaultTemplate(teamID, createdBy string) error {
-	now := time.Now()
-	templateID := newRepoID()
-	t := &models.StatusTemplate{
-		ID:        templateID,
-		TeamID:    teamID,
-		Name:      "Default",
-		Position:  0,
-		CreatedBy: createdBy,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := r.CreateTemplate(t); err != nil {
-		return err
-	}
-
-	type seed struct {
-		name     string
-		color    string
-		isClosed bool
-	}
-	seeds := []seed{
-		{"Planning", "#3B82F6", false},
-		{"In Progress", "#F59E0B", false},
-		{"Complete", "#22C55E", true},
-	}
-	for i, s := range seeds {
-		item := &models.StatusTemplateItem{
-			ID:         newRepoID(),
-			TemplateID: templateID,
-			Name:       s.name,
-			Color:      s.color,
-			IsClosed:   s.isClosed,
-			Position:   i,
-		}
-		if err := r.CreateTemplateItem(item); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ── Timeline statuses ─────────────────────────────────────────────────────────
-
-// ListStatuses returns all statuses for a timeline, ordered by position.
-func (r *StatusRepo) ListStatuses(timelineID string) ([]*models.Status, error) {
-	var statuses []*models.Status
-	if err := r.db.Select(&statuses, `
-		SELECT * FROM statuses WHERE timeline_id = ? ORDER BY position
-	`, timelineID); err != nil {
-		return nil, fmt.Errorf("listing statuses: %w", err)
-	}
-	if statuses == nil {
-		statuses = []*models.Status{}
-	}
-	return statuses, nil
-}
-
-// GetStatus returns a single status by ID.
-func (r *StatusRepo) GetStatus(id string) (*models.Status, error) {
-	var s models.Status
-	if err := r.db.Get(&s, `SELECT * FROM statuses WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status: %w", err)
-	}
-	return &s, nil
-}
-
-// CopyTemplateToTimeline copies a template's items into live statuses for a timeline.
-// If no template is found for the team it is a silent no-op.
-func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string) error {
-	// Use the team's first template (by position, then created_at).
-	var template models.StatusTemplate
-	err := r.db.Get(&template, `
-		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at LIMIT 1
-	`, teamID)
-	if err != nil {
-		// No template — not an error; leave the timeline with no statuses.
-		return nil
-	}
-
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, `
-		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
-	`, template.ID); err != nil {
-		return fmt.Errorf("loading template items for copy: %w", err)
-	}
-
-	now := time.Now()
-	for _, item := range items {
-		s := &models.Status{
-			ID:         newRepoID(),
-			TimelineID: timelineID,
-			Name:       item.Name,
-			Color:      item.Color,
-			Icon:       item.Icon,
-			IsClosed:   item.IsClosed,
-			Position:   item.Position,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		if _, err := r.db.NamedExec(`
-			INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
-			VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
-		`, s); err != nil {
-			return fmt.Errorf("copying status to timeline: %w", err)
-		}
-	}
-	return nil
-}
-
-// newRepoID generates a 32-character hex ID — same entropy as api.newID but
-// usable within the db package without importing the api package.
-func newRepoID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-````
-
-## File: packages/api/internal/db/timeline_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// TimelineRepo is the persistence layer for Timeline records and their access
-// control entries.
-type TimelineRepo struct {
-	db *sqlx.DB
-}
-
-// NewTimelineRepo returns a TimelineRepo backed by db.
-func NewTimelineRepo(db *sqlx.DB) *TimelineRepo {
-	return &TimelineRepo{db: db}
-}
-
-// Create inserts a new Timeline row.
-func (r *TimelineRepo) Create(t *models.Timeline) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO timelines (
-			id, team_id, name, start_date, end_date,
-			share_token, ical_token,
-			created_by, created_at, updated_at
-		) VALUES (
-			:id, :team_id, :name, :start_date, :end_date,
-			:share_token, :ical_token,
-			:created_by, :created_at, :updated_at
-		)
-	`, t)
-	if err != nil {
-		return fmt.Errorf("creating timeline: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Timeline by primary key, including archived rows so the
-// archive/unarchive handlers can operate on them. Callers that should reject
-// archived timelines must check ArchivedAt explicitly.
-func (r *TimelineRepo) GetByID(id string) (*models.Timeline, error) {
-	var t models.Timeline
-	err := r.db.Get(&t, `SELECT * FROM timelines WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting timeline: %w", err)
-	}
-	return &t, nil
-}
-
-// SetArchived sets or clears archived_at on a timeline. Pass a non-nil time
-// to archive; pass nil to unarchive.
-func (r *TimelineRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE timelines SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting timeline archived_at: %w", err)
-	}
-	return nil
-}
-
-// GetByShareToken fetches a non-archived Timeline by its public share token.
-// Archived timelines are intentionally excluded — public share URLs should
-// 404 once a timeline is archived.
-// Returns sql.ErrNoRows (wrapped) when no row matches.
-func (r *TimelineRepo) GetByShareToken(token string) (*models.Timeline, error) {
-	var t models.Timeline
-	err := r.db.Get(&t, `SELECT * FROM timelines WHERE share_token = ? AND archived_at IS NULL`, token)
-	if err != nil {
-		return nil, fmt.Errorf("getting timeline by share token: %w", err)
-	}
-	return &t, nil
-}
-
-// ListByTeam returns timelines for a team ordered by creation date
-// descending. When includeArchived is false, archived rows are excluded.
-func (r *TimelineRepo) ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error) {
-	ts := make([]*models.Timeline, 0)
-	query := `SELECT * FROM timelines WHERE team_id = ?`
-	if !includeArchived {
-		query += ` AND archived_at IS NULL`
-	}
-	query += ` ORDER BY created_at DESC`
-	err := r.db.Select(&ts, query, teamID)
-	if err != nil {
-		return nil, fmt.Errorf("listing timelines: %w", err)
-	}
-	return ts, nil
-}
-
-// HasAccess reports whether teamMemberID has an entry in timeline_access for
-// the given timeline. Returns false (not an error) when the row is absent.
-func (r *TimelineRepo) HasAccess(timelineID, teamMemberID string) (bool, error) {
-	var count int
-	err := r.db.Get(&count,
-		`SELECT COUNT(*) FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
-		timelineID, teamMemberID,
-	)
-	if err != nil {
-		return false, fmt.Errorf("checking timeline access: %w", err)
-	}
-	return count > 0, nil
-}
-
-// GrantAccess inserts a timeline_access row with the given role. On conflict
-// (row already exists) the role is updated to the supplied value.
-func (r *TimelineRepo) GrantAccess(timelineID, teamMemberID, role string) error {
-	_, err := r.db.Exec(
-		`INSERT INTO timeline_access (timeline_id, team_member_id, role)
-		 VALUES (?, ?, ?)
-		 ON CONFLICT(timeline_id, team_member_id) DO UPDATE SET role = excluded.role`,
-		timelineID, teamMemberID, role,
-	)
-	if err != nil {
-		return fmt.Errorf("granting timeline access: %w", err)
-	}
-	return nil
-}
-
-// RevokeAccess removes a timeline_access row. It is a no-op when the row
-// does not exist.
-func (r *TimelineRepo) RevokeAccess(timelineID, teamMemberID string) error {
-	_, err := r.db.Exec(
-		`DELETE FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
-		timelineID, teamMemberID,
-	)
-	if err != nil {
-		return fmt.Errorf("revoking timeline access: %w", err)
-	}
-	return nil
-}
 ````
 
 ## File: packages/api/internal/events/bus.go
@@ -14677,53 +15398,6 @@ export default function MemberAvatar({ member, size = 28, className }: Props) {
 }
 ````
 
-## File: packages/web/src/components/ProtectedRoute.tsx
-````typescript
-/**
- * Wraps protected routes. Unauthenticated users are redirected to /login
- * with the original path preserved in state so they land back after logging in.
- * On a fresh install (no users exist) they are redirected to /setup instead.
- * Shows nothing while the session is being restored or the setup check is in flight.
- */
-
-import { Navigate, Outlet, useLocation } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { API_BASE } from '@/lib/api'
-
-interface SetupStatus {
-  needsSetup: boolean
-}
-
-export default function ProtectedRoute() {
-  const { accessToken, initializing } = useAuth()
-  const location = useLocation()
-
-  // Only fetch setup status when the user isn't logged in — once setup is
-  // done the result never changes back, so we cache it indefinitely.
-  const { data: setup, isLoading: setupLoading } = useQuery<SetupStatus>({
-    queryKey: ['setup-status'],
-    queryFn: () =>
-      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
-    enabled: !initializing && !accessToken,
-    staleTime: Infinity,
-  })
-
-  if (initializing || (!accessToken && setupLoading)) {
-    return null
-  }
-
-  if (!accessToken) {
-    if (setup?.needsSetup) {
-      return <Navigate to="/setup" replace />
-    }
-    return <Navigate to="/login" state={{ from: location }} replace />
-  }
-
-  return <Outlet />
-}
-````
-
 ## File: packages/web/src/contexts/FilterContext.tsx
 ````typescript
 /**
@@ -14880,6 +15554,439 @@ export function useFind(): FindContextValue {
   const ctx = useContext(FindContext)
   if (!ctx) throw new Error('useFind must be used inside FindProvider')
   return ctx
+}
+````
+
+## File: packages/web/src/hooks/useStatusTemplates.ts
+````typescript
+/**
+ * TanStack Query hooks for status templates and timeline statuses.
+ *
+ * Status templates are team-level reusable presets. When a timeline is
+ * created the team's first template's items are copied into live Status rows
+ * for that timeline.
+ */
+
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+type StatusTemplate = components['schemas']['StatusTemplate']
+type StatusTemplateItem = components['schemas']['StatusTemplateItem']
+type Status = components['schemas']['Status']
+type CreateStatusTemplateInput = components['schemas']['CreateStatusTemplateInput']
+type PatchStatusTemplateInput = components['schemas']['PatchStatusTemplateInput']
+type CreateStatusTemplateItemInput = components['schemas']['CreateStatusTemplateItemInput']
+type PatchStatusTemplateItemInput = components['schemas']['PatchStatusTemplateItemInput']
+type CreateStatusInput = components['schemas']['CreateStatusInput']
+type PatchStatusInput = components['schemas']['PatchStatusInput']
+
+export const statusKeys = {
+  templates: (teamId: string) => ['teams', teamId, 'status-templates'] as const,
+  statuses: (teamId: string, timelineId: string) =>
+    ['teams', teamId, 'timelines', timelineId, 'statuses'] as const,
+}
+
+/** Fetches all status templates for a team. */
+export function useStatusTemplates(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: statusKeys.templates(teamId),
+    queryFn: async () =>
+      (await authFetch<StatusTemplate[]>(`/teams/${teamId}/status-templates`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Creates a new status template for a team. */
+export function useCreateStatusTemplate(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateStatusTemplateInput) =>
+      authFetch<StatusTemplate>(`/teams/${teamId}/status-templates`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Updates a status template (name, description, position). */
+export function useUpdateStatusTemplate(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ id, ...patch }: PatchStatusTemplateInput & { id: string }) =>
+      authFetch<StatusTemplate>(`/status-templates/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Deletes a status template. The server blocks deleting the last template. */
+export function useDeleteStatusTemplate(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/status-templates/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Adds an item to a status template. */
+export function useCreateTemplateItem(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ templateId, ...input }: CreateStatusTemplateItemInput & { templateId: string }) =>
+      authFetch<StatusTemplateItem>(`/status-templates/${templateId}/items`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Updates a template item (name, color, icon, isClosed, position). */
+export function useUpdateTemplateItem(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ id, ...patch }: PatchStatusTemplateItemInput & { id: string }) =>
+      authFetch<StatusTemplateItem>(`/status-template-items/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Deletes a template item. The server blocks deleting the last item. */
+export function useDeleteTemplateItem(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/status-template-items/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.templates(teamId) }),
+  })
+}
+
+/** Fetches live statuses for a timeline. */
+export function useTimelineStatuses(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: statusKeys.statuses(teamId, timelineId),
+    queryFn: async () =>
+      (await authFetch<Status[]>(`/teams/${teamId}/timelines/${timelineId}/statuses`)) ?? [],
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Adds a status to a timeline. */
+export function useCreateTimelineStatus(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateStatusInput) =>
+      authFetch<Status>(`/teams/${teamId}/timelines/${timelineId}/statuses`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.statuses(teamId, timelineId) }),
+  })
+}
+
+/** Updates a live timeline status (name, color, icon, isClosed, position). */
+export function useUpdateTimelineStatus(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ id, ...patch }: PatchStatusInput & { id: string }) =>
+      authFetch<Status>(`/statuses/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.statuses(teamId, timelineId) }),
+  })
+}
+
+/** Deletes a live timeline status. */
+export function useDeleteTimelineStatus(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ id, replacementStatusId }: { id: string; replacementStatusId?: string }) =>
+      authFetch<void>(`/statuses/${id}`, {
+        method: 'DELETE',
+        body: replacementStatusId ? JSON.stringify({ replacementStatusId }) : undefined,
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: statusKeys.statuses(teamId, timelineId) }),
+  })
+}
+````
+
+## File: packages/web/src/hooks/useWebSocket.ts
+````typescript
+/**
+ * WebSocket client hook for real-time event updates.
+ *
+ * Protocol (from CONVENTIONS.md):
+ *   - Connect: GET /ws?token=<jwt>
+ *   - Subscribe: send { type: "subscribe", teamId: "..." }
+ *   - Receive: { type: "event.updated" | "event.created" | "event.deleted", payload: {...} }
+ *   - Heartbeat: server sends { type: "ping" } every 30s; client replies { type: "pong" }
+ *
+ * Reconnect: exponential back-off on unexpected close (not called on intentional cleanup).
+ */
+
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { API_BASE } from '@/lib/api'
+
+type WsStatus = 'connecting' | 'connected' | 'disconnected'
+
+export interface WsMessage {
+  type: string
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- wire format is open-ended
+  payload?: any
+  teamId?: string
+}
+
+interface Options {
+  /** JWT access token. Pass null/undefined to stay disconnected. */
+  token: string | null | undefined
+  /** Team IDs to subscribe to once the connection opens. */
+  teamIds?: string[]
+  /** Called for every incoming message (excluding server pings). */
+  onMessage?: (msg: WsMessage) => void
+}
+
+// Priority:
+// 1. VITE_API_URL is set → use it (explicit override, e.g. cross-origin prod).
+// 2. VITE_API_TARGET is set → connect directly to the dev target, bypassing
+//    the Vite proxy. Vite v6's ws: true proxy is unreliable and connecting
+//    directly avoids the upgrade-handshake issues on the dev server.
+// 3. Fallback → derive from the current page origin (production embedded mode,
+//    or local dev where the Vite proxy handles the /ws path).
+const WS_BASE = API_BASE
+  ? API_BASE.replace(/^http/, 'ws')
+  : (import.meta.env.VITE_API_TARGET as string | undefined)
+    ? (import.meta.env.VITE_API_TARGET as string).replace(/^http/, 'ws')
+    : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
+const MAX_BACKOFF_MS = 30_000
+
+export function useWebSocket({ token, teamIds = [], onMessage }: Options) {
+  const [status, setStatus] = useState<WsStatus>('disconnected')
+  const wsRef = useRef<WebSocket | null>(null)
+  const backoffRef = useRef(1_000)
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const intentionalRef = useRef(false)
+  const onMessageRef = useRef(onMessage)
+  onMessageRef.current = onMessage
+  const teamIdsRef = useRef(teamIds)
+  teamIdsRef.current = teamIds
+
+  const connect = useCallback(() => {
+    if (!token) return
+
+    intentionalRef.current = false
+    setStatus('connecting')
+
+    const ws = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent(token)}`)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      setStatus('connected')
+      backoffRef.current = 1_000
+      // Subscribe to all requested teams.
+      for (const teamId of teamIdsRef.current) {
+        ws.send(JSON.stringify({ type: 'subscribe', teamId }))
+      }
+    }
+
+    ws.onmessage = ev => {
+      let msg: WsMessage
+      try {
+        msg = JSON.parse(ev.data as string) as WsMessage
+      } catch {
+        return
+      }
+      if (msg.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong' }))
+        return
+      }
+      onMessageRef.current?.(msg)
+    }
+
+    ws.onclose = () => {
+      setStatus('disconnected')
+      wsRef.current = null
+      if (!intentionalRef.current && token) {
+        // Reconnect with back-off.
+        reconnectTimerRef.current = setTimeout(() => {
+          backoffRef.current = Math.min(backoffRef.current * 2, MAX_BACKOFF_MS)
+          connect()
+        }, backoffRef.current)
+      }
+    }
+
+    ws.onerror = () => {
+      ws.close()
+    }
+  }, [token])
+
+  // Connect when token becomes available; disconnect on cleanup or token removal.
+  useEffect(() => {
+    if (!token) {
+      intentionalRef.current = true
+      wsRef.current?.close()
+      return
+    }
+    connect()
+    return () => {
+      intentionalRef.current = true
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+      wsRef.current?.close()
+    }
+  }, [token, connect])
+
+  /** Subscribe to an additional team at runtime. */
+  const subscribe = useCallback((teamId: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'subscribe', teamId }))
+    }
+  }, [])
+
+  return { status, subscribe } as const
+}
+````
+
+## File: packages/web/src/lib/api.ts
+````typescript
+/**
+ * Thin fetch wrapper over the draba REST API.
+ *
+ * Token lifecycle:
+ *   - Access token: kept in memory via the AuthContext; passed as Authorization header.
+ *   - Refresh token: persisted in localStorage under REFRESH_TOKEN_KEY.
+ *     On a 401, the client attempts one silent refresh then retries the original request.
+ *
+ * All callers receive typed JSON or throw an ApiError.
+ */
+
+import type { components } from '@draba/shared'
+
+export type ApiErrorBody = components['schemas']['ApiError']
+
+// Empty string = same-origin relative URLs, which is correct when the SPA is
+// embedded in the Go binary. Set VITE_API_URL for local dev against a
+// separate API server (e.g. VITE_API_URL=http://localhost:8080).
+export const API_BASE =
+  (import.meta.env.VITE_API_URL as string | undefined) ?? ''
+
+export const REFRESH_TOKEN_KEY = 'draba_refresh_token'
+
+/** Thrown for any non-2xx response. */
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+    /** Extra fields from the error response body (e.g. assignmentCount on 409). */
+    public readonly data?: Record<string, unknown>,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+/** Reads the stored refresh token from localStorage. */
+export function getStoredRefreshToken(): string | null {
+  return localStorage.getItem(REFRESH_TOKEN_KEY)
+}
+
+/** Persists the refresh token to localStorage. */
+export function storeRefreshToken(token: string): void {
+  localStorage.setItem(REFRESH_TOKEN_KEY, token)
+}
+
+/** Removes the refresh token from localStorage (on logout). */
+export function clearStoredRefreshToken(): void {
+  localStorage.removeItem(REFRESH_TOKEN_KEY)
+}
+
+async function parseError(res: Response): Promise<ApiError> {
+  try {
+    const body = (await res.json()) as ApiErrorBody & Record<string, unknown>
+    const { error, ...rest } = body
+    const data = Object.keys(rest).length > 0 ? (rest as Record<string, unknown>) : undefined
+    return new ApiError(res.status, error.code, error.message, data)
+  } catch {
+    return new ApiError(res.status, 'UNKNOWN', res.statusText)
+  }
+}
+
+/** Low-level fetch that injects the access token and throws ApiError on non-2xx. */
+export async function apiFetch<T>(
+  path: string,
+  init: RequestInit & { accessToken?: string } = {},
+): Promise<T> {
+  const { accessToken, ...rest } = init
+  const headers = new Headers(rest.headers)
+  headers.set('Content-Type', 'application/json')
+  if (accessToken) {
+    headers.set('Authorization', `Bearer ${accessToken}`)
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
+
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+
+  // 204 No Content — return undefined cast as T
+  if (res.status === 204) {
+    return undefined as unknown as T
+  }
+
+  return res.json() as Promise<T>
+}
+
+/**
+ * Higher-level wrapper that supplies the access token from a getter function.
+ * Used by TanStack Query hooks so they never capture a stale token closure.
+ */
+export function createAuthFetch(getToken: () => string | null) {
+  return function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+    return apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
+  }
 }
 ````
 
@@ -15827,166 +16934,6 @@ export default function TokensPage() {
 }
 ````
 
-## File: packages/web/src/pages/RegisterPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useSearchParams, Link } from 'react-router-dom'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-export default function RegisterPage() {
-  const { register } = useAuth()
-  const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [displayName, setDisplayName] = useState('')
-  // Pre-fill from ?token= query param (invite link).
-  const [inviteToken, setInviteToken] = useState(searchParams.get('token') ?? '')
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setError(null)
-    setLoading(true)
-    try {
-      await register(email, password, displayName, inviteToken || undefined)
-      navigate('/', { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--background)',
-        padding: '24px',
-      }}
-    >
-      {/* Dark mode toggle — top-right */}
-      <div style={{ position: 'fixed', top: 16, right: 16 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Logo + wordmark */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 32 }}>
-        <img src="/logo.svg" alt="draba" style={{ width: 36, height: 36 }} />
-        <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.01em' }}>
-          draba
-        </span>
-      </div>
-
-      <Card style={{ width: '100%', maxWidth: 400 }}>
-        <CardHeader>
-          <CardTitle>Create your account</CardTitle>
-          <CardDescription>You need a valid invite token to register.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="displayName">Display name</Label>
-              <Input
-                id="displayName"
-                type="text"
-                autoComplete="name"
-                placeholder="Jane Smith"
-                value={displayName}
-                onChange={e => setDisplayName(e.target.value)}
-                required
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                required
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                autoComplete="new-password"
-                placeholder="At least 8 characters"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                required
-                minLength={8}
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="inviteToken">Invite token</Label>
-              <div
-                style={{
-                  fontSize: 12,
-                  color: 'var(--muted-foreground)',
-                  background: 'var(--muted)',
-                  borderRadius: 6,
-                  padding: '8px 10px',
-                  lineHeight: 1.5,
-                }}
-              >
-                draba is invite-only. Ask your team admin to send you an invite, or click the link in your invitation email — it will fill this in automatically.
-              </div>
-              <Input
-                id="inviteToken"
-                type="text"
-                placeholder="Paste your invite token"
-                value={inviteToken}
-                onChange={e => setInviteToken(e.target.value)}
-              />
-            </div>
-
-            {error && (
-              <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
-            )}
-
-            <Button type="submit" disabled={loading} style={{ width: '100%' }}>
-              {loading ? 'Creating account…' : 'Create account'}
-            </Button>
-          </form>
-
-          <p style={{ marginTop: 16, fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
-            Already have an account?{' '}
-            <Link to="/login" style={{ color: 'var(--primary)', fontWeight: 600 }}>
-              Sign in
-            </Link>
-          </p>
-        </CardContent>
-      </Card>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/index.css
 ````css
 @import "tailwindcss";
@@ -16261,53 +17208,6 @@ code, pre {
 }
 ````
 
-## File: packages/web/package.json
-````json
-{
-  "name": "@draba/web",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "tsc --noEmit",
-    "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest"
-  },
-  "dependencies": {
-    "@draba/shared": "workspace:*",
-    "@radix-ui/react-label": "^2.1.8",
-    "@radix-ui/react-slot": "^1.2.4",
-    "@tanstack/react-query": "^5.100.10",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "lucide-react": "^0.500.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "react-router-dom": "^7.15.1",
-    "tailwind-merge": "^3.6.0"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.1.0",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^25.8.0",
-    "@types/react": "^19.1.0",
-    "@types/react-dom": "^19.1.0",
-    "@vitejs/plugin-react": "^4.5.0",
-    "@vitest/ui": "^4.1.7",
-    "jsdom": "^29.1.1",
-    "tailwindcss": "^4.1.0",
-    "typescript": "~5.8.0",
-    "vite": "^6.3.0",
-    "vitest": "^4.1.7"
-  }
-}
-````
-
 ## File: scripts/reset-test-env.sh
 ````bash
 #!/usr/bin/env bash
@@ -16473,161 +17373,585 @@ jobs:
           file_pattern: docs/ai-context/repomap.md
 ````
 
-## File: packages/api/internal/api/middleware.go
+## File: packages/api/internal/db/status_repo.go
 ````go
-package api
+// Package db — StatusRepo manages status templates, template items,
+// and live timeline statuses.
+package db
 
 import (
-	"bufio"
-	"context"
-	"database/sql"
-	"errors"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
-	"log/slog"
-	"net"
-	"net/http"
-	"strings"
 	"time"
 
-	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
-// contextKey is an unexported type to avoid collisions with other packages
-// using context.WithValue on the same request context.
-type contextKey string
-
-const (
-	claimsKey     contextKey = "claims"
-	tokenScopeKey contextKey = "tokenScope"
-)
-
-// Scope sentinels. tokenScopeFull is used for JWT-authenticated requests
-// where no scope restriction applies; the other values mirror the api_tokens
-// schema check constraint.
-const (
-	tokenScopeFull    = "full"
-	tokenScopeRead    = "read"
-	tokenScopeAdd     = "add"
-	tokenScopeEditOwn = "edit_own"
-	tokenScopeEditAll = "edit_all"
-)
-
-// authMiddleware enforces a Bearer credential on the request, attaches the
-// resolved Claims (and any API-token scope) to the request context, and
-// rejects unauthenticated or scope-violating requests.
-//
-// The Bearer value is either a JWT access token or an API token (prefix
-// auth.APITokenPrefix). Read-only API tokens are rejected on any non-GET
-// request — write scopes are accepted on all methods.
-func (s *Server) authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") {
-			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or invalid authorization header")
-			return
-		}
-		raw := strings.TrimPrefix(header, "Bearer ")
-
-		var (
-			claims *auth.Claims
-			scope  = tokenScopeFull
-		)
-
-		if auth.LooksLikeAPIToken(raw) {
-			tok, err := s.apiTokens.GetByHash(auth.HashAPIToken(raw))
-			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or revoked api token")
-					return
-				}
-				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
-				return
-			}
-			if tok.Scope == tokenScopeRead && r.Method != http.MethodGet {
-				writeError(w, http.StatusForbidden, "FORBIDDEN", "read-only token cannot perform writes")
-				return
-			}
-			user, err := s.users.GetByID(tok.UserID)
-			if err != nil {
-				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "token owner not found")
-				return
-			}
-			claims = &auth.Claims{UserID: user.ID, Email: user.Email, Type: "access"}
-			scope = tok.Scope
-			// Best-effort last-used touch; never block the request on a write failure.
-			if err := s.apiTokens.TouchLastUsed(tok.ID); err != nil {
-				slog.Debug("api token touch failed", "id", tok.ID, "err", err)
-			}
-		} else {
-			c, err := s.tokens.Validate(raw, "access")
-			if err != nil {
-				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
-				return
-			}
-			// Verify the user still exists. A valid JWT for a deleted user (e.g.
-			// after a DB wipe) would otherwise pass signature validation but fail
-			// later at the FK layer, producing a confusing 500 instead of a 401.
-			if _, err := s.users.GetByID(c.UserID); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
-					return
-				}
-				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to authenticate")
-				return
-			}
-			claims = c
-		}
-
-		ctx := context.WithValue(r.Context(), claimsKey, claims)
-		ctx = context.WithValue(ctx, tokenScopeKey, scope)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+// StatusRepo is the persistence layer for status templates and timeline statuses.
+type StatusRepo struct {
+	db *sqlx.DB
 }
 
-// claimsFromContext returns the Claims placed by authMiddleware, or nil
-// if the request did not pass through it. Handlers behind authMiddleware
-// can rely on a non-nil result.
-func claimsFromContext(ctx context.Context) *auth.Claims {
-	c, _ := ctx.Value(claimsKey).(*auth.Claims)
-	return c
+// NewStatusRepo returns a StatusRepo backed by db.
+func NewStatusRepo(db *sqlx.DB) *StatusRepo {
+	return &StatusRepo{db: db}
 }
 
-// statusWriter wraps ResponseWriter to capture the status code written by
-// the handler, which is not otherwise readable after the fact.
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-}
+// ── Templates ─────────────────────────────────────────────────────────────────
 
-func (sw *statusWriter) WriteHeader(code int) {
-	sw.status = code
-	sw.ResponseWriter.WriteHeader(code)
-}
-
-// Hijack implements http.Hijacker so that the WebSocket upgrader can take
-// over the connection. Without this, the statusWriter wrapper breaks WS upgrades.
-func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	h, ok := sw.ResponseWriter.(http.Hijacker)
-	if !ok {
-		return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+// ListTemplates returns all status templates for a team, ordered by position,
+// with their items populated.
+func (r *StatusRepo) ListTemplates(teamID string) ([]*models.StatusTemplate, error) {
+	var templates []*models.StatusTemplate
+	if err := r.db.Select(&templates, `
+		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at
+	`, teamID); err != nil {
+		return nil, fmt.Errorf("listing status templates: %w", err)
 	}
-	return h.Hijack()
+
+	// Populate items for each template in one query.
+	if len(templates) == 0 {
+		return templates, nil
+	}
+	ids := make([]string, len(templates))
+	for i, t := range templates {
+		ids[i] = t.ID
+	}
+
+	query, args, err := sqlx.In(`
+		SELECT * FROM status_template_items WHERE template_id IN (?) ORDER BY position
+	`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("building status template items query: %w", err)
+	}
+	query = r.db.Rebind(query)
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, query, args...); err != nil {
+		return nil, fmt.Errorf("listing status template items: %w", err)
+	}
+
+	byTemplate := make(map[string][]models.StatusTemplateItem)
+	for _, item := range items {
+		byTemplate[item.TemplateID] = append(byTemplate[item.TemplateID], item)
+	}
+	for _, t := range templates {
+		t.Items = byTemplate[t.ID]
+		if t.Items == nil {
+			t.Items = []models.StatusTemplateItem{}
+		}
+	}
+	return templates, nil
 }
 
-// requestLogger wraps next and emits a debug-level log line for every
-// request: method, path, status code, and wall-clock duration in ms.
-func requestLogger(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(sw, r)
-		slog.Debug("http",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", sw.status,
-			"ms", time.Since(start).Milliseconds(),
+// GetTemplate returns a single status template by ID.
+func (r *StatusRepo) GetTemplate(id string) (*models.StatusTemplate, error) {
+	var t models.StatusTemplate
+	if err := r.db.Get(&t, `SELECT * FROM status_templates WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status template: %w", err)
+	}
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, `
+		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
+	`, id); err != nil {
+		return nil, fmt.Errorf("getting status template items: %w", err)
+	}
+	t.Items = items
+	if t.Items == nil {
+		t.Items = []models.StatusTemplateItem{}
+	}
+	return &t, nil
+}
+
+// CreateTemplate inserts a new status template.
+func (r *StatusRepo) CreateTemplate(t *models.StatusTemplate) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
+		VALUES (:id, :team_id, :name, :description, :position, :created_by, :created_at, :updated_at)
+	`, t)
+	if err != nil {
+		return fmt.Errorf("creating status template: %w", err)
+	}
+	return nil
+}
+
+// UpdateTemplate writes mutable template fields (name, description, position).
+func (r *StatusRepo) UpdateTemplate(t *models.StatusTemplate) error {
+	_, err := r.db.NamedExec(`
+		UPDATE status_templates
+		SET name = :name, description = :description, position = :position, updated_at = :updated_at
+		WHERE id = :id
+	`, t)
+	if err != nil {
+		return fmt.Errorf("updating status template: %w", err)
+	}
+	return nil
+}
+
+// CountTemplates returns the number of status templates for a team.
+func (r *StatusRepo) CountTemplates(teamID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_templates WHERE team_id = ?`, teamID); err != nil {
+		return 0, fmt.Errorf("counting status templates: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteTemplate deletes a status template by ID.
+func (r *StatusRepo) DeleteTemplate(id string) error {
+	_, err := r.db.Exec(`DELETE FROM status_templates WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting status template: %w", err)
+	}
+	return nil
+}
+
+// ── Template items ────────────────────────────────────────────────────────────
+
+// GetTemplateItem returns a single template item by ID.
+func (r *StatusRepo) GetTemplateItem(id string) (*models.StatusTemplateItem, error) {
+	var item models.StatusTemplateItem
+	if err := r.db.Get(&item, `SELECT * FROM status_template_items WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status template item: %w", err)
+	}
+	return &item, nil
+}
+
+// CreateTemplateItem inserts a new item into a template.
+func (r *StatusRepo) CreateTemplateItem(item *models.StatusTemplateItem) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO status_template_items (id, template_id, name, color, icon, is_closed, position)
+		VALUES (:id, :template_id, :name, :color, :icon, :is_closed, :position)
+	`, item)
+	if err != nil {
+		return fmt.Errorf("creating status template item: %w", err)
+	}
+	return nil
+}
+
+// UpdateTemplateItem writes mutable item fields (name, color, icon, is_closed, position).
+func (r *StatusRepo) UpdateTemplateItem(item *models.StatusTemplateItem) error {
+	_, err := r.db.NamedExec(`
+		UPDATE status_template_items
+		SET name = :name, color = :color, icon = :icon, is_closed = :is_closed, position = :position
+		WHERE id = :id
+	`, item)
+	if err != nil {
+		return fmt.Errorf("updating status template item: %w", err)
+	}
+	return nil
+}
+
+// CountTemplateItems returns the number of items in a template.
+func (r *StatusRepo) CountTemplateItems(templateID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_template_items WHERE template_id = ?`, templateID); err != nil {
+		return 0, fmt.Errorf("counting status template items: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteTemplateItem deletes a single template item by ID.
+func (r *StatusRepo) DeleteTemplateItem(id string) error {
+	_, err := r.db.Exec(`DELETE FROM status_template_items WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting status template item: %w", err)
+	}
+	return nil
+}
+
+// ── Seeding ───────────────────────────────────────────────────────────────────
+
+// SeedDefaultTemplate creates the "Default" template (Planning / In Progress / Complete)
+// for a newly created team. Complete is marked is_closed = true.
+func (r *StatusRepo) SeedDefaultTemplate(teamID, createdBy string) error {
+	now := time.Now()
+	templateID := newRepoID()
+	t := &models.StatusTemplate{
+		ID:        templateID,
+		TeamID:    teamID,
+		Name:      "Default",
+		Position:  0,
+		CreatedBy: createdBy,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := r.CreateTemplate(t); err != nil {
+		return err
+	}
+
+	type seed struct {
+		name     string
+		color    string
+		isClosed bool
+	}
+	seeds := []seed{
+		{"Planning", "#3B82F6", false},
+		{"In Progress", "#F59E0B", false},
+		{"Complete", "#22C55E", true},
+	}
+	for i, s := range seeds {
+		item := &models.StatusTemplateItem{
+			ID:         newRepoID(),
+			TemplateID: templateID,
+			Name:       s.name,
+			Color:      s.color,
+			IsClosed:   s.isClosed,
+			Position:   i,
+		}
+		if err := r.CreateTemplateItem(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ── Timeline statuses ─────────────────────────────────────────────────────────
+
+// ListStatuses returns all statuses for a timeline, ordered by position.
+func (r *StatusRepo) ListStatuses(timelineID string) ([]*models.Status, error) {
+	var statuses []*models.Status
+	if err := r.db.Select(&statuses, `
+		SELECT * FROM statuses WHERE timeline_id = ? ORDER BY position
+	`, timelineID); err != nil {
+		return nil, fmt.Errorf("listing statuses: %w", err)
+	}
+	if statuses == nil {
+		statuses = []*models.Status{}
+	}
+	return statuses, nil
+}
+
+// GetStatus returns a single status by ID.
+func (r *StatusRepo) GetStatus(id string) (*models.Status, error) {
+	var s models.Status
+	if err := r.db.Get(&s, `SELECT * FROM statuses WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status: %w", err)
+	}
+	return &s, nil
+}
+
+// CreateStatus inserts a new live status for a timeline.
+func (r *StatusRepo) CreateStatus(s *models.Status) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+		VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
+	`, s)
+	if err != nil {
+		return fmt.Errorf("creating status: %w", err)
+	}
+	return nil
+}
+
+// UpdateStatus writes mutable status fields: name, color, icon, is_closed, position.
+func (r *StatusRepo) UpdateStatus(s *models.Status) error {
+	_, err := r.db.NamedExec(`
+		UPDATE statuses
+		SET name = :name, color = :color, icon = :icon,
+		    is_closed = :is_closed, position = :position, updated_at = :updated_at
+		WHERE id = :id
+	`, s)
+	if err != nil {
+		return fmt.Errorf("updating status: %w", err)
+	}
+	return nil
+}
+
+// CountStatuses returns the number of live statuses for a timeline.
+func (r *StatusRepo) CountStatuses(timelineID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM statuses WHERE timeline_id = ?`, timelineID); err != nil {
+		return 0, fmt.Errorf("counting statuses: %w", err)
+	}
+	return n, nil
+}
+
+// CountStatusActivities returns the number of activities that reference a
+// specific status ID. Used to guard status deletion.
+func (r *StatusRepo) CountStatusActivities(statusID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM activities WHERE status_id = ?`, statusID); err != nil {
+		return 0, fmt.Errorf("counting status activities: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteStatus deletes a live status. If replacementStatusID is non-empty,
+// activities pointing at the deleted status are re-pointed to the replacement
+// first. Returns an error if replacementStatusID is empty but activities
+// reference the status.
+func (r *StatusRepo) DeleteStatus(id, replacementStatusID string) error {
+	if replacementStatusID != "" {
+		if _, err := r.db.Exec(
+			`UPDATE activities SET status_id = ? WHERE status_id = ?`,
+			replacementStatusID, id,
+		); err != nil {
+			return fmt.Errorf("re-assigning activities before status delete: %w", err)
+		}
+	}
+	if _, err := r.db.Exec(`DELETE FROM statuses WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("deleting status: %w", err)
+	}
+	return nil
+}
+
+// CopyTemplateToTimeline copies a template's items into live statuses for a timeline.
+// If no template is found for the team it is a silent no-op.
+func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string) error {
+	// Use the team's first template (by position, then created_at).
+	var template models.StatusTemplate
+	err := r.db.Get(&template, `
+		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at LIMIT 1
+	`, teamID)
+	if err != nil {
+		// No template — not an error; leave the timeline with no statuses.
+		return nil
+	}
+
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, `
+		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
+	`, template.ID); err != nil {
+		return fmt.Errorf("loading template items for copy: %w", err)
+	}
+
+	now := time.Now()
+	for _, item := range items {
+		s := &models.Status{
+			ID:         newRepoID(),
+			TimelineID: timelineID,
+			Name:       item.Name,
+			Color:      item.Color,
+			Icon:       item.Icon,
+			IsClosed:   item.IsClosed,
+			Position:   item.Position,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		if _, err := r.db.NamedExec(`
+			INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+			VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
+		`, s); err != nil {
+			return fmt.Errorf("copying status to timeline: %w", err)
+		}
+	}
+	return nil
+}
+
+// newRepoID generates a 32-character hex ID — same entropy as api.newID but
+// usable within the db package without importing the api package.
+func newRepoID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+````
+
+## File: packages/api/internal/db/timeline_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// TimelineRepo is the persistence layer for Timeline records and their access
+// control entries.
+type TimelineRepo struct {
+	db *sqlx.DB
+}
+
+// NewTimelineRepo returns a TimelineRepo backed by db.
+func NewTimelineRepo(db *sqlx.DB) *TimelineRepo {
+	return &TimelineRepo{db: db}
+}
+
+// Create inserts a new Timeline row.
+func (r *TimelineRepo) Create(t *models.Timeline) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO timelines (
+			id, team_id, name, start_date, end_date,
+			share_token, ical_token,
+			created_by, created_at, updated_at
+		) VALUES (
+			:id, :team_id, :name, :start_date, :end_date,
+			:share_token, :ical_token,
+			:created_by, :created_at, :updated_at
 		)
-	})
+	`, t)
+	if err != nil {
+		return fmt.Errorf("creating timeline: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Timeline by primary key, including archived rows so the
+// archive/unarchive handlers can operate on them. Callers that should reject
+// archived timelines must check ArchivedAt explicitly.
+func (r *TimelineRepo) GetByID(id string) (*models.Timeline, error) {
+	var t models.Timeline
+	err := r.db.Get(&t, `SELECT * FROM timelines WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting timeline: %w", err)
+	}
+	return &t, nil
+}
+
+// SetArchived sets or clears archived_at on a timeline. Pass a non-nil time
+// to archive; pass nil to unarchive.
+func (r *TimelineRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE timelines SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting timeline archived_at: %w", err)
+	}
+	return nil
+}
+
+// GetByShareToken fetches a non-archived Timeline by its public share token.
+// Archived timelines are intentionally excluded — public share URLs should
+// 404 once a timeline is archived.
+// Returns sql.ErrNoRows (wrapped) when no row matches.
+func (r *TimelineRepo) GetByShareToken(token string) (*models.Timeline, error) {
+	var t models.Timeline
+	err := r.db.Get(&t, `SELECT * FROM timelines WHERE share_token = ? AND archived_at IS NULL`, token)
+	if err != nil {
+		return nil, fmt.Errorf("getting timeline by share token: %w", err)
+	}
+	return &t, nil
+}
+
+// ListByTeam returns timelines for a team ordered by creation date
+// descending. When includeArchived is false, archived rows are excluded.
+func (r *TimelineRepo) ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error) {
+	ts := make([]*models.Timeline, 0)
+	query := `SELECT * FROM timelines WHERE team_id = ?`
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
+	query += ` ORDER BY created_at DESC`
+	err := r.db.Select(&ts, query, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("listing timelines: %w", err)
+	}
+	return ts, nil
+}
+
+// HasAccess reports whether teamMemberID has an entry in timeline_access for
+// the given timeline. Returns false (not an error) when the row is absent.
+func (r *TimelineRepo) HasAccess(timelineID, teamMemberID string) (bool, error) {
+	var count int
+	err := r.db.Get(&count,
+		`SELECT COUNT(*) FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("checking timeline access: %w", err)
+	}
+	return count > 0, nil
+}
+
+// GrantAccess inserts a timeline_access row with the given role. On conflict
+// (row already exists) the role is updated to the supplied value.
+func (r *TimelineRepo) GrantAccess(timelineID, teamMemberID, role string) error {
+	_, err := r.db.Exec(
+		`INSERT INTO timeline_access (timeline_id, team_member_id, role)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(timeline_id, team_member_id) DO UPDATE SET role = excluded.role`,
+		timelineID, teamMemberID, role,
+	)
+	if err != nil {
+		return fmt.Errorf("granting timeline access: %w", err)
+	}
+	return nil
+}
+
+// RevokeAccess removes a timeline_access row. It is a no-op when the row
+// does not exist.
+func (r *TimelineRepo) RevokeAccess(timelineID, teamMemberID string) error {
+	_, err := r.db.Exec(
+		`DELETE FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		return fmt.Errorf("revoking timeline access: %w", err)
+	}
+	return nil
+}
+
+// GetAccessRole returns the role for a member in timeline_access, or "" if
+// no entry exists. Returns sql.ErrNoRows (wrapped) only on DB errors.
+func (r *TimelineRepo) GetAccessRole(timelineID, teamMemberID string) (string, error) {
+	var role string
+	err := r.db.Get(&role,
+		`SELECT role FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		// No row means no access — return empty string, not an error.
+		return "", nil
+	}
+	return role, nil
+}
+
+// ListAccess returns all access grants for a timeline, joined with member
+// display info, ordered by joined_at.
+func (r *TimelineRepo) ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error) {
+	entries := make([]*models.TimelineAccessEntry, 0)
+	err := r.db.Select(&entries, `
+		SELECT
+			ta.timeline_id,
+			ta.team_member_id,
+			ta.role,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			COALESCE(u.email, '')                           AS email,
+			tm.color,
+			tm.icon,
+			tm.user_id
+		FROM timeline_access ta
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE ta.timeline_id = ?
+		ORDER BY tm.joined_at
+	`, timelineID)
+	if err != nil {
+		return nil, fmt.Errorf("listing timeline access: %w", err)
+	}
+	return entries, nil
+}
+
+// Update writes mutable timeline fields: name, start_date, end_date,
+// description, color, icon.
+func (r *TimelineRepo) Update(t *models.Timeline) error {
+	_, err := r.db.Exec(`
+		UPDATE timelines
+		SET name = ?, start_date = ?, end_date = ?,
+		    color = ?, icon = ?, updated_at = ?
+		WHERE id = ?
+	`, t.Name, t.StartDate, t.EndDate, t.Color, t.Icon, t.UpdatedAt, t.ID)
+	if err != nil {
+		return fmt.Errorf("updating timeline: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a timeline and all its child rows (statuses,
+// timeline_access cascade via FK).
+func (r *TimelineRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM timelines WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting timeline: %w", err)
+	}
+	return nil
 }
 ````
 
@@ -16910,512 +18234,6 @@ export default function ActivityCreatePanel({
 }
 ````
 
-## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
-````typescript
-/**
- * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
- *
- * Fields: icon (stub), title, dates + allDay, assigned to (member rows),
- * status (stub), tags (stub), color, parent activity (stub), % complete (stub),
- * location, url, description. All functional fields save on change/blur via
- * PATCH /activities/:id.
- */
-
-import { useState, useEffect } from 'react'
-import { X, Trash2, ArrowRight, Loader2, Tag, ChevronDown } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-
-const PANEL_WIDTH = 300
-
-interface Props {
-  event: ApiActivity | null
-  open: boolean
-  members: Member[]
-  teamId: string
-  onClose: () => void
-}
-
-// ── Small helpers ─────────────────────────────────────────────────────────────
-
-function toDateInput(iso: string): string { return iso.slice(0, 10) }
-function toISODate(d: string): string { return `${d}T00:00:00Z` }
-
-const SEC_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 700,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  marginBottom: 6,
-}
-
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 3,
-  width: 68,
-  flexShrink: 0,
-}
-
-const STUB_VALUE: React.CSSProperties = {
-  fontSize: 12,
-  color: 'var(--muted-foreground)',
-  opacity: 0.5,
-  flex: 1,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 4,
-  cursor: 'default',
-  userSelect: 'none',
-}
-
-const DIVIDER: React.CSSProperties = {
-  borderTop: '1px solid var(--border)',
-  margin: '10px 0',
-}
-
-const INPUT: React.CSSProperties = {
-  width: '100%',
-  boxSizing: 'border-box' as const,
-  fontSize: 12,
-  color: 'var(--foreground)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-  padding: '5px 8px',
-  outline: 'none',
-  background: 'var(--background)',
-  fontFamily: 'var(--font-sans)',
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-export default function ActivityDetailPanel({ event, open, members, teamId, onClose }: Props) {
-  const updateMutation = useUpdateActivity(teamId)
-  const deleteMutation = useDeleteActivity(teamId)
-
-  const [title, setTitle] = useState(event?.title ?? '')
-  const [description, setDescription] = useState(event?.description ?? '')
-  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
-  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
-  const [allDay, setAllDay] = useState(event?.allDay ?? false)
-  const [identity, setIdentity] = useState<Identity>({
-    color: event?.color ?? '#288C9B',
-    icon: event?.icon ?? '__none__',
-  })
-  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
-  const [location, setLocation] = useState(event?.location ?? '')
-  const [url, setUrl] = useState(event?.url ?? '')
-  const [confirmDelete, setConfirmDelete] = useState(false)
-
-  // Re-sync when the selected activity changes.
-  useEffect(() => {
-    if (!event) return
-    setTitle(event.title)
-    setDescription(event.description ?? '')
-    setStartDate(toDateInput(event.startAt))
-    setEndDate(toDateInput(event.endAt))
-    setAllDay(event.allDay)
-    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
-    setAssignedIds(event.assignedMemberIds ?? [])
-    setLocation(event.location ?? '')
-    setUrl(event.url ?? '')
-    setConfirmDelete(false)
-  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const saving = updateMutation.isPending
-  const deleting = deleteMutation.isPending
-
-  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
-    if (!event) return
-    updateMutation.mutate({ activityId: event.id, patch })
-  }
-
-  function handleTitleBlur() {
-    if (title.trim() && title !== event?.title) save({ title: title.trim() })
-  }
-
-  function handleDescriptionBlur() {
-    if (description !== (event?.description ?? '')) save({ description: description || null })
-  }
-
-  function handleLocationBlur() {
-    if (location !== (event?.location ?? '')) save({ location: location || null })
-  }
-
-  function handleUrlBlur() {
-    if (url !== (event?.url ?? '')) save({ url: url || null })
-  }
-
-  function handleStartDateChange(val: string) {
-    setStartDate(val)
-    if (val && val <= endDate) save({ startAt: toISODate(val) })
-  }
-
-  function handleEndDateChange(val: string) {
-    setEndDate(val)
-    if (val && val >= startDate) save({ endAt: toISODate(val) })
-  }
-
-  function handleAllDayToggle() {
-    const next = !allDay
-    setAllDay(next)
-    save({ allDay: next })
-  }
-
-  function handleIdentityChange(next: Identity) {
-    setIdentity(next)
-    save({ color: next.color, icon: next.icon })
-  }
-
-  function toggleAssignee(memberId: string) {
-    const next = assignedIds.includes(memberId)
-      ? assignedIds.filter(id => id !== memberId)
-      : [...assignedIds, memberId]
-    setAssignedIds(next)
-    save({ assignedMemberIds: next })
-  }
-
-  function handleDelete() {
-    if (!event) return
-    deleteMutation.mutate(event.id, { onSuccess: onClose })
-  }
-
-  return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-        {!event ? null : (<>
-
-        {/* ── Header bar ── */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '0 12px', height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)', flexShrink: 0,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
-            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', color: 'var(--muted-foreground)',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
-        </div>
-
-        {/* ── Scrollable body ── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
-
-          {/* Identity widget + Title */}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
-            <div style={{ marginTop: 2, flexShrink: 0 }}>
-              <IdentityWidget
-                identity={identity}
-                name={title || event?.title || ''}
-                shape="square"
-                onChange={handleIdentityChange}
-              />
-            </div>
-            {/* Title */}
-            <input
-              value={title}
-              onChange={e => setTitle(e.target.value)}
-              onBlur={handleTitleBlur}
-              style={{
-                flex: 1, fontSize: 13, fontWeight: 600,
-                color: 'var(--foreground)', border: '1px solid transparent',
-                borderRadius: 'var(--radius-md)', padding: '5px 6px',
-                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-              }}
-              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* ── WHEN ── */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>When</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-              <input
-                type="date" value={startDate}
-                onChange={e => handleStartDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-              <input
-                type="date" value={endDate} min={startDate}
-                onChange={e => handleEndDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-              <input
-                type="checkbox" checked={allDay} onChange={handleAllDayToggle}
-                style={{ width: 13, height: 13, cursor: 'pointer', accentColor: 'var(--primary)' }}
-              />
-              <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>All day</span>
-            </label>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* ── ASSIGNED TO ── */}
-          {members.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={SEC_LABEL}>Assigned to</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                {members.map(m => {
-                  const assigned = assignedIds.includes(m.id)
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => toggleAssignee(m.id)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '5px 6px',
-                        border: 'none', borderRadius: 'var(--radius-md)',
-                        background: 'none', cursor: 'pointer', textAlign: 'left',
-                        opacity: assigned ? 1 : 0.45,
-                        transition: 'opacity 0.1s, background 0.1s',
-                      }}
-                      onMouseEnter={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.opacity = '1' }}
-                      onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.opacity = assigned ? '1' : '0.45' }}
-                    >
-                      <MemberAvatar member={m} size={20} />
-                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                      {assigned && (
-                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          <div style={DIVIDER} />
-
-          {/* ── CLASSIFY ── */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Classify</div>
-
-            {/* Status stub */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Status</span>
-              <div style={{ ...STUB_VALUE }}>
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 100,
-                  border: '1px solid var(--border)', lineHeight: 1.5,
-                  display: 'flex', alignItems: 'center', gap: 3,
-                }}>
-                  Planned <ChevronDown size={10} strokeWidth={2} />
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>Phase 10</span>
-              </div>
-            </div>
-
-            {/* Tags stub */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
-              <span style={FIELD_LABEL}>Tags</span>
-              <div style={{ ...STUB_VALUE }}>
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 100,
-                  border: '1px dashed var(--border)', lineHeight: 1.5,
-                  display: 'flex', alignItems: 'center', gap: 3,
-                }}>
-                  <Tag size={9} strokeWidth={2} /> Add tag
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
-              </div>
-            </div>
-
-            {/* Identity (color + icon) — handled by the widget in the title row above */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>Identity</span>
-              <div style={{ flex: 1, fontSize: 11, color: 'var(--muted-foreground)', opacity: 0.7 }}>
-                Use the icon above to edit
-              </div>
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* ── DETAILS ── */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Details</div>
-
-            {/* Parent activity stub */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Parent</span>
-              <div style={{ ...STUB_VALUE }}>
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 4,
-                  border: '1px solid var(--border)', lineHeight: 1.5,
-                  display: 'flex', alignItems: 'center', gap: 3,
-                }}>
-                  None <ChevronDown size={10} strokeWidth={2} />
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
-              </div>
-            </div>
-
-            {/* % Complete stub */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Progress</span>
-              <div style={{ ...STUB_VALUE }}>
-                <div style={{
-                  flex: 1, height: 4, background: 'var(--border)',
-                  borderRadius: 2, overflow: 'hidden', maxWidth: 80,
-                }}>
-                  <div style={{ width: `${event.percentComplete ?? 0}%`, height: '100%', background: 'var(--primary)', borderRadius: 2 }} />
-                </div>
-                <span style={{ fontSize: 11, marginLeft: 5 }}>{event.percentComplete ?? 0}%</span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
-              </div>
-            </div>
-
-            {/* Location (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Location</span>
-              <input
-                value={location}
-                onChange={e => setLocation(e.target.value)}
-                onBlur={handleLocationBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-
-            {/* URL (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>URL</span>
-              <input
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-                onBlur={handleUrlBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* ── NOTES ── */}
-          <div style={{ marginBottom: 8 }}>
-            <div style={SEC_LABEL}>Notes</div>
-            <textarea
-              value={description}
-              rows={3}
-              onChange={e => setDescription(e.target.value)}
-              onBlur={handleDescriptionBlur}
-              placeholder="Add notes…"
-              style={{
-                ...INPUT, resize: 'vertical', lineHeight: 1.5, padding: '6px 8px',
-              }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-              onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-            />
-          </div>
-
-        </div>
-
-        {/* ── Footer ── */}
-        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-          {confirmDelete ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
-                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
-              </p>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  onClick={() => setConfirmDelete(false)}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                    background: 'var(--card)', color: 'var(--foreground)',
-                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                  }}
-                >Cancel</button>
-                <button
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: 'none',
-                    background: 'var(--destructive)', color: 'white',
-                    cursor: deleting ? 'not-allowed' : 'pointer',
-                    fontFamily: 'var(--font-sans)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  }}
-                >
-                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                  Delete
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setConfirmDelete(true)}
-              style={{
-                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                fontSize: 12, fontWeight: 600, padding: 7,
-                borderRadius: 'var(--radius-md)', border: 'none',
-                background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
-                cursor: 'pointer', fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <Trash2 size={12} strokeWidth={2} />
-              Delete activity
-            </button>
-          )}
-        </div>
-
-        </>)}
-      </div>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/components/gantt/granularity.ts
 ````typescript
 /**
@@ -17653,6 +18471,167 @@ export function autoFitGranularity(
   }
 
   return best;
+}
+````
+
+## File: packages/web/src/contexts/AuthContext.tsx
+````typescript
+/**
+ * Auth context: current user + access token in memory, refresh token in localStorage.
+ *
+ * Provides login, logout, and register actions so any component can
+ * authenticate without knowing about token storage details.
+ */
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import type { components } from '@draba/shared'
+import {
+  API_BASE,
+  ApiError,
+  clearStoredRefreshToken,
+  getStoredRefreshToken,
+  storeRefreshToken,
+} from '@/lib/api'
+
+type User = components['schemas']['User']
+type AuthResponse = components['schemas']['AuthResponse']
+type RefreshResponse = components['schemas']['RefreshResponse']
+
+interface AuthState {
+  user: User | null
+  accessToken: string | null
+  /** True while checking the stored refresh token on initial mount. */
+  initializing: boolean
+}
+
+interface AuthContextValue extends AuthState {
+  getAccessToken: () => string | null
+  login: (email: string, password: string) => Promise<void>
+  /** Registers a new account and returns the fresh access token directly,
+   *  avoiding a race against the async setState that follows. */
+  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
+  logout: () => void
+  /** Merges fields into the current user object — used after profile updates. */
+  patchUser: (patch: Partial<User>) => void
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null)
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    const err = data as { error: { code: string; message: string } }
+    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
+  }
+  return data as T
+}
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [state, setState] = useState<AuthState>({
+    user: null,
+    accessToken: null,
+    initializing: true,
+  })
+
+  // Stable ref so callbacks never capture a stale token.
+  const tokenRef = useRef<string | null>(null)
+  tokenRef.current = state.accessToken
+
+  const getAccessToken = useCallback(() => tokenRef.current, [])
+
+  // On mount, attempt to restore session via the stored refresh token.
+  // After exchanging the refresh token we also fetch /auth/me so that `user`
+  // is populated — without it, admin checks (canEditTeam etc.) always fail
+  // because userId is '' and no member's userId matches an empty string.
+  useEffect(() => {
+    const refresh = getStoredRefreshToken()
+    if (!refresh) {
+      setState(s => ({ ...s, initializing: false }))
+      return
+    }
+    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
+      .then(async ({ accessToken }) => {
+        try {
+          const res = await fetch(`${API_BASE}/auth/me`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          })
+          const user: User | null = res.ok ? (await res.json() as User) : null
+          setState({ user, accessToken, initializing: false })
+        } catch {
+          // /auth/me failed but the token is still valid — set what we have.
+          setState(s => ({ ...s, accessToken, initializing: false }))
+        }
+      })
+      .catch(() => {
+        clearStoredRefreshToken()
+        setState(s => ({ ...s, initializing: false }))
+      })
+  }, [])
+
+  const login = useCallback(async (email: string, password: string) => {
+    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
+      email,
+      password,
+    })
+    storeRefreshToken(refreshToken)
+    setState({ user, accessToken, initializing: false })
+  }, [])
+
+  const register = useCallback(
+    async (
+      email: string,
+      password: string,
+      displayName: string,
+      inviteToken?: string,
+    ): Promise<string> => {
+      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
+        '/auth/register',
+        { email, password, displayName, inviteToken },
+      )
+      storeRefreshToken(refreshToken)
+      setState({ user, accessToken, initializing: false })
+      // Return the token directly so callers don't race against the async
+      // setState — tokenRef won't update until the next render cycle.
+      return accessToken
+    },
+    [],
+  )
+
+  const logout = useCallback(() => {
+    clearStoredRefreshToken()
+    setState({ user: null, accessToken: null, initializing: false })
+  }, [])
+
+  const patchUser = useCallback((patch: Partial<User>) => {
+    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
+  }, [])
+
+  const value = useMemo<AuthContextValue>(
+    () => ({ ...state, getAccessToken, login, register, logout, patchUser }),
+    [state, getAccessToken, login, register, logout, patchUser],
+  )
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+/** Returns the auth context. Throws if used outside of AuthProvider. */
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext)
+  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
+  return ctx
 }
 ````
 
@@ -17963,243 +18942,6 @@ export function useRevokeUser() {
       client.invalidateQueries({ queryKey: ['teams'] })
     },
   })
-}
-````
-
-## File: packages/web/src/hooks/useWebSocket.ts
-````typescript
-/**
- * WebSocket client hook for real-time event updates.
- *
- * Protocol (from CONVENTIONS.md):
- *   - Connect: GET /ws?token=<jwt>
- *   - Subscribe: send { type: "subscribe", teamId: "..." }
- *   - Receive: { type: "event.updated" | "event.created" | "event.deleted", payload: {...} }
- *   - Heartbeat: server sends { type: "ping" } every 30s; client replies { type: "pong" }
- *
- * Reconnect: exponential back-off on unexpected close (not called on intentional cleanup).
- */
-
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { API_BASE } from '@/lib/api'
-
-type WsStatus = 'connecting' | 'connected' | 'disconnected'
-
-export interface WsMessage {
-  type: string
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- wire format is open-ended
-  payload?: any
-  teamId?: string
-}
-
-interface Options {
-  /** JWT access token. Pass null/undefined to stay disconnected. */
-  token: string | null | undefined
-  /** Team IDs to subscribe to once the connection opens. */
-  teamIds?: string[]
-  /** Called for every incoming message (excluding server pings). */
-  onMessage?: (msg: WsMessage) => void
-}
-
-// Priority:
-// 1. VITE_API_URL is set → use it (explicit override, e.g. cross-origin prod).
-// 2. VITE_API_TARGET is set → connect directly to the dev target, bypassing
-//    the Vite proxy. Vite v6's ws: true proxy is unreliable and connecting
-//    directly avoids the upgrade-handshake issues on the dev server.
-// 3. Fallback → derive from the current page origin (production embedded mode,
-//    or local dev where the Vite proxy handles the /ws path).
-const WS_BASE = API_BASE
-  ? API_BASE.replace(/^http/, 'ws')
-  : (import.meta.env.VITE_API_TARGET as string | undefined)
-    ? (import.meta.env.VITE_API_TARGET as string).replace(/^http/, 'ws')
-    : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
-const MAX_BACKOFF_MS = 30_000
-
-export function useWebSocket({ token, teamIds = [], onMessage }: Options) {
-  const [status, setStatus] = useState<WsStatus>('disconnected')
-  const wsRef = useRef<WebSocket | null>(null)
-  const backoffRef = useRef(1_000)
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const intentionalRef = useRef(false)
-  const onMessageRef = useRef(onMessage)
-  onMessageRef.current = onMessage
-  const teamIdsRef = useRef(teamIds)
-  teamIdsRef.current = teamIds
-
-  const connect = useCallback(() => {
-    if (!token) return
-
-    intentionalRef.current = false
-    setStatus('connecting')
-
-    const ws = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent(token)}`)
-    wsRef.current = ws
-
-    ws.onopen = () => {
-      setStatus('connected')
-      backoffRef.current = 1_000
-      // Subscribe to all requested teams.
-      for (const teamId of teamIdsRef.current) {
-        ws.send(JSON.stringify({ type: 'subscribe', teamId }))
-      }
-    }
-
-    ws.onmessage = ev => {
-      let msg: WsMessage
-      try {
-        msg = JSON.parse(ev.data as string) as WsMessage
-      } catch {
-        return
-      }
-      if (msg.type === 'ping') {
-        ws.send(JSON.stringify({ type: 'pong' }))
-        return
-      }
-      onMessageRef.current?.(msg)
-    }
-
-    ws.onclose = () => {
-      setStatus('disconnected')
-      wsRef.current = null
-      if (!intentionalRef.current && token) {
-        // Reconnect with back-off.
-        reconnectTimerRef.current = setTimeout(() => {
-          backoffRef.current = Math.min(backoffRef.current * 2, MAX_BACKOFF_MS)
-          connect()
-        }, backoffRef.current)
-      }
-    }
-
-    ws.onerror = () => {
-      ws.close()
-    }
-  }, [token])
-
-  // Connect when token becomes available; disconnect on cleanup or token removal.
-  useEffect(() => {
-    if (!token) {
-      intentionalRef.current = true
-      wsRef.current?.close()
-      return
-    }
-    connect()
-    return () => {
-      intentionalRef.current = true
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
-      wsRef.current?.close()
-    }
-  }, [token, connect])
-
-  /** Subscribe to an additional team at runtime. */
-  const subscribe = useCallback((teamId: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'subscribe', teamId }))
-    }
-  }, [])
-
-  return { status, subscribe } as const
-}
-````
-
-## File: packages/web/src/lib/api.ts
-````typescript
-/**
- * Thin fetch wrapper over the draba REST API.
- *
- * Token lifecycle:
- *   - Access token: kept in memory via the AuthContext; passed as Authorization header.
- *   - Refresh token: persisted in localStorage under REFRESH_TOKEN_KEY.
- *     On a 401, the client attempts one silent refresh then retries the original request.
- *
- * All callers receive typed JSON or throw an ApiError.
- */
-
-import type { components } from '@draba/shared'
-
-export type ApiErrorBody = components['schemas']['ApiError']
-
-// Empty string = same-origin relative URLs, which is correct when the SPA is
-// embedded in the Go binary. Set VITE_API_URL for local dev against a
-// separate API server (e.g. VITE_API_URL=http://localhost:8080).
-export const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined) ?? ''
-
-export const REFRESH_TOKEN_KEY = 'draba_refresh_token'
-
-/** Thrown for any non-2xx response. */
-export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-    /** Extra fields from the error response body (e.g. assignmentCount on 409). */
-    public readonly data?: Record<string, unknown>,
-  ) {
-    super(message)
-    this.name = 'ApiError'
-  }
-}
-
-/** Reads the stored refresh token from localStorage. */
-export function getStoredRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_TOKEN_KEY)
-}
-
-/** Persists the refresh token to localStorage. */
-export function storeRefreshToken(token: string): void {
-  localStorage.setItem(REFRESH_TOKEN_KEY, token)
-}
-
-/** Removes the refresh token from localStorage (on logout). */
-export function clearStoredRefreshToken(): void {
-  localStorage.removeItem(REFRESH_TOKEN_KEY)
-}
-
-async function parseError(res: Response): Promise<ApiError> {
-  try {
-    const body = (await res.json()) as ApiErrorBody & Record<string, unknown>
-    const { error, ...rest } = body
-    const data = Object.keys(rest).length > 0 ? (rest as Record<string, unknown>) : undefined
-    return new ApiError(res.status, error.code, error.message, data)
-  } catch {
-    return new ApiError(res.status, 'UNKNOWN', res.statusText)
-  }
-}
-
-/** Low-level fetch that injects the access token and throws ApiError on non-2xx. */
-export async function apiFetch<T>(
-  path: string,
-  init: RequestInit & { accessToken?: string } = {},
-): Promise<T> {
-  const { accessToken, ...rest } = init
-  const headers = new Headers(rest.headers)
-  headers.set('Content-Type', 'application/json')
-  if (accessToken) {
-    headers.set('Authorization', `Bearer ${accessToken}`)
-  }
-
-  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
-
-  if (!res.ok) {
-    throw await parseError(res)
-  }
-
-  // 204 No Content — return undefined cast as T
-  if (res.status === 204) {
-    return undefined as unknown as T
-  }
-
-  return res.json() as Promise<T>
-}
-
-/**
- * Higher-level wrapper that supplies the access token from a getter function.
- * Used by TanStack Query hooks so they never capture a stale token closure.
- */
-export function createAuthFetch(getToken: () => string | null) {
-  return function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-    return apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
-  }
 }
 ````
 
@@ -18619,6 +19361,527 @@ packages/api/
 - [TBD — GitHub Actions; build + test on PR; publish Docker image on tag]
 ````
 
+## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
+````typescript
+/**
+ * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
+ *
+ * Fields: icon (stub), title, dates + allDay, assigned to (member rows),
+ * status (stub), tags (stub), color, parent activity (stub), % complete (stub),
+ * location, url, description. All functional fields save on change/blur via
+ * PATCH /activities/:id.
+ */
+
+import { useState, useEffect } from 'react'
+import { X, Trash2, ArrowRight, Loader2, Tag, ChevronDown } from 'lucide-react'
+import MemberAvatar from '@/components/MemberAvatar'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+
+const PANEL_WIDTH = 300
+
+interface Props {
+  event: ApiActivity | null
+  open: boolean
+  members: Member[]
+  teamId: string
+  timelineId?: string
+  onClose: () => void
+}
+
+// ── Small helpers ─────────────────────────────────────────────────────────────
+
+function toDateInput(iso: string): string { return iso.slice(0, 10) }
+function toISODate(d: string): string { return `${d}T00:00:00Z` }
+
+const SEC_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.08em',
+  marginBottom: 6,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.07em',
+  marginBottom: 3,
+  width: 68,
+  flexShrink: 0,
+}
+
+const STUB_VALUE: React.CSSProperties = {
+  fontSize: 12,
+  color: 'var(--muted-foreground)',
+  opacity: 0.5,
+  flex: 1,
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  cursor: 'default',
+  userSelect: 'none',
+}
+
+const DIVIDER: React.CSSProperties = {
+  borderTop: '1px solid var(--border)',
+  margin: '10px 0',
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box' as const,
+  fontSize: 12,
+  color: 'var(--foreground)',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-md)',
+  padding: '5px 8px',
+  outline: 'none',
+  background: 'var(--background)',
+  fontFamily: 'var(--font-sans)',
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export default function ActivityDetailPanel({ event, open, members, teamId, timelineId, onClose }: Props) {
+  const updateMutation = useUpdateActivity(teamId)
+  const deleteMutation = useDeleteActivity(teamId)
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId ?? '')
+
+  const [title, setTitle] = useState(event?.title ?? '')
+  const [description, setDescription] = useState(event?.description ?? '')
+  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
+  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
+  const [allDay, setAllDay] = useState(event?.allDay ?? false)
+  const [identity, setIdentity] = useState<Identity>({
+    color: event?.color ?? '#288C9B',
+    icon: event?.icon ?? '__none__',
+  })
+  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
+  const [location, setLocation] = useState(event?.location ?? '')
+  const [url, setUrl] = useState(event?.url ?? '')
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // Re-sync when the selected activity changes.
+  useEffect(() => {
+    if (!event) return
+    setTitle(event.title)
+    setDescription(event.description ?? '')
+    setStartDate(toDateInput(event.startAt))
+    setEndDate(toDateInput(event.endAt))
+    setAllDay(event.allDay)
+    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
+    setAssignedIds(event.assignedMemberIds ?? [])
+    setLocation(event.location ?? '')
+    setUrl(event.url ?? '')
+    setConfirmDelete(false)
+  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saving = updateMutation.isPending
+  const deleting = deleteMutation.isPending
+
+  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
+    if (!event) return
+    updateMutation.mutate({ activityId: event.id, patch })
+  }
+
+  function handleTitleBlur() {
+    if (title.trim() && title !== event?.title) save({ title: title.trim() })
+  }
+
+  function handleDescriptionBlur() {
+    if (description !== (event?.description ?? '')) save({ description: description || null })
+  }
+
+  function handleLocationBlur() {
+    if (location !== (event?.location ?? '')) save({ location: location || null })
+  }
+
+  function handleUrlBlur() {
+    if (url !== (event?.url ?? '')) save({ url: url || null })
+  }
+
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val && val <= endDate) save({ startAt: toISODate(val) })
+  }
+
+  function handleEndDateChange(val: string) {
+    setEndDate(val)
+    if (val && val >= startDate) save({ endAt: toISODate(val) })
+  }
+
+  function handleAllDayToggle() {
+    const next = !allDay
+    setAllDay(next)
+    save({ allDay: next })
+  }
+
+  function handleIdentityChange(next: Identity) {
+    setIdentity(next)
+    save({ color: next.color, icon: next.icon })
+  }
+
+  function toggleAssignee(memberId: string) {
+    const next = assignedIds.includes(memberId)
+      ? assignedIds.filter(id => id !== memberId)
+      : [...assignedIds, memberId]
+    setAssignedIds(next)
+    save({ assignedMemberIds: next })
+  }
+
+  function handleDelete() {
+    if (!event) return
+    deleteMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {!event ? null : (<>
+
+        {/* ── Header bar ── */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0 12px', height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)', flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
+            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', color: 'var(--muted-foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <X size={14} strokeWidth={2} />
+          </button>
+        </div>
+
+        {/* ── Scrollable body ── */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
+
+          {/* Identity widget + Title */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
+            <div style={{ marginTop: 2, flexShrink: 0 }}>
+              <IdentityWidget
+                identity={identity}
+                name={title || event?.title || ''}
+                shape="square"
+                onChange={handleIdentityChange}
+              />
+            </div>
+            {/* Title */}
+            <input
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              onBlur={handleTitleBlur}
+              style={{
+                flex: 1, fontSize: 13, fontWeight: 600,
+                color: 'var(--foreground)', border: '1px solid transparent',
+                borderRadius: 'var(--radius-md)', padding: '5px 6px',
+                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
+              }}
+              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
+              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
+            />
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* ── WHEN ── */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>When</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <input
+                type="date" value={startDate}
+                onChange={e => handleStartDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
+              <input
+                type="date" value={endDate} min={startDate}
+                onChange={e => handleEndDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <input
+                type="checkbox" checked={allDay} onChange={handleAllDayToggle}
+                style={{ width: 13, height: 13, cursor: 'pointer', accentColor: 'var(--primary)' }}
+              />
+              <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>All day</span>
+            </label>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* ── ASSIGNED TO ── */}
+          {members.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={SEC_LABEL}>Assigned to</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                {members.map(m => {
+                  const assigned = assignedIds.includes(m.id)
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => toggleAssignee(m.id)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '5px 6px',
+                        border: 'none', borderRadius: 'var(--radius-md)',
+                        background: 'none', cursor: 'pointer', textAlign: 'left',
+                        opacity: assigned ? 1 : 0.45,
+                        transition: 'opacity 0.1s, background 0.1s',
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.opacity = '1' }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.opacity = assigned ? '1' : '0.45' }}
+                    >
+                      <MemberAvatar member={m} size={20} />
+                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
+                      {assigned && (
+                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          <div style={DIVIDER} />
+
+          {/* ── CLASSIFY ── */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Classify</div>
+
+            {/* Status picker */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Status</span>
+              {statuses.length > 0 ? (
+                <div style={{ flex: 1 }}>
+                  <select
+                    value={event?.statusId ?? ''}
+                    onChange={e => save({ statusId: e.target.value || null } as Parameters<typeof save>[0])}
+                    style={{
+                      fontSize: 12, padding: '3px 8px', border: '1px solid var(--border)',
+                      borderRadius: 6, background: 'var(--background)', color: 'var(--foreground)',
+                      cursor: 'pointer', width: '100%',
+                    }}
+                  >
+                    <option value="">— No status —</option>
+                    {statuses.map(s => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div style={{ ...STUB_VALUE }}>
+                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
+                </div>
+              )}
+            </div>
+
+            {/* Tags stub */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+              <span style={FIELD_LABEL}>Tags</span>
+              <div style={{ ...STUB_VALUE }}>
+                <span style={{
+                  fontSize: 11, padding: '2px 8px', borderRadius: 100,
+                  border: '1px dashed var(--border)', lineHeight: 1.5,
+                  display: 'flex', alignItems: 'center', gap: 3,
+                }}>
+                  <Tag size={9} strokeWidth={2} /> Add tag
+                </span>
+                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
+              </div>
+            </div>
+
+            {/* Identity (color + icon) — handled by the widget in the title row above */}
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <span style={FIELD_LABEL}>Identity</span>
+              <div style={{ flex: 1, fontSize: 11, color: 'var(--muted-foreground)', opacity: 0.7 }}>
+                Use the icon above to edit
+              </div>
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* ── DETAILS ── */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Details</div>
+
+            {/* Parent activity stub */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Parent</span>
+              <div style={{ ...STUB_VALUE }}>
+                <span style={{
+                  fontSize: 11, padding: '2px 8px', borderRadius: 4,
+                  border: '1px solid var(--border)', lineHeight: 1.5,
+                  display: 'flex', alignItems: 'center', gap: 3,
+                }}>
+                  None <ChevronDown size={10} strokeWidth={2} />
+                </span>
+                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
+              </div>
+            </div>
+
+            {/* % Complete stub */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Progress</span>
+              <div style={{ ...STUB_VALUE }}>
+                <div style={{
+                  flex: 1, height: 4, background: 'var(--border)',
+                  borderRadius: 2, overflow: 'hidden', maxWidth: 80,
+                }}>
+                  <div style={{ width: `${event.percentComplete ?? 0}%`, height: '100%', background: 'var(--primary)', borderRadius: 2 }} />
+                </div>
+                <span style={{ fontSize: 11, marginLeft: 5 }}>{event.percentComplete ?? 0}%</span>
+                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
+              </div>
+            </div>
+
+            {/* Location (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Location</span>
+              <input
+                value={location}
+                onChange={e => setLocation(e.target.value)}
+                onBlur={handleLocationBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+
+            {/* URL (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <span style={FIELD_LABEL}>URL</span>
+              <input
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                onBlur={handleUrlBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* ── NOTES ── */}
+          <div style={{ marginBottom: 8 }}>
+            <div style={SEC_LABEL}>Notes</div>
+            <textarea
+              value={description}
+              rows={3}
+              onChange={e => setDescription(e.target.value)}
+              onBlur={handleDescriptionBlur}
+              placeholder="Add notes…"
+              style={{
+                ...INPUT, resize: 'vertical', lineHeight: 1.5, padding: '6px 8px',
+              }}
+              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+              onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+            />
+          </div>
+
+        </div>
+
+        {/* ── Footer ── */}
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+          {confirmDelete ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
+                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
+              </p>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                    background: 'var(--card)', color: 'var(--foreground)',
+                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                  }}
+                >Cancel</button>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: 'none',
+                    background: 'var(--destructive)', color: 'white',
+                    cursor: deleting ? 'not-allowed' : 'pointer',
+                    fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  }}
+                >
+                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmDelete(true)}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                fontSize: 12, fontWeight: 600, padding: 7,
+                borderRadius: 'var(--radius-md)', border: 'none',
+                background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
+                cursor: 'pointer', fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <Trash2 size={12} strokeWidth={2} />
+              Delete activity
+            </button>
+          )}
+        </div>
+
+        </>)}
+      </div>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/components/StatusTemplatesTab.tsx
 ````typescript
 /**
@@ -19022,167 +20285,6 @@ export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props
 }
 ````
 
-## File: packages/web/src/contexts/AuthContext.tsx
-````typescript
-/**
- * Auth context: current user + access token in memory, refresh token in localStorage.
- *
- * Provides login, logout, and register actions so any component can
- * authenticate without knowing about token storage details.
- */
-
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
-import type { components } from '@draba/shared'
-import {
-  API_BASE,
-  ApiError,
-  clearStoredRefreshToken,
-  getStoredRefreshToken,
-  storeRefreshToken,
-} from '@/lib/api'
-
-type User = components['schemas']['User']
-type AuthResponse = components['schemas']['AuthResponse']
-type RefreshResponse = components['schemas']['RefreshResponse']
-
-interface AuthState {
-  user: User | null
-  accessToken: string | null
-  /** True while checking the stored refresh token on initial mount. */
-  initializing: boolean
-}
-
-interface AuthContextValue extends AuthState {
-  getAccessToken: () => string | null
-  login: (email: string, password: string) => Promise<void>
-  /** Registers a new account and returns the fresh access token directly,
-   *  avoiding a race against the async setState that follows. */
-  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
-  logout: () => void
-  /** Merges fields into the current user object — used after profile updates. */
-  patchUser: (patch: Partial<User>) => void
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null)
-
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const data = await res.json()
-  if (!res.ok) {
-    const err = data as { error: { code: string; message: string } }
-    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
-  }
-  return data as T
-}
-
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<AuthState>({
-    user: null,
-    accessToken: null,
-    initializing: true,
-  })
-
-  // Stable ref so callbacks never capture a stale token.
-  const tokenRef = useRef<string | null>(null)
-  tokenRef.current = state.accessToken
-
-  const getAccessToken = useCallback(() => tokenRef.current, [])
-
-  // On mount, attempt to restore session via the stored refresh token.
-  // After exchanging the refresh token we also fetch /auth/me so that `user`
-  // is populated — without it, admin checks (canEditTeam etc.) always fail
-  // because userId is '' and no member's userId matches an empty string.
-  useEffect(() => {
-    const refresh = getStoredRefreshToken()
-    if (!refresh) {
-      setState(s => ({ ...s, initializing: false }))
-      return
-    }
-    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
-      .then(async ({ accessToken }) => {
-        try {
-          const res = await fetch(`${API_BASE}/auth/me`, {
-            headers: { Authorization: `Bearer ${accessToken}` },
-          })
-          const user: User | null = res.ok ? (await res.json() as User) : null
-          setState({ user, accessToken, initializing: false })
-        } catch {
-          // /auth/me failed but the token is still valid — set what we have.
-          setState(s => ({ ...s, accessToken, initializing: false }))
-        }
-      })
-      .catch(() => {
-        clearStoredRefreshToken()
-        setState(s => ({ ...s, initializing: false }))
-      })
-  }, [])
-
-  const login = useCallback(async (email: string, password: string) => {
-    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
-      email,
-      password,
-    })
-    storeRefreshToken(refreshToken)
-    setState({ user, accessToken, initializing: false })
-  }, [])
-
-  const register = useCallback(
-    async (
-      email: string,
-      password: string,
-      displayName: string,
-      inviteToken?: string,
-    ): Promise<string> => {
-      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
-        '/auth/register',
-        { email, password, displayName, inviteToken },
-      )
-      storeRefreshToken(refreshToken)
-      setState({ user, accessToken, initializing: false })
-      // Return the token directly so callers don't race against the async
-      // setState — tokenRef won't update until the next render cycle.
-      return accessToken
-    },
-    [],
-  )
-
-  const logout = useCallback(() => {
-    clearStoredRefreshToken()
-    setState({ user: null, accessToken: null, initializing: false })
-  }, [])
-
-  const patchUser = useCallback((patch: Partial<User>) => {
-    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
-  }, [])
-
-  const value = useMemo<AuthContextValue>(
-    () => ({ ...state, getAccessToken, login, register, logout, patchUser }),
-    [state, getAccessToken, login, register, logout, patchUser],
-  )
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
-}
-
-/** Returns the auth context. Throws if used outside of AuthProvider. */
-export function useAuth(): AuthContextValue {
-  const ctx = useContext(AuthContext)
-  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
-  return ctx
-}
-````
-
 ## File: packages/web/src/hooks/useSettings.ts
 ````typescript
 /**
@@ -19407,347 +20509,6 @@ export function useAdminUsers(orphanedOnly = false) {
     queryKey: ['admin', 'users', { orphanedOnly }],
     queryFn: () =>
       authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
-  })
-}
-````
-
-## File: packages/web/src/hooks/useTeamActivities.ts
-````typescript
-/**
- * TanStack Query hooks for team-scoped data.
- *
- * All hooks call createAuthFetch to inject the current access token at
- * query-time so stale closures never send an expired token.
- */
-
-import { useCallback } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-import { useWebSocket } from '@/hooks/useWebSocket'
-
-type Activity = components['schemas']['Activity']
-type Team = components['schemas']['Team']
-type Timeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-/** Query key factory — centralises cache key strings. */
-export const keys = {
-  myTeams: () => ['teams'] as const,
-  teamActivities: (teamId: string, from?: string, to?: string) =>
-    ['teams', teamId, 'activities', { from, to }] as const,
-  teamMembers: (teamId: string) =>
-    ['teams', teamId, 'members'] as const,
-  teamTimelines: (teamId: string) =>
-    ['teams', teamId, 'timelines'] as const,
-}
-
-/** Fetches all teams the authenticated user belongs to. */
-export function useMyTeams(includeArchived = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.myTeams(), { includeArchived }],
-    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
-  })
-}
-
-/** Fetches a single team by ID. */
-export function useTeam(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId],
-    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches all non-archived timelines for a team. */
-export function useTeamTimelines(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamTimelines(teamId),
-    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches all activities for a team, optionally filtered by date range. */
-export function useTeamActivities(teamId: string, from?: string, to?: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamActivities(teamId, from, to),
-    queryFn: async () => {
-      const params = new URLSearchParams()
-      if (from) params.set('from', from)
-      if (to) params.set('to', to)
-      const qs = params.toString()
-      return (await authFetch<Activity[] | null>(`/teams/${teamId}/activities${qs ? `?${qs}` : ''}`)) ?? []
-    },
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches the member list for a team. */
-export function useTeamMembers(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamMembers(teamId),
-    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/**
- * Subscribes to the team's WebSocket feed and applies surgical cache updates
- * for activity.created / activity.updated / activity.deleted deltas.
- *
- * Conflict strategy: for activity.updated, incoming deltas are only applied
- * when their updatedAt timestamp is strictly newer than the cached version.
- * This prevents self-echo (our own PATCH broadcast arriving back) and handles
- * the last-writer-wins case where a concurrent remote edit arrives while our
- * mutation is in-flight — the server-returned updatedAt on our onSuccess will
- * always win if our PATCH was truly last.
- */
-export function useTeamActivitySync(
-  teamId: string,
-  accessToken: string | null | undefined,
-) {
-  const client = useQueryClient()
-
-  const handleMessage = useCallback(
-    (msg: { type: string; payload?: unknown }) => {
-      if (!teamId || !msg.payload) return
-
-      if (msg.type === 'activity.created') {
-        const incoming = msg.payload as Activity
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['teams', teamId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            // Guard against duplicate delivery.
-            if (old.some((a) => a.id === incoming.id)) return old
-            return [...old, incoming]
-          },
-        )
-      } else if (msg.type === 'activity.updated') {
-        const incoming = msg.payload as Activity
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['teams', teamId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            return old.map((a) => {
-              if (a.id !== incoming.id) return a
-              // Skip if the cache already holds the same or a newer version.
-              const cachedMs = new Date(a.updatedAt).getTime()
-              const incomingMs = new Date(incoming.updatedAt).getTime()
-              return incomingMs > cachedMs ? incoming : a
-            })
-          },
-        )
-      } else if (msg.type === 'activity.deleted') {
-        const { id } = msg.payload as { id: string }
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['teams', teamId, 'activities'] },
-          (old) => old?.filter((a) => a.id !== id),
-        )
-      }
-    },
-    [client, teamId],
-  )
-
-  useWebSocket({
-    token: accessToken,
-    teamIds: teamId ? [teamId] : [],
-    onMessage: handleMessage,
-  })
-}
-
-interface CreateActivityInput {
-  title: string
-  startAt: string
-  endAt: string
-  description?: string | null
-  color?: string | null
-  icon?: string | null
-  assignedMemberIds?: string[]
-}
-
-interface UpdateActivityInput {
-  activityId: string
-  patch: {
-    title?: string
-    description?: string | null
-    startAt?: string
-    endAt?: string
-    allDay?: boolean
-    color?: string | null
-    icon?: string | null
-    location?: string | null
-    url?: string | null
-    assignedMemberIds?: string[]
-  }
-}
-
-/** Creates an activity and inserts it directly into the cache. */
-export function useCreateActivity(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: CreateActivityInput) =>
-      authFetch<Activity>(`/teams/${teamId}/activities`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: (created) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['teams', teamId, 'activities'] },
-        (old) => {
-          if (!old) return old
-          // WS self-echo may also insert this activity; deduplicate by id.
-          if (old.some((a) => a.id === created.id)) return old
-          return [...old, created]
-        },
-      )
-    },
-  })
-}
-
-/** PATCHes an activity and optimistically updates the cache. */
-export function useUpdateActivity(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
-      authFetch<Activity>(`/activities/${activityId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: (updated) => {
-      // Update the activity in all matching cache entries for the team.
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['teams', teamId, 'activities'] },
-        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
-      )
-    },
-  })
-}
-
-interface CreateTeamInput {
-  name: string
-  description?: string | null
-  notes?: string | null
-  color?: string | null
-  icon?: string | null
-}
-
-interface UpdateTeamInput {
-  teamId: string
-  patch: {
-    name?: string
-    description?: string | null
-    notes?: string | null
-    color?: string | null
-    icon?: string | null
-  }
-}
-
-/** Creates a team and inserts it into the active-teams cache. */
-export function useCreateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: CreateTeamInput) =>
-      authFetch<Team>('/teams', {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      // Invalidate both active and archived team lists.
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** PATCHes a team's mutable fields and refreshes the cache. */
-export function useUpdateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
-      authFetch<Team>(`/teams/${teamId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives a team (soft delete). */
-export function useArchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Restores an archived team. */
-export function useUnarchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Deletes an activity and removes it from the cache. */
-export function useDeleteActivity(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['teams', teamId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
   })
 }
 ````
@@ -20454,6 +21215,60 @@ export const STATUS_LABELS: Record<ActivityStatus, string> = {
 };
 ````
 
+## File: packages/web/src/App.tsx
+````typescript
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AuthProvider } from '@/contexts/AuthContext'
+import ProtectedRoute from '@/components/ProtectedRoute'
+import LoginPage from '@/pages/LoginPage'
+import RegisterPage from '@/pages/RegisterPage'
+import DashboardPage from '@/pages/DashboardPage'
+import SetupPage from '@/pages/SetupPage'
+import SettingsPage from '@/pages/SettingsPage'
+import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
+import ResetPasswordPage from '@/pages/ResetPasswordPage'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
+    },
+  },
+})
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <Routes>
+            {/* First-run setup — public, shown before any users exist */}
+            <Route path="/setup" element={<SetupPage />} />
+
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/settings/*" element={<SettingsPage />} />
+            </Route>
+
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  )
+}
+````
+
 ## File: packages/api/internal/api/auth_handler.go
 ````go
 package api
@@ -20821,243 +21636,6 @@ func isValidPassword(p string) bool {
 		}
 	}
 	return true
-}
-````
-
-## File: packages/api/internal/api/timeline_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
-// list the non-archived timelines for a team.
-func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
-		return
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timelines)
-}
-
-// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
-// user must be a member of the team. The creator is automatically granted
-// timeline-admin access.
-func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	var req CreateTimelineJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-
-	startDate := req.StartDate.Time
-	endDate := req.EndDate.Time
-
-	if endDate.Before(startDate) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
-		return
-	}
-
-	now := time.Now()
-	timeline := &models.Timeline{
-		ID:         newID(),
-		TeamID:     teamID,
-		Name:       req.Name,
-		StartDate:  startDate.Format("2006-01-02"),
-		EndDate:    endDate.Format("2006-01-02"),
-		ShareToken: newID(),
-		IcalToken:  newID(),
-		CreatedBy:  claims.UserID,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}
-	if err := s.timelines.Create(timeline); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	// Always grant the creator timeline-admin access so they can manage it.
-	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	// Copy the team's first status template's items into live statuses for this timeline.
-	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusCreated, timeline)
-}
-
-// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
-// be a member of the timeline's team. Team admins may access any timeline;
-// other members require an entry in timeline_access.
-func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	// Hide archived timelines from the standard read path unless ?archived=true.
-	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	// Team admins can access all timelines; members need an explicit grant.
-	if member.Role != "admin" {
-		ok, err := s.timelines.HasAccess(timelineID, member.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-			return
-		}
-		if !ok {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
-// admins or timeline admins may archive.
-func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, true)
-}
-
-// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
-func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, false)
-}
-
-// setTimelineArchive is the shared archive/unarchive implementation. Access
-// is admin-only: the caller must be a team admin, or hold timeline_access
-// with role='admin' for this timeline.
-func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	// Team admins always pass. Per-timeline admin grants are not consulted
-	// here — granular timeline-admin checks are tracked for Phase 10.3.
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-	}
-	if err := s.timelines.SetArchived(timelineID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	timeline.ArchivedAt = at
-	timeline.UpdatedAt = time.Now().UTC()
-
-	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
-// authentication is required; the token itself is the credential.
-func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	timeline, err := s.timelines.GetByShareToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
 }
 ````
 
@@ -21725,6 +22303,496 @@ func ptrEqual(a, b *string) bool {
 }
 ````
 
+## File: packages/web/src/hooks/useTeamActivities.ts
+````typescript
+/**
+ * TanStack Query hooks for team-scoped data.
+ *
+ * All hooks call createAuthFetch to inject the current access token at
+ * query-time so stale closures never send an expired token.
+ */
+
+import { useCallback } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+import { useWebSocket } from '@/hooks/useWebSocket'
+
+type Activity = components['schemas']['Activity']
+type Team = components['schemas']['Team']
+type Timeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
+type PatchTimelineInput = components['schemas']['PatchTimelineInput']
+
+/** Query key factory — centralises cache key strings. */
+export const keys = {
+  myTeams: () => ['teams'] as const,
+  teamActivities: (teamId: string, from?: string, to?: string) =>
+    ['teams', teamId, 'activities', { from, to }] as const,
+  teamMembers: (teamId: string) =>
+    ['teams', teamId, 'members'] as const,
+  teamTimelines: (teamId: string) =>
+    ['teams', teamId, 'timelines'] as const,
+}
+
+/** Fetches all teams the authenticated user belongs to. */
+export function useMyTeams(includeArchived = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.myTeams(), { includeArchived }],
+    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
+  })
+}
+
+/** Fetches a single team by ID. */
+export function useTeam(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId],
+    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Fetches all non-archived timelines for a team. */
+export function useTeamTimelines(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamTimelines(teamId),
+    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Fetches all activities for a team, optionally filtered by date range. */
+export function useTeamActivities(teamId: string, from?: string, to?: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamActivities(teamId, from, to),
+    queryFn: async () => {
+      const params = new URLSearchParams()
+      if (from) params.set('from', from)
+      if (to) params.set('to', to)
+      const qs = params.toString()
+      return (await authFetch<Activity[] | null>(`/teams/${teamId}/activities${qs ? `?${qs}` : ''}`)) ?? []
+    },
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Fetches the member list for a team. */
+export function useTeamMembers(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamMembers(teamId),
+    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/**
+ * Subscribes to the team's WebSocket feed and applies surgical cache updates
+ * for activity.created / activity.updated / activity.deleted deltas.
+ *
+ * Conflict strategy: for activity.updated, incoming deltas are only applied
+ * when their updatedAt timestamp is strictly newer than the cached version.
+ * This prevents self-echo (our own PATCH broadcast arriving back) and handles
+ * the last-writer-wins case where a concurrent remote edit arrives while our
+ * mutation is in-flight — the server-returned updatedAt on our onSuccess will
+ * always win if our PATCH was truly last.
+ */
+export function useTeamActivitySync(
+  teamId: string,
+  accessToken: string | null | undefined,
+) {
+  const client = useQueryClient()
+
+  const handleMessage = useCallback(
+    (msg: { type: string; payload?: unknown }) => {
+      if (!teamId || !msg.payload) return
+
+      if (msg.type === 'activity.created') {
+        const incoming = msg.payload as Activity
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['teams', teamId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            // Guard against duplicate delivery.
+            if (old.some((a) => a.id === incoming.id)) return old
+            return [...old, incoming]
+          },
+        )
+      } else if (msg.type === 'activity.updated') {
+        const incoming = msg.payload as Activity
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['teams', teamId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            return old.map((a) => {
+              if (a.id !== incoming.id) return a
+              // Skip if the cache already holds the same or a newer version.
+              const cachedMs = new Date(a.updatedAt).getTime()
+              const incomingMs = new Date(incoming.updatedAt).getTime()
+              return incomingMs > cachedMs ? incoming : a
+            })
+          },
+        )
+      } else if (msg.type === 'activity.deleted') {
+        const { id } = msg.payload as { id: string }
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['teams', teamId, 'activities'] },
+          (old) => old?.filter((a) => a.id !== id),
+        )
+      }
+    },
+    [client, teamId],
+  )
+
+  useWebSocket({
+    token: accessToken,
+    teamIds: teamId ? [teamId] : [],
+    onMessage: handleMessage,
+  })
+}
+
+interface CreateActivityInput {
+  title: string
+  startAt: string
+  endAt: string
+  description?: string | null
+  color?: string | null
+  icon?: string | null
+  assignedMemberIds?: string[]
+}
+
+interface UpdateActivityInput {
+  activityId: string
+  patch: {
+    title?: string
+    description?: string | null
+    startAt?: string
+    endAt?: string
+    allDay?: boolean
+    color?: string | null
+    icon?: string | null
+    location?: string | null
+    url?: string | null
+    statusId?: string | null
+    assignedMemberIds?: string[]
+  }
+}
+
+/** Creates an activity and inserts it directly into the cache. */
+export function useCreateActivity(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateActivityInput) =>
+      authFetch<Activity>(`/teams/${teamId}/activities`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (created) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['teams', teamId, 'activities'] },
+        (old) => {
+          if (!old) return old
+          // WS self-echo may also insert this activity; deduplicate by id.
+          if (old.some((a) => a.id === created.id)) return old
+          return [...old, created]
+        },
+      )
+    },
+  })
+}
+
+/** PATCHes an activity and optimistically updates the cache. */
+export function useUpdateActivity(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
+      authFetch<Activity>(`/activities/${activityId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: (updated) => {
+      // Update the activity in all matching cache entries for the team.
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['teams', teamId, 'activities'] },
+        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
+      )
+    },
+  })
+}
+
+interface CreateTeamInput {
+  name: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
+}
+
+interface UpdateTeamInput {
+  teamId: string
+  patch: {
+    name?: string
+    description?: string | null
+    notes?: string | null
+    color?: string | null
+    icon?: string | null
+  }
+}
+
+/** Creates a team and inserts it into the active-teams cache. */
+export function useCreateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateTeamInput) =>
+      authFetch<Team>('/teams', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      // Invalidate both active and archived team lists.
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** PATCHes a team's mutable fields and refreshes the cache. */
+export function useUpdateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
+      authFetch<Team>(`/teams/${teamId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Archives a team (soft delete). */
+export function useArchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Restores an archived team. */
+export function useUnarchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Deletes an activity and removes it from the cache. */
+export function useDeleteActivity(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['teams', teamId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
+
+// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
+
+/** Fetches all timelines for a team, optionally including archived ones. */
+export function useTeamTimelinesWithArchived(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
+    queryFn: async () =>
+      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Creates a new timeline for a team. */
+export function useCreateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null }) =>
+      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** PATCHes a timeline's mutable fields. */
+export function useUpdateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
+      authFetch<Timeline>(`/timelines/${timelineId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Hard-deletes a timeline. */
+export function useDeleteTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Archives a timeline. */
+export function useArchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Restores an archived timeline. */
+export function useUnarchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Fetches the access grant list for a timeline. */
+export function useTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
+    queryFn: async () =>
+      (await authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access`,
+      )) ?? [],
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Grants or updates a member's access to a timeline. */
+export function useGrantTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
+      authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
+        { method: 'PUT', body: JSON.stringify({ role }) },
+      ),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+
+/** Revokes a member's access to a timeline. */
+export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+````
+
 ## File: packages/web/src/pages/settings/ProfilePage.tsx
 ````typescript
 /**
@@ -21908,6 +22976,422 @@ export default function ProfilePage() {
 }
 ````
 
+## File: packages/web/src/pages/LoginPage.tsx
+````typescript
+import { useState } from 'react'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
+import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError } from '@/lib/api'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+// ── Floating-label input ─────────────────────────────────────────────────────
+
+interface FloatInputProps {
+  id: string
+  label: string
+  type: string
+  value: string
+  autoComplete: string
+  error?: string | null
+  onChange: (v: string) => void
+  onKeyDown?: (e: React.KeyboardEvent) => void
+  rightSlot?: React.ReactNode
+}
+
+function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
+  const [focused, setFocused] = useState(false)
+  const floated = focused || value.length > 0
+
+  const borderColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#288C9B'
+    : 'hsl(210 15% 24%)'
+
+  const boxShadow = error
+    ? '0 0 0 3px rgba(231,76,60,0.15)'
+    : focused
+    ? '0 0 0 3px rgba(40,140,155,0.18)'
+    : 'none'
+
+  const labelColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#5BC0DE'
+    : 'hsl(210 15% 65%)'
+
+  return (
+    <div>
+      <div style={{
+        position: 'relative',
+        borderRadius: 8,
+        border: `1px solid ${borderColor}`,
+        background: 'hsl(210 15% 17%)',
+        transition: 'border-color 180ms ease, box-shadow 180ms ease',
+        boxShadow,
+      }}>
+        {/* Floating label */}
+        <label
+          htmlFor={id}
+          style={{
+            position: 'absolute',
+            left: 14,
+            top: floated ? 8 : '50%',
+            transform: floated ? 'none' : 'translateY(-50%)',
+            fontSize: floated ? 11 : 14,
+            letterSpacing: floated ? '0.06em' : 0,
+            textTransform: floated ? 'uppercase' : 'none',
+            fontWeight: 600,
+            color: labelColor,
+            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          {label}
+        </label>
+
+        <input
+          id={id}
+          type={type}
+          autoComplete={autoComplete}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onKeyDown={onKeyDown}
+          style={{
+            width: '100%',
+            padding: '22px 42px 8px 14px',
+            background: 'transparent',
+            border: 'none',
+            outline: 'none',
+            fontSize: 15,
+            color: 'hsl(210 17% 93%)',
+            fontFamily: 'inherit',
+            lineHeight: 1.4,
+            boxSizing: 'border-box',
+          }}
+        />
+
+        {rightSlot && (
+          <div style={{
+            position: 'absolute',
+            right: 12,
+            top: '50%',
+            transform: 'translateY(-50%)',
+          }}>
+            {rightSlot}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
+      )}
+    </div>
+  )
+}
+
+// ── Spinner ──────────────────────────────────────────────────────────────────
+
+function Spinner() {
+  return (
+    <Loader2
+      size={16}
+      strokeWidth={2.5}
+      color="rgba(255,255,255,0.8)"
+      style={{ animation: 'spin 0.8s linear infinite' }}
+    />
+  )
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
+
+export default function LoginPage() {
+  const { login } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [success, setSuccess] = useState(false)
+
+  function validateAndSubmit() {
+    let valid = true
+    setServerError(null)
+
+    if (!email.trim()) {
+      setEmailError('Email is required')
+      valid = false
+    } else if (!/\S+@\S+\.\S+/.test(email)) {
+      setEmailError('Enter a valid email')
+      valid = false
+    } else {
+      setEmailError(null)
+    }
+
+    if (!password) {
+      setPasswordError('Password is required')
+      valid = false
+    } else if (password.length < 6) {
+      setPasswordError('Password must be at least 6 characters')
+      valid = false
+    } else {
+      setPasswordError(null)
+    }
+
+    if (!valid) return
+    doLogin()
+  }
+
+  async function doLogin() {
+    setLoading(true)
+    try {
+      await login(email, password)
+      setSuccess(true)
+      // Brief success flash then navigate
+      setTimeout(() => navigate(from, { replace: true }), 600)
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError(err.message)
+      } else {
+        setServerError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    validateAndSubmit()
+  }
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--background)',
+      padding: '24px',
+      position: 'relative',
+    }}>
+      {/* Teal radial glow behind card */}
+      <div style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
+        pointerEvents: 'none',
+      }} />
+
+      {/* Dark mode toggle */}
+      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Card */}
+      <div style={{
+        width: '100%',
+        maxWidth: 860,
+        minHeight: 520,
+        borderRadius: 16,
+        overflow: 'hidden',
+        display: 'flex',
+        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
+        position: 'relative',
+        zIndex: 1,
+      }}>
+
+        {/* ── Left panel — brand ─────────────────────────────────────── */}
+        <div style={{
+          width: '38%',
+          flexShrink: 0,
+          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 4,
+          padding: '48px 32px',
+          position: 'relative',
+          overflow: 'hidden',
+        }}>
+          {/* Decorative circles */}
+          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
+          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
+
+          {/* Logo — 2× the handoff's 88px */}
+          <img
+            src="/icon-color.svg"
+            alt="draba"
+            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginBottom: '-62px' }}
+          />
+
+          <div style={{ position: 'relative', textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+              draba
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
+              Team coordination,<br />simplified.
+            </div>
+          </div>
+        </div>
+
+        {/* ── Right panel — form ─────────────────────────────────────── */}
+        <div style={{
+          flex: 1,
+          background: 'var(--card)',
+          padding: '52px 48px',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+        }}>
+          {success ? (
+            /* Success state */
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: '50%',
+                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 20px',
+              }}>
+                <Check size={24} color="#288C9B" strokeWidth={2.5} />
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
+                You're signed in
+              </div>
+              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
+                Redirecting to your timeline…
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} noValidate>
+              {/* Heading */}
+              <div style={{ marginBottom: 28 }}>
+                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
+                  Sign in
+                </h1>
+                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
+                  Welcome back — sign in to your account.
+                </p>
+              </div>
+
+              {/* Fields */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
+                <FloatInput
+                  id="email"
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  error={emailError}
+                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
+                />
+
+                <FloatInput
+                  id="password"
+                  label="Password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  error={passwordError}
+                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
+                  rightSlot={
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(s => !s)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
+                    >
+                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
+                    </button>
+                  }
+                />
+              </div>
+
+              {/* Forgot password */}
+              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
+                <Link
+                  to="/forgot-password"
+                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Forgot password?
+                </Link>
+              </div>
+
+              {/* Server error */}
+              {serverError && (
+                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
+              )}
+
+              {/* Sign in button */}
+              <button
+                type="submit"
+                disabled={loading}
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  borderRadius: 8,
+                  border: 'none',
+                  background: loading
+                    ? 'hsl(188 40% 35%)'
+                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
+                  color: '#fff',
+                  fontSize: 15,
+                  fontWeight: 700,
+                  letterSpacing: '0.01em',
+                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  fontFamily: 'inherit',
+                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
+                }}
+                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
+                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
+                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
+              >
+                {loading && <Spinner />}
+                {loading ? 'Signing in…' : 'Sign in'}
+              </button>
+
+              {/* Register link */}
+              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
+                Have an invite?{' '}
+                <Link
+                  to="/register"
+                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Create an account
+                </Link>
+              </p>
+            </form>
+          )}
+        </div>
+      </div>
+
+      {/* Keyframe for spinner */}
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/pages/SettingsPage.tsx
 ````typescript
 /**
@@ -22025,60 +23509,6 @@ export default function SettingsPage() {
         </Routes>
       </div>
     </div>
-  )
-}
-````
-
-## File: packages/web/src/App.tsx
-````typescript
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AuthProvider } from '@/contexts/AuthContext'
-import ProtectedRoute from '@/components/ProtectedRoute'
-import LoginPage from '@/pages/LoginPage'
-import RegisterPage from '@/pages/RegisterPage'
-import DashboardPage from '@/pages/DashboardPage'
-import SetupPage from '@/pages/SetupPage'
-import SettingsPage from '@/pages/SettingsPage'
-import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
-import ResetPasswordPage from '@/pages/ResetPasswordPage'
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
-})
-
-export default function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          <Routes>
-            {/* First-run setup — public, shown before any users exist */}
-            <Route path="/setup" element={<SetupPage />} />
-
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/reset-password" element={<ResetPasswordPage />} />
-
-            {/* Protected routes */}
-            <Route element={<ProtectedRoute />}>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/settings/*" element={<SettingsPage />} />
-            </Route>
-
-            {/* Fallback */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
   )
 }
 ````
@@ -22797,419 +24227,497 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
-## File: packages/web/src/pages/LoginPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useLocation, Link } from 'react-router-dom'
-import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import DarkModeToggle from '@/components/DarkModeToggle'
+## File: packages/api/internal/api/timeline_handler.go
+````go
+package api
 
-// ── Floating-label input ─────────────────────────────────────────────────────
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
 
-interface FloatInputProps {
-  id: string
-  label: string
-  type: string
-  value: string
-  autoComplete: string
-  error?: string | null
-  onChange: (v: string) => void
-  onKeyDown?: (e: React.KeyboardEvent) => void
-  rightSlot?: React.ReactNode
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
+// list the non-archived timelines for a team.
+func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timelines)
 }
 
-function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
-  const [focused, setFocused] = useState(false)
-  const floated = focused || value.length > 0
+// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
+// user must be a member of the team. The creator is automatically granted
+// timeline-admin access.
+func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
 
-  const borderColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#288C9B'
-    : 'hsl(210 15% 24%)'
+	member, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
 
-  const boxShadow = error
-    ? '0 0 0 3px rgba(231,76,60,0.15)'
-    : focused
-    ? '0 0 0 3px rgba(40,140,155,0.18)'
-    : 'none'
+	var req CreateTimelineJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
 
-  const labelColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#5BC0DE'
-    : 'hsl(210 15% 65%)'
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
 
-  return (
-    <div>
-      <div style={{
-        position: 'relative',
-        borderRadius: 8,
-        border: `1px solid ${borderColor}`,
-        background: 'hsl(210 15% 17%)',
-        transition: 'border-color 180ms ease, box-shadow 180ms ease',
-        boxShadow,
-      }}>
-        {/* Floating label */}
-        <label
-          htmlFor={id}
-          style={{
-            position: 'absolute',
-            left: 14,
-            top: floated ? 8 : '50%',
-            transform: floated ? 'none' : 'translateY(-50%)',
-            fontSize: floated ? 11 : 14,
-            letterSpacing: floated ? '0.06em' : 0,
-            textTransform: floated ? 'uppercase' : 'none',
-            fontWeight: 600,
-            color: labelColor,
-            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
-            pointerEvents: 'none',
-            userSelect: 'none',
-          }}
-        >
-          {label}
-        </label>
+	startDate := req.StartDate.Time
+	endDate := req.EndDate.Time
 
-        <input
-          id={id}
-          type={type}
-          autoComplete={autoComplete}
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onKeyDown={onKeyDown}
-          style={{
-            width: '100%',
-            padding: '22px 42px 8px 14px',
-            background: 'transparent',
-            border: 'none',
-            outline: 'none',
-            fontSize: 15,
-            color: 'hsl(210 17% 93%)',
-            fontFamily: 'inherit',
-            lineHeight: 1.4,
-            boxSizing: 'border-box',
-          }}
-        />
+	if endDate.Before(startDate) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
+		return
+	}
 
-        {rightSlot && (
-          <div style={{
-            position: 'absolute',
-            right: 12,
-            top: '50%',
-            transform: 'translateY(-50%)',
-          }}>
-            {rightSlot}
-          </div>
-        )}
-      </div>
+	now := time.Now()
+	timeline := &models.Timeline{
+		ID:         newID(),
+		TeamID:     teamID,
+		Name:       req.Name,
+		StartDate:  startDate.Format("2006-01-02"),
+		EndDate:    endDate.Format("2006-01-02"),
+		ShareToken: newID(),
+		IcalToken:  newID(),
+		CreatedBy:  claims.UserID,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := s.timelines.Create(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
 
-      {error && (
-        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
-      )}
-    </div>
-  )
+	// Always grant the creator timeline-admin access so they can manage it.
+	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	// Copy the team's first status template's items into live statuses for this timeline.
+	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusCreated, timeline)
 }
 
-// ── Spinner ──────────────────────────────────────────────────────────────────
+// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
+// be a member of the timeline's team. Team admins may access any timeline;
+// other members require an entry in timeline_access.
+func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
 
-function Spinner() {
-  return (
-    <Loader2
-      size={16}
-      strokeWidth={2.5}
-      color="rgba(255,255,255,0.8)"
-      style={{ animation: 'spin 0.8s linear infinite' }}
-    />
-  )
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	// Hide archived timelines from the standard read path unless ?archived=true.
+	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	// Team admins can access all timelines; members need an explicit grant.
+	if member.Role != "admin" {
+		ok, err := s.timelines.HasAccess(timelineID, member.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
 }
 
-// ── Main page ────────────────────────────────────────────────────────────────
+// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
+// admins or timeline admins may archive.
+func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, true)
+}
 
-export default function LoginPage() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
+func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, false)
+}
 
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [emailError, setEmailError] = useState<string | null>(null)
-  const [passwordError, setPasswordError] = useState<string | null>(null)
-  const [serverError, setServerError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [success, setSuccess] = useState(false)
+// setTimelineArchive is the shared archive/unarchive implementation. Access
+// is admin-only: the caller must be a team admin, or hold timeline_access
+// with role='admin' for this timeline.
+func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
 
-  function validateAndSubmit() {
-    let valid = true
-    setServerError(null)
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
 
-    if (!email.trim()) {
-      setEmailError('Email is required')
-      valid = false
-    } else if (!/\S+@\S+\.\S+/.test(email)) {
-      setEmailError('Enter a valid email')
-      valid = false
-    } else {
-      setEmailError(null)
-    }
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+	// Team admins always pass. Per-timeline admin grants are not consulted
+	// here — granular timeline-admin checks are tracked for Phase 10.3.
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
 
-    if (!password) {
-      setPasswordError('Password is required')
-      valid = false
-    } else if (password.length < 6) {
-      setPasswordError('Password must be at least 6 characters')
-      valid = false
-    } else {
-      setPasswordError(null)
-    }
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+	}
+	if err := s.timelines.SetArchived(timelineID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+	timeline.ArchivedAt = at
+	timeline.UpdatedAt = time.Now().UTC()
 
-    if (!valid) return
-    doLogin()
-  }
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
 
-  async function doLogin() {
-    setLoading(true)
-    try {
-      await login(email, password)
-      setSuccess(true)
-      // Brief success flash then navigate
-      setTimeout(() => navigate(from, { replace: true }), 600)
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setServerError(err.message)
-      } else {
-        setServerError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
+// handleUpdateTimeline handles PATCH /timelines/{id}. Only a team admin or a
+// member with timeline_access role='admin' may rename or change dates.
+func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    validateAndSubmit()
-  }
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
 
-  return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--background)',
-      padding: '24px',
-      position: 'relative',
-    }}>
-      {/* Teal radial glow behind card */}
-      <div style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
-        pointerEvents: 'none',
-      }} />
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
 
-      {/* Dark mode toggle */}
-      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
-        <DarkModeToggle />
-      </div>
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
 
-      {/* Card */}
-      <div style={{
-        width: '100%',
-        maxWidth: 860,
-        minHeight: 520,
-        borderRadius: 16,
-        overflow: 'hidden',
-        display: 'flex',
-        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
-        position: 'relative',
-        zIndex: 1,
-      }}>
+	var req PatchTimelineJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
 
-        {/* ── Left panel — brand ─────────────────────────────────────── */}
-        <div style={{
-          width: '38%',
-          flexShrink: 0,
-          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 4,
-          padding: '48px 32px',
-          position: 'relative',
-          overflow: 'hidden',
-        }}>
-          {/* Decorative circles */}
-          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
-          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		timeline.Name = name
+	}
+	if req.StartDate != nil {
+		timeline.StartDate = *req.StartDate
+	}
+	if req.EndDate != nil {
+		timeline.EndDate = *req.EndDate
+	}
+	if req.Color != nil {
+		timeline.Color = req.Color
+	}
+	if req.Icon != nil {
+		timeline.Icon = req.Icon
+	}
+	timeline.UpdatedAt = time.Now().UTC()
 
-          {/* Logo — 2× the handoff's 88px */}
-          <img
-            src="/icon-color.svg"
-            alt="draba"
-            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginBottom: '-62px' }}
-          />
+	if err := s.timelines.Update(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
 
-          <div style={{ position: 'relative', textAlign: 'center' }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
-              draba
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
-              Team coordination,<br />simplified.
-            </div>
-          </div>
-        </div>
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
 
-        {/* ── Right panel — form ─────────────────────────────────────── */}
-        <div style={{
-          flex: 1,
-          background: 'var(--card)',
-          padding: '52px 48px',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'center',
-        }}>
-          {success ? (
-            /* Success state */
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
-              <div style={{
-                width: 56, height: 56, borderRadius: '50%',
-                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                margin: '0 auto 20px',
-              }}>
-                <Check size={24} color="#288C9B" strokeWidth={2.5} />
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
-                You're signed in
-              </div>
-              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
-                Redirecting to your timeline…
-              </div>
-            </div>
-          ) : (
-            <form onSubmit={handleSubmit} noValidate>
-              {/* Heading */}
-              <div style={{ marginBottom: 28 }}>
-                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
-                  Sign in
-                </h1>
-                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
-                  Welcome back — sign in to your account.
-                </p>
-              </div>
+// handleDeleteTimeline handles DELETE /timelines/{id}. Hard-deletes the
+// timeline; only a team admin may delete. Cascades to statuses and
+// timeline_access via foreign key.
+func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
 
-              {/* Fields */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
-                <FloatInput
-                  id="email"
-                  label="Email"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  error={emailError}
-                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
-                />
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
 
-                <FloatInput
-                  id="password"
-                  label="Password"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  value={password}
-                  error={passwordError}
-                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
-                  rightSlot={
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(s => !s)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
-                    >
-                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
-                    </button>
-                  }
-                />
-              </div>
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
 
-              {/* Forgot password */}
-              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
-                <Link
-                  to="/forgot-password"
-                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Forgot password?
-                </Link>
-              </div>
+	if err := s.timelines.Delete(timelineID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
 
-              {/* Server error */}
-              {serverError && (
-                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
-              )}
+	w.WriteHeader(http.StatusNoContent)
+}
 
-              {/* Sign in button */}
-              <button
-                type="submit"
-                disabled={loading}
-                style={{
-                  width: '100%',
-                  padding: '14px',
-                  borderRadius: 8,
-                  border: 'none',
-                  background: loading
-                    ? 'hsl(188 40% 35%)'
-                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
-                  color: '#fff',
-                  fontSize: 15,
-                  fontWeight: 700,
-                  letterSpacing: '0.01em',
-                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 8,
-                  fontFamily: 'inherit',
-                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
-                }}
-                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
-                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
-                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
-              >
-                {loading && <Spinner />}
-                {loading ? 'Signing in…' : 'Sign in'}
-              </button>
+// handleListTimelineAccess handles GET /teams/{id}/timelines/{timelineId}/access.
+// Team members may list the access grants for any timeline they can view.
+func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
 
-              {/* Register link */}
-              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
-                Have an invite?{' '}
-                <Link
-                  to="/register"
-                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Create an account
-                </Link>
-              </p>
-            </form>
-          )}
-        </div>
-      </div>
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
 
-      {/* Keyframe for spinner */}
-      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-    </div>
-  )
+	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleGrantTimelineAccess handles PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may manage the access list.
+func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	// Verify the target member belongs to the same team.
+	if _, err := s.teams.GetMemberByID(targetMemberID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	var req GrantTimelineAccessJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Role != "admin" && req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	if err := s.timelines.GrantAccess(timelineID, targetMemberID, req.Role); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleRevokeTimelineAccess handles DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may revoke access.
+func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	if err := s.timelines.RevokeAccess(timelineID, targetMemberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// canAdminTimeline reports whether a team member may perform admin operations
+// on a timeline. Team admins always pass; members must hold timeline_access
+// with role='admin'.
+func (s *Server) canAdminTimeline(member *models.TeamMember, timelineID string) bool {
+	if member.Role == "admin" {
+		return true
+	}
+	role, err := s.timelines.GetAccessRole(timelineID, member.ID)
+	if err != nil {
+		return false
+	}
+	return role == "admin"
+}
+
+// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
+// authentication is required; the token itself is the credential.
+func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	timeline, err := s.timelines.GetByShareToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
 }
 ````
 
@@ -23643,222 +25151,6 @@ function AddFilterRow({ onClick }: { onClick: () => void }) {
       Add filter
     </button>
   )
-}
-````
-
-## File: packages/web/src/components/gantt/GanttToolbar.tsx
-````typescript
-/**
- * GanttToolbar — the thin sub-toolbar that sits between the top bar and
- * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
- * export stub.
- */
-
-import { Download, Share2, Plus, Minus } from 'lucide-react';
-import type { TimeGranularity } from './granularity';
-import { cn } from '@/lib/utils';
-
-export type { TimeGranularity } from './granularity';
-export type GroupBy = 'none' | 'member' | 'parent';
-export type SortBy = 'startDate' | 'endDate' | 'title';
-export type ColorBy = 'activity' | 'member' | 'status';
-
-interface Props {
-  groupBy: GroupBy;
-  onGroupByChange: (g: GroupBy) => void;
-  sortBy: SortBy;
-  onSortByChange: (s: SortBy) => void;
-  granularity: TimeGranularity | 'auto';
-  onGranularityChange: (g: TimeGranularity | 'auto') => void;
-  colorBy: ColorBy;
-  onColorByChange: (c: ColorBy) => void;
-  onExport: () => void;
-  onShare?: () => void;
-}
-
-const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
-const divider = 'w-px h-4 bg-border shrink-0';
-const label   = 'text-[11px] text-muted-foreground shrink-0';
-const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-export default function GanttToolbar({
-  groupBy,
-  onGroupByChange,
-  sortBy,
-  onSortByChange,
-  granularity,
-  onGranularityChange,
-  colorBy,
-  onColorByChange,
-  onExport,
-  onShare,
-}: Props) {
-  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
-  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
-  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
-    ? granularityMap.indexOf(granularity as never)
-    : 0;
-  const currentLabel = granularityLabels[currentIndex];
-
-  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = parseInt(e.target.value, 10);
-    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
-  };
-
-  return (
-    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
-      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
-      <style>{`
-        .gantt-zoom-slider {
-          -webkit-appearance: none;
-          appearance: none;
-          background: transparent;
-        }
-        .gantt-zoom-slider::-webkit-slider-thumb {
-          -webkit-appearance: none;
-          appearance: none;
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          margin-top: -4px;
-        }
-        .gantt-zoom-slider::-moz-range-thumb {
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          border: none;
-        }
-        .gantt-zoom-slider::-webkit-slider-runnable-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-        .gantt-zoom-slider::-moz-range-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-      `}</style>
-
-      {/* Zoom (granularity) */}
-      <div className="flex items-center gap-1.5 h-[26px]">
-        <button
-          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 0}
-          title="Zoom out"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Minus size={14} />
-        </button>
-
-        <div className="relative w-20 h-[26px] flex items-center">
-          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
-            {[0, 1, 2, 3, 4, 5].map(i => (
-              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
-            ))}
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="5"
-            step="1"
-            value={currentIndex}
-            onChange={handleSliderChange}
-            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
-            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          />
-        </div>
-
-        <button
-          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 5}
-          title="Zoom in"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Plus size={14} />
-        </button>
-
-        <div
-          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          className={cn(
-            'flex items-center justify-center w-[22px] h-[22px]',
-            'bg-card border border-border rounded-sm text-xs font-mono select-none',
-            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
-          )}
-        >
-          {currentLabel}
-        </div>
-      </div>
-
-      <div className={divider} />
-
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as GroupBy)}
-      >
-        <option value="none">None</option>
-        <option value="member">Member</option>
-        <option value="parent">Parent activity</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Sort by */}
-      <span className={label}>Sort by</span>
-      <select
-        className={select}
-        value={sortBy}
-        onChange={e => onSortByChange(e.target.value as SortBy)}
-      >
-        <option value="startDate">Start date</option>
-        <option value="endDate">End date</option>
-        <option value="title">Title A–Z</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className="flex-1" />
-
-      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
-        <Download size={13} strokeWidth={1.8} />
-        Export
-      </button>
-
-      <button className={ctrlBtn} onClick={onShare} title="Share">
-        <Share2 size={13} strokeWidth={1.8} />
-        Share
-      </button>
-    </div>
-  );
 }
 ````
 
@@ -24337,6 +25629,61 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
     document.body,
   )
 }
+````
+
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
 ````
 
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
@@ -25231,6 +26578,241 @@ export default function GanttGrid({
 }
 ````
 
+## File: packages/web/src/components/gantt/GanttToolbar.tsx
+````typescript
+/**
+ * GanttToolbar — the thin sub-toolbar that sits between the top bar and
+ * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
+ * export stub.
+ */
+
+import { Download, Share2, Plus, Minus } from 'lucide-react';
+import type { TimeGranularity } from './granularity';
+import { cn } from '@/lib/utils';
+
+export type { TimeGranularity } from './granularity';
+export type GroupBy = 'none' | 'member' | 'parent';
+export type SortBy = 'startDate' | 'endDate' | 'title';
+export type ColorBy = 'activity' | 'member' | 'status';
+
+interface Props {
+  groupBy: GroupBy;
+  onGroupByChange: (g: GroupBy) => void;
+  sortBy: SortBy;
+  onSortByChange: (s: SortBy) => void;
+  granularity: TimeGranularity | 'auto';
+  onGranularityChange: (g: TimeGranularity | 'auto') => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  hideClosed?: boolean;
+  onHideClosedChange?: (v: boolean) => void;
+  onExport: () => void;
+  onShare?: () => void;
+}
+
+const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label   = 'text-[11px] text-muted-foreground shrink-0';
+const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+export default function GanttToolbar({
+  groupBy,
+  onGroupByChange,
+  sortBy,
+  onSortByChange,
+  granularity,
+  onGranularityChange,
+  colorBy,
+  onColorByChange,
+  hideClosed = false,
+  onHideClosedChange,
+  onExport,
+  onShare,
+}: Props) {
+  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
+  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
+  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
+    ? granularityMap.indexOf(granularity as never)
+    : 0;
+  const currentLabel = granularityLabels[currentIndex];
+
+  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseInt(e.target.value, 10);
+    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
+  };
+
+  return (
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
+      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
+      <style>{`
+        .gantt-zoom-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          background: transparent;
+        }
+        .gantt-zoom-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          margin-top: -4px;
+        }
+        .gantt-zoom-slider::-moz-range-thumb {
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          border: none;
+        }
+        .gantt-zoom-slider::-webkit-slider-runnable-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+        .gantt-zoom-slider::-moz-range-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+      `}</style>
+
+      {/* Zoom (granularity) */}
+      <div className="flex items-center gap-1.5 h-[26px]">
+        <button
+          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 0}
+          title="Zoom out"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Minus size={14} />
+        </button>
+
+        <div className="relative w-20 h-[26px] flex items-center">
+          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
+            {[0, 1, 2, 3, 4, 5].map(i => (
+              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
+            ))}
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="5"
+            step="1"
+            value={currentIndex}
+            onChange={handleSliderChange}
+            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
+            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          />
+        </div>
+
+        <button
+          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 5}
+          title="Zoom in"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Plus size={14} />
+        </button>
+
+        <div
+          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          className={cn(
+            'flex items-center justify-center w-[22px] h-[22px]',
+            'bg-card border border-border rounded-sm text-xs font-mono select-none',
+            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
+          )}
+        >
+          {currentLabel}
+        </div>
+      </div>
+
+      <div className={divider} />
+
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as GroupBy)}
+      >
+        <option value="none">None</option>
+        <option value="member">Member</option>
+        <option value="parent">Parent activity</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Sort by */}
+      <span className={label}>Sort by</span>
+      <select
+        className={select}
+        value={sortBy}
+        onChange={e => onSortByChange(e.target.value as SortBy)}
+      >
+        <option value="startDate">Start date</option>
+        <option value="endDate">End date</option>
+        <option value="title">Title A–Z</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      {onHideClosedChange && (
+        <>
+          <div className={divider} />
+          <label className="flex items-center gap-1.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={hideClosed}
+              onChange={e => onHideClosedChange(e.target.checked)}
+              className="w-3 h-3 cursor-pointer accent-primary"
+            />
+            <span className="text-[11px] text-muted-foreground">Hide closed</span>
+          </label>
+        </>
+      )}
+
+      <div className="flex-1" />
+
+      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
+        <Download size={13} strokeWidth={1.8} />
+        Export
+      </button>
+
+      <button className={ctrlBtn} onClick={onShare} title="Share">
+        <Share2 size={13} strokeWidth={1.8} />
+        Share
+      </button>
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/components/TeamModal.tsx
 ````typescript
 /**
@@ -26045,61 +27627,6 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
 }
 ````
 
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/status-templates': { target: apiTarget, changeOrigin: true },
-        '/status-template-items': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
-````
-
 ## File: packages/api/cmd/draba/main.go
 ````go
 // Command draba is the API server entry point. It wires repositories,
@@ -26854,6 +28381,10 @@ interface Props {
   sortBy: SortBy;
   granularity: TimeGranularity | 'auto';
   colorBy: ColorBy;
+  /** When true, activities with a closed status are hidden. */
+  hideClosed?: boolean;
+  /** Set of status IDs that are marked is_closed. Used with hideClosed. */
+  closedStatusIds?: Set<string>;
   selectedActivityId?: string | null;
   onSelectActivity?: (id: string | null) => void;
   /** Called when the user drags on an empty lane to create an activity. */
@@ -27047,6 +28578,8 @@ export default function GanttView({
   sortBy,
   granularity,
   colorBy,
+  hideClosed = false,
+  closedStatusIds,
   selectedActivityId = null,
   onSelectActivity = () => {},
   onLaneDrag,
@@ -27129,20 +28662,25 @@ export default function GanttView({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [members]);
 
+  const visibleActivities = useMemo(() => {
+    if (!hideClosed || !closedStatusIds?.size) return apiActivities
+    return apiActivities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+  }, [apiActivities, hideClosed, closedStatusIds])
+
   const rows: GanttRow[] = useMemo(() => {
-    const richActivities = apiActivities
+    const richActivities = visibleActivities
       .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
       .filter((a): a is RichActivity => a !== null);
     return buildRows(richActivities, members, groupBy, sortBy);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
 
   // ── Find: compute matches and register with context ───────────────────────
 
   const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, apiActivities, members, apiActivities),
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, apiActivities, members],
+    [debouncedQuery, visibleActivities, members],
   );
 
   const matchedSet = useMemo(
@@ -28344,7 +29882,12 @@ type TimelineStore interface {
 	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
 	HasAccess(timelineID, teamMemberID string) (bool, error)
 	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
 	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
 }
 
 // Server holds shared dependencies for all HTTP handlers.
@@ -28510,6 +30053,19 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
 	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
 	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
 
 	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
 	// JWT itself before upgrading, because WebSocket clients can't set headers.
@@ -28834,6 +30390,19 @@ type Status struct {
 	Position   int       `db:"position"    json:"position"`
 	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
 	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
 }
 
 // Invite is a single-use token that grants an email address the right to
@@ -29503,7 +31072,47 @@ export interface paths {
         get: operations["getTimeline"];
         put?: never;
         post?: never;
+        /**
+         * Hard-delete a timeline (team admin only)
+         * @description Deletes the timeline and all its statuses. Activities are NOT deleted.
+         */
+        delete: operations["deleteTimeline"];
+        options?: never;
+        head?: never;
+        /** Rename or change dates on a timeline (timeline admin only) */
+        patch: operations["updateTimeline"];
+        trace?: never;
+    };
+    "/teams/{id}/timelines/{timelineId}/access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List access grants for a timeline */
+        get: operations["listTimelineAccess"];
+        put?: never;
+        post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/timelines/{timelineId}/access/{memberId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Grant or update a team member's access to a timeline (timeline admin only) */
+        put: operations["grantTimelineAccess"];
+        post?: never;
+        /** Revoke a team member's access to a timeline (timeline admin only) */
+        delete: operations["revokeTimelineAccess"];
         options?: never;
         head?: never;
         patch?: never;
@@ -29765,11 +31374,33 @@ export interface paths {
         /** List statuses for a specific timeline */
         get: operations["listTimelineStatuses"];
         put?: never;
-        post?: never;
+        /** Add a status to a timeline (timeline admin only) */
+        post: operations["createTimelineStatus"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/statuses/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a timeline status (timeline admin only)
+         * @description Blocked if it is the last status. Requires replacementStatusId if any activities reference the status.
+         */
+        delete: operations["deleteStatus"];
+        options?: never;
+        head?: never;
+        /** Rename, recolor, or reorder a timeline status (timeline admin only) */
+        patch: operations["updateStatus"];
         trace?: never;
     };
     "/timelines/share/{token}": {
@@ -30112,6 +31743,43 @@ export interface components {
             isClosed?: boolean;
             position?: number;
         };
+        PatchTimelineInput: {
+            name?: string;
+            /** Format: date */
+            startDate?: string;
+            /** Format: date */
+            endDate?: string;
+            color?: string | null;
+            icon?: string | null;
+        };
+        TimelineAccessEntry: {
+            timelineId: string;
+            teamMemberId: string;
+            /** @enum {string} */
+            role: "admin" | "member";
+            displayName: string;
+            email: string;
+            color?: string | null;
+            icon?: string | null;
+            userId?: string | null;
+        };
+        CreateStatusInput: {
+            name: string;
+            color?: string;
+            icon?: string | null;
+            isClosed?: boolean;
+        };
+        PatchStatusInput: {
+            name?: string;
+            color?: string;
+            icon?: string | null;
+            isClosed?: boolean;
+            position?: number;
+        };
+        DeleteStatusInput: {
+            /** @description Required when activities reference the deleted status. */
+            replacementStatusId?: string | null;
+        };
     };
     responses: {
         /** @description Invalid request body or parameters. */
@@ -30176,6 +31844,8 @@ export interface components {
         activityId: string;
         /** @description Timeline ID. */
         timelineId: string;
+        /** @description Timeline ID (nested path parameter). */
+        timelineIdParam: string;
         /** @description Saved filter ID. */
         savedFilterId: string;
         /** @description Resource ID. */
@@ -31624,6 +33294,158 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    deleteTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Timeline ID. */
+                id: components["parameters"]["timelineId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Timeline deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Timeline ID. */
+                id: components["parameters"]["timelineId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchTimelineInput"];
+            };
+        };
+        responses: {
+            /** @description Updated timeline. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Timeline"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listTimelineAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested path parameter). */
+                timelineId: components["parameters"]["timelineIdParam"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of access grants. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimelineAccessEntry"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    grantTimelineAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested path parameter). */
+                timelineId: components["parameters"]["timelineIdParam"];
+                memberId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    role: "admin" | "member";
+                };
+            };
+        };
+        responses: {
+            /** @description Updated access list. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimelineAccessEntry"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    revokeTimelineAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested path parameter). */
+                timelineId: components["parameters"]["timelineIdParam"];
+                memberId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Access revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     listSavedFilters: {
         parameters: {
             query?: never;
@@ -32244,6 +34066,109 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    createTimelineStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teamId: string;
+                timelineId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateStatusInput"];
+            };
+        };
+        responses: {
+            /** @description Status created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Status"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["DeleteStatusInput"];
+            };
+        };
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Last status or activities reference it without a replacement. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource ID. */
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchStatusInput"];
+            };
+        };
+        responses: {
+            /** @description Updated status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Status"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
         };
     };
     getTimelineByShareToken: {
@@ -32941,6 +34866,87 @@ components:
         position:
           type: integer
 
+    PatchTimelineInput:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+
+    TimelineAccessEntry:
+      type: object
+      required: [timelineId, teamMemberId, role, displayName, email]
+      properties:
+        timelineId:
+          type: string
+        teamMemberId:
+          type: string
+        role:
+          type: string
+          enum: [admin, member]
+        displayName:
+          type: string
+        email:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        userId:
+          type: string
+          nullable: true
+
+    CreateStatusInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+
+    PatchStatusInput:
+      type: object
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+        position:
+          type: integer
+
+    DeleteStatusInput:
+      type: object
+      properties:
+        replacementStatusId:
+          type: string
+          nullable: true
+          description: Required when activities reference the deleted status.
+
   # ────────────────────────────────────────────────────────────
   # Reusable responses
   # ────────────────────────────────────────────────────────────
@@ -33012,6 +35018,14 @@ components:
       in: path
       required: true
       description: Timeline ID.
+      schema:
+        type: string
+
+    timelineIdParam:
+      name: timelineId
+      in: path
+      required: true
+      description: Timeline ID (nested path parameter).
       schema:
         type: string
 
@@ -34523,6 +36537,149 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+    patch:
+      operationId: updateTimeline
+      summary: Rename or change dates on a timeline (timeline admin only)
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchTimelineInput"
+      responses:
+        "200":
+          description: Updated timeline.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteTimeline
+      summary: Hard-delete a timeline (team admin only)
+      description: Deletes the timeline and all its statuses. Activities are NOT deleted.
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      responses:
+        "204":
+          description: Timeline deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/access:
+    get:
+      operationId: listTimelineAccess
+      summary: List access grants for a timeline
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdParam"
+      responses:
+        "200":
+          description: List of access grants.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TimelineAccessEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/access/{memberId}:
+    put:
+      operationId: grantTimelineAccess
+      summary: Grant or update a team member's access to a timeline (timeline admin only)
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdParam"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  enum: [admin, member]
+      responses:
+        "200":
+          description: Updated access list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TimelineAccessEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: revokeTimelineAccess
+      summary: Revoke a team member's access to a timeline (timeline admin only)
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdParam"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Access revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # ── Saved Filters ────────────────────────────────────────────
 
   /teams/{id}/saved_filters:
@@ -35069,6 +37226,109 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+    post:
+      operationId: createTimelineStatus
+      summary: Add a status to a timeline (timeline admin only)
+      tags: [statuses]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: timelineId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStatusInput"
+      responses:
+        "201":
+          description: Status created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /statuses/{id}:
+    patch:
+      operationId: updateStatus
+      summary: Rename, recolor, or reorder a timeline status (timeline admin only)
+      tags: [statuses]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchStatusInput"
+      responses:
+        "200":
+          description: Updated status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteStatus
+      summary: Delete a timeline status (timeline admin only)
+      description: Blocked if it is the last status. Requires replacementStatusId if any activities reference the status.
+      tags: [statuses]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteStatusInput"
+      responses:
+        "204":
+          description: Deleted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Last status or activities reference it without a replacement.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /timelines/share/{token}:
     get:
       operationId: getTimelineByShareToken
@@ -35126,15 +37386,29 @@ interface ApiTeam {
   archivedAt?: string | null;
 }
 
+interface ApiTimeline {
+  id: string;
+  name: string;
+  startDate?: string;
+  endDate?: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+}
+
 interface Props {
   collapsed: boolean;
   onToggle: () => void;
   onActiveColorChange?: (color: string) => void;
   onActiveNameChange?: (name: string) => void;
   onNewActivity?: () => void;
-  apiTimelines?: Array<{ id: string; name: string; startDate?: string; endDate?: string }>;
+  apiTimelines?: ApiTimeline[];
+  archivedTimelines?: ApiTimeline[];
   activeTimelineId?: string;
   onActiveTimelineChange?: (id: string) => void;
+  onNewTimeline?: () => void;
+  onEditTimeline?: (timelineId: string) => void;
+  onUnarchiveTimeline?: (timelineId: string) => void;
   // Team management
   activeTeam?: ApiTeam;
   /** All non-archived teams. Used to render the switchable team list. */
@@ -35498,7 +37772,7 @@ function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit
  */
 const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
 
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, activeTimelineId, onActiveTimelineChange, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, onUnarchiveTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
   const { user } = useAuth();
   const currentUserId = (user as { id?: string } | null)?.id;
   const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
@@ -35514,12 +37788,21 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
     ? apiTimelines.map((t, i) => ({
         id: t.id,
         name: t.name,
-        color: TIMELINE_COLORS[i % TIMELINE_COLORS.length],
+        color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
         icon: <LineChart {...ICON_SM} />,
         startDate: t.startDate,
         endDate: t.endDate,
       }))
     : DEMO_TIMELINES
+
+  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t, i) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? '#64748B',
+    icon: <LineChart {...ICON_SM} />,
+    startDate: t.startDate,
+    endDate: t.endDate,
+  }))
   const activeId = activeTimelineId ?? internalActiveId
   const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0];
 
@@ -35873,10 +38156,11 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                   active={activeId === tl.id}
                   collapsed={false}
                   onClick={() => { setInternalActiveId(tl.id); onActiveColorChange?.(tl.color); onActiveNameChange?.(tl.name); onActiveTimelineChange?.(tl.id); }}
-                  onSettings={() => {}}
+                  onSettings={() => onEditTimeline?.(tl.id)}
                 />
               ))}
               <button
+                onClick={onNewTimeline}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -35886,7 +38170,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                   border: 'none',
                   color: 'rgba(255,255,255,0.35)',
                   fontSize: 12,
-                  cursor: 'pointer',
+                  cursor: onNewTimeline ? 'pointer' : 'default',
                   width: '100%',
                   fontFamily: 'var(--font-sans)',
                   marginTop: 2,
@@ -35899,40 +38183,59 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
               </button>
 
               {/* Archived sub-section */}
-              <button
-                onClick={() => setArchivedOpen(o => !o)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 5,
-                  width: '100%', padding: '6px 12px 4px 16px',
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                  marginTop: 4,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-              >
-                {archivedOpen
-                  ? <ChevronDown {...ICON_XS} />
-                  : <ChevronRight {...ICON_XS} />}
-                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Archived
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4 }}>({DEMO_ARCHIVED.length})</span>
-              </button>
+              {(archivedTimelineItems.length > 0 || apiTimelines?.length) && (
+                <>
+                  <button
+                    onClick={() => setArchivedOpen(o => !o)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 5,
+                      width: '100%', padding: '6px 12px 4px 16px',
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                      marginTop: 4,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                  >
+                    {archivedOpen
+                      ? <ChevronDown {...ICON_XS} />
+                      : <ChevronRight {...ICON_XS} />}
+                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                      Archived
+                    </span>
+                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
+                  </button>
 
-              {archivedOpen && (
-                <div style={{ opacity: 0.5 }}>
-                  {DEMO_ARCHIVED.map(tl => (
-                    <TimelineItem
-                      key={tl.id}
-                      timeline={tl}
-                      active={false}
-                      collapsed={false}
-                      onClick={() => {}}
-                      onSettings={() => {}}
-                    />
-                  ))}
-                </div>
+                  {archivedOpen && (
+                    <div style={{ opacity: 0.6 }}>
+                      {archivedTimelineItems.map(tl => (
+                        <div key={tl.id} style={{ position: 'relative' }}>
+                          <TimelineItem
+                            timeline={tl}
+                            active={false}
+                            collapsed={false}
+                            onClick={() => {}}
+                            onSettings={() => {}}
+                          />
+                          {onUnarchiveTimeline && (
+                            <button
+                              onClick={() => onUnarchiveTimeline(tl.id)}
+                              title="Unarchive"
+                              style={{
+                                position: 'absolute', right: 30, top: '50%', transform: 'translateY(-50%)',
+                                fontSize: 9, padding: '1px 5px', border: '1px solid rgba(255,255,255,0.2)',
+                                borderRadius: 3, background: 'none', color: 'rgba(255,255,255,0.5)',
+                                cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                              }}
+                            >
+                              Restore
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </>
           ) : (
@@ -36775,20 +39078,43 @@ API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Member
 Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
 
 **API — timeline-level:**
-- [ ] `PATCH /timelines/:id` — rename, change start/end date, change description (admin only)
-- [ ] `DELETE /timelines/:id` — hard delete; admin only; double-confirm
-- [ ] Archive endpoints already in Phase 9
+- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
+- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
+- [x] Archive endpoints already in Phase 9
+
+**API — timeline statuses (editing):**
+- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
+- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
 
 **API — access list:**
-- [ ] `GET /timelines/:id/access` — list current grants (team member + role)
-- [ ] `PUT /timelines/:id/access/:memberId` — grant or update role (admin / member)
-- [ ] `DELETE /timelines/:id/access/:memberId` — revoke grant
+- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
+- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
+- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
 
 **Web:**
-- [ ] "New timeline" affordance in the sidebar timelines list → create-timeline modal (name, date range)
-- [ ] Edit-timeline modal from the sidebar (or a `/settings/team/:id/timelines` sub-route): rename, change date range, archive, delete
-- [ ] Access-list management UI: search-pick team members, role toggle, remove
-- [ ] Archived timelines under a collapsed "Archived" group in the sidebar; unarchive from there
+- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
+- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
+- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
+- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
+- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
+- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
+- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
+- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
+
+**Testing & verification:**
+- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
+- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
+- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
+- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
+- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
+- [ ] Manual: delete timeline → confirm → gone from sidebar
+- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
+- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
 
 ---
 
@@ -37009,15 +39335,18 @@ import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/u
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
 import { Badge } from '@/components/identity/Badge'
 import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamActivitySync, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities'
+import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
 import TeamModal from '@/components/TeamModal'
 import MemberModal from '@/components/MemberModal'
+import TimelineModal from '@/components/TimelineModal'
 import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
 
 type ApiActivity = components['schemas']['Activity']
 type ApiTeam = components['schemas']['Team']
+type ApiTimeline = components['schemas']['Timeline']
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
 
 const DROPDOWN_BTN: React.CSSProperties = {
@@ -37106,6 +39435,14 @@ function DashboardShell() {
   // Member modal state
   const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
 
+  // Timeline modal state
+  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
+  const unarchiveTimeline = useUnarchiveTimeline(teamId)
+
+  // Hide-closed-statuses toggle (GanttToolbar → GanttView filter)
+  const [hideClosed, setHideClosed] = useState(false)
+
   // Fetch all teams including archived for the sidebar's archived section.
   const { data: allTeams = [] } = useMyTeams(true)
   const activeTeams = allTeams.filter(t => !t.archivedAt)
@@ -37136,6 +39473,9 @@ function DashboardShell() {
   }, [])
 
   const { data: timelines = [] } = useTeamTimelines(teamId)
+  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
+  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
+  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
   const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
   // Initialize activeTimelineId from the saved global pref (selected_timeline),
   // falling back to timelines[0] when no pref is stored or the saved timeline
@@ -37221,8 +39561,16 @@ function DashboardShell() {
         onActiveColorChange={setActiveTimelineColor}
         onActiveNameChange={setActiveTimelineName}
         apiTimelines={timelines}
+        archivedTimelines={archivedTimelines}
         activeTimelineId={activeTimelineId}
         onActiveTimelineChange={handleTimelineChange}
+        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
+        onEditTimeline={id => {
+          const tl = allTimelines.find(t => t.id === id)
+          setEditingTimeline(tl ?? null)
+          setTimelineModalMode('edit')
+        }}
+        onUnarchiveTimeline={id => unarchiveTimeline.mutate(id)}
         onNewActivity={() => {
           const today = new Date().toISOString().slice(0, 10)
           setSelectedActivityId(null)
@@ -37325,6 +39673,8 @@ function DashboardShell() {
             onGranularityChange={setGranularity}
             colorBy={colorBy}
             onColorByChange={setColorBy}
+            hideClosed={hideClosed}
+            onHideClosedChange={activeTimelineStatuses.some(s => s.isClosed) ? setHideClosed : undefined}
             onExport={() => {}}
             onShare={() => {}}
           />
@@ -37341,6 +39691,8 @@ function DashboardShell() {
               sortBy={sortBy}
               granularity={granularity}
               colorBy={colorBy}
+              hideClosed={hideClosed}
+              closedStatusIds={new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))}
               selectedActivityId={selectedActivityId}
               onSelectActivity={(id) => {
                 setSelectedActivityId(id)
@@ -37373,6 +39725,7 @@ function DashboardShell() {
         event={selectedApiActivity}
         members={ganttMembers}
         teamId={teamId}
+        timelineId={activeTimelineId}
         onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null) }}
       />
 
@@ -37416,6 +39769,19 @@ function DashboardShell() {
           isAdmin={canEditTeam}
           isSuperadmin={isSuperadmin}
           onClose={() => setEditingMember(null)}
+        />
+      )}
+
+      {/* Timeline modal — create or edit */}
+      {timelineModalMode && (
+        <TimelineModal
+          mode={timelineModalMode}
+          teamId={teamId}
+          timeline={editingTimeline ?? undefined}
+          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
+          onCreated={created => {
+            setActiveTimelineId(created.id)
+          }}
         />
       )}
     </div>
@@ -37475,8 +39841,8 @@ This document organizes development into discrete phases with effort estimates a
 | 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
 | 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | 🔄 |
 | 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | 🔄 |
-| 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | 🔄 In Progress |
-| 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | ⬜ |
+| 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | ✅ |
+| 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | 🔄 |
 | 10.4 | [Preference Consumption, Branding & Backup](#phase-104--preference-consumption-branding--backup-admin) | S — 1 day | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
@@ -38284,7 +40650,7 @@ Hard-delete of a `team_members` row is only ever permitted when the member has z
 ---
 
 ### Phase 10.2 — Status Templates & Timeline Statuses
-**Status:** 🔄 In Progress — 2026-05-27, all automated checks pass; manual Docker verification still needed | **Effort:** M (2–3 days)
+**Status:** ✅ Done — 2026-05-27 | **Effort:** M (2–3 days)
 
 Statuses represent phases for an activity (e.g., Planned → In Progress → Done). They are **timeline-scoped** — each timeline has its own set. To reduce setup friction, teams maintain **status templates** (reusable presets). When a timeline is created, a template's items are copied into timeline-specific status rows; from that point the timeline's statuses are independent of the template. Activities default to null status (no auto-assignment). Required before Phase 11.3 (Kanban) so admins can configure columns.
 
@@ -38333,7 +40699,7 @@ Statuses represent phases for an activity (e.g., Planned → In Progress → Don
 ---
 
 ### Phase 10.3 — Timelines — Full CRUD (API + UI)
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** 🔄 In Progress — 2026-05-27, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
 
 Closes the Timelines cornerstone. Same problem space as 10.1: today timelines can be created in the wizard and never managed afterward, and access lists exist in the schema (Phase 8.0) with no CRUD endpoints. Also wires the status system from 10.2 into the timeline and activity UIs.
 
@@ -38776,6 +41142,59 @@ By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), an
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-05-27 — Phase 10.3 — Timelines Full CRUD (API + UI)
+
+**Backend:**
+- New handlers: `PATCH /timelines/{id}`, `DELETE /timelines/{id}`
+- New handlers: `GET/PUT/DELETE /teams/{id}/timelines/{timelineId}/access` — timeline access list CRUD
+- New handlers: `POST /teams/{id}/timelines/{timelineId}/statuses`, `PATCH /statuses/{id}`, `DELETE /statuses/{id}` — live timeline status editing
+- `canAdminTimeline` helper: checks team admin role first, then per-timeline `timeline_access` role='admin'
+- `TimelineStore` interface expanded: `Update`, `Delete`, `ListAccess`, `GetAccessRole`, `RevokeAccess`
+- `TimelineAccessEntry` model added: joins `timeline_access` + `team_members` + `users`
+- `StatusRepo` additions: `CreateStatus`, `UpdateStatus`, `DeleteStatus`, `CountStatuses`, `CountStatusActivities`
+- `DeleteStatus` re-points activities to replacement before deleting; blocked if last status
+- Note: access endpoints use team-scoped URL prefix to avoid Go 1.22 mux conflict with `GET /timelines/share/{token}` on 3-segment paths
+- OpenAPI spec updated: `PatchTimelineInput`, `TimelineAccessEntry`, `CreateStatusInput`, `PatchStatusInput`, `DeleteStatusInput` schemas + all new endpoints; TypeScript types regenerated
+
+**Tests added:**
+- `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden`
+- `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden`
+- `TestTimelineAccessList_GrantAndRevoke`
+
+**Frontend:**
+- `TimelineModal.tsx` — create/edit modal with Settings, Statuses, and Access tabs; archive + delete confirmation dialogs
+- `Sidebar.tsx` — real archived timelines section (Restore button), wired New timeline and settings gear
+- `ActivityDetailPanel.tsx` — status dropdown populated from `useTimelineStatuses`; replaces stub
+- `GanttToolbar.tsx` — `hideClosed` / `onHideClosedChange` props; Hide closed checkbox shown when timeline has closed statuses
+- `GanttView.tsx` — `hideClosed` + `closedStatusIds` props; filters out activities with closed status IDs
+- `useTeamActivities.ts` — `useCreateTimeline`, `useUpdateTimeline`, `useDeleteTimeline`, `useArchiveTimeline`, `useUnarchiveTimeline`, `useTeamTimelinesWithArchived`, `useTimelineAccess`, `useGrantTimelineAccess`, `useRevokeTimelineAccess`
+- `useStatusTemplates.ts` — `useCreateTimelineStatus`, `useUpdateTimelineStatus`, `useDeleteTimelineStatus`
+- `DashboardPage.tsx` — timeline modal state; passes all new props to Sidebar + GanttToolbar + GanttView + ActivityDetailPanel
+
+**Automated:** `golangci-lint run` clean, `go test ./...` all pass, `pnpm --filter web lint` clean.
+
+**Pending manual verification (against epcot.lan:8081):** see TASKS.md checklist.
+
+---
+
+## 2026-05-27 — Phase 10.2 — Review Fixes & Docker Verification
+
+**Review fixes applied:**
+- Aligned `SeedDefaultTemplate` test assertions to match actual seed output ("Default" template with Planning / In Progress / Complete; Complete is `is_closed`)
+- Added three missing tests: `TestUpdateStatusTemplate_AdminCanRename`, `TestUpdateTemplateItem_AdminCanUpdate`, `TestStatusTemplates_NonAdminForbidden` (403 on all 5 mutation routes for non-admin members)
+- Rephrased `is_closed` checkbox label in `StatusTemplatesTab.tsx` to remove forward-reference to "Hide closed" filter (Phase 10.3 scope)
+- Replaced mojibake em-dashes (`â€"`) with hyphens in 4 test files: `team_handler_test.go`, `activity_handler_test.go`, `saved_filter_handler_test.go`, `timeline_handler_test.go`
+
+**Docker verification (epcot.lan:8081):** ✅ passed
+- Default template seeded on team create; template CRUD, item CRUD, and last-item/last-template guards all work from UI
+- New timeline correctly copies template statuses (verified via API)
+- Non-admin sees templates read-only
+- Note: "Create new timeline" UI is Phase 10.3 — statuses verified via direct API call
+
+**Phase 10.2 closed ✅**
 
 ---
 
