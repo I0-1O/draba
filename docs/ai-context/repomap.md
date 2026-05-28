@@ -18909,6 +18909,113 @@ export function autoFitGranularity(
 }
 ````
 
+## File: packages/web/src/components/layout/TopBar.tsx
+````typescript
+/**
+ * Top toolbar above the active view. Left side: global app navigation
+ * (view switcher) and global object actions (Share). Right side: global
+ * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
+ * then whatever the parent injects into `rightSlot` (typically the profile menu).
+ *
+ * View-specific controls (date nav, zoom) intentionally live elsewhere —
+ * a context-sensitive sub-toolbar hosts them.
+ */
+
+import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
+import FilterDropdown from '@/components/filters/FilterDropdown';
+import FindBar from '@/components/layout/FindBar';
+import { useFind } from '@/contexts/FindContext';
+import { cn } from '@/lib/utils';
+
+export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
+
+interface Props {
+  view: ViewMode;
+  teamId?: string;
+  timelineName?: string;
+  onViewChange: (view: ViewMode) => void;
+  onOpenFilterEditor: () => void;
+  rightSlot?: React.ReactNode;
+}
+
+const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
+  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
+  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
+  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
+  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
+];
+
+export default function TopBar({
+  view,
+  teamId,
+  timelineName,
+  onViewChange,
+  onOpenFilterEditor,
+  rightSlot,
+}: Props) {
+  const { findBarOpen, setFindBarOpen } = useFind();
+
+  return (
+    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
+      {/* Left zone: view switcher */}
+      <div className="flex items-center justify-start shrink-0">
+        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
+          {VIEWS.map(v => (
+            <button
+              key={v.id}
+              onClick={() => onViewChange(v.id)}
+              className={cn(
+                'flex items-center justify-center gap-[5px]',
+                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
+                'border-none cursor-pointer',
+                view === v.id
+                  ? 'bg-card text-foreground shadow-sm'
+                  : 'bg-transparent text-muted-foreground',
+              )}
+            >
+              {v.icon}
+              {v.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Center zone: timeline name — truncates with ellipsis when narrow */}
+      <div className="flex-1 min-w-0 flex items-center justify-center px-3">
+        <span
+          title={timelineName}
+          className="text-xs font-medium text-muted-foreground truncate select-none"
+        >
+          {timelineName}
+        </span>
+      </div>
+
+      {/* Right zone: Find bar / trigger, Filter, profile slot */}
+      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
+        {findBarOpen ? (
+          <FindBar />
+        ) : (
+          <button
+            onClick={() => setFindBarOpen(true)}
+            title="Find in view (Ctrl+F)"
+            className={cn(
+              'flex items-center justify-center w-7 h-7',
+              'border border-border rounded-md bg-card',
+              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
+              'transition-colors shrink-0',
+            )}
+          >
+            <Search size={13} strokeWidth={1.8} />
+          </button>
+        )}
+        <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
+        {rightSlot}
+      </div>
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/components/TimelineModal.tsx
 ````typescript
 /**
@@ -20042,130 +20149,6 @@ export function useRevokeUser() {
     },
   })
 }
-````
-
-## File: packages/web/src/lib/findMatcher.test.ts
-````typescript
-import { describe, it, expect } from 'vitest'
-import { matchEvents } from './findMatcher'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-
-// ── Fixtures ─────────────────────────────────────────────────────────────────
-
-const MEMBERS: Member[] = [
-  { id: 'm1', name: 'Alice Smith',   initials: 'AS', color: '#288C9B' },
-  { id: 'm2', name: 'Bob Jones',     initials: 'BJ', color: '#F29E4C' },
-  { id: 'm3', name: 'Charlie Brown', initials: 'CB', color: '#5BC0DE' },
-]
-
-function makeActivity(overrides: Partial<ApiActivity> & { id: string; title: string }): ApiActivity {
-  return {
-    teamId: 'team-1',
-    startAt: '2026-01-01T00:00:00Z',
-    endAt: '2026-01-07T00:00:00Z',
-    allDay: true,
-    createdBy: 'user-1',
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T00:00:00Z',
-    ...overrides,
-  }
-}
-
-const ACTIVITIES: ApiActivity[] = [
-  makeActivity({ id: 'e1', title: 'Alpha Launch',        description: 'Ship the first version' }),
-  makeActivity({ id: 'e2', title: 'Beta Testing',        description: 'Run QA on beta build', assignedMemberIds: ['m1'] }),
-  makeActivity({ id: 'e3', title: 'Design Review',       description: null, assignedMemberIds: ['m2', 'm3'] }),
-  makeActivity({ id: 'e4', title: 'Security Audit',      description: 'Check alice permissions' }),
-  makeActivity({ id: 'e5', title: 'Parent Activity',     description: null }),
-  makeActivity({ id: 'e6', title: 'Child milestone',     description: null, parentActivityId: 'e5' }),
-  makeActivity({ id: 'e7', title: 'Another Child',       description: null, parentActivityId: 'e5' }),
-]
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-describe('matchActivities', () => {
-  it('returns empty array for empty query', () => {
-    expect(matchEvents('', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
-    expect(matchEvents('   ', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
-  })
-
-  it('matches activity title, case-insensitive', () => {
-    const results = matchEvents('alpha', ACTIVITIES, MEMBERS, ACTIVITIES)
-    expect(results).toHaveLength(1)
-    expect(results[0].activityId).toBe('e1')
-    expect(results[0].reasons).toContain('title')
-  })
-
-  it('matches description', () => {
-    const results = matchEvents('QA on beta', ACTIVITIES, MEMBERS, ACTIVITIES)
-    expect(results).toHaveLength(1)
-    expect(results[0].activityId).toBe('e2')
-    expect(results[0].reasons).toContain('description')
-  })
-
-  it('matches assignee display name', () => {
-    const results = matchEvents('alice', ACTIVITIES, MEMBERS, ACTIVITIES)
-    // e2 assigns Alice Smith; e4 has "alice" in description
-    const matchedIds = results.map(r => r.activityId)
-    expect(matchedIds).toContain('e2')
-    expect(matchedIds).toContain('e4')
-    const e2 = results.find(r => r.activityId === 'e2')!
-    expect(e2.reasons).toContain('assignee: Alice Smith')
-    const e4 = results.find(r => r.activityId === 'e4')!
-    expect(e4.reasons).toContain('description')
-  })
-
-  it('matches parent activity title for child activities', () => {
-    const results = matchEvents('parent activity', ACTIVITIES, MEMBERS, ACTIVITIES)
-    const matchedIds = results.map(r => r.activityId)
-    // e5 matches by title; e6 and e7 match by parent title
-    expect(matchedIds).toContain('e5')
-    expect(matchedIds).toContain('e6')
-    expect(matchedIds).toContain('e7')
-    const e6 = results.find(r => r.activityId === 'e6')!
-    expect(e6.reasons.some(r => r.startsWith('parent:'))).toBe(true)
-  })
-
-  it('is case-insensitive for all match fields', () => {
-    expect(matchEvents('ALPHA', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e1')
-    expect(matchEvents('AlPhA', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e1')
-    expect(matchEvents('ALICE', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e2')
-    expect(matchEvents('bob', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e3')
-  })
-
-  it('reports multiple reasons when multiple fields match', () => {
-    // e2: title contains "beta", description contains "beta", no assignee match for "beta"
-    const results = matchEvents('beta', ACTIVITIES, MEMBERS, ACTIVITIES)
-    const e2 = results.find(r => r.activityId === 'e2')!
-    expect(e2.reasons).toContain('title')
-    expect(e2.reasons).toContain('description')
-  })
-
-  it('does not include activities outside the visible set', () => {
-    // Only pass e1 as visible
-    const results = matchEvents('alpha', [ACTIVITIES[0]], MEMBERS, ACTIVITIES)
-    expect(results).toHaveLength(1)
-    expect(results[0].activityId).toBe('e1')
-
-    // e2 not visible — should not appear
-    const results2 = matchEvents('alpha', [ACTIVITIES[1]], MEMBERS, ACTIVITIES)
-    expect(results2).toHaveLength(0)
-  })
-
-  it('returns empty when nothing matches', () => {
-    expect(matchEvents('xyznonexistent', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
-  })
-
-  it('handles activities with no optional fields gracefully', () => {
-    const bare = makeActivity({ id: 'bare', title: 'Bare activity' })
-    expect(() => matchEvents('bare', [bare], [], [])).not.toThrow()
-    const results = matchEvents('bare', [bare], [], [])
-    expect(results[0].activityId).toBe('bare')
-  })
-})
 ````
 
 ## File: packages/web/src/types/index.ts
@@ -22624,6 +22607,130 @@ export function useAdminUsers(orphanedOnly = false) {
 }
 ````
 
+## File: packages/web/src/lib/findMatcher.test.ts
+````typescript
+import { describe, it, expect } from 'vitest'
+import { matchEvents } from './findMatcher'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+
+// ── Fixtures ─────────────────────────────────────────────────────────────────
+
+const MEMBERS: Member[] = [
+  { id: 'm1', name: 'Alice Smith',   initials: 'AS', color: '#288C9B' },
+  { id: 'm2', name: 'Bob Jones',     initials: 'BJ', color: '#F29E4C' },
+  { id: 'm3', name: 'Charlie Brown', initials: 'CB', color: '#5BC0DE' },
+]
+
+function makeActivity(overrides: Partial<ApiActivity> & { id: string; title: string }): ApiActivity {
+  return {
+    timelineId: 'timeline-1',
+    startAt: '2026-01-01T00:00:00Z',
+    endAt: '2026-01-07T00:00:00Z',
+    allDay: true,
+    createdBy: 'user-1',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+const ACTIVITIES: ApiActivity[] = [
+  makeActivity({ id: 'e1', title: 'Alpha Launch',        description: 'Ship the first version' }),
+  makeActivity({ id: 'e2', title: 'Beta Testing',        description: 'Run QA on beta build', assignedMemberIds: ['m1'] }),
+  makeActivity({ id: 'e3', title: 'Design Review',       description: null, assignedMemberIds: ['m2', 'm3'] }),
+  makeActivity({ id: 'e4', title: 'Security Audit',      description: 'Check alice permissions' }),
+  makeActivity({ id: 'e5', title: 'Parent Activity',     description: null }),
+  makeActivity({ id: 'e6', title: 'Child milestone',     description: null, parentActivityId: 'e5' }),
+  makeActivity({ id: 'e7', title: 'Another Child',       description: null, parentActivityId: 'e5' }),
+]
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+describe('matchActivities', () => {
+  it('returns empty array for empty query', () => {
+    expect(matchEvents('', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
+    expect(matchEvents('   ', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
+  })
+
+  it('matches activity title, case-insensitive', () => {
+    const results = matchEvents('alpha', ACTIVITIES, MEMBERS, ACTIVITIES)
+    expect(results).toHaveLength(1)
+    expect(results[0].activityId).toBe('e1')
+    expect(results[0].reasons).toContain('title')
+  })
+
+  it('matches description', () => {
+    const results = matchEvents('QA on beta', ACTIVITIES, MEMBERS, ACTIVITIES)
+    expect(results).toHaveLength(1)
+    expect(results[0].activityId).toBe('e2')
+    expect(results[0].reasons).toContain('description')
+  })
+
+  it('matches assignee display name', () => {
+    const results = matchEvents('alice', ACTIVITIES, MEMBERS, ACTIVITIES)
+    // e2 assigns Alice Smith; e4 has "alice" in description
+    const matchedIds = results.map(r => r.activityId)
+    expect(matchedIds).toContain('e2')
+    expect(matchedIds).toContain('e4')
+    const e2 = results.find(r => r.activityId === 'e2')!
+    expect(e2.reasons).toContain('assignee: Alice Smith')
+    const e4 = results.find(r => r.activityId === 'e4')!
+    expect(e4.reasons).toContain('description')
+  })
+
+  it('matches parent activity title for child activities', () => {
+    const results = matchEvents('parent activity', ACTIVITIES, MEMBERS, ACTIVITIES)
+    const matchedIds = results.map(r => r.activityId)
+    // e5 matches by title; e6 and e7 match by parent title
+    expect(matchedIds).toContain('e5')
+    expect(matchedIds).toContain('e6')
+    expect(matchedIds).toContain('e7')
+    const e6 = results.find(r => r.activityId === 'e6')!
+    expect(e6.reasons.some(r => r.startsWith('parent:'))).toBe(true)
+  })
+
+  it('is case-insensitive for all match fields', () => {
+    expect(matchEvents('ALPHA', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e1')
+    expect(matchEvents('AlPhA', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e1')
+    expect(matchEvents('ALICE', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e2')
+    expect(matchEvents('bob', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e3')
+  })
+
+  it('reports multiple reasons when multiple fields match', () => {
+    // e2: title contains "beta", description contains "beta", no assignee match for "beta"
+    const results = matchEvents('beta', ACTIVITIES, MEMBERS, ACTIVITIES)
+    const e2 = results.find(r => r.activityId === 'e2')!
+    expect(e2.reasons).toContain('title')
+    expect(e2.reasons).toContain('description')
+  })
+
+  it('does not include activities outside the visible set', () => {
+    // Only pass e1 as visible
+    const results = matchEvents('alpha', [ACTIVITIES[0]], MEMBERS, ACTIVITIES)
+    expect(results).toHaveLength(1)
+    expect(results[0].activityId).toBe('e1')
+
+    // e2 not visible — should not appear
+    const results2 = matchEvents('alpha', [ACTIVITIES[1]], MEMBERS, ACTIVITIES)
+    expect(results2).toHaveLength(0)
+  })
+
+  it('returns empty when nothing matches', () => {
+    expect(matchEvents('xyznonexistent', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
+  })
+
+  it('handles activities with no optional fields gracefully', () => {
+    const bare = makeActivity({ id: 'bare', title: 'Bare activity' })
+    expect(() => matchEvents('bare', [bare], [], [])).not.toThrow()
+    const results = matchEvents('bare', [bare], [], [])
+    expect(results[0].activityId).toBe('bare')
+  })
+})
+````
+
 ## File: packages/web/src/pages/settings/OrganizationPage.tsx
 ````typescript
 /**
@@ -24050,108 +24157,236 @@ export default function ActivityCreatePanel({
 }
 ````
 
-## File: packages/web/src/components/layout/TopBar.tsx
+## File: packages/web/src/components/gantt/GanttToolbar.tsx
 ````typescript
 /**
- * Top toolbar above the active view. Left side: global app navigation
- * (view switcher) and global object actions (Share). Right side: global
- * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
- * then whatever the parent injects into `rightSlot` (typically the profile menu).
- *
- * View-specific controls (date nav, zoom) intentionally live elsewhere —
- * a context-sensitive sub-toolbar hosts them.
+ * GanttToolbar — the thin sub-toolbar that sits between the top bar and
+ * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
+ * export stub.
  */
 
-import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
-import FilterDropdown from '@/components/filters/FilterDropdown';
-import FindBar from '@/components/layout/FindBar';
-import { useFind } from '@/contexts/FindContext';
+import { Download, Share2, Plus, Minus } from 'lucide-react';
+import type { TimeGranularity } from './granularity';
 import { cn } from '@/lib/utils';
 
-export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
+export type { TimeGranularity } from './granularity';
+export type GroupBy = 'none' | 'member' | 'parent';
+export type SortBy = 'startDate' | 'endDate' | 'title';
+export type ColorBy = 'activity' | 'member' | 'status';
 
 interface Props {
-  view: ViewMode;
-  teamId?: string;
-  timelineName?: string;
-  onViewChange: (view: ViewMode) => void;
-  onOpenFilterEditor: () => void;
-  rightSlot?: React.ReactNode;
+  groupBy: GroupBy;
+  onGroupByChange: (g: GroupBy) => void;
+  sortBy: SortBy;
+  onSortByChange: (s: SortBy) => void;
+  granularity: TimeGranularity | 'auto';
+  onGranularityChange: (g: TimeGranularity | 'auto') => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  hideClosed?: boolean;
+  onHideClosedChange?: (v: boolean) => void;
+  onExport: () => void;
+  onShare?: () => void;
 }
 
-const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
-  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
-  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
-  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
-  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
-];
+const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label   = 'text-[11px] text-muted-foreground shrink-0';
+const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
 
-export default function TopBar({
-  view,
-  teamId,
-  timelineName,
-  onViewChange,
-  onOpenFilterEditor,
-  rightSlot,
+export default function GanttToolbar({
+  groupBy,
+  onGroupByChange,
+  sortBy,
+  onSortByChange,
+  granularity,
+  onGranularityChange,
+  colorBy,
+  onColorByChange,
+  hideClosed = false,
+  onHideClosedChange,
+  onExport,
+  onShare,
 }: Props) {
-  const { findBarOpen, setFindBarOpen } = useFind();
+  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
+  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
+  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
+    ? granularityMap.indexOf(granularity as never)
+    : 0;
+  const currentLabel = granularityLabels[currentIndex];
+
+  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseInt(e.target.value, 10);
+    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
+  };
 
   return (
-    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
-      {/* Left zone: view switcher */}
-      <div className="flex items-center justify-start shrink-0">
-        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
-          {VIEWS.map(v => (
-            <button
-              key={v.id}
-              onClick={() => onViewChange(v.id)}
-              className={cn(
-                'flex items-center justify-center gap-[5px]',
-                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
-                'border-none cursor-pointer',
-                view === v.id
-                  ? 'bg-card text-foreground shadow-sm'
-                  : 'bg-transparent text-muted-foreground',
-              )}
-            >
-              {v.icon}
-              {v.label}
-            </button>
-          ))}
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
+      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
+      <style>{`
+        .gantt-zoom-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          background: transparent;
+        }
+        .gantt-zoom-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          margin-top: -4px;
+        }
+        .gantt-zoom-slider::-moz-range-thumb {
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          border: none;
+        }
+        .gantt-zoom-slider::-webkit-slider-runnable-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+        .gantt-zoom-slider::-moz-range-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+      `}</style>
+
+      {/* Zoom (granularity) */}
+      <div className="flex items-center gap-1.5 h-[26px]">
+        <button
+          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 0}
+          title="Zoom out"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Minus size={14} />
+        </button>
+
+        <div className="relative w-20 h-[26px] flex items-center">
+          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
+            {[0, 1, 2, 3, 4, 5].map(i => (
+              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
+            ))}
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="5"
+            step="1"
+            value={currentIndex}
+            onChange={handleSliderChange}
+            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
+            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          />
+        </div>
+
+        <button
+          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 5}
+          title="Zoom in"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Plus size={14} />
+        </button>
+
+        <div
+          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          className={cn(
+            'flex items-center justify-center w-[22px] h-[22px]',
+            'bg-card border border-border rounded-sm text-xs font-mono select-none',
+            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
+          )}
+        >
+          {currentLabel}
         </div>
       </div>
 
-      {/* Center zone: timeline name — truncates with ellipsis when narrow */}
-      <div className="flex-1 min-w-0 flex items-center justify-center px-3">
-        <span
-          title={timelineName}
-          className="text-xs font-medium text-muted-foreground truncate select-none"
-        >
-          {timelineName}
-        </span>
-      </div>
+      <div className={divider} />
 
-      {/* Right zone: Find bar / trigger, Filter, profile slot */}
-      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
-        {findBarOpen ? (
-          <FindBar />
-        ) : (
-          <button
-            onClick={() => setFindBarOpen(true)}
-            title="Find in view (Ctrl+F)"
-            className={cn(
-              'flex items-center justify-center w-7 h-7',
-              'border border-border rounded-md bg-card',
-              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
-              'transition-colors shrink-0',
-            )}
-          >
-            <Search size={13} strokeWidth={1.8} />
-          </button>
-        )}
-        <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
-        {rightSlot}
-      </div>
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as GroupBy)}
+      >
+        <option value="none">None</option>
+        <option value="member">Member</option>
+        <option value="parent">Parent activity</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Sort by */}
+      <span className={label}>Sort by</span>
+      <select
+        className={select}
+        value={sortBy}
+        onChange={e => onSortByChange(e.target.value as SortBy)}
+      >
+        <option value="startDate">Start date</option>
+        <option value="endDate">End date</option>
+        <option value="title">Title A–Z</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      {onHideClosedChange && (
+        <>
+          <div className={divider} />
+          <label className="flex items-center gap-1.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={hideClosed}
+              onChange={e => onHideClosedChange(e.target.checked)}
+              className="w-3 h-3 cursor-pointer accent-primary"
+            />
+            <span className="text-[11px] text-muted-foreground">Hide closed</span>
+          </label>
+        </>
+      )}
+
+      <div className="flex-1" />
+
+      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
+        <Download size={13} strokeWidth={1.8} />
+        Export
+      </button>
+
+      <button className={ctrlBtn} onClick={onShare} title="Share">
+        <Share2 size={13} strokeWidth={1.8} />
+        Share
+      </button>
     </div>
   );
 }
@@ -26629,241 +26864,6 @@ export default function GanttGrid({
           ))}
         </div>
       )}
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/gantt/GanttToolbar.tsx
-````typescript
-/**
- * GanttToolbar — the thin sub-toolbar that sits between the top bar and
- * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
- * export stub.
- */
-
-import { Download, Share2, Plus, Minus } from 'lucide-react';
-import type { TimeGranularity } from './granularity';
-import { cn } from '@/lib/utils';
-
-export type { TimeGranularity } from './granularity';
-export type GroupBy = 'none' | 'member' | 'parent';
-export type SortBy = 'startDate' | 'endDate' | 'title';
-export type ColorBy = 'activity' | 'member' | 'status';
-
-interface Props {
-  groupBy: GroupBy;
-  onGroupByChange: (g: GroupBy) => void;
-  sortBy: SortBy;
-  onSortByChange: (s: SortBy) => void;
-  granularity: TimeGranularity | 'auto';
-  onGranularityChange: (g: TimeGranularity | 'auto') => void;
-  colorBy: ColorBy;
-  onColorByChange: (c: ColorBy) => void;
-  hideClosed?: boolean;
-  onHideClosedChange?: (v: boolean) => void;
-  onExport: () => void;
-  onShare?: () => void;
-}
-
-const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
-const divider = 'w-px h-4 bg-border shrink-0';
-const label   = 'text-[11px] text-muted-foreground shrink-0';
-const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-export default function GanttToolbar({
-  groupBy,
-  onGroupByChange,
-  sortBy,
-  onSortByChange,
-  granularity,
-  onGranularityChange,
-  colorBy,
-  onColorByChange,
-  hideClosed = false,
-  onHideClosedChange,
-  onExport,
-  onShare,
-}: Props) {
-  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
-  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
-  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
-    ? granularityMap.indexOf(granularity as never)
-    : 0;
-  const currentLabel = granularityLabels[currentIndex];
-
-  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = parseInt(e.target.value, 10);
-    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
-  };
-
-  return (
-    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
-      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
-      <style>{`
-        .gantt-zoom-slider {
-          -webkit-appearance: none;
-          appearance: none;
-          background: transparent;
-        }
-        .gantt-zoom-slider::-webkit-slider-thumb {
-          -webkit-appearance: none;
-          appearance: none;
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          margin-top: -4px;
-        }
-        .gantt-zoom-slider::-moz-range-thumb {
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          border: none;
-        }
-        .gantt-zoom-slider::-webkit-slider-runnable-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-        .gantt-zoom-slider::-moz-range-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-      `}</style>
-
-      {/* Zoom (granularity) */}
-      <div className="flex items-center gap-1.5 h-[26px]">
-        <button
-          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 0}
-          title="Zoom out"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Minus size={14} />
-        </button>
-
-        <div className="relative w-20 h-[26px] flex items-center">
-          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
-            {[0, 1, 2, 3, 4, 5].map(i => (
-              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
-            ))}
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="5"
-            step="1"
-            value={currentIndex}
-            onChange={handleSliderChange}
-            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
-            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          />
-        </div>
-
-        <button
-          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 5}
-          title="Zoom in"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Plus size={14} />
-        </button>
-
-        <div
-          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          className={cn(
-            'flex items-center justify-center w-[22px] h-[22px]',
-            'bg-card border border-border rounded-sm text-xs font-mono select-none',
-            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
-          )}
-        >
-          {currentLabel}
-        </div>
-      </div>
-
-      <div className={divider} />
-
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as GroupBy)}
-      >
-        <option value="none">None</option>
-        <option value="member">Member</option>
-        <option value="parent">Parent activity</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Sort by */}
-      <span className={label}>Sort by</span>
-      <select
-        className={select}
-        value={sortBy}
-        onChange={e => onSortByChange(e.target.value as SortBy)}
-      >
-        <option value="startDate">Start date</option>
-        <option value="endDate">End date</option>
-        <option value="title">Title A–Z</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      {onHideClosedChange && (
-        <>
-          <div className={divider} />
-          <label className="flex items-center gap-1.5 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={hideClosed}
-              onChange={e => onHideClosedChange(e.target.checked)}
-              className="w-3 h-3 cursor-pointer accent-primary"
-            />
-            <span className="text-[11px] text-muted-foreground">Hide closed</span>
-          </label>
-        </>
-      )}
-
-      <div className="flex-1" />
-
-      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
-        <Download size={13} strokeWidth={1.8} />
-        Export
-      </button>
-
-      <button className={ctrlBtn} onClick={onShare} title="Share">
-        <Share2 size={13} strokeWidth={1.8} />
-        Share
-      </button>
     </div>
   );
 }
@@ -39357,6 +39357,496 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
 }
 ````
 
+## File: packages/web/src/pages/DashboardPage.tsx
+````typescript
+/**
+ * Main application shell: sidebar + top bar + content area.
+ *
+ * Fetches the authenticated user's first team and first timeline to seed the
+ * initial view. Team-selection UI and full sidebar wiring come in a later phase.
+ */
+
+import { useState, useRef, useEffect, useCallback } from 'react'
+import Sidebar from '@/components/layout/Sidebar'
+import TopBar, { type ViewMode } from '@/components/layout/TopBar'
+import RightSidebar from '@/components/layout/RightSidebar'
+import GanttView from '@/components/gantt/GanttView'
+import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
+import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
+import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
+import { FilterProvider } from '@/contexts/FilterContext'
+import { FindProvider, useFind } from '@/contexts/FindContext'
+import { useAuth } from '@/contexts/AuthContext'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Settings, Moon, Sun, LogOut } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import TeamModal from '@/components/TeamModal'
+import MemberModal from '@/components/MemberModal'
+import TimelineModal from '@/components/TimelineModal'
+import { useNavigate } from 'react-router-dom'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type ApiTeam = components['schemas']['Team']
+type ApiTimeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+const DROPDOWN_BTN: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  padding: '10px 14px',
+  background: 'none',
+  border: 'none',
+  fontSize: 13,
+  color: 'var(--foreground)',
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+  textAlign: 'left',
+}
+
+function DashboardShell() {
+  const { logout, accessToken, user } = useAuth()
+  const navigate = useNavigate()
+  const { isDark, toggle: toggleDark, theme } = useDarkMode()
+  const { setFindBarOpen } = useFind()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [view, setView] = useState<ViewMode>('gantt')
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
+  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
+  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
+  const [filterEditorOpen, setFilterEditorOpen] = useState(false)
+  // Gantt toolbar state
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
+  const [sortBy, setSortBy] = useState<SortBy>('startDate')
+  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
+  const [colorBy, setColorBy] = useState<ColorBy>('activity')
+  const profileRef = useRef<HTMLDivElement>(null)
+  // Preference persistence
+  const upsert = useUpsertPreference()
+  // Track whether we've applied server prefs for the active timeline so we
+  // don't immediately write defaults back before the server data arrives.
+  const prefsAppliedForTimeline = useRef<string | null>(null)
+  // One-shot guard: init activeTimelineId from global prefs only on first load.
+  const timelineIdInitialized = useRef(false)
+
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setFindBarOpen(true)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [setFindBarOpen])
+
+  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
+  const email = (user as { email?: string } | null)?.email ?? ''
+  const userIdentity: Identity = {
+    color: (user as { color?: string } | null)?.color ?? '#288C9B',
+    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+  }
+
+  // Global preferences — restored on login to seed team/timeline selection.
+  const { isSuccess: globalPrefsSettled } = usePreferences()
+  const globalPrefMap = usePreferenceMap()
+
+  // Team modal state
+  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
+  const unarchiveTeam = useUnarchiveTeam()
+
+  // Member modal state
+  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
+
+  // Timeline modal state
+  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
+
+  // Hide-closed-statuses toggle (GanttToolbar → GanttView filter)
+  const [hideClosed, setHideClosed] = useState(false)
+
+  // Fetch all teams including archived for the sidebar's archived section.
+  const { data: allTeams = [] } = useMyTeams(true)
+  const activeTeams = allTeams.filter(t => !t.archivedAt)
+  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
+
+  // Explicit team selection state — initialized from global prefs or first active team.
+  const [activeTeamId, setActiveTeamId] = useState<string>('')
+  const teamIdInitialized = useRef(false)
+  useEffect(() => {
+    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
+    teamIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
+    const exists = saved && activeTeams.some(t => t.id === saved)
+    setActiveTeamId(exists ? saved : activeTeams[0].id)
+  }, [activeTeams, globalPrefsSettled, globalPrefMap])
+
+  const activeTeam = activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0]
+  const teamId = activeTeam?.id ?? ''
+
+  // Check whether the current user is an admin of the active team.
+  const { data: teamMembers = [] } = useTeamMembers(teamId)
+  const userId = (user as { id?: string } | null)?.id ?? ''
+  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
+  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
+
+  const handleSelectTeam = useCallback((id: string) => {
+    setActiveTeamId(id)
+  }, [])
+
+  const unarchiveTimeline = useUnarchiveTimeline(teamId)
+
+  const { data: timelines = [] } = useTeamTimelines(teamId)
+  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
+  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
+  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
+  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
+  // Initialize activeTimelineId from the saved global pref (selected_timeline),
+  // falling back to timelines[0] when no pref is stored or the saved timeline
+  // is no longer in the list. Waits for global prefs to settle so we don't
+  // immediately overwrite a restored value with the fallback.
+  useEffect(() => {
+    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
+    timelineIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
+    const exists = saved && timelines.some(t => t.id === saved)
+    setActiveTimelineId(exists ? saved : timelines[0].id)
+  }, [timelines, globalPrefsSettled, globalPrefMap])
+  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
+  // Derived so they stay in sync after edits without needing separate state.
+  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
+  const activeTimelineName = activeTimeline?.name ?? ''
+
+  const handleTimelineChange = useCallback((id: string) => {
+    prefsAppliedForTimeline.current = null
+    setActiveTimelineId(id)
+  }, [])
+
+  useTeamActivitySync(teamId, accessToken)
+
+  // Per-timeline preferences: restore toolbar state when the active timeline changes.
+  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
+  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
+  const timelinePrefs = usePreferenceMap(activeTimelineId)
+  useEffect(() => {
+    if (!activeTimelineId || !prefsSettled) return
+    if (prefsAppliedForTimeline.current === activeTimelineId) return
+    prefsAppliedForTimeline.current = activeTimelineId
+
+    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
+    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
+    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
+    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
+  }, [activeTimelineId, prefsSettled, timelinePrefs])
+
+  // Save toolbar state changes to per-timeline prefs.
+  const saveTimelinePref = useCallback((key: string, value: string) => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
+  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('group_by', groupBy)
+  }, [groupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('sort_by', sortBy)
+  }, [sortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('zoom_granularity', granularity)
+  }, [granularity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('color_by', colorBy)
+  }, [colorBy, saveTimelinePref])
+
+  // Global preferences: persist dark mode, active team, and active timeline.
+  useEffect(() => {
+    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
+  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!teamId) return
+    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
+  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
+  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(c => !c)}
+        apiTimelines={timelines}
+        archivedTimelines={archivedTimelines}
+        activeTimelineId={activeTimelineId}
+        onActiveTimelineChange={handleTimelineChange}
+        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
+        onEditTimeline={id => {
+          const tl = allTimelines.find(t => t.id === id)
+          setEditingTimeline(tl ?? null)
+          setTimelineModalMode('edit')
+        }}
+        onNewActivity={() => {
+          const today = new Date().toISOString().slice(0, 10)
+          setSelectedActivityId(null)
+          setSelectedApiActivity(null)
+          setFilterEditorOpen(false)
+          setCreateDefaults({ start: today, end: today, memberId: null })
+        }}
+        activeTeam={activeTeam}
+        activeTeams={activeTeams}
+        archivedTeams={archivedTeams}
+        canEditTeam={canEditTeam}
+        onSelectTeam={handleSelectTeam}
+        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
+        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
+        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
+        members={teamMembers.length > 0 ? teamMembers : undefined}
+        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
+      />
+
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <TopBar
+          view={view}
+          teamId={teamId}
+          timelineName={activeTimelineName}
+          onViewChange={setView}
+          onOpenFilterEditor={() => setFilterEditorOpen(true)}
+          rightSlot={
+            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
+              <button
+                onClick={() => setProfileOpen(o => !o)}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                title={displayName}
+              >
+                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
+              </button>
+
+              {profileOpen && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 8px)',
+                    right: 0,
+                    width: 220,
+                    background: 'var(--card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+                    zIndex: 100,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
+                  </div>
+                  <button
+                    onClick={toggleDark}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
+                    {isDark ? 'Dark mode' : 'Light mode'}
+                  </button>
+                  <button
+                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Settings size={14} strokeWidth={1.8} />
+                    Settings
+                  </button>
+                  <button
+                    onClick={logout}
+                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <LogOut size={14} strokeWidth={1.8} />
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
+          }
+        />
+
+        {/* Active timeline color band */}
+        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
+
+        {/* Gantt sub-toolbar — only shown in Gantt view */}
+        {view === 'gantt' && (
+          <GanttToolbar
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            granularity={granularity}
+            onGranularityChange={setGranularity}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            hideClosed={hideClosed}
+            onHideClosedChange={activeTimelineStatuses.some(s => s.isClosed) ? setHideClosed : undefined}
+            onExport={() => {}}
+            onShare={() => {}}
+          />
+        )}
+
+        {/* Content area */}
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {view === 'gantt' && teamId && activeTimelineId ? (
+            <GanttView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              granularity={granularity}
+              colorBy={colorBy}
+              hideClosed={hideClosed}
+              closedStatusIds={new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+                if (activity) setFilterEditorOpen(false)
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
+                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Activity detail panel — slides in from right when an activity is selected */}
+      <ActivityDetailPanel
+        open={Boolean(selectedApiActivity)}
+        event={selectedApiActivity}
+        members={ganttMembers}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null) }}
+      />
+
+      {/* Activity create panel — slides in from New Activity button or future drag */}
+      <ActivityCreatePanel
+        open={Boolean(createDefaults) && !selectedApiActivity}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        members={ganttMembers}
+        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
+        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
+        defaultMemberId={createDefaults?.memberId}
+        onClose={() => setCreateDefaults(null)}
+      />
+
+      <RightSidebar
+        open={filterEditorOpen}
+        title="Filter editor"
+        onClose={() => setFilterEditorOpen(false)}
+      >
+        <p style={{ color: 'var(--muted-foreground)', fontSize: 13, lineHeight: 1.5 }}>
+          Filter editor coming soon.
+        </p>
+      </RightSidebar>
+
+      {/* Team modal — create or edit */}
+      {teamModalMode && (
+        <TeamModal
+          mode={teamModalMode}
+          team={editingTeam ?? undefined}
+          isAdmin={canEditTeam}
+          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
+          onTeamCreated={created => setActiveTeamId(created.id)}
+        />
+      )}
+
+      {/* Member modal — edit a team member */}
+      {editingMember && (
+        <MemberModal
+          teamId={teamId}
+          memberId={editingMember.id}
+          isAdmin={canEditTeam}
+          isSuperadmin={isSuperadmin}
+          onClose={() => setEditingMember(null)}
+        />
+      )}
+
+      {/* Timeline modal — create or edit */}
+      {timelineModalMode && (
+        <TimelineModal
+          mode={timelineModalMode}
+          teamId={teamId}
+          timeline={editingTimeline ?? undefined}
+          canAdmin={canEditTeam}
+          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
+          onCreated={created => setActiveTimelineId(created.id)}
+          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
+        />
+      )}
+    </div>
+  )
+}
+
+export default function DashboardPage() {
+  return (
+    <FindProvider>
+      <FilterProvider>
+        <DashboardShell />
+      </FilterProvider>
+    </FindProvider>
+  )
+}
+````
+
 ## File: docs/TASKS.md
 ````markdown
 # Tasks
@@ -40338,496 +40828,6 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - Notifications (email, push)
 - Recurring event UI (RRULE editing)
 - Kanban drag-to-change-status (v2; v1 Kanban is read-only)
-````
-
-## File: packages/web/src/pages/DashboardPage.tsx
-````typescript
-/**
- * Main application shell: sidebar + top bar + content area.
- *
- * Fetches the authenticated user's first team and first timeline to seed the
- * initial view. Team-selection UI and full sidebar wiring come in a later phase.
- */
-
-import { useState, useRef, useEffect, useCallback } from 'react'
-import Sidebar from '@/components/layout/Sidebar'
-import TopBar, { type ViewMode } from '@/components/layout/TopBar'
-import RightSidebar from '@/components/layout/RightSidebar'
-import GanttView from '@/components/gantt/GanttView'
-import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
-import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
-import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
-import { FilterProvider } from '@/contexts/FilterContext'
-import { FindProvider, useFind } from '@/contexts/FindContext'
-import { useAuth } from '@/contexts/AuthContext'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import TeamModal from '@/components/TeamModal'
-import MemberModal from '@/components/MemberModal'
-import TimelineModal from '@/components/TimelineModal'
-import { useNavigate } from 'react-router-dom'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-type ApiTeam = components['schemas']['Team']
-type ApiTimeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-const DROPDOWN_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  width: '100%',
-  padding: '10px 14px',
-  background: 'none',
-  border: 'none',
-  fontSize: 13,
-  color: 'var(--foreground)',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  textAlign: 'left',
-}
-
-function DashboardShell() {
-  const { logout, accessToken, user } = useAuth()
-  const navigate = useNavigate()
-  const { isDark, toggle: toggleDark, theme } = useDarkMode()
-  const { setFindBarOpen } = useFind()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('gantt')
-  const [profileOpen, setProfileOpen] = useState(false)
-  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
-  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
-  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
-  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
-  const [filterEditorOpen, setFilterEditorOpen] = useState(false)
-  // Gantt toolbar state
-  const [groupBy, setGroupBy] = useState<GroupBy>('none')
-  const [sortBy, setSortBy] = useState<SortBy>('startDate')
-  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
-  const [colorBy, setColorBy] = useState<ColorBy>('activity')
-  const profileRef = useRef<HTMLDivElement>(null)
-  // Preference persistence
-  const upsert = useUpsertPreference()
-  // Track whether we've applied server prefs for the active timeline so we
-  // don't immediately write defaults back before the server data arrives.
-  const prefsAppliedForTimeline = useRef<string | null>(null)
-  // One-shot guard: init activeTimelineId from global prefs only on first load.
-  const timelineIdInitialized = useRef(false)
-
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
-        setProfileOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault()
-        setFindBarOpen(true)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [setFindBarOpen])
-
-  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
-  const email = (user as { email?: string } | null)?.email ?? ''
-  const userIdentity: Identity = {
-    color: (user as { color?: string } | null)?.color ?? '#288C9B',
-    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
-  }
-
-  // Global preferences — restored on login to seed team/timeline selection.
-  const { isSuccess: globalPrefsSettled } = usePreferences()
-  const globalPrefMap = usePreferenceMap()
-
-  // Team modal state
-  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
-  const unarchiveTeam = useUnarchiveTeam()
-
-  // Member modal state
-  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
-
-  // Timeline modal state
-  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
-
-  // Hide-closed-statuses toggle (GanttToolbar → GanttView filter)
-  const [hideClosed, setHideClosed] = useState(false)
-
-  // Fetch all teams including archived for the sidebar's archived section.
-  const { data: allTeams = [] } = useMyTeams(true)
-  const activeTeams = allTeams.filter(t => !t.archivedAt)
-  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
-
-  // Explicit team selection state — initialized from global prefs or first active team.
-  const [activeTeamId, setActiveTeamId] = useState<string>('')
-  const teamIdInitialized = useRef(false)
-  useEffect(() => {
-    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
-    teamIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
-    const exists = saved && activeTeams.some(t => t.id === saved)
-    setActiveTeamId(exists ? saved : activeTeams[0].id)
-  }, [activeTeams, globalPrefsSettled, globalPrefMap])
-
-  const activeTeam = activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0]
-  const teamId = activeTeam?.id ?? ''
-
-  // Check whether the current user is an admin of the active team.
-  const { data: teamMembers = [] } = useTeamMembers(teamId)
-  const userId = (user as { id?: string } | null)?.id ?? ''
-  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
-  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
-
-  const handleSelectTeam = useCallback((id: string) => {
-    setActiveTeamId(id)
-  }, [])
-
-  const unarchiveTimeline = useUnarchiveTimeline(teamId)
-
-  const { data: timelines = [] } = useTeamTimelines(teamId)
-  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
-  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
-  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
-  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
-  // Initialize activeTimelineId from the saved global pref (selected_timeline),
-  // falling back to timelines[0] when no pref is stored or the saved timeline
-  // is no longer in the list. Waits for global prefs to settle so we don't
-  // immediately overwrite a restored value with the fallback.
-  useEffect(() => {
-    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
-    timelineIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
-    const exists = saved && timelines.some(t => t.id === saved)
-    setActiveTimelineId(exists ? saved : timelines[0].id)
-  }, [timelines, globalPrefsSettled, globalPrefMap])
-  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
-  // Derived so they stay in sync after edits without needing separate state.
-  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
-  const activeTimelineName = activeTimeline?.name ?? ''
-
-  const handleTimelineChange = useCallback((id: string) => {
-    prefsAppliedForTimeline.current = null
-    setActiveTimelineId(id)
-  }, [])
-
-  useTeamActivitySync(teamId, accessToken)
-
-  // Per-timeline preferences: restore toolbar state when the active timeline changes.
-  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
-  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
-  const timelinePrefs = usePreferenceMap(activeTimelineId)
-  useEffect(() => {
-    if (!activeTimelineId || !prefsSettled) return
-    if (prefsAppliedForTimeline.current === activeTimelineId) return
-    prefsAppliedForTimeline.current = activeTimelineId
-
-    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
-    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
-    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
-    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
-  }, [activeTimelineId, prefsSettled, timelinePrefs])
-
-  // Save toolbar state changes to per-timeline prefs.
-  const saveTimelinePref = useCallback((key: string, value: string) => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
-  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('group_by', groupBy)
-  }, [groupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('sort_by', sortBy)
-  }, [sortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('zoom_granularity', granularity)
-  }, [granularity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('color_by', colorBy)
-  }, [colorBy, saveTimelinePref])
-
-  // Global preferences: persist dark mode, active team, and active timeline.
-  useEffect(() => {
-    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
-  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!teamId) return
-    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
-  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
-  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
-      <Sidebar
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(c => !c)}
-        apiTimelines={timelines}
-        archivedTimelines={archivedTimelines}
-        activeTimelineId={activeTimelineId}
-        onActiveTimelineChange={handleTimelineChange}
-        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
-        onEditTimeline={id => {
-          const tl = allTimelines.find(t => t.id === id)
-          setEditingTimeline(tl ?? null)
-          setTimelineModalMode('edit')
-        }}
-        onNewActivity={() => {
-          const today = new Date().toISOString().slice(0, 10)
-          setSelectedActivityId(null)
-          setSelectedApiActivity(null)
-          setFilterEditorOpen(false)
-          setCreateDefaults({ start: today, end: today, memberId: null })
-        }}
-        activeTeam={activeTeam}
-        activeTeams={activeTeams}
-        archivedTeams={archivedTeams}
-        canEditTeam={canEditTeam}
-        onSelectTeam={handleSelectTeam}
-        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
-        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
-        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
-        members={teamMembers.length > 0 ? teamMembers : undefined}
-        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
-      />
-
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
-        <TopBar
-          view={view}
-          teamId={teamId}
-          timelineName={activeTimelineName}
-          onViewChange={setView}
-          onOpenFilterEditor={() => setFilterEditorOpen(true)}
-          rightSlot={
-            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
-              <button
-                onClick={() => setProfileOpen(o => !o)}
-                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
-                title={displayName}
-              >
-                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
-              </button>
-
-              {profileOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 'calc(100% + 8px)',
-                    right: 0,
-                    width: 220,
-                    background: 'var(--card)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-                    zIndex: 100,
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
-                  </div>
-                  <button
-                    onClick={toggleDark}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
-                    {isDark ? 'Dark mode' : 'Light mode'}
-                  </button>
-                  <button
-                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Settings size={14} strokeWidth={1.8} />
-                    Settings
-                  </button>
-                  <button
-                    onClick={logout}
-                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <LogOut size={14} strokeWidth={1.8} />
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
-          }
-        />
-
-        {/* Active timeline color band */}
-        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
-
-        {/* Gantt sub-toolbar — only shown in Gantt view */}
-        {view === 'gantt' && (
-          <GanttToolbar
-            groupBy={groupBy}
-            onGroupByChange={setGroupBy}
-            sortBy={sortBy}
-            onSortByChange={setSortBy}
-            granularity={granularity}
-            onGranularityChange={setGranularity}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            hideClosed={hideClosed}
-            onHideClosedChange={activeTimelineStatuses.some(s => s.isClosed) ? setHideClosed : undefined}
-            onExport={() => {}}
-            onShare={() => {}}
-          />
-        )}
-
-        {/* Content area */}
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'gantt' && teamId && activeTimelineId ? (
-            <GanttView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              startDate={activeTimeline?.startDate}
-              endDate={activeTimeline?.endDate}
-              groupBy={groupBy}
-              sortBy={sortBy}
-              granularity={granularity}
-              colorBy={colorBy}
-              hideClosed={hideClosed}
-              closedStatusIds={new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-                if (activity) setFilterEditorOpen(false)
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
-                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Activity detail panel — slides in from right when an activity is selected */}
-      <ActivityDetailPanel
-        open={Boolean(selectedApiActivity)}
-        event={selectedApiActivity}
-        members={ganttMembers}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null) }}
-      />
-
-      {/* Activity create panel — slides in from New Activity button or future drag */}
-      <ActivityCreatePanel
-        open={Boolean(createDefaults) && !selectedApiActivity}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        members={ganttMembers}
-        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
-        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
-        defaultMemberId={createDefaults?.memberId}
-        onClose={() => setCreateDefaults(null)}
-      />
-
-      <RightSidebar
-        open={filterEditorOpen}
-        title="Filter editor"
-        onClose={() => setFilterEditorOpen(false)}
-      >
-        <p style={{ color: 'var(--muted-foreground)', fontSize: 13, lineHeight: 1.5 }}>
-          Filter editor coming soon.
-        </p>
-      </RightSidebar>
-
-      {/* Team modal — create or edit */}
-      {teamModalMode && (
-        <TeamModal
-          mode={teamModalMode}
-          team={editingTeam ?? undefined}
-          isAdmin={canEditTeam}
-          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
-          onTeamCreated={created => setActiveTeamId(created.id)}
-        />
-      )}
-
-      {/* Member modal — edit a team member */}
-      {editingMember && (
-        <MemberModal
-          teamId={teamId}
-          memberId={editingMember.id}
-          isAdmin={canEditTeam}
-          isSuperadmin={isSuperadmin}
-          onClose={() => setEditingMember(null)}
-        />
-      )}
-
-      {/* Timeline modal — create or edit */}
-      {timelineModalMode && (
-        <TimelineModal
-          mode={timelineModalMode}
-          teamId={teamId}
-          timeline={editingTimeline ?? undefined}
-          canAdmin={canEditTeam}
-          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
-          onCreated={created => setActiveTimelineId(created.id)}
-          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
-        />
-      )}
-    </div>
-  )
-}
-
-export default function DashboardPage() {
-  return (
-    <FindProvider>
-      <FilterProvider>
-        <DashboardShell />
-      </FilterProvider>
-    </FindProvider>
-  )
-}
 ````
 
 ## File: docs/ROADMAP.md
