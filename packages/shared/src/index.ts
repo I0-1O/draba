@@ -496,7 +496,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/teams/{id}/activities": {
+    "/teams/{id}/timelines/{timelineId}/activities": {
         parameters: {
             query?: never;
             header?: never;
@@ -504,12 +504,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List activities for a team
+         * List activities for a timeline
          * @description Archived activities are excluded by default. Optional date-range filter on startAt.
          */
         get: operations["listActivities"];
         put?: never;
-        /** Create an activity in a team */
+        /** Create an activity in a timeline */
         post: operations["createActivity"];
         delete?: never;
         options?: never;
@@ -1158,7 +1158,7 @@ export interface components {
         };
         Activity: {
             id: string;
-            teamId: string;
+            timelineId: string;
             title: string;
             description?: string | null;
             icon?: string | null;
@@ -2547,6 +2547,7 @@ export interface operations {
             path: {
                 /** @description Team ID. */
                 id: components["parameters"]["teamId"];
+                timelineId: string;
             };
             cookie?: never;
         };
@@ -2574,6 +2575,7 @@ export interface operations {
             path: {
                 /** @description Team ID. */
                 id: components["parameters"]["teamId"];
+                timelineId: string;
             };
             cookie?: never;
         };

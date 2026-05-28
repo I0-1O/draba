@@ -11,17 +11,26 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
-// createActivityBody extends the generated CreateActivityJSONBody with TimelineId.
-type createActivityBody struct {
-	CreateActivityJSONBody
-	TimelineId *string `json:"timelineId,omitempty"`
-}
-
-// handleCreateActivity handles POST /teams/{id}/activities. The authenticated
-// user must be a member of the team.
+// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
+// The authenticated user must be a member of the team.
 func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
 	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
 
 	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -32,7 +41,7 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req createActivityBody
+	var req CreateActivityJSONBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
@@ -59,8 +68,7 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	activity := &models.Activity{
 		ID:               newID(),
-		TeamID:           teamID,
-		TimelineID:       req.TimelineId,
+		TimelineID:       timelineID,
 		Title:            req.Title,
 		Description:      req.Description,
 		Icon:             req.Icon,
@@ -93,15 +101,30 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 		activity.AssignedMemberIDs = []string{}
 	}
 
-	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: activity.TeamID, Payload: activity})
+	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
 	writeJSON(w, http.StatusCreated, activity)
 }
 
-// handleListActivities handles GET /teams/{id}/activities. Optional query
-// params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
+// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
+// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
 func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
 	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
 
 	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -131,11 +154,7 @@ func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
 	}
 
 	includeArchived := r.URL.Query().Get("archived") == "true"
-	var timelineID *string
-	if v := r.URL.Query().Get("timelineId"); v != "" {
-		timelineID = &v
-	}
-	acts, err := s.activities.ListByTeam(teamID, timelineID, from, to, includeArchived)
+	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
 		return
@@ -160,7 +179,13 @@ func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.teams.GetMember(activity.TeamID, claims.UserID); err != nil {
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
 			return
@@ -296,7 +321,7 @@ func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
 		activity.AssignedMemberIDs = existing
 	}
 
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: activity.TeamID, Payload: activity})
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
 	writeJSON(w, http.StatusOK, activity)
 }
 
@@ -328,7 +353,14 @@ func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, arch
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
 		return
 	}
-	if _, err := s.teams.GetMember(activity.TeamID, claims.UserID); err != nil {
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
 			return
@@ -356,7 +388,7 @@ func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, arch
 		activity.AssignedMemberIDs = []string{}
 	}
 
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: activity.TeamID, Payload: activity})
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
 	writeJSON(w, http.StatusOK, activity)
 }
 
@@ -376,7 +408,13 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.teams.GetMember(activity.TeamID, claims.UserID); err != nil {
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
 			return
@@ -392,7 +430,7 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 
 	s.bus.Publish(events.Message{
 		Type:    events.ActivityDeleted,
-		TeamID:  activity.TeamID,
+		TeamID:  timeline.TeamID,
 		Payload: map[string]string{"id": activityID},
 	})
 	w.WriteHeader(http.StatusNoContent)

@@ -2,6 +2,43 @@
 
 ---
 
+## 2026-05-28 — Phase 10.4.2: Activity Schema Normalization
+
+**Goal:** Remove the redundant `activities.team_id` column now that `timeline_id` is the primary FK. Harden `timeline_id` to NOT NULL. Move activity routes to timeline-scoped paths.
+
+**Backend:**
+- Migration 015: backfills NULL `timeline_id` rows (assigns to team's oldest timeline), rebuilds `activities` without `team_id` using the SQLite CREATE-INSERT-DROP-RENAME pattern, hardens `timeline_id` as NOT NULL with `ON DELETE CASCADE`
+- `models.Activity`: `TeamID` removed, `TimelineID` changed from `*string` to `string`
+- `ActivityRepo.Create`: removed `team_id` from INSERT; `ListByTeam` → `ListByTimeline(timelineID string, ...)` (simple `WHERE timeline_id = ?`)
+- Activity handlers: POST/GET moved to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix required — `GET /timelines/{id}/activities` conflicts with `GET /timelines/share/{token}` in Go 1.22 mux); update/delete/archive derive teamID via timeline lookup for auth + bus publish
+- OpenAPI: `Activity.teamId` → `timelineId` (required, non-nullable); paths updated; TS types regenerated
+
+**Frontend:**
+- `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)`: URL and cache key updated
+- `useCreateActivity(teamId, timelineId)`, `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: all updated
+- `useTeamActivitySync`: WS deltas now patch `['timelines', timelineId, 'activities']` cache entries using payload's `timelineId`
+- `GanttView.tsx`: `timelineId` prop now required; uses `useTimelineActivities`
+- `ActivityCreatePanel.tsx`, `ActivityDetailPanel.tsx`: updated signatures; no `timelineId` in create request body
+- `DashboardPage.tsx`: Gantt guarded on `activeTimelineId` presence; `ActivityCreatePanel` restored `teamId` prop
+
+**Tests:**
+- All activity handler tests create a timeline first; routes updated to team-scoped path; `activityURL()` helper added
+- `activity_repo_test.go`: `makeActivity` uses `timelineID`; `ListByTimeline` throughout; added `TestActivityRepo_ListByTimeline_Filter`
+- `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before seeding activity
+- `user_repo_test.go`, `migrations_test.go`: raw INSERTs use `timeline_id`
+
+**Note:** TASKS.md had "UI Consistency" mislabeled as Phase 10.4.2; corrected to 10.4.3 per ROADMAP.
+
+**Exit criteria:**
+- ✅ `activities` table has no `team_id`; `timeline_id` is NOT NULL
+- ✅ `golangci-lint run` clean
+- ✅ `go test ./...` passes
+- ✅ `pnpm --filter web lint` clean
+- ⬜ Gantt loads activities (manual Docker verification)
+- ⬜ `PRAGMA foreign_key_check` on Docker DB
+
+---
+
 ## 2026-05-28 — /review-phase 10.4.1 fixes
 
 **Blockers resolved:**

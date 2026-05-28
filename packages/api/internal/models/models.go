@@ -6,7 +6,7 @@ package models
 
 import "time"
 
-// Activity is a scheduled item of work belonging to a Team. ArchivedAt is
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
 // non-nil when the activity is soft-deleted; list endpoints exclude archived
 // activities by default.
 //
@@ -17,8 +17,7 @@ import "time"
 // corresponding records in external calendar systems (VEVENT identifiers).
 type Activity struct {
 	ID                string     `db:"id"                  json:"id"`
-	TeamID            string     `db:"team_id"             json:"teamId"`
-	TimelineID        *string    `db:"timeline_id"         json:"timelineId,omitempty"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
 	Title             string     `db:"title"               json:"title"`
 	Description       *string    `db:"description"         json:"description,omitempty"`
 	Icon              *string    `db:"icon"                json:"icon,omitempty"`

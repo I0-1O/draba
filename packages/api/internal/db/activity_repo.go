@@ -23,13 +23,13 @@ func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
 func (r *ActivityRepo) Create(activity *models.Activity) error {
 	_, err := r.db.NamedExec(`
 		INSERT INTO activities (
-			id, team_id, timeline_id, title, description, icon, color,
+			id, timeline_id, title, description, icon, color,
 			start_at, end_at, all_day, status_id, parent_activity_id,
 			percent_complete, location, url, rrule,
 			caldav_uid, google_event_id,
 			created_by, created_at, updated_at
 		) VALUES (
-			:id, :team_id, :timeline_id, :title, :description, :icon, :color,
+			:id, :timeline_id, :title, :description, :icon, :color,
 			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
 			:percent_complete, :location, :url, :rrule,
 			:caldav_uid, :google_event_id,
@@ -148,18 +148,13 @@ func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
 	return ids, nil
 }
 
-// ListByTeam returns activities for a team, optionally filtered by timeline.
-// When timelineID is non-nil only activities for that timeline are returned.
-// When includeArchived is false archived rows are excluded. When from or to
-// are non-nil they bound the query by start_at.
+// ListByTimeline returns activities for a specific timeline. When
+// includeArchived is false archived rows are excluded. When from or to are
+// non-nil they bound the query by start_at.
 // AssignedMemberIDs is populated via a second query.
-func (r *ActivityRepo) ListByTeam(teamID string, timelineID *string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
-	query := `SELECT * FROM activities WHERE team_id = ?`
-	args := []any{teamID}
-	if timelineID != nil {
-		query += ` AND timeline_id = ?`
-		args = append(args, *timelineID)
-	}
+func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
+	query := `SELECT * FROM activities WHERE timeline_id = ?`
+	args := []any{timelineID}
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
 	}

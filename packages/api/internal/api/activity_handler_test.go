@@ -20,9 +20,10 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/ws"
 )
 
-// activityTestSetup creates a server, registers Alice, creates a team, and
-// returns the handler, Alice's token, and the team ID.
-func activityTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID string) {
+// activityTestSetup creates a server, registers Alice, creates a team and a
+// timeline, and returns the handler, Alice's token, the team ID, and the
+// timeline ID. Activities are now scoped to timelines.
+func activityTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID, timelineID string) {
 	t.Helper()
 	database, err := db.Open(":memory:")
 	require.NoError(t, err)
@@ -48,11 +49,29 @@ func activityTestSetup(t *testing.T) (srv http.Handler, aliceToken, teamID strin
 	var team map[string]any
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
 	teamID = team["id"].(string)
-	return srv, aliceToken, teamID
+
+	// Create a timeline so activities have a valid timeline_id.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name":      "Test Timeline",
+		"startDate": "2026-01-01",
+		"endDate":   "2026-12-31",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var timeline map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&timeline))
+	timelineID = timeline["id"].(string)
+
+	return srv, aliceToken, teamID, timelineID
+}
+
+// activityURL builds the team-scoped activity collection URL.
+func activityURL(teamID, timelineID string) string {
+	return fmt.Sprintf("/teams/%s/timelines/%s/activities", teamID, timelineID)
 }
 
 func TestCreateActivity_Success(t *testing.T) {
-	srv, token, teamID := activityTestSetup(t)
+	srv, token, teamID, timelineID := activityTestSetup(t)
 
 	body := map[string]any{
 		"title":   "Sprint Planning",
@@ -61,30 +80,30 @@ func TestCreateActivity_Success(t *testing.T) {
 		"allDay":  false,
 	}
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), body, token))
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID), body, token))
 
 	assert.Equal(t, http.StatusCreated, w.Code)
 	var activity map[string]any
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&activity))
 	assert.Equal(t, "Sprint Planning", activity["title"])
-	assert.Equal(t, teamID, activity["teamId"])
+	assert.Equal(t, timelineID, activity["timelineId"])
 	assert.NotEmpty(t, activity["id"])
 }
 
 func TestCreateActivity_MissingTitle(t *testing.T) {
-	srv, token, teamID := activityTestSetup(t)
+	srv, token, teamID, timelineID := activityTestSetup(t)
 
 	body := map[string]any{
 		"startAt": "2026-05-05T09:00:00Z",
 		"endAt":   "2026-05-05T10:00:00Z",
 	}
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), body, token))
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID), body, token))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestCreateActivity_EndBeforeStart(t *testing.T) {
-	srv, token, teamID := activityTestSetup(t)
+	srv, token, teamID, timelineID := activityTestSetup(t)
 
 	body := map[string]any{
 		"title":   "Backwards Activity",
@@ -92,12 +111,12 @@ func TestCreateActivity_EndBeforeStart(t *testing.T) {
 		"endAt":   "2026-05-05T09:00:00Z",
 	}
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), body, token))
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID), body, token))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestListActivities_NoFilter(t *testing.T) {
-	srv, token, teamID := activityTestSetup(t)
+	srv, token, teamID, timelineID := activityTestSetup(t)
 
 	for _, title := range []string{"Alpha", "Beta", "Gamma"} {
 		body := map[string]any{
@@ -106,12 +125,12 @@ func TestListActivities_NoFilter(t *testing.T) {
 			"endAt":   "2026-05-10T17:00:00Z",
 		}
 		w := httptest.NewRecorder()
-		srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), body, token))
+		srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID), body, token))
 		require.Equal(t, http.StatusCreated, w.Code)
 	}
 
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/activities", teamID), nil, token))
+	srv.ServeHTTP(w, authReq(http.MethodGet, activityURL(teamID, timelineID), nil, token))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var acts []map[string]any
@@ -120,7 +139,7 @@ func TestListActivities_NoFilter(t *testing.T) {
 }
 
 func TestListActivities_DateRangeFilter(t *testing.T) {
-	srv, token, teamID := activityTestSetup(t)
+	srv, token, teamID, timelineID := activityTestSetup(t)
 
 	// Three activities: one in April, two in May.
 	for _, startAt := range []string{
@@ -134,12 +153,12 @@ func TestListActivities_DateRangeFilter(t *testing.T) {
 			"endAt":   startAt[:11] + "17:00:00Z",
 		}
 		w := httptest.NewRecorder()
-		srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), body, token))
+		srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID), body, token))
 		require.Equal(t, http.StatusCreated, w.Code)
 	}
 
 	// Filter to May only.
-	url := fmt.Sprintf("/teams/%s/activities?from=2026-05-01T00:00:00Z&to=2026-05-31T23:59:59Z", teamID)
+	url := activityURL(teamID, timelineID) + "?from=2026-05-01T00:00:00Z&to=2026-05-31T23:59:59Z"
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodGet, url, nil, token))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -150,19 +169,19 @@ func TestListActivities_DateRangeFilter(t *testing.T) {
 }
 
 func TestListActivities_InvalidFromParam(t *testing.T) {
-	srv, token, teamID := activityTestSetup(t)
+	srv, token, teamID, timelineID := activityTestSetup(t)
 
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/activities?from=not-a-date", teamID), nil, token))
+	srv.ServeHTTP(w, authReq(http.MethodGet, activityURL(teamID, timelineID)+"?from=not-a-date", nil, token))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestUpdateActivity_Success(t *testing.T) {
-	srv, token, teamID := activityTestSetup(t)
+	srv, token, teamID, timelineID := activityTestSetup(t)
 
 	// Create an activity.
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID),
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID),
 		map[string]any{
 			"title":   "Original Title",
 			"startAt": "2026-05-05T09:00:00Z",
@@ -187,7 +206,7 @@ func TestUpdateActivity_Success(t *testing.T) {
 }
 
 func TestUpdateActivity_NotFound(t *testing.T) {
-	srv, token, _ := activityTestSetup(t)
+	srv, token, _, _ := activityTestSetup(t)
 
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodPatch, "/activities/nonexistent-id",
@@ -196,10 +215,10 @@ func TestUpdateActivity_NotFound(t *testing.T) {
 }
 
 func TestUpdateActivity_EndBeforeStart(t *testing.T) {
-	srv, token, teamID := activityTestSetup(t)
+	srv, token, teamID, timelineID := activityTestSetup(t)
 
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID),
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID),
 		map[string]any{
 			"title":   "Original",
 			"startAt": "2026-05-05T09:00:00Z",
@@ -216,10 +235,10 @@ func TestUpdateActivity_EndBeforeStart(t *testing.T) {
 }
 
 func TestDeleteActivity_Success(t *testing.T) {
-	srv, token, teamID := activityTestSetup(t)
+	srv, token, teamID, timelineID := activityTestSetup(t)
 
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID),
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID),
 		map[string]any{
 			"title":   "To Delete",
 			"startAt": "2026-05-05T09:00:00Z",
@@ -236,14 +255,14 @@ func TestDeleteActivity_Success(t *testing.T) {
 
 	// Activity no longer appears in the list.
 	w3 := httptest.NewRecorder()
-	srv.ServeHTTP(w3, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/activities", teamID), nil, token))
+	srv.ServeHTTP(w3, authReq(http.MethodGet, activityURL(teamID, timelineID), nil, token))
 	var acts []map[string]any
 	require.NoError(t, json.NewDecoder(w3.Body).Decode(&acts))
 	assert.Empty(t, acts)
 }
 
 func TestDeleteActivity_NotFound(t *testing.T) {
-	srv, token, _ := activityTestSetup(t)
+	srv, token, _, _ := activityTestSetup(t)
 
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, authReq(http.MethodDelete, "/activities/nonexistent-id", nil, token))
@@ -252,7 +271,7 @@ func TestDeleteActivity_NotFound(t *testing.T) {
 
 // activityTestSetupWithBus is like activityTestSetup but also returns the bus
 // so tests can assert that activity mutations publish the correct messages.
-func activityTestSetupWithBus(t *testing.T) (srv http.Handler, aliceToken, teamID string, bus *events.Bus) {
+func activityTestSetupWithBus(t *testing.T) (srv http.Handler, aliceToken, teamID, timelineID string, bus *events.Bus) {
 	t.Helper()
 	database, err := db.Open(":memory:")
 	require.NoError(t, err)
@@ -278,16 +297,28 @@ func activityTestSetupWithBus(t *testing.T) (srv http.Handler, aliceToken, teamI
 	var team map[string]any
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
 	teamID = team["id"].(string)
-	return srv, aliceToken, teamID, bus
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name":      "Bus Timeline",
+		"startDate": "2026-01-01",
+		"endDate":   "2026-12-31",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var timeline map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&timeline))
+	timelineID = timeline["id"].(string)
+
+	return srv, aliceToken, teamID, timelineID, bus
 }
 
 func TestCreateActivity_PublishesBusMessage(t *testing.T) {
-	srv, token, teamID, bus := activityTestSetupWithBus(t)
+	srv, token, teamID, timelineID, bus := activityTestSetupWithBus(t)
 	ch := bus.Subscribe()
 	defer bus.Unsubscribe(ch)
 
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), map[string]any{
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID), map[string]any{
 		"title": "Bus Test", "startAt": "2026-05-05T09:00:00Z", "endAt": "2026-05-05T10:00:00Z",
 	}, token))
 	require.Equal(t, http.StatusCreated, w.Code)
@@ -302,10 +333,10 @@ func TestCreateActivity_PublishesBusMessage(t *testing.T) {
 }
 
 func TestUpdateActivity_PublishesBusMessage(t *testing.T) {
-	srv, token, teamID, bus := activityTestSetupWithBus(t)
+	srv, token, teamID, timelineID, bus := activityTestSetupWithBus(t)
 
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), map[string]any{
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID), map[string]any{
 		"title": "Original", "startAt": "2026-05-05T09:00:00Z", "endAt": "2026-05-05T10:00:00Z",
 	}, token))
 	require.Equal(t, http.StatusCreated, w.Code)
@@ -330,10 +361,10 @@ func TestUpdateActivity_PublishesBusMessage(t *testing.T) {
 }
 
 func TestDeleteActivity_PublishesBusMessage(t *testing.T) {
-	srv, token, teamID, bus := activityTestSetupWithBus(t)
+	srv, token, teamID, timelineID, bus := activityTestSetupWithBus(t)
 
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), map[string]any{
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID), map[string]any{
 		"title": "To Delete", "startAt": "2026-05-05T09:00:00Z", "endAt": "2026-05-05T10:00:00Z",
 	}, token))
 	require.Equal(t, http.StatusCreated, w.Code)
@@ -358,11 +389,11 @@ func TestDeleteActivity_PublishesBusMessage(t *testing.T) {
 }
 
 func TestActivityCRUD_NonMemberForbidden(t *testing.T) {
-	srv, aliceToken, teamID := activityTestSetup(t)
+	srv, aliceToken, teamID, timelineID := activityTestSetup(t)
 
 	// Create an activity as Alice.
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID),
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID),
 		map[string]any{
 			"title":   "Alice's Activity",
 			"startAt": "2026-05-05T09:00:00Z",
@@ -381,8 +412,8 @@ func TestActivityCRUD_NonMemberForbidden(t *testing.T) {
 		method, path string
 		body         any
 	}{
-		{http.MethodGet, fmt.Sprintf("/teams/%s/activities", teamID), nil},
-		{http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), map[string]any{
+		{http.MethodGet, activityURL(teamID, timelineID), nil},
+		{http.MethodPost, activityURL(teamID, timelineID), map[string]any{
 			"title": "x", "startAt": time.Now().Format(time.RFC3339),
 			"endAt": time.Now().Add(time.Hour).Format(time.RFC3339),
 		}},

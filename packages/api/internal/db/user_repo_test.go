@@ -18,12 +18,16 @@ func TestRevokeUser_InactivatesMembershipWithAssignmentHistory(t *testing.T) {
 	memberID := "mem-rvu-history"
 	seedTeamMember(t, database, memberID, teamID, userID)
 
+	tlRepo := db.NewTimelineRepo(database)
+	tl := makeTimeline("tl-rvu-history", teamID, userID)
+	require.NoError(t, tlRepo.Create(tl))
+
 	// Seed an activity and an assignment row to simulate assignment history.
 	actID := "act-rvu-history"
 	_, err := database.Exec(
-		`INSERT INTO activities (id, team_id, title, start_at, end_at, created_by, created_at, updated_at)
+		`INSERT INTO activities (id, timeline_id, title, start_at, end_at, created_by, created_at, updated_at)
 		 VALUES (?, ?, 'Test', datetime('now'), datetime('now'), ?, datetime('now'), datetime('now'))`,
-		actID, teamID, userID,
+		actID, tl.ID, userID,
 	)
 	require.NoError(t, err)
 	_, err = database.Exec(
@@ -99,11 +103,15 @@ func TestRevokeUser_MixedMemberships(t *testing.T) {
 	require.NoError(t, err)
 
 	// Seed assignment on team1 membership only.
+	tlRepo2 := db.NewTimelineRepo(database)
+	tl2 := makeTimeline("tl-rvu-mix", team1ID, userID)
+	require.NoError(t, tlRepo2.Create(tl2))
+
 	actID := "act-rvu-mix"
 	_, err = database.Exec(
-		`INSERT INTO activities (id, team_id, title, start_at, end_at, created_by, created_at, updated_at)
+		`INSERT INTO activities (id, timeline_id, title, start_at, end_at, created_by, created_at, updated_at)
 		 VALUES (?, ?, 'Task', datetime('now'), datetime('now'), ?, datetime('now'), datetime('now'))`,
-		actID, team1ID, userID,
+		actID, tl2.ID, userID,
 	)
 	require.NoError(t, err)
 	_, err = database.Exec(

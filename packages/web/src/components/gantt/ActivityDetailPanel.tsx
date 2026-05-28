@@ -27,7 +27,7 @@ interface Props {
   open: boolean
   members: Member[]
   teamId: string
-  timelineId?: string
+  timelineId: string
   onClose: () => void
 }
 
@@ -89,10 +89,10 @@ const INPUT: React.CSSProperties = {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function ActivityDetailPanel({ event, open, members, teamId, timelineId, onClose }: Props) {
-  const updateMutation = useUpdateActivity(teamId)
-  const deleteMutation = useDeleteActivity(teamId)
+  const updateMutation = useUpdateActivity(timelineId)
+  const deleteMutation = useDeleteActivity(timelineId)
   const formatDate = useFormatDate()
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId ?? '')
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
 
   const [title, setTitle] = useState(event?.title ?? '')
   const [description, setDescription] = useState(event?.description ?? '')

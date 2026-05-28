@@ -22,8 +22,8 @@ type PatchTimelineInput = components['schemas']['PatchTimelineInput']
 /** Query key factory — centralises cache key strings. */
 export const keys = {
   myTeams: () => ['teams'] as const,
-  teamActivities: (teamId: string, from?: string, to?: string, timelineId?: string) =>
-    ['teams', teamId, 'activities', { from, to, timelineId }] as const,
+  timelineActivities: (timelineId: string, from?: string, to?: string) =>
+    ['timelines', timelineId, 'activities', { from, to }] as const,
   teamMembers: (teamId: string) =>
     ['teams', teamId, 'members'] as const,
   teamTimelines: (teamId: string) =>
@@ -65,22 +65,21 @@ export function useTeamTimelines(teamId: string) {
   })
 }
 
-/** Fetches activities for a team, optionally filtered by timeline and date range. */
-export function useTeamActivities(teamId: string, from?: string, to?: string, timelineId?: string) {
+/** Fetches activities for a timeline, optionally bounded by date range. */
+export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
   const { getAccessToken } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
 
   return useQuery({
-    queryKey: keys.teamActivities(teamId, from, to, timelineId),
+    queryKey: keys.timelineActivities(timelineId, from, to),
     queryFn: async () => {
       const params = new URLSearchParams()
       if (from) params.set('from', from)
       if (to) params.set('to', to)
-      if (timelineId) params.set('timelineId', timelineId)
       const qs = params.toString()
-      return (await authFetch<Activity[] | null>(`/teams/${teamId}/activities${qs ? `?${qs}` : ''}`)) ?? []
+      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
     },
-    enabled: Boolean(teamId),
+    enabled: Boolean(teamId) && Boolean(timelineId),
   })
 }
 
@@ -119,8 +118,11 @@ export function useTeamActivitySync(
 
       if (msg.type === 'activity.created') {
         const incoming = msg.payload as Activity
+        // Target all timeline-scoped activity cache entries by using the
+        // timelineId from the incoming activity payload.
+        if (!incoming.timelineId) return
         client.setQueriesData<Activity[]>(
-          { queryKey: ['teams', teamId, 'activities'] },
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
           (old) => {
             if (!old) return old
             // Guard against duplicate delivery.
@@ -130,8 +132,9 @@ export function useTeamActivitySync(
         )
       } else if (msg.type === 'activity.updated') {
         const incoming = msg.payload as Activity
+        if (!incoming.timelineId) return
         client.setQueriesData<Activity[]>(
-          { queryKey: ['teams', teamId, 'activities'] },
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
           (old) => {
             if (!old) return old
             return old.map((a) => {
@@ -145,8 +148,12 @@ export function useTeamActivitySync(
         )
       } else if (msg.type === 'activity.deleted') {
         const { id } = msg.payload as { id: string }
+        // activity.deleted payload only has id — invalidate all timeline
+        // activity queries for this team so caches stay consistent.
+        client.invalidateQueries({ queryKey: ['timelines'] })
+        // Optimistically remove from all cached timeline activity lists.
         client.setQueriesData<Activity[]>(
-          { queryKey: ['teams', teamId, 'activities'] },
+          { queryKey: ['timelines'] },
           (old) => old?.filter((a) => a.id !== id),
         )
       }
@@ -165,7 +172,6 @@ interface CreateActivityInput {
   title: string
   startAt: string
   endAt: string
-  timelineId?: string
   description?: string | null
   color?: string | null
   icon?: string | null
@@ -189,21 +195,21 @@ interface UpdateActivityInput {
   }
 }
 
-/** Creates an activity and inserts it directly into the cache. */
-export function useCreateActivity(teamId: string) {
+/** Creates an activity in a timeline and inserts it directly into the cache. */
+export function useCreateActivity(teamId: string, timelineId: string) {
   const { getAccessToken } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
   const client = useQueryClient()
 
   return useMutation({
     mutationFn: (input: CreateActivityInput) =>
-      authFetch<Activity>(`/teams/${teamId}/activities`, {
+      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
         method: 'POST',
         body: JSON.stringify(input),
       }),
     onSuccess: (created) => {
       client.setQueriesData<Activity[]>(
-        { queryKey: ['teams', teamId, 'activities'] },
+        { queryKey: ['timelines', timelineId, 'activities'] },
         (old) => {
           if (!old) return old
           // WS self-echo may also insert this activity; deduplicate by id.
@@ -216,7 +222,7 @@ export function useCreateActivity(teamId: string) {
 }
 
 /** PATCHes an activity and optimistically updates the cache. */
-export function useUpdateActivity(teamId: string) {
+export function useUpdateActivity(timelineId: string) {
   const { getAccessToken } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
   const client = useQueryClient()
@@ -228,9 +234,9 @@ export function useUpdateActivity(teamId: string) {
         body: JSON.stringify(patch),
       }),
     onSuccess: (updated) => {
-      // Update the activity in all matching cache entries for the team.
+      // Update the activity in all matching cache entries for the timeline.
       client.setQueriesData<Activity[]>(
-        { queryKey: ['teams', teamId, 'activities'] },
+        { queryKey: ['timelines', timelineId, 'activities'] },
         (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
       )
     },
@@ -324,7 +330,7 @@ export function useUnarchiveTeam() {
 }
 
 /** Deletes an activity and removes it from the cache. */
-export function useDeleteActivity(teamId: string) {
+export function useDeleteActivity(timelineId: string) {
   const { getAccessToken } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
   const client = useQueryClient()
@@ -334,7 +340,7 @@ export function useDeleteActivity(teamId: string) {
       authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
     onSuccess: (_data, activityId) => {
       client.setQueriesData<Activity[]>(
-        { queryKey: ['teams', teamId, 'activities'] },
+        { queryKey: ['timelines', timelineId, 'activities'] },
         (old) => old?.filter((a) => a.id !== activityId),
       )
     },

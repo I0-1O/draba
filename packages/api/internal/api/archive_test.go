@@ -12,11 +12,11 @@ import (
 )
 
 func TestArchiveActivity_HiddenByDefaultRestorableWithFlag(t *testing.T) {
-	srv, token, teamID := activityTestSetup(t)
+	srv, token, teamID, timelineID := activityTestSetup(t)
 
 	// Create an activity.
 	wc := httptest.NewRecorder()
-	srv.ServeHTTP(wc, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), map[string]any{
+	srv.ServeHTTP(wc, authReq(http.MethodPost, activityURL(teamID, timelineID), map[string]any{
 		"title":   "To archive",
 		"startAt": "2026-05-05T09:00:00Z",
 		"endAt":   "2026-05-05T10:00:00Z",
@@ -36,7 +36,7 @@ func TestArchiveActivity_HiddenByDefaultRestorableWithFlag(t *testing.T) {
 
 	// Default list excludes archived activities.
 	wl := httptest.NewRecorder()
-	srv.ServeHTTP(wl, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/activities", teamID), nil, token))
+	srv.ServeHTTP(wl, authReq(http.MethodGet, activityURL(teamID, timelineID), nil, token))
 	require.Equal(t, http.StatusOK, wl.Code)
 	var defaultList []map[string]any
 	require.NoError(t, json.NewDecoder(wl.Body).Decode(&defaultList))
@@ -44,7 +44,7 @@ func TestArchiveActivity_HiddenByDefaultRestorableWithFlag(t *testing.T) {
 
 	// ?archived=true restores visibility.
 	wl2 := httptest.NewRecorder()
-	srv.ServeHTTP(wl2, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/activities?archived=true", teamID), nil, token))
+	srv.ServeHTTP(wl2, authReq(http.MethodGet, activityURL(teamID, timelineID)+"?archived=true", nil, token))
 	require.Equal(t, http.StatusOK, wl2.Code)
 	var withArchived []map[string]any
 	require.NoError(t, json.NewDecoder(wl2.Body).Decode(&withArchived))
@@ -61,7 +61,7 @@ func TestArchiveActivity_HiddenByDefaultRestorableWithFlag(t *testing.T) {
 
 	// Now visible by default.
 	wl3 := httptest.NewRecorder()
-	srv.ServeHTTP(wl3, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/activities", teamID), nil, token))
+	srv.ServeHTTP(wl3, authReq(http.MethodGet, activityURL(teamID, timelineID), nil, token))
 	require.Equal(t, http.StatusOK, wl3.Code)
 	var afterUnarchive []map[string]any
 	require.NoError(t, json.NewDecoder(wl3.Body).Decode(&afterUnarchive))

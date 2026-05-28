@@ -367,7 +367,7 @@ function DashboardShell() {
 
         {/* Content area */}
         <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'gantt' && teamId ? (
+          {view === 'gantt' && teamId && activeTimelineId ? (
             <GanttView
               teamId={teamId}
               timelineId={activeTimelineId}
@@ -391,7 +391,7 @@ function DashboardShell() {
               }}
               onMembersLoaded={setGanttMembers}
             />
-          ) : view === 'gantt' && !teamId ? (
+          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
               <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
             </div>
@@ -411,7 +411,7 @@ function DashboardShell() {
         event={selectedApiActivity}
         members={ganttMembers}
         teamId={teamId}
-        timelineId={activeTimelineId}
+        timelineId={activeTimelineId ?? ''}
         onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null) }}
       />
 

@@ -291,11 +291,11 @@ components:
 
     Activity:
       type: object
-      required: [id, teamId, title, startAt, endAt, allDay, createdBy, createdAt, updatedAt]
+      required: [id, timelineId, title, startAt, endAt, allDay, createdBy, createdAt, updatedAt]
       properties:
         id:
           type: string
-        teamId:
+        timelineId:
           type: string
         title:
           type: string
@@ -1937,13 +1937,18 @@ paths:
 
   # ── Activities ───────────────────────────────────────────────
 
-  /teams/{id}/activities:
+  /teams/{id}/timelines/{timelineId}/activities:
     post:
       operationId: createActivity
-      summary: Create an activity in a team
+      summary: Create an activity in a timeline
       tags: [activities]
       parameters:
         - $ref: "#/components/parameters/teamId"
+        - name: timelineId
+          in: path
+          required: true
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -2016,11 +2021,16 @@ paths:
 
     get:
       operationId: listActivities
-      summary: List activities for a team
+      summary: List activities for a timeline
       description: Archived activities are excluded by default. Optional date-range filter on startAt.
       tags: [activities]
       parameters:
         - $ref: "#/components/parameters/teamId"
+        - name: timelineId
+          in: path
+          required: true
+          schema:
+            type: string
         - name: from
           in: query
           required: false

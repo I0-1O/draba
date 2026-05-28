@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short._
 
-**Last updated:** 2026-05-28 (Phase 10.4.1 complete — automated checks pass)
+**Last updated:** 2026-05-28 (Phase 10.4.2 complete — automated checks pass)
 
 ---
 
@@ -18,8 +18,38 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.2 | Status Templates & Timeline Statuses | ✅ | ✅ Docker verified |
 | 10.3 | Timelines — Full CRUD (API + UI) | ✅ | ⬜ needs Docker verification |
 | 10.4.1 | Preference Consumption & Session Handling | ✅ | ⬜ needs Docker verification |
+| 10.4.2 | Activity Schema Normalization | ✅ | ⬜ needs Docker verification |
 
-Next phase to build: **10.4.2** — Activity Schema Normalization (drop team_id, harden timeline_id NOT NULL). Then **10.4.3** — UI Consistency (modals, sidebar, toolbar). Backup moved to Phase 17.
+Next phase to build: **10.4.3** — UI Consistency (modals, sidebar, toolbar). Backup moved to Phase 17.
+
+---
+
+## Phase 10.4.2 — Activity Schema Normalization (2026-05-28 — not yet Docker-verified)
+
+**Backend:**
+- Migration 015: backfill NULL `timeline_id` rows, rebuild `activities` without `team_id`, `timeline_id` now NOT NULL with CASCADE
+- `models.Activity`: `TeamID` field removed; `TimelineID` changed from `*string` to `string`
+- `ActivityRepo.Create`: removed `team_id` from INSERT
+- `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: simple `WHERE timeline_id = ?` query
+- `handleCreateActivity`, `handleListActivities`: moved to `POST/GET /teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix to avoid Go 1.22 mux conflict with `/timelines/share/{token}`)
+- `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: derive `TeamID` from timeline lookup for auth + bus publish
+- OpenAPI: `Activity` schema replaces `teamId` with `timelineId` (required); endpoints updated to team-scoped path; TS types regenerated
+
+**Frontend:**
+- `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)`: URL `/teams/${teamId}/timelines/${timelineId}/activities`; cache key `['timelines', timelineId, 'activities']`
+- `useCreateActivity(teamId, timelineId)`, `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache keys updated
+- `useTeamActivitySync`: WS updates now target `['timelines', incoming.timelineId, 'activities']` cache entries
+- `GanttView`: `timelineId` prop now required (was optional); uses `useTimelineActivities`
+- `ActivityCreatePanel`: `teamId` prop restored (needed for URL); no `timelineId` in request body
+- `ActivityDetailPanel`: `timelineId` prop is now required (was optional)
+
+**Tests:**
+- `activity_repo_test.go`: all tests seed a timeline; `makeActivity` uses `timelineID`; `ListByTeam` → `ListByTimeline`; added `TestActivityRepo_ListByTimeline_Filter`
+- `activity_handler_test.go`: `activityTestSetup` creates timeline; all routes updated; `activityURL` helper added
+- `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes
+- `user_repo_test.go`, `migrations_test.go`: raw activity INSERTs use `timeline_id`
+
+**Note:** TASKS.md had UI Consistency labeled as Phase 10.4.2; corrected to 10.4.3 per ROADMAP.
 
 ---
 

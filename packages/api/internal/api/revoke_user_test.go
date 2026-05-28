@@ -106,9 +106,18 @@ func TestRevokeUser_WithAssignments_InactivatesMembership(t *testing.T) {
 	}
 	require.NotEmpty(t, bobMemberID)
 
-	// Create an activity and assign it to Bob.
+	// Create a timeline and an activity, then assign the activity to Bob.
+	wTL := httptest.NewRecorder()
+	srv.ServeHTTP(wTL, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "Sprint", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, wTL.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(wTL.Body).Decode(&tl))
+	tlID := tl["id"].(string)
+
 	wAct := httptest.NewRecorder()
-	srv.ServeHTTP(wAct, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/activities", teamID), map[string]any{
+	srv.ServeHTTP(wAct, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines/%s/activities", teamID, tlID), map[string]any{
 		"title":   "Sprint Planning",
 		"startAt": "2026-06-01T09:00:00Z",
 		"endAt":   "2026-06-01T17:00:00Z",

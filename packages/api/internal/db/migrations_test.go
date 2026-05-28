@@ -242,8 +242,12 @@ func TestMigrate_HexStorageRoundTrip(t *testing.T) {
 		`INSERT INTO teams (id, name, slug) VALUES ('t1', 'Team', 'team-rt')`)
 	require.NoError(t, err)
 	_, err = database.Exec(
-		`INSERT INTO activities (id, team_id, created_by, title, start_at, end_at, color)
-		 VALUES ('a1', 't1', 'u1', 'Act', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', '#3B82F6')`)
+		`INSERT INTO timelines (id, team_id, name, start_date, end_date, share_token, ical_token, created_by)
+		 VALUES ('tl1', 't1', 'RT Timeline', '2026-01-01', '2026-12-31', 'share-rt', 'ical-rt', 'u1')`)
+	require.NoError(t, err)
+	_, err = database.Exec(
+		`INSERT INTO activities (id, timeline_id, created_by, title, start_at, end_at, color)
+		 VALUES ('a1', 'tl1', 'u1', 'Act', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', '#3B82F6')`)
 	require.NoError(t, err)
 
 	var color string

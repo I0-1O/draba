@@ -41,7 +41,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | ✅ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | 🔄 |
 | 10.4.1 | [Preference Consumption & Session Handling](#phase-1041--preference-consumption--session-handling) | S–M — 1–2 days | 🔄 |
-| 10.4.2 | [Activity Schema Normalization — Drop team_id](#phase-1042--activity-schema-normalization--drop-team_id) | S — ½–1 day | ⬜ |
+| 10.4.2 | [Activity Schema Normalization — Drop team_id](#phase-1042--activity-schema-normalization--drop-team_id) | S — ½–1 day | ✅ |
 | 10.4.3 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1043--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
@@ -987,7 +987,7 @@ Wires the user and instance preferences stored in 10.1.3 into the rest of the sy
 ---
 
 ### Phase 10.4.2 — Activity Schema Normalization — Drop team_id
-**Status:** ⬜ | **Effort:** S (½–1 day)
+**Status:** ✅ Done — 2026-05-28 | **Effort:** S (½–1 day)
 
 Removes `activities.team_id` now that `timeline_id` is stored and the relationship `activity → timeline → team` is sufficient. `team_id` is a transitive dependency (`activity_id → timeline_id → team_id`) — a violation of 3NF that creates two sources of truth for the same fact. If timelines are ever moved between teams, every activity row would also need updating or the data silently lies.
 

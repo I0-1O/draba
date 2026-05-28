@@ -726,7 +726,56 @@ Wires user and instance preferences (stored in 10.1.3) into views. Fixes the bro
 
 ---
 
-### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.2)
+### Activity Schema Normalization — Drop team_id (Phase 10.4.2)
+Removes `activities.team_id` (redundant now that `timeline_id` is stored). Hardens `timeline_id` to NOT NULL. Moves activity routes to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix avoids Go 1.22 mux conflict with `GET /timelines/share/{token}`).
+
+**Schema (migration 015):**
+- [x] Backfill NULL `timeline_id` rows (assign to team's oldest timeline) — 2026-05-28
+- [x] Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE` — 2026-05-28
+- [x] Recreate `idx_activities_timeline_id` on the new table — 2026-05-28
+
+**API — Go:**
+- [x] `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string` — 2026-05-28
+- [x] `ActivityRepo.Create`: remove `team_id` from INSERT — 2026-05-28
+- [x] `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: query becomes `WHERE timeline_id = ?` — 2026-05-28
+- [x] `handleCreateActivity`, `handleListActivities`: path params are `teamId` + `timelineId`; look up timeline to verify ownership — 2026-05-28
+- [x] `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: replace `activity.TeamID` with timeline lookup — 2026-05-28
+- [x] WebSocket broadcasts: derive `TeamID` from timeline lookup — 2026-05-28
+- [x] Move activity routes: `POST /teams/{id}/timelines/{timelineId}/activities`, `GET /teams/{id}/timelines/{timelineId}/activities` — 2026-05-28
+
+**OpenAPI + types:**
+- [x] Update `Activity` schema: replace `teamId` with `timelineId` (required, non-nullable) — 2026-05-28
+- [x] Update activity endpoints to new team-scoped path — 2026-05-28
+- [x] Regenerate TypeScript types — 2026-05-28
+
+**Frontend:**
+- [x] Rename `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)` — cache key `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `useCreateActivity(teamId, timelineId)`: URL becomes `/teams/${teamId}/timelines/${timelineId}/activities`; no `timelineId` in request body — 2026-05-28
+- [x] `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache key updated — 2026-05-28
+- [x] `useTeamActivitySync`: update cache key lookups to `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `GanttView`: use `useTimelineActivities`; `timelineId` prop is now required (not optional) — 2026-05-28
+- [x] `ActivityCreatePanel`: `teamId` + `timelineId` passed to `useCreateActivity`; no `timelineId` in body — 2026-05-28
+- [x] `ActivityDetailPanel`: `timelineId` required; passed to `useUpdateActivity`/`useDeleteActivity` — 2026-05-28
+- [x] `DashboardPage`: updated GanttView/ActivityCreatePanel/ActivityDetailPanel prop signatures — 2026-05-28
+
+**Tests:**
+- [x] `activity_repo_test.go`: `makeActivity` uses `timelineID`; all `ListByTeam` calls → `ListByTimeline` — 2026-05-28
+- [x] Added `TestActivityRepo_ListByTimeline_Filter` — 2026-05-28
+- [x] `activity_handler_test.go`: `activityTestSetup` creates a timeline; all routes updated — 2026-05-28
+- [x] `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes — 2026-05-28
+- [x] `user_repo_test.go`, `migrations_test.go`: activity INSERTs use `timeline_id` instead of `team_id` — 2026-05-28
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-28
+- [x] `go test ./...` passes — 2026-05-28
+- [x] `pnpm --filter web lint` clean — 2026-05-28
+- [ ] Manual: Gantt view loads activities for the active timeline
+- [ ] Manual: Creating an activity from the panel associates it with the correct timeline
+- [ ] Manual: `PRAGMA foreign_key_check` returns no rows after migration on Docker DB
+
+---
+
+### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.3) [was mislabeled 10.4.2]
 Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
 
 **Inline name editing (3 → 1):**

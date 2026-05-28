@@ -13,7 +13,7 @@
 
 import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
 import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTeamActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
 import type { components } from '@draba/shared';
 import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
 import { resolveColorHex } from '@/components/identity/identity-constants';
@@ -35,8 +35,8 @@ type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
 
 interface Props {
   teamId: string;
-  /** Active timeline ID — used to filter activities to this timeline. */
-  timelineId?: string;
+  /** Active timeline ID — activities are fetched scoped to this timeline. */
+  timelineId: string;
   /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
   startDate?: string;
   /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
@@ -251,7 +251,7 @@ export default function GanttView({
   onMembersLoaded,
   onSelectApiActivity,
 }: Props) {
-  const updateActivity = useUpdateActivity(teamId);
+  const updateActivity = useUpdateActivity(timelineId);
   const today = todayMidnight();
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(800);
@@ -313,7 +313,7 @@ export default function GanttView({
   const to = viewEnd.toISOString();
 
   const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTeamActivities(teamId, from, to, timelineId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
 
   const members: Member[] = useMemo(
     () => apiMembers.map((m, i) => toMember(m, i)),

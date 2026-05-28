@@ -2,7 +2,7 @@
  * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
  *
  * Defaults come from the drag selection: start/end date and the lane member.
- * Submits via POST /teams/:id/activities with the active timelineId.
+ * Submits via POST /timelines/:id/activities.
  */
 
 import { useState, useEffect } from 'react'
@@ -45,7 +45,7 @@ export default function ActivityCreatePanel({
   defaultMemberId,
   onClose,
 }: Props) {
-  const createMutation = useCreateActivity(teamId)
+  const createMutation = useCreateActivity(teamId, timelineId)
 
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -85,7 +85,6 @@ export default function ActivityCreatePanel({
         title: titleTrimmed,
         startAt: `${startDate}T00:00:00Z`,
         endAt: `${endDate}T00:00:00Z`,
-        timelineId: timelineId || undefined,
         description: description.trim() || null,
         color: identity.color,
         icon: identity.icon,
