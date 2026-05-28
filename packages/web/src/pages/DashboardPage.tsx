@@ -62,8 +62,6 @@ function DashboardShell() {
   const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
   const [ganttMembers, setGanttMembers] = useState<Member[]>([])
   const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
-  const [activeTimelineColor, setActiveTimelineColor] = useState('#1A97A2')
-  const [activeTimelineName, setActiveTimelineName] = useState('Q1 2027 Roadmap')
   const [filterEditorOpen, setFilterEditorOpen] = useState(false)
   // Gantt toolbar state
   const [groupBy, setGroupBy] = useState<GroupBy>('none')
@@ -176,6 +174,9 @@ function DashboardShell() {
     setActiveTimelineId(exists ? saved : timelines[0].id)
   }, [timelines, globalPrefsSettled, globalPrefMap])
   const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
+  // Derived so they stay in sync after edits without needing separate state.
+  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
+  const activeTimelineName = activeTimeline?.name ?? ''
 
   const handleTimelineChange = useCallback((id: string) => {
     prefsAppliedForTimeline.current = null
@@ -245,8 +246,6 @@ function DashboardShell() {
       <Sidebar
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(c => !c)}
-        onActiveColorChange={setActiveTimelineColor}
-        onActiveNameChange={setActiveTimelineName}
         apiTimelines={timelines}
         archivedTimelines={archivedTimelines}
         activeTimelineId={activeTimelineId}
@@ -257,7 +256,6 @@ function DashboardShell() {
           setEditingTimeline(tl ?? null)
           setTimelineModalMode('edit')
         }}
-        onUnarchiveTimeline={id => unarchiveTimeline.mutate(id)}
         onNewActivity={() => {
           const today = new Date().toISOString().slice(0, 10)
           setSelectedActivityId(null)
@@ -465,10 +463,10 @@ function DashboardShell() {
           mode={timelineModalMode}
           teamId={teamId}
           timeline={editingTimeline ?? undefined}
+          canAdmin={canEditTeam}
           onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
-          onCreated={created => {
-            setActiveTimelineId(created.id)
-          }}
+          onCreated={created => setActiveTimelineId(created.id)}
+          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
         />
       )}
     </div>

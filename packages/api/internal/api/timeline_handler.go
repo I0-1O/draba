@@ -54,19 +54,32 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req CreateTimelineJSONBody
+	var req createTimelineBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
 	}
 
-	if req.Name == "" {
+	if strings.TrimSpace(req.Name) == "" {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
 		return
 	}
+	if req.StartDate == "" || req.EndDate == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startDate and endDate are required")
+		return
+	}
 
-	startDate := req.StartDate.Time
-	endDate := req.EndDate.Time
+	const dateLayout = "2006-01-02"
+	startDate, err := time.Parse(dateLayout, req.StartDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startDate format")
+		return
+	}
+	endDate, err := time.Parse(dateLayout, req.EndDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endDate format")
+		return
+	}
 
 	if endDate.Before(startDate) {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
@@ -75,16 +88,20 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	timeline := &models.Timeline{
-		ID:         newID(),
-		TeamID:     teamID,
-		Name:       req.Name,
-		StartDate:  startDate.Format("2006-01-02"),
-		EndDate:    endDate.Format("2006-01-02"),
-		ShareToken: newID(),
-		IcalToken:  newID(),
-		CreatedBy:  claims.UserID,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:          newID(),
+		TeamID:      teamID,
+		Name:        strings.TrimSpace(req.Name),
+		Description: req.Description,
+		Notes:       req.Notes,
+		StartDate:   startDate.Format(dateLayout),
+		EndDate:     endDate.Format(dateLayout),
+		Color:       req.Color,
+		Icon:        req.Icon,
+		ShareToken:  newID(),
+		IcalToken:   newID(),
+		CreatedBy:   claims.UserID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	if err := s.timelines.Create(timeline); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
@@ -97,8 +114,8 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy the team's first status template's items into live statuses for this timeline.
-	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID); err != nil {
+	// Copy the selected (or first) status template into live statuses for this timeline.
+	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID, req.TemplateID); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
 		return
 	}
@@ -271,6 +288,12 @@ func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Icon != nil {
 		timeline.Icon = req.Icon
+	}
+	if req.Description != nil {
+		timeline.Description = req.Description
+	}
+	if req.Notes != nil {
+		timeline.Notes = req.Notes
 	}
 	timeline.UpdatedAt = time.Now().UTC()
 

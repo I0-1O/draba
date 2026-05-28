@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short._
 
-**Last updated:** 2026-05-27 (Phase 10.3 implemented)
+**Last updated:** 2026-05-27 (Phase 10.3 UI bug fixes)
 
 ---
 
@@ -19,6 +19,34 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.3 | Timelines — Full CRUD (API + UI) | ✅ | ⬜ needs Docker verification |
 
 Next phase to build: **10.4** — Preference Consumption, Branding & Backup.
+
+---
+
+## Timeline UI Bug Fixes (2026-05-27 — not yet Docker-verified)
+
+**Backend:**
+- Migration 013: `description TEXT` and `notes TEXT` added to `timelines`
+- `Timeline` model: added `Description *string`, `Notes *string`
+- `timeline_repo.go`: `Create` INSERT and `Update` SET include description/notes/color/icon
+- `timeline_types.go`: replaced generated `CreateTimelineJSONBody` with custom `createTimelineBody` (adds color, icon, description, notes, templateId); added description/notes to `PatchTimelineJSONBody`
+- `timeline_handler.go`: `handleCreateTimeline` and `handleUpdateTimeline` handle all new fields
+- `status_repo.go`: `CopyTemplateToTimeline` accepts optional `templateID *string`
+- OpenAPI + TS types regenerated
+
+**Frontend (13 issues fixed):**
+1. Sidebar icon: `timelines` map now stores `t.icon ?? null`; `TimelineItem` passes real icon to `Badge`
+2. Active timeline name/color: no longer stale state — derived from `activeTimeline` object (live from query cache)
+3. Template picker: shows all templates as clickable cards; `selectedTemplateId` sent to API
+4. Access tab removed from TimelineModal (all team members have access to all timelines)
+5. Name edit moved to modal header (editable inline input next to IdentityWidget)
+6. Description and Notes textarea fields added to Settings tab
+7. Clicking outside modal no longer closes it (overlay click handler removed)
+8. Archived timelines in sidebar show gear icon (opens edit modal) instead of inline "Restore" button; modal shows "Restore" button when `timeline.archivedAt` is set
+9. Settings gear on timelines gated behind `canEditTeam`; `canEdit` prop on `TimelineItem`
+10. Add-status form shows IdentityWidget + is_closed checkbox before submission
+11. `PATCH /statuses/{id}` 404 fixed: added `/statuses` to Vite proxy
+12. `DELETE /statuses/{id}` 404 fixed: same proxy fix
+13. After creating a timeline it becomes active — derived color/name fix handles this automatically
 
 ---
 

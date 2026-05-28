@@ -24,11 +24,13 @@ func NewTimelineRepo(db *sqlx.DB) *TimelineRepo {
 func (r *TimelineRepo) Create(t *models.Timeline) error {
 	_, err := r.db.NamedExec(`
 		INSERT INTO timelines (
-			id, team_id, name, start_date, end_date,
+			id, team_id, name, description, notes,
+			start_date, end_date, color, icon,
 			share_token, ical_token,
 			created_by, created_at, updated_at
 		) VALUES (
-			:id, :team_id, :name, :start_date, :end_date,
+			:id, :team_id, :name, :description, :notes,
+			:start_date, :end_date, :color, :icon,
 			:share_token, :ical_token,
 			:created_by, :created_at, :updated_at
 		)
@@ -176,15 +178,16 @@ func (r *TimelineRepo) ListAccess(timelineID string) ([]*models.TimelineAccessEn
 	return entries, nil
 }
 
-// Update writes mutable timeline fields: name, start_date, end_date,
-// description, color, icon.
+// Update writes mutable timeline fields: name, description, notes, start_date,
+// end_date, color, icon.
 func (r *TimelineRepo) Update(t *models.Timeline) error {
 	_, err := r.db.Exec(`
 		UPDATE timelines
-		SET name = ?, start_date = ?, end_date = ?,
+		SET name = ?, description = ?, notes = ?,
+		    start_date = ?, end_date = ?,
 		    color = ?, icon = ?, updated_at = ?
 		WHERE id = ?
-	`, t.Name, t.StartDate, t.EndDate, t.Color, t.Icon, t.UpdatedAt, t.ID)
+	`, t.Name, t.Description, t.Notes, t.StartDate, t.EndDate, t.Color, t.Icon, t.UpdatedAt, t.ID)
 	if err != nil {
 		return fmt.Errorf("updating timeline: %w", err)
 	}

@@ -361,7 +361,7 @@ export function useCreateTimeline(teamId: string) {
   const client = useQueryClient()
 
   return useMutation({
-    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null }) =>
+    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
       authFetch<Timeline>(`/teams/${teamId}/timelines`, {
         method: 'POST',
         body: JSON.stringify(input),

@@ -5,13 +5,8 @@ import {
   ChevronDown,
   Plus,
   Settings2,
-  Code2,
-  Palette,
-  BarChart3,
   Upload,
   CalendarPlus,
-  LineChart,
-  Megaphone,
   Plug,
 } from 'lucide-react';
 import { Badge } from '@/components/identity/Badge';
@@ -44,8 +39,6 @@ interface ApiTimeline {
 interface Props {
   collapsed: boolean;
   onToggle: () => void;
-  onActiveColorChange?: (color: string) => void;
-  onActiveNameChange?: (name: string) => void;
   onNewActivity?: () => void;
   apiTimelines?: ApiTimeline[];
   archivedTimelines?: ApiTimeline[];
@@ -53,7 +46,6 @@ interface Props {
   onActiveTimelineChange?: (id: string) => void;
   onNewTimeline?: () => void;
   onEditTimeline?: (timelineId: string) => void;
-  onUnarchiveTimeline?: (timelineId: string) => void;
   // Team management
   activeTeam?: ApiTeam;
   /** All non-archived teams. Used to render the switchable team list. */
@@ -79,7 +71,7 @@ interface Timeline {
   id: string;
   name: string;
   color: string;
-  icon: React.ReactNode;
+  icon: string | null;
   startDate?: string;
   endDate?: string;
 }
@@ -105,10 +97,10 @@ interface Member {
 }
 
 const DEMO_TIMELINES: Timeline[] = [
-  { id: '1', name: 'Q1 2027 Roadmap',            color: '#1A97A2', icon: <Code2 {...ICON_SM} />,    startDate: '2027-01-01', endDate: '2027-03-31' },
-  { id: '2', name: 'New Logo GTM',                color: '#6366F1', icon: <Palette {...ICON_SM} />,  startDate: '2026-12-01', endDate: '2027-01-15' },
-  { id: '3', name: 'Q4 2026 Roadmap',             color: '#F17B2B', icon: <BarChart3 {...ICON_SM} />, startDate: '2026-10-01', endDate: '2026-12-31' },
-  { id: '4', name: 'Project Pinky and the Brain', color: '#E11D48', icon: <Megaphone {...ICON_SM} />, startDate: '2026-11-15', endDate: '2026-12-20' },
+  { id: '1', name: 'Q1 2027 Roadmap',            color: '#1A97A2', icon: null, startDate: '2027-01-01', endDate: '2027-03-31' },
+  { id: '2', name: 'New Logo GTM',                color: '#6366F1', icon: null, startDate: '2026-12-01', endDate: '2027-01-15' },
+  { id: '3', name: 'Q4 2026 Roadmap',             color: '#F17B2B', icon: null, startDate: '2026-10-01', endDate: '2026-12-31' },
+  { id: '4', name: 'Project Pinky and the Brain', color: '#E11D48', icon: null, startDate: '2026-11-15', endDate: '2026-12-20' },
 ];
 
 
@@ -123,11 +115,12 @@ interface TimelineItemProps {
   active: boolean;
   collapsed: boolean;
   showDate?: boolean;
+  canEdit?: boolean;
   onClick: () => void;
   onSettings: () => void;
 }
 
-function TimelineItem({ timeline, active, collapsed, showDate = true, onClick, onSettings }: TimelineItemProps) {
+function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = false, onClick, onSettings }: TimelineItemProps) {
   const [hovered, setHovered] = useState(false);
   const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
 
@@ -170,7 +163,7 @@ function TimelineItem({ timeline, active, collapsed, showDate = true, onClick, o
         }}
       >
         <Badge
-          identity={{ color: timeline.color, icon: '__none__' }}
+          identity={{ color: timeline.color, icon: timeline.icon ?? '__none__' }}
           name={timeline.name}
           shape="square"
           size={20}
@@ -189,7 +182,7 @@ function TimelineItem({ timeline, active, collapsed, showDate = true, onClick, o
         )}
       </button>
 
-      {!collapsed && (
+      {!collapsed && canEdit && (
         <button
           onClick={e => { e.stopPropagation(); onSettings(); }}
           title={`Configure ${timeline.name}`}
@@ -413,7 +406,7 @@ function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit
  */
 const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
 
-export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onActiveNameChange, onNewActivity, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, onUnarchiveTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
   const { user } = useAuth();
   const currentUserId = (user as { id?: string } | null)?.id;
   const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
@@ -430,7 +423,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
         id: t.id,
         name: t.name,
         color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
-        icon: <LineChart {...ICON_SM} />,
+        icon: t.icon ?? null,
         startDate: t.startDate,
         endDate: t.endDate,
       }))
@@ -440,7 +433,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
     id: t.id,
     name: t.name,
     color: t.color ?? '#64748B',
-    icon: <LineChart {...ICON_SM} />,
+    icon: t.icon ?? null,
     startDate: t.startDate,
     endDate: t.endDate,
   }))
@@ -561,19 +554,14 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
             <div
               title={activeTimeline.name}
               onClick={onToggle}
-              style={{
-                width: 28,
-                height: 28,
-                borderRadius: 6,
-                background: activeTimeline.color,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: 'white',
-                cursor: 'pointer',
-              }}
+              style={{ cursor: 'pointer' }}
             >
-              {activeTimeline.icon}
+              <Badge
+                identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
+                name={activeTimeline.name}
+                shape="square"
+                size={28}
+              />
             </div>
 
             {/* New activity */}
@@ -796,7 +784,8 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                   timeline={tl}
                   active={activeId === tl.id}
                   collapsed={false}
-                  onClick={() => { setInternalActiveId(tl.id); onActiveColorChange?.(tl.color); onActiveNameChange?.(tl.name); onActiveTimelineChange?.(tl.id); }}
+                  canEdit={canEditTeam}
+                  onClick={() => { setInternalActiveId(tl.id); onActiveTimelineChange?.(tl.id); }}
                   onSettings={() => onEditTimeline?.(tl.id)}
                 />
               ))}
@@ -850,29 +839,15 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
                   {archivedOpen && (
                     <div style={{ opacity: 0.6 }}>
                       {archivedTimelineItems.map(tl => (
-                        <div key={tl.id} style={{ position: 'relative' }}>
-                          <TimelineItem
-                            timeline={tl}
-                            active={false}
-                            collapsed={false}
-                            onClick={() => {}}
-                            onSettings={() => {}}
-                          />
-                          {onUnarchiveTimeline && (
-                            <button
-                              onClick={() => onUnarchiveTimeline(tl.id)}
-                              title="Unarchive"
-                              style={{
-                                position: 'absolute', right: 30, top: '50%', transform: 'translateY(-50%)',
-                                fontSize: 9, padding: '1px 5px', border: '1px solid rgba(255,255,255,0.2)',
-                                borderRadius: 3, background: 'none', color: 'rgba(255,255,255,0.5)',
-                                cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                              }}
-                            >
-                              Restore
-                            </button>
-                          )}
-                        </div>
+                        <TimelineItem
+                          key={tl.id}
+                          timeline={tl}
+                          active={false}
+                          collapsed={false}
+                          canEdit={canEditTeam}
+                          onClick={() => {}}
+                          onSettings={() => onEditTimeline?.(tl.id)}
+                        />
                       ))}
                     </div>
                   )}

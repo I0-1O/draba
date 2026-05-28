@@ -372,6 +372,12 @@ components:
           type: string
         name:
           type: string
+        description:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
         color:
           type: string
           nullable: true
@@ -679,6 +685,12 @@ components:
           type: string
           nullable: true
         icon:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        notes:
           type: string
           nullable: true
 
@@ -2247,6 +2259,22 @@ paths:
                 endDate:
                   type: string
                   format: date
+                color:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
+                description:
+                  type: string
+                  nullable: true
+                notes:
+                  type: string
+                  nullable: true
+                templateId:
+                  type: string
+                  nullable: true
+                  description: ID of the status template to seed this timeline's statuses from. Uses the team's first template when omitted.
       responses:
         "201":
           description: Timeline created.

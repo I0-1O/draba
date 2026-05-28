@@ -1172,6 +1172,8 @@ export interface components {
             id: string;
             teamId: string;
             name: string;
+            description?: string | null;
+            notes?: string | null;
             /** @description Identity color ID (e.g. "teal"). Null until explicitly set. */
             color?: string | null;
             /** @description Identity icon ID or special value. Null until explicitly set. */
@@ -1326,6 +1328,8 @@ export interface components {
             endDate?: string;
             color?: string | null;
             icon?: string | null;
+            description?: string | null;
+            notes?: string | null;
         };
         TimelineAccessEntry: {
             timelineId: string;
@@ -2769,6 +2773,12 @@ export interface operations {
                     startDate: string;
                     /** Format: date */
                     endDate: string;
+                    color?: string | null;
+                    icon?: string | null;
+                    description?: string | null;
+                    notes?: string | null;
+                    /** @description ID of the status template to seed this timeline's statuses from. Uses the team's first template when omitted. */
+                    templateId?: string | null;
                 };
             };
         };

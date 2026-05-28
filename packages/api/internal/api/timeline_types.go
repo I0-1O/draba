@@ -1,12 +1,28 @@
 package api
 
+// createTimelineBody is the request body for POST /teams/{id}/timelines.
+// It replaces the generated CreateTimelineJSONBody to include identity and
+// free-text fields that the generated type omits.
+type createTimelineBody struct {
+	Name        string  `json:"name"`
+	StartDate   string  `json:"startDate"`
+	EndDate     string  `json:"endDate"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
+	TemplateID  *string `json:"templateId,omitempty"`
+}
+
 // PatchTimelineJSONBody is the request body for PATCH /timelines/{id}.
 type PatchTimelineJSONBody struct {
-	Name      *string `json:"name,omitempty"`
-	StartDate *string `json:"startDate,omitempty"`
-	EndDate   *string `json:"endDate,omitempty"`
-	Color     *string `json:"color,omitempty"`
-	Icon      *string `json:"icon,omitempty"`
+	Name        *string `json:"name,omitempty"`
+	StartDate   *string `json:"startDate,omitempty"`
+	EndDate     *string `json:"endDate,omitempty"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
 }
 
 // CreateTimelineStatusJSONBody is the request body for POST /teams/{id}/timelines/{timelineId}/statuses.

@@ -136,21 +136,24 @@ type MemberDetail struct {
 // container — it is a view over a team's events for a given date window.
 // Access is governed by timeline_access + team role; share_token allows
 // unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
 type Timeline struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Name       string     `db:"name"        json:"name"`
-	StartDate  string     `db:"start_date"  json:"startDate"`
-	EndDate    string     `db:"end_date"    json:"endDate"`
-	Color      *string    `db:"color"       json:"color,omitempty"`
-	Icon       *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken string     `db:"share_token" json:"shareToken"`
-	IcalToken  string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy  string     `db:"created_by"  json:"createdBy"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
 }
 
 // SavedFilter is a user-owned, team-scoped named filter spec. Definition is

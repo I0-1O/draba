@@ -320,14 +320,22 @@ func (r *StatusRepo) DeleteStatus(id, replacementStatusID string) error {
 	return nil
 }
 
-// CopyTemplateToTimeline copies a template's items into live statuses for a timeline.
-// If no template is found for the team it is a silent no-op.
-func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string) error {
-	// Use the team's first template (by position, then created_at).
+// CopyTemplateToTimeline copies a template's items into live statuses for a
+// timeline. If templateID is non-nil, that specific template is used; otherwise
+// the team's first template (by position then created_at) is used. If no
+// matching template is found the call is a silent no-op.
+func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string, templateID *string) error {
 	var template models.StatusTemplate
-	err := r.db.Get(&template, `
-		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at LIMIT 1
-	`, teamID)
+	var err error
+	if templateID != nil && *templateID != "" {
+		err = r.db.Get(&template, `
+			SELECT * FROM status_templates WHERE id = ? AND team_id = ?
+		`, *templateID, teamID)
+	} else {
+		err = r.db.Get(&template, `
+			SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at LIMIT 1
+		`, teamID)
+	}
 	if err != nil {
 		// No template — not an error; leave the timeline with no statuses.
 		return nil

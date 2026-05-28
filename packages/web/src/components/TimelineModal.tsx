@@ -2,12 +2,11 @@
  * TimelineModal — create / edit a timeline.
  *
  * Modes:
- *  - "new":  name + date range + identity; template picker seeds the initial statuses
- *  - "edit": same fields; plus Statuses tab (add/edit/delete live statuses) and
- *            Access tab (grant/revoke member access)
+ *  - "new":  name, identity, date range, description, notes; template picker seeds statuses
+ *  - "edit": same fields; plus Statuses tab (add/edit/delete live statuses)
  */
 
-import { useState, useRef } from 'react'
+import { useState } from 'react'
 import { X, Plus, Trash2, Check, AlertTriangle } from 'lucide-react'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import { Badge } from '@/components/identity/Badge'
@@ -18,10 +17,6 @@ import {
   useUpdateTimeline,
   useDeleteTimeline,
   useArchiveTimeline,
-  useTimelineAccess,
-  useGrantTimelineAccess,
-  useRevokeTimelineAccess,
-  useTeamMembers,
 } from '@/hooks/useTeamActivities'
 import {
   useTimelineStatuses,
@@ -34,7 +29,6 @@ import type { components } from '@draba/shared'
 
 type Timeline = components['schemas']['Timeline']
 type Status = components['schemas']['Status']
-type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
 
 // ── Prop types ────────────────────────────────────────────────────────────────
 
@@ -42,13 +36,15 @@ interface Props {
   mode: 'new' | 'edit'
   teamId: string
   timeline?: Timeline
+  canAdmin?: boolean
   onClose: () => void
   onCreated?: (timeline: Timeline) => void
+  onUnarchive?: (timelineId: string) => void
 }
 
-type Tab = 'settings' | 'statuses' | 'access'
+type Tab = 'settings' | 'statuses'
 
-// ── Inline styles (matching Team Modal aesthetic) ─────────────────────────────
+// ── Inline styles ─────────────────────────────────────────────────────────────
 
 const OVERLAY: React.CSSProperties = {
   position: 'fixed', inset: 0,
@@ -94,6 +90,14 @@ const INPUT: React.CSSProperties = {
   border: '1px solid var(--border)', borderRadius: 6,
   padding: '7px 10px', background: 'var(--background)',
   outline: 'none',
+}
+
+const TEXTAREA: React.CSSProperties = {
+  ...INPUT,
+  resize: 'vertical' as const,
+  minHeight: 68,
+  fontFamily: 'var(--font-sans)',
+  lineHeight: 1.5,
 }
 
 function tabStyle(active: boolean): React.CSSProperties {
@@ -172,30 +176,32 @@ function StatusRow({ status, canDelete, teamId, timelineId, allStatuses }: Statu
 
   if (editing) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0' }}>
-        <IdentityWidget
-          identity={{ color: identity.color, icon: identity.icon ?? '' }}
-          name={status.name}
-          onChange={setIdentity}
-          shape="square"
-        />
-        <input
-          autoFocus
-          value={name}
-          onChange={e => setName(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
-          style={{ ...INPUT, flex: 1 }}
-        />
-        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--muted-foreground)', cursor: 'pointer' }}>
+      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginBottom: 4, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <IdentityWidget
+            identity={{ color: identity.color, icon: identity.icon ?? '' }}
+            name={name || status.name}
+            onChange={setIdentity}
+            shape="square"
+          />
+          <input
+            autoFocus
+            value={name}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
+            style={{ ...INPUT, flex: 1 }}
+          />
+          <button onClick={save} disabled={update.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4 }}>
+            <Check width={14} height={14} />
+          </button>
+          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+            <X width={14} height={14} />
+          </button>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
           <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
-          closed
+          Closed status (marks this status as completed/done)
         </label>
-        <button onClick={save} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4 }}>
-          <Check width={14} height={14} />
-        </button>
-        <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-          <X width={14} height={14} />
-        </button>
       </div>
     )
   }
@@ -221,70 +227,96 @@ function StatusRow({ status, canDelete, teamId, timelineId, allStatuses }: Statu
   )
 }
 
-// ── Access row (edit mode) ────────────────────────────────────────────────────
+// ── Add-status form ───────────────────────────────────────────────────────────
 
-interface AccessRowProps {
-  entry: TimelineAccessEntry
+interface AddStatusFormProps {
   teamId: string
   timelineId: string
-  isCurrentUser: boolean
+  primaryColor: string
 }
 
-function AccessRow({ entry, teamId, timelineId, isCurrentUser }: AccessRowProps) {
-  const grant = useGrantTimelineAccess(teamId, timelineId)
-  const revoke = useRevokeTimelineAccess(teamId, timelineId)
+function AddStatusForm({ teamId, timelineId, primaryColor }: AddStatusFormProps) {
+  const [expanding, setExpanding] = useState(false)
+  const [name, setName] = useState('')
+  const [identity, setIdentity] = useState<Identity>({ color: primaryColor, icon: '' })
+  const [isClosed, setIsClosed] = useState(false)
+  const createStatus = useCreateTimelineStatus(teamId, timelineId)
+
+  function handleAdd() {
+    if (!name.trim()) return
+    createStatus.mutate(
+      { name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
+      {
+        onSuccess: () => {
+          setName('')
+          setIdentity({ color: primaryColor, icon: '' })
+          setIsClosed(false)
+          setExpanding(false)
+        },
+      },
+    )
+  }
+
+  function handleCancel() {
+    setExpanding(false)
+    setName('')
+    setIdentity({ color: primaryColor, icon: '' })
+    setIsClosed(false)
+  }
+
+  if (!expanding) {
+    return (
+      <button
+        onClick={() => setExpanding(true)}
+        style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', fontSize: 12, padding: '4px 2px', fontFamily: 'var(--font-sans)' }}
+      >
+        <Plus width={13} height={13} /> Add status
+      </button>
+    )
+  }
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0' }}>
-      <Badge
-        identity={{ color: entry.color ?? '#8b949e', icon: entry.icon ?? '__name_words__' }}
-        name={entry.displayName || entry.email}
-        shape="circle"
-        size={24}
-      />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {entry.displayName || entry.email}
-        </div>
-        {entry.email && entry.displayName && (
-          <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{entry.email}</div>
-        )}
-      </div>
-      <select
-        value={entry.role}
-        disabled={isCurrentUser}
-        onChange={e => grant.mutate({ memberId: entry.teamMemberId, role: e.target.value as 'admin' | 'member' })}
-        style={{ fontSize: 12, border: '1px solid var(--border)', borderRadius: 5, padding: '2px 6px', background: 'var(--card)', color: 'var(--foreground)', cursor: isCurrentUser ? 'default' : 'pointer' }}
-      >
-        <option value="admin">Admin</option>
-        <option value="member">Member</option>
-      </select>
-      {!isCurrentUser && (
-        <button
-          onClick={() => revoke.mutate(entry.teamMemberId)}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}
-        >
-          <X width={13} height={13} />
+    <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <IdentityWidget identity={identity} name={name || 'New status'} shape="square" onChange={setIdentity} />
+        <input
+          autoFocus
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') handleCancel() }}
+          placeholder="Status name…"
+          style={{ ...INPUT, flex: 1 }}
+        />
+        <button onClick={handleAdd} disabled={!name.trim() || createStatus.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4, display: 'flex' }}>
+          <Check width={14} height={14} />
         </button>
-      )}
+        <button onClick={handleCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+          <X width={14} height={14} />
+        </button>
+      </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+        <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
+        Closed status (marks this status as completed/done)
+      </label>
     </div>
   )
 }
 
 // ── Main modal ────────────────────────────────────────────────────────────────
 
-export default function TimelineModal({ mode, teamId, timeline, onClose, onCreated }: Props) {
+export default function TimelineModal({ mode, teamId, timeline, canAdmin = false, onClose, onCreated, onUnarchive }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>('settings')
   const [name, setName] = useState(timeline?.name ?? '')
+  const [description, setDescription] = useState(timeline?.description ?? '')
+  const [notes, setNotes] = useState(timeline?.notes ?? '')
   const [startDate, setStartDate] = useState(timeline?.startDate ?? '')
   const [endDate, setEndDate] = useState(timeline?.endDate ?? '')
   const [identity, setIdentity] = useState<Identity>({ color: timeline?.color ?? '#1A97A2', icon: timeline?.icon ?? '' })
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [showArchiveConfirm, setShowArchiveConfirm] = useState(false)
-  const [newStatusName, setNewStatusName] = useState('')
-  const [addingMemberId, setAddingMemberId] = useState('')
 
   const createTimeline = useCreateTimeline(teamId)
   const updateTimeline = useUpdateTimeline(teamId)
@@ -292,23 +324,9 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
   const archiveTimeline = useArchiveTimeline(teamId)
 
   const { data: statuses = [] } = useTimelineStatuses(teamId, timeline?.id ?? '')
-  const createStatus = useCreateTimelineStatus(teamId, timeline?.id ?? '')
-  const { data: accessEntries = [] } = useTimelineAccess(teamId, timeline?.id ?? '')
-  const { data: allMembers = [] } = useTeamMembers(teamId)
-  const grantAccess = useGrantTimelineAccess(teamId, timeline?.id ?? '')
-
   const { data: templates = [] } = useStatusTemplates(teamId)
 
-  const overlayRef = useRef<HTMLDivElement>(null)
   const timelineColor = resolveColorHex(identity.color) ?? identity.color ?? '#1A97A2'
-
-  // Grant access affordance — members not yet on the access list.
-  const accessedMemberIds = new Set(accessEntries.map(e => e.teamMemberId))
-  const unlistedMembers = allMembers.filter(m => !accessedMemberIds.has(m.id))
-
-  function handleOverlayClick(e: React.MouseEvent) {
-    if (e.target === overlayRef.current) onClose()
-  }
 
   function handleSave() {
     if (!name.trim()) { setError('Name is required'); return }
@@ -319,7 +337,16 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
 
     if (mode === 'new') {
       createTimeline.mutate(
-        { name: name.trim(), startDate, endDate, color: identity.color || null, icon: identity.icon || null },
+        {
+          name: name.trim(),
+          startDate,
+          endDate,
+          color: identity.color || null,
+          icon: identity.icon || null,
+          description: description.trim() || null,
+          notes: notes.trim() || null,
+          templateId: selectedTemplateId || null,
+        },
         {
           onSuccess: (tl) => { setSaving(false); onCreated?.(tl); onClose() },
           onError: () => { setSaving(false); setError('Failed to create timeline') },
@@ -327,7 +354,18 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
       )
     } else if (timeline) {
       updateTimeline.mutate(
-        { timelineId: timeline.id, patch: { name: name.trim(), startDate, endDate, color: identity.color || null, icon: identity.icon || null } },
+        {
+          timelineId: timeline.id,
+          patch: {
+            name: name.trim(),
+            startDate,
+            endDate,
+            color: identity.color || null,
+            icon: identity.icon || null,
+            description: description.trim() || null,
+            notes: notes.trim() || null,
+          },
+        },
         {
           onSuccess: () => { setSaving(false); onClose() },
           onError: () => { setSaving(false); setError('Failed to save timeline') },
@@ -336,25 +374,9 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
     }
   }
 
-  function handleAddStatus() {
-    if (!newStatusName.trim() || !timeline) return
-    createStatus.mutate(
-      { name: newStatusName.trim() },
-      { onSuccess: () => setNewStatusName('') },
-    )
-  }
-
-  function handleGrantMember() {
-    if (!addingMemberId || !timeline) return
-    grantAccess.mutate(
-      { memberId: addingMemberId, role: 'member' },
-      { onSuccess: () => setAddingMemberId('') },
-    )
-  }
-
   if (showDeleteConfirm && timeline) {
     return (
-      <div style={OVERLAY} ref={overlayRef} onClick={handleOverlayClick}>
+      <div style={OVERLAY}>
         <div style={{ ...PANEL, maxWidth: 440 }}>
           <div style={{ padding: 28, textAlign: 'center' }}>
             <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'rgba(239,68,68,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
@@ -381,7 +403,7 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
 
   if (showArchiveConfirm && timeline) {
     return (
-      <div style={OVERLAY} ref={overlayRef} onClick={handleOverlayClick}>
+      <div style={OVERLAY}>
         <div style={{ ...PANEL, maxWidth: 440 }}>
           <div style={{ padding: 28, textAlign: 'center' }}>
             <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'rgba(245,158,11,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
@@ -389,7 +411,7 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
             </div>
             <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10 }}>Archive timeline?</div>
             <div style={{ fontSize: 13, color: 'var(--muted-foreground)', marginBottom: 24, lineHeight: 1.5 }}>
-              <strong>{timeline.name}</strong> will be hidden from the active list. All data is preserved and the timeline can be restored from the Archived section in the sidebar.
+              <strong>{timeline.name}</strong> will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.
             </div>
             <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
               <button onClick={() => setShowArchiveConfirm(false)} style={{ padding: '8px 18px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancel</button>
@@ -407,9 +429,9 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
   }
 
   return (
-    <div style={OVERLAY} ref={overlayRef} onClick={handleOverlayClick}>
+    <div style={OVERLAY}>
       <div style={PANEL} onClick={e => e.stopPropagation()}>
-        {/* Header */}
+        {/* Header — identity widget + editable name */}
         <div style={HEADER}>
           <IdentityWidget
             identity={identity}
@@ -418,30 +440,34 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
             shape="square"
           />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 2 }}>
+            <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4 }}>
               {mode === 'new' ? 'NEW TIMELINE' : 'EDIT TIMELINE'}
             </div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {name || (mode === 'new' ? 'New timeline' : timeline?.name)}
-            </div>
+            <input
+              autoFocus={mode === 'new'}
+              value={name}
+              onChange={e => { setName(e.target.value); setError('') }}
+              placeholder="Timeline name"
+              style={{
+                width: '100%', boxSizing: 'border-box',
+                fontSize: 15, fontWeight: 700, color: 'var(--foreground)',
+                background: 'none', border: 'none', outline: 'none',
+                padding: 0, fontFamily: 'var(--font-sans)',
+              }}
+            />
           </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
             <X width={18} height={18} />
           </button>
         </div>
 
-        {/* Tab bar — only show Statuses and Access tabs in edit mode */}
+        {/* Tab bar — Statuses tab only in edit mode */}
         <div style={TAB_BAR}>
           <button style={tabStyle(activeTab === 'settings')} onClick={() => setActiveTab('settings')}>Settings</button>
           {mode === 'edit' && (
-            <>
-              <button style={tabStyle(activeTab === 'statuses')} onClick={() => setActiveTab('statuses')}>
-                Statuses {statuses.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({statuses.length})</span>}
-              </button>
-              <button style={tabStyle(activeTab === 'access')} onClick={() => setActiveTab('access')}>
-                Access {accessEntries.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({accessEntries.length})</span>}
-              </button>
-            </>
+            <button style={tabStyle(activeTab === 'statuses')} onClick={() => setActiveTab('statuses')}>
+              Statuses {statuses.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({statuses.length})</span>}
+            </button>
           )}
         </div>
 
@@ -449,18 +475,6 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
         <div style={CONTENT}>
           {activeTab === 'settings' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-              {/* Name */}
-              <div>
-                <div style={FIELD_LABEL}>Name *</div>
-                <input
-                  autoFocus={mode === 'new'}
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  placeholder="Timeline name"
-                  style={INPUT}
-                />
-              </div>
-
               {/* Date range */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <div>
@@ -473,27 +487,65 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
                 </div>
               </div>
 
+              {/* Description */}
+              <div>
+                <div style={FIELD_LABEL}>Description</div>
+                <textarea
+                  value={description}
+                  onChange={e => setDescription(e.target.value)}
+                  placeholder="Short description of this timeline's purpose…"
+                  style={TEXTAREA}
+                />
+              </div>
+
+              {/* Notes */}
+              <div>
+                <div style={FIELD_LABEL}>Notes</div>
+                <textarea
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  placeholder="Internal notes, links, references…"
+                  style={TEXTAREA}
+                />
+              </div>
+
               {/* Template picker (create mode only) */}
               {mode === 'new' && templates.length > 0 && (
                 <div>
                   <div style={FIELD_LABEL}>Status template</div>
-                  <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 8 }}>
-                    The team's first template will be copied into this timeline's statuses automatically.
-                  </div>
-                  <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 14px' }}>
-                    {templates[0] && (
-                      <div>
-                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{templates[0].name}</div>
-                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          {templates[0].items.map(item => (
-                            <span key={item.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: item.color + '22', border: `1px solid ${item.color}66`, color: item.color }}>
-                              {item.name}
-                            </span>
-                          ))}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {templates.map(tpl => {
+                      const isSelected = selectedTemplateId === tpl.id || (!selectedTemplateId && tpl === templates[0])
+                      return (
+                        <div
+                          key={tpl.id}
+                          onClick={() => setSelectedTemplateId(tpl.id)}
+                          style={{
+                            border: `1px solid ${isSelected ? timelineColor + '88' : 'var(--border)'}`,
+                            borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
+                            background: isSelected ? timelineColor + '11' : 'var(--muted)',
+                            transition: 'all 0.1s',
+                          }}
+                        >
+                          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--foreground)' }}>{tpl.name}</div>
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            {tpl.items.map(item => (
+                              <span key={item.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: item.color + '22', border: `1px solid ${item.color}66`, color: item.color }}>
+                                {item.name}
+                              </span>
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )
+                    })}
                   </div>
+                </div>
+              )}
+
+              {/* Archived banner */}
+              {mode === 'edit' && timeline?.archivedAt && (
+                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 6, padding: '8px 12px' }}>
+                  This timeline is archived. It is hidden from the active list.
                 </div>
               )}
 
@@ -511,7 +563,7 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
                 Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
               </div>
 
-              <div style={{ marginBottom: 12 }}>
+              <div style={{ marginBottom: 4 }}>
                 {statuses.map(s => (
                   <StatusRow
                     key={s.id}
@@ -524,70 +576,7 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
                 ))}
               </div>
 
-              {/* Add status */}
-              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                <input
-                  value={newStatusName}
-                  onChange={e => setNewStatusName(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') handleAddStatus() }}
-                  placeholder="New status name…"
-                  style={{ ...INPUT, flex: 1 }}
-                />
-                <button
-                  onClick={handleAddStatus}
-                  disabled={!newStatusName.trim()}
-                  style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 12px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 6, background: 'var(--primary)', color: 'white', cursor: 'pointer', opacity: newStatusName.trim() ? 1 : 0.4 }}
-                >
-                  <Plus width={13} height={13} /> Add
-                </button>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'access' && timeline && (
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
-                Team admins can always access all timelines. Use this list to grant specific team members access.
-              </div>
-
-              <div style={{ marginBottom: 14 }}>
-                {accessEntries.length === 0 ? (
-                  <div style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center', padding: '20px 0' }}>No explicit access grants yet.</div>
-                ) : (
-                  accessEntries.map(e => (
-                    <AccessRow
-                      key={e.teamMemberId}
-                      entry={e}
-                      teamId={teamId}
-                      timelineId={timeline.id}
-                      isCurrentUser={false}
-                    />
-                  ))
-                )}
-              </div>
-
-              {/* Add member */}
-              {unlistedMembers.length > 0 && (
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <select
-                    value={addingMemberId}
-                    onChange={e => setAddingMemberId(e.target.value)}
-                    style={{ ...INPUT, flex: 1, fontSize: 12 }}
-                  >
-                    <option value="">Add a team member…</option>
-                    {unlistedMembers.map(m => (
-                      <option key={m.id} value={m.id}>{m.displayName || m.email}</option>
-                    ))}
-                  </select>
-                  <button
-                    onClick={handleGrantMember}
-                    disabled={!addingMemberId}
-                    style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 12px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 6, background: 'var(--primary)', color: 'white', cursor: 'pointer', opacity: addingMemberId ? 1 : 0.4 }}
-                  >
-                    <Plus width={13} height={13} /> Grant
-                  </button>
-                </div>
-              )}
+              <AddStatusForm teamId={teamId} timelineId={timeline.id} primaryColor={timelineColor} />
             </div>
           )}
         </div>
@@ -595,7 +584,7 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
         {/* Footer */}
         <div style={FOOTER}>
           <div style={{ display: 'flex', gap: 8 }}>
-            {mode === 'edit' && timeline && !timeline.archivedAt && (
+            {mode === 'edit' && timeline && canAdmin && !timeline.archivedAt && (
               <button
                 onClick={() => setShowArchiveConfirm(true)}
                 style={{ fontSize: 12, padding: '7px 12px', border: '1px solid #F59E0B44', borderRadius: 7, background: 'none', color: '#F59E0B', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
@@ -603,7 +592,15 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
                 Archive
               </button>
             )}
-            {mode === 'edit' && timeline && (
+            {mode === 'edit' && timeline && canAdmin && timeline.archivedAt && onUnarchive && (
+              <button
+                onClick={() => onUnarchive(timeline.id)}
+                style={{ fontSize: 12, padding: '7px 12px', border: '1px solid #F59E0B44', borderRadius: 7, background: 'none', color: '#F59E0B', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+              >
+                Restore
+              </button>
+            )}
+            {mode === 'edit' && timeline && canAdmin && (
               <button
                 onClick={() => setShowDeleteConfirm(true)}
                 style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
@@ -619,7 +616,7 @@ export default function TimelineModal({ mode, teamId, timeline, onClose, onCreat
             >
               Cancel
             </button>
-            {(activeTab === 'settings') && (
+            {activeTab === 'settings' && (
               <button
                 onClick={handleSave}
                 disabled={saving}

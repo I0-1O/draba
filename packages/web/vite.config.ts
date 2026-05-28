@@ -36,6 +36,7 @@ export default defineConfig(({ mode }) => {
         '/timelines': { target: apiTarget, changeOrigin: true },
         '/status-templates': { target: apiTarget, changeOrigin: true },
         '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/statuses': { target: apiTarget, changeOrigin: true },
         '/activities': { target: apiTarget, changeOrigin: true },
         '/events': { target: apiTarget, changeOrigin: true },
         '/health': { target: apiTarget, changeOrigin: true },
