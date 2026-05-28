@@ -2,6 +2,37 @@
 
 ---
 
+## 2026-05-28 — /review-phase 10.4.1 fixes
+
+**Blockers resolved:**
+- `GanttView.tsx`: Maps `date_format` pref to BCP 47 locale (`DD/MM/YYYY` → `en-GB`, others → `en-US`); passes `locale` to `generateColumns` — column labels now respect the user's date ordering preference
+- `ActivityDetailPanel.tsx`: Wired `useFormatDate`; formatted date range summary line added above native date inputs
+- `BrandingSync.tsx`: Fixed accent color to set `--primary` directly (not `--accent-override`); added `isValidHex()` guard; exported `makeDocTitle(pageName?)` helper for the `${page} — ${app}` title pattern
+- `openapi.yaml`: Added `GET /settings/branding` with `security: []` and full response schema; regenerated TS types
+- `settings_handler_test.go`: Added `TestPatchAdminSettings_AccentColor`, `TestGetPublicBranding_NoAuth`, `TestGetPublicBranding_EmptyWhenUnset`
+- `api.test.ts`: New file — 7 tests covering `createAuthFetch` happy path, non-401 errors, 401 retry, null-token re-throw, unregistered interceptor, de-registration teardown, and `ApiError` identity
+- `useFormatDate.ts`: Exported `formatDate` pure function; new `useFormatDate.test.ts` with 6 branch tests
+- `granularity.test.ts`: New test file — 6 tests covering `weekStart` (monday/sunday/default) and `locale` (en-US/en-GB/default) params
+
+**Suggestions resolved:**
+- `OrganizationPage.tsx`: Hex validation (`/^#[0-9a-fA-F]{6}$/`) on accent color input; invalid value blocked from PATCH; inline error shown
+- `PreferencesPage.tsx`: Added why-comment to `eslint-disable-next-line` for `JSON.stringify(prefMap)` dep stabilization
+- `admin_handler.go`: Added comment to `handleGetPublicBranding` warning against adding sensitive keys to the public endpoint
+
+**Nit resolved:**
+- `BrandingSync.tsx`: `makeDocTitle()` helper exported so pages can set `"PageName — AppName"` titles; document.title set via `makeDocTitle()` at root level
+
+---
+
+## 2026-05-28 — /test-phase 10.4.1
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (ws-smoke heartbeat 3-cycle skipped — 30s server interval exceeds smoke budget, mechanism verified in code; web-e2e browser runtime skipped — dev server not confirmed running, all assertions pass code-level)
+- Smoke target: http://epcot.lan:8081
+- Note: TESTING.md Phase 2 schema-check table list updated (old names `team_statuses`, `events`, `event_tags`, `event_assignments` → current names)
+
+---
+
 ## 2026-05-28 — Phase 10.4.1 — Preference Consumption & Session Handling
 
 **Session lifecycle (401 interceptor):**

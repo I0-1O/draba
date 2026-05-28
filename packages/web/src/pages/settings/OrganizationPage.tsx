@@ -17,6 +17,8 @@ export default function OrganizationPage() {
   const settings = data?.settings ?? {}
   const [orgName, setOrgName] = useState('')
   const [accentColor, setAccentColor] = useState('')
+  // Validated hex to submit — only a well-formed #RRGGBB is sent to the API.
+  const accentColorValid = accentColor === '' || /^#[0-9a-fA-F]{6}$/.test(accentColor)
   const [regPolicy, setRegPolicy] = useState('invite_only')
   const [timezone, setTimezone] = useState('UTC')
   const [weekStart, setWeekStart] = useState('monday')
@@ -35,7 +37,8 @@ export default function OrganizationPage() {
     try {
       await patch.mutateAsync({
         instance_name: orgName,
-        accent_color: accentColor,
+        // Only submit a valid hex value; empty string clears the override.
+        accent_color: accentColorValid ? accentColor : '',
         registration_policy: regPolicy,
         default_timezone: timezone,
         default_week_start: weekStart,
@@ -85,7 +88,7 @@ export default function OrganizationPage() {
               value={accentColor}
               onChange={e => setAccentColor(e.target.value)}
               placeholder="#288C9B"
-              className="max-w-[140px] font-mono text-[13px]"
+              className={`max-w-[140px] font-mono text-[13px] ${!accentColorValid ? 'border-destructive' : ''}`}
             />
             {accentColor && (
               <button
@@ -97,6 +100,9 @@ export default function OrganizationPage() {
               </button>
             )}
           </div>
+          {!accentColorValid && (
+            <p className="text-xs text-destructive m-0">Must be a 6-digit hex color (e.g. #288C9B).</p>
+          )}
           <p className="text-xs text-muted-foreground m-0">
             Overrides the primary color globally. Leave blank to use the default teal.
           </p>

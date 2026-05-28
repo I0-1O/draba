@@ -258,6 +258,10 @@ export default function GanttView({
 
   const globalPrefs = usePreferenceMap();
   const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
 
   useLayoutEffect(() => {
     const el = containerRef.current;
@@ -293,8 +297,8 @@ export default function GanttView({
   }, [granularity, viewStart, viewEnd, containerWidth]);
 
   const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart],
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
   );
 
   const todayIdx = useMemo(

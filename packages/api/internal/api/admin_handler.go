@@ -220,6 +220,9 @@ func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request
 // handleGetPublicBranding handles GET /settings/branding. Returns the
 // instance name and accent color without requiring authentication, so the
 // login page and shared timeline views can display branding before sign-in.
+//
+// Only cosmetic settings are exposed here. Never add sensitive keys (SMTP
+// credentials, JWT secrets, registration policy, etc.) to this handler.
 func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
 	name, _ := s.instanceSets.Get("instance_name")
 	accent, _ := s.instanceSets.Get("accent_color")

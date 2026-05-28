@@ -18,7 +18,8 @@ function pad2(n: number): string {
   return n.toString().padStart(2, '0')
 }
 
-function formatDate(date: Date, fmt: string): string {
+/** Pure formatting function — exported for use outside React (utilities, tests). */
+export function formatDate(date: Date, fmt: string): string {
   const y = date.getFullYear()
   const m = date.getMonth() + 1
   const d = date.getDate()

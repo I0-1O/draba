@@ -9,6 +9,7 @@
 
 import { useState, useEffect } from 'react'
 import { X, Trash2, ArrowRight, Loader2, Tag, ChevronDown } from 'lucide-react'
+import { useFormatDate } from '@/hooks/useFormatDate'
 import MemberAvatar from '@/components/MemberAvatar'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import type { Identity } from '@/components/identity/identity-constants'
@@ -90,6 +91,7 @@ const INPUT: React.CSSProperties = {
 export default function ActivityDetailPanel({ event, open, members, teamId, timelineId, onClose }: Props) {
   const updateMutation = useUpdateActivity(teamId)
   const deleteMutation = useDeleteActivity(teamId)
+  const formatDate = useFormatDate()
   const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId ?? '')
 
   const [title, setTitle] = useState(event?.title ?? '')
@@ -253,6 +255,12 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
           {/* ── WHEN ── */}
           <div style={{ marginBottom: 12 }}>
             <div style={SEC_LABEL}>When</div>
+            {/* Human-readable date summary respecting the user's date_format preference */}
+            {startDate && endDate && (
+              <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginBottom: 6 }}>
+                {formatDate(new Date(startDate))} – {formatDate(new Date(endDate))}
+              </div>
+            )}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
               <input
                 type="date" value={startDate}

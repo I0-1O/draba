@@ -2773,6 +2773,31 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /settings/branding:
+    get:
+      operationId: getPublicBranding
+      summary: Get public branding settings (no auth required)
+      description: >
+        Returns the instance name and accent color. Intentionally public so the
+        login page and shared timeline views can display branding before sign-in.
+        Only cosmetic settings are exposed here.
+      tags: [settings]
+      security: []
+      responses:
+        "200":
+          description: Public branding values.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instanceName:
+                    type: string
+                    description: Admin-configured name shown in the browser tab and login page.
+                  accentColor:
+                    type: string
+                    description: 6-digit hex override for the primary color (e.g. "#288C9B"). Empty string means no override.
+
   /admin/settings:
     get:
       operationId: getAdminSettings

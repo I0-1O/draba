@@ -55,7 +55,8 @@ export default function PreferencesPage() {
     setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
     const savedTheme = prefMap['theme'] as string | undefined
     if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
-  }, [JSON.stringify(prefMap)]) // eslint-disable-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
+  }, [JSON.stringify(prefMap)])
 
   function handleThemeChange(t: 'light' | 'dark') {
     setTheme(t)

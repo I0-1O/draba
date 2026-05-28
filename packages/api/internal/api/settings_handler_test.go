@@ -304,6 +304,64 @@ func TestPatchAdminSettings_RejectsUnknownKey(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestPatchAdminSettings_AccentColor(t *testing.T) {
+	srv, aliceJWT := settingsTestSetup(t)
+
+	body := `{"accent_color":"#FF5500"}`
+	req := httptest.NewRequest(http.MethodPatch, "/admin/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+aliceJWT)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	settings := resp["settings"].(map[string]any)
+	assert.Equal(t, "#FF5500", settings["accent_color"])
+}
+
+// ── GET /settings/branding ────────────────────────────────────────────────────
+
+func TestGetPublicBranding_NoAuth(t *testing.T) {
+	srv, aliceJWT := settingsTestSetup(t)
+
+	// Seed instance_name and accent_color first.
+	body := `{"instance_name":"Acme","accent_color":"#112233"}`
+	req := httptest.NewRequest(http.MethodPatch, "/admin/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+aliceJWT)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Fetch branding without auth — should succeed.
+	req2 := httptest.NewRequest(http.MethodGet, "/settings/branding", http.NoBody)
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+
+	assert.Equal(t, http.StatusOK, w2.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&resp))
+	assert.Equal(t, "Acme", resp["instanceName"])
+	assert.Equal(t, "#112233", resp["accentColor"])
+}
+
+func TestGetPublicBranding_EmptyWhenUnset(t *testing.T) {
+	srv, _ := settingsTestSetup(t)
+
+	// No settings configured — branding fields should be empty strings.
+	req := httptest.NewRequest(http.MethodGet, "/settings/branding", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "", resp["instanceName"])
+	assert.Equal(t, "", resp["accentColor"])
+}
+
 // ── GET /admin/users ──────────────────────────────────────────────────────────
 
 func TestListAdminUsers_SuperadminCanList(t *testing.T) {

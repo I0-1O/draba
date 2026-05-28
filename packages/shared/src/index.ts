@@ -833,6 +833,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/settings/branding": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get public branding settings (no auth required)
+         * @description Returns the instance name and accent color. Intentionally public so the login page and shared timeline views can display branding before sign-in. Only cosmetic settings are exposed here.
+         */
+        get: operations["getPublicBranding"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/settings": {
         parameters: {
             query?: never;
@@ -3339,6 +3359,31 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    getPublicBranding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Public branding values. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description Admin-configured name shown in the browser tab and login page. */
+                        instanceName?: string;
+                        /** @description 6-digit hex override for the primary color (e.g. "#288C9B"). Empty string means no override. */
+                        accentColor?: string;
+                    };
+                };
+            };
         };
     };
     getAdminSettings: {
