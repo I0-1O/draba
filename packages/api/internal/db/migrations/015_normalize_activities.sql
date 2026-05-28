@@ -50,8 +50,9 @@ SELECT
     start_at, end_at, all_day, status_id, parent_activity_id,
     percent_complete, location, url, rrule, caldav_uid, google_event_id,
     created_by, created_at, updated_at, archived_at
-FROM activities
-WHERE timeline_id IS NOT NULL;
+-- No WHERE filter: any row with NULL timeline_id after backfill violates the
+-- NOT NULL constraint and aborts the migration loudly rather than silently dropping data.
+FROM activities;
 
 DROP TABLE activities;
 ALTER TABLE activities_new RENAME TO activities;

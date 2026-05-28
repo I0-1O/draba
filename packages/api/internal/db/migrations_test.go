@@ -159,6 +159,47 @@ func TestMigrate_Idempotent(t *testing.T) {
 	}
 }
 
+// TestMigrate_015_NormalizesActivities verifies that migration 015 drops
+// activities.team_id, hardens timeline_id to NOT NULL, and wires ON DELETE CASCADE.
+func TestMigrate_015_NormalizesActivities(t *testing.T) {
+	database, err := db.Open(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Migrate(database))
+
+	// team_id must be gone.
+	var teamIDCount int
+	require.NoError(t, database.Get(&teamIDCount,
+		`SELECT COUNT(*) FROM pragma_table_info('activities') WHERE name = 'team_id'`))
+	assert.Equal(t, 0, teamIDCount, "activities.team_id should not exist after migration 015")
+
+	// timeline_id must exist.
+	var timelineIDCount int
+	require.NoError(t, database.Get(&timelineIDCount,
+		`SELECT COUNT(*) FROM pragma_table_info('activities') WHERE name = 'timeline_id'`))
+	assert.Equal(t, 1, timelineIDCount, "activities.timeline_id should exist after migration 015")
+
+	// timeline_id FK must reference timelines with ON DELETE CASCADE.
+	type fkInfo struct {
+		OnDelete string `db:"on_delete"`
+		Table    string `db:"table"`
+		From     string `db:"from"`
+	}
+	var actFKs []fkInfo
+	require.NoError(t, database.Select(&actFKs,
+		`SELECT "table", "from", on_delete FROM pragma_foreign_key_list('activities')`))
+	var foundCascade bool
+	for _, fk := range actFKs {
+		if fk.From == "timeline_id" {
+			assert.Equal(t, "timelines", fk.Table,
+				"activities.timeline_id FK should reference timelines")
+			assert.Equal(t, "CASCADE", fk.OnDelete,
+				"activities.timeline_id FK should be ON DELETE CASCADE")
+			foundCascade = true
+		}
+	}
+	assert.True(t, foundCascade, "activities.timeline_id FK should exist")
+}
+
 // TestMigrate_006_007_ColorConversion verifies the two-step color conversion:
 // migration 006 maps legacy hex values to palette name IDs, and migration 007
 // maps those name IDs back to canonical hex values. The net effect is that

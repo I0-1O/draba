@@ -2,6 +2,25 @@
 
 ---
 
+## 2026-05-28 — /review-phase 10.4.2 fixes
+
+**Blockers resolved:**
+- Migration 015: removed `WHERE timeline_id IS NOT NULL` filter from `INSERT INTO activities_new` — any row with NULL timeline_id after backfill now aborts the migration with a NOT NULL constraint error rather than being silently dropped
+- `handleUpdateActivity`, `setActivityArchive`, `handleDeleteActivity`: added `sql.ErrNoRows` check on the timeline lookup so a missing/deleted timeline returns 404 instead of 500 and skipping the auth check
+- Added `TestCreateActivity_TimelineNotFound`, `TestListActivities_TimelineNotFound`: verify 404 when timelineId does not exist
+- Added `TestCreateActivity_TimelineDifferentTeam`, `TestListActivities_TimelineDifferentTeam`: verify 404 when timeline belongs to a different team than the URL's team ID
+- Added `TestMigrate_015_NormalizesActivities`: asserts `activities.team_id` is absent, `activities.timeline_id` is present, and FK is ON DELETE CASCADE to timelines
+
+---
+
+## 2026-05-28 — /test-phase 10.4.2
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke
+- Result: 7 pass, 0 fail, 0 skip (web-e2e not run — no Phase 10.4.2 assertions defined)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-05-28 — Phase 10.4.2: Activity Schema Normalization
 
 **Goal:** Remove the redundant `activities.team_id` column now that `timeline_id` is the primary FK. Harden `timeline_id` to NOT NULL. Move activity routes to timeline-scoped paths.

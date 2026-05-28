@@ -181,6 +181,10 @@ func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
 
 	timeline, err := s.timelines.GetByID(activity.TimelineID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
 		return
 	}
@@ -356,6 +360,10 @@ func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, arch
 
 	timeline, err := s.timelines.GetByID(activity.TimelineID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
 		return
 	}
@@ -410,6 +418,10 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 
 	timeline, err := s.timelines.GetByID(activity.TimelineID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
 		return
 	}

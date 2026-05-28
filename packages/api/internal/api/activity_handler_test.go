@@ -388,6 +388,77 @@ func TestDeleteActivity_PublishesBusMessage(t *testing.T) {
 	}
 }
 
+func TestCreateActivity_TimelineNotFound(t *testing.T) {
+	srv, token, teamID, _ := activityTestSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines/no-such-timeline/activities", teamID), map[string]any{
+		"title": "x", "startAt": "2026-05-05T09:00:00Z", "endAt": "2026-05-05T10:00:00Z",
+	}, token))
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestListActivities_TimelineNotFound(t *testing.T) {
+	srv, token, teamID, _ := activityTestSetup(t)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/no-such-timeline/activities", teamID), nil, token))
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestCreateActivity_TimelineDifferentTeam(t *testing.T) {
+	srv, token, teamAID, _ := activityTestSetup(t)
+
+	// Create a second team and a timeline in that team.
+	wB := httptest.NewRecorder()
+	srv.ServeHTTP(wB, authReq(http.MethodPost, "/teams", map[string]any{"name": "Team B", "slug": "team-b-create"}, token))
+	require.Equal(t, http.StatusCreated, wB.Code)
+	var teamB map[string]any
+	require.NoError(t, json.NewDecoder(wB.Body).Decode(&teamB))
+	teamBID := teamB["id"].(string)
+
+	wTL := httptest.NewRecorder()
+	srv.ServeHTTP(wTL, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamBID), map[string]any{
+		"name": "B Timeline", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, token))
+	require.Equal(t, http.StatusCreated, wTL.Code)
+	var tlB map[string]any
+	require.NoError(t, json.NewDecoder(wTL.Body).Decode(&tlB))
+	timelineBID := tlB["id"].(string)
+
+	// Posting to team A's route using team B's timeline ID must be 404.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines/%s/activities", teamAID, timelineBID), map[string]any{
+		"title": "Cross-team attempt", "startAt": "2026-05-05T09:00:00Z", "endAt": "2026-05-05T10:00:00Z",
+	}, token))
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestListActivities_TimelineDifferentTeam(t *testing.T) {
+	srv, token, teamAID, _ := activityTestSetup(t)
+
+	wB := httptest.NewRecorder()
+	srv.ServeHTTP(wB, authReq(http.MethodPost, "/teams", map[string]any{"name": "Team B", "slug": "team-b-list"}, token))
+	require.Equal(t, http.StatusCreated, wB.Code)
+	var teamB map[string]any
+	require.NoError(t, json.NewDecoder(wB.Body).Decode(&teamB))
+	teamBID := teamB["id"].(string)
+
+	wTL := httptest.NewRecorder()
+	srv.ServeHTTP(wTL, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamBID), map[string]any{
+		"name": "B Timeline", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, token))
+	require.Equal(t, http.StatusCreated, wTL.Code)
+	var tlB map[string]any
+	require.NoError(t, json.NewDecoder(wTL.Body).Decode(&tlB))
+	timelineBID := tlB["id"].(string)
+
+	// GETting team A's activities using team B's timeline ID must be 404.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/%s/activities", teamAID, timelineBID), nil, token))
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
 func TestActivityCRUD_NonMemberForbidden(t *testing.T) {
 	srv, aliceToken, teamID, timelineID := activityTestSetup(t)
 
