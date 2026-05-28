@@ -82,19 +82,19 @@ func TestActivityRepo_SetArchived(t *testing.T) {
 	require.NoError(t, repo.SetArchived(a.ID, &now))
 
 	// Default list excludes it.
-	acts, err := repo.ListByTeam(teamID, nil, nil, false)
+	acts, err := repo.ListByTeam(teamID, nil, nil, nil, false)
 	require.NoError(t, err)
 	assert.Empty(t, acts)
 
 	// includeArchived=true brings it back.
-	acts, err = repo.ListByTeam(teamID, nil, nil, true)
+	acts, err = repo.ListByTeam(teamID, nil, nil, nil, true)
 	require.NoError(t, err)
 	require.Len(t, acts, 1)
 	assert.NotNil(t, acts[0].ArchivedAt)
 
 	// Unarchive.
 	require.NoError(t, repo.SetArchived(a.ID, nil))
-	acts, err = repo.ListByTeam(teamID, nil, nil, false)
+	acts, err = repo.ListByTeam(teamID, nil, nil, nil, false)
 	require.NoError(t, err)
 	assert.Len(t, acts, 1)
 }
@@ -138,7 +138,7 @@ func TestActivityRepo_ListByTeam_DateFilter(t *testing.T) {
 
 	from := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	to := time.Date(2026, 5, 31, 23, 59, 59, 0, time.UTC)
-	acts, err := repo.ListByTeam(teamID, &from, &to, false)
+	acts, err := repo.ListByTeam(teamID, nil, &from, &to, false)
 	require.NoError(t, err)
 	assert.Len(t, acts, 2, "expected only May activities")
 }
@@ -154,7 +154,7 @@ func TestActivityRepo_AssignedMemberIDs_PopulatedInList(t *testing.T) {
 	require.NoError(t, repo.Create(a))
 	require.NoError(t, repo.SetAssignments(a.ID, []string{memberID}))
 
-	acts, err := repo.ListByTeam(teamID, nil, nil, false)
+	acts, err := repo.ListByTeam(teamID, nil, nil, nil, false)
 	require.NoError(t, err)
 	require.Len(t, acts, 1)
 	assert.Equal(t, []string{memberID}, acts[0].AssignedMemberIDs)

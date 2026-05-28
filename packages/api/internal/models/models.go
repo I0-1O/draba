@@ -18,6 +18,7 @@ import "time"
 type Activity struct {
 	ID                string     `db:"id"                  json:"id"`
 	TeamID            string     `db:"team_id"             json:"teamId"`
+	TimelineID        *string    `db:"timeline_id"         json:"timelineId,omitempty"`
 	Title             string     `db:"title"               json:"title"`
 	Description       *string    `db:"description"         json:"description,omitempty"`
 	Icon              *string    `db:"icon"                json:"icon,omitempty"`

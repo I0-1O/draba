@@ -11,6 +11,12 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
+// createActivityBody extends the generated CreateActivityJSONBody with TimelineId.
+type createActivityBody struct {
+	CreateActivityJSONBody
+	TimelineId *string `json:"timelineId,omitempty"`
+}
+
 // handleCreateActivity handles POST /teams/{id}/activities. The authenticated
 // user must be a member of the team.
 func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
@@ -26,7 +32,7 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req CreateActivityJSONBody
+	var req createActivityBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
@@ -54,6 +60,7 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 	activity := &models.Activity{
 		ID:               newID(),
 		TeamID:           teamID,
+		TimelineID:       req.TimelineId,
 		Title:            req.Title,
 		Description:      req.Description,
 		Icon:             req.Icon,
@@ -124,7 +131,11 @@ func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
 	}
 
 	includeArchived := r.URL.Query().Get("archived") == "true"
-	acts, err := s.activities.ListByTeam(teamID, from, to, includeArchived)
+	var timelineID *string
+	if v := r.URL.Query().Get("timelineId"); v != "" {
+		timelineID = &v
+	}
+	acts, err := s.activities.ListByTeam(teamID, timelineID, from, to, includeArchived)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
 		return

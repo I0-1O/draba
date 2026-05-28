@@ -35,6 +35,8 @@ type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
 
 interface Props {
   teamId: string;
+  /** Active timeline ID — used to filter activities to this timeline. */
+  timelineId?: string;
   /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
   startDate?: string;
   /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
@@ -234,6 +236,7 @@ function buildRows(
 
 export default function GanttView({
   teamId,
+  timelineId,
   startDate,
   endDate,
   groupBy,
@@ -310,7 +313,7 @@ export default function GanttView({
   const to = viewEnd.toISOString();
 
   const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTeamActivities(teamId, from, to);
+  const { data: apiActivities = [], isLoading } = useTeamActivities(teamId, from, to, timelineId);
 
   const members: Member[] = useMemo(
     () => apiMembers.map((m, i) => toMember(m, i)),

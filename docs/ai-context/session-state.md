@@ -19,7 +19,7 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.3 | Timelines — Full CRUD (API + UI) | ✅ | ⬜ needs Docker verification |
 | 10.4.1 | Preference Consumption & Session Handling | ✅ | ⬜ needs Docker verification |
 
-Next phase to build: **10.4.2** — UI Consistency (modals, sidebar, toolbar). Backup moved to Phase 17.
+Next phase to build: **10.4.2** — Activity Schema Normalization (drop team_id, harden timeline_id NOT NULL). Then **10.4.3** — UI Consistency (modals, sidebar, toolbar). Backup moved to Phase 17.
 
 ---
 

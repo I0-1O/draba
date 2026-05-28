@@ -41,7 +41,8 @@ This document organizes development into discrete phases with effort estimates a
 | 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | ✅ |
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | 🔄 |
 | 10.4.1 | [Preference Consumption & Session Handling](#phase-1041--preference-consumption--session-handling) | S–M — 1–2 days | 🔄 |
-| 10.4.2 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1042--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ⬜ |
+| 10.4.2 | [Activity Schema Normalization — Drop team_id](#phase-1042--activity-schema-normalization--drop-team_id) | S — ½–1 day | ⬜ |
+| 10.4.3 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1043--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
 | 10.7 | [Localization & Language Support](#phase-107--localization--language-support) | L — 3–5 days | ⬜ |
@@ -985,7 +986,59 @@ Wires the user and instance preferences stored in 10.1.3 into the rest of the sy
 
 ---
 
-### Phase 10.4.2 — UI Consistency — Modals, Sidebar & Toolbar
+### Phase 10.4.2 — Activity Schema Normalization — Drop team_id
+**Status:** ⬜ | **Effort:** S (½–1 day)
+
+Removes `activities.team_id` now that `timeline_id` is stored and the relationship `activity → timeline → team` is sufficient. `team_id` is a transitive dependency (`activity_id → timeline_id → team_id`) — a violation of 3NF that creates two sources of truth for the same fact. If timelines are ever moved between teams, every activity row would also need updating or the data silently lies.
+
+**Why now:** Phase 10.4.1 added `timeline_id`. The redundant column is cheapest to remove before more code accumulates that reads `activity.TeamID` directly. The auth checks and WebSocket routing that currently use `activity.TeamID` are straightforward to reroute through the timeline.
+
+**Prerequisite:** `activities.timeline_id` is currently nullable (migration 014 used `ON DELETE SET NULL` for backward compatibility). This phase hardens it to `NOT NULL`.
+
+**Scope:**
+
+*Schema (migration 015 — table rebuild):*
+- Backfill: `UPDATE activities SET timeline_id = (SELECT id FROM timelines WHERE team_id = activities.team_id ORDER BY created_at LIMIT 1) WHERE timeline_id IS NULL` — assigns any orphaned activities to the team's oldest timeline; log a warning if any activities remain NULL after backfill (manual remediation required)
+- Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE`; use the SQLite table-rebuild pattern (CREATE new → INSERT → DROP old → RENAME) to enforce the NOT NULL constraint cleanly and add the cascade
+- Recreate `idx_activities_timeline_id` on the new table
+
+*API — Go:*
+- `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string`
+- `ActivityRepo.Create`: remove `team_id` from INSERT
+- `ActivityRepo.ListByTeam`: rename to `ListByTimeline(timelineID string, ...)` — query becomes `WHERE timeline_id = ?` directly; remove the `timelineID *string` optional filter added in 10.4.1 since it is now the only filter
+- `handleUpdateActivity`, `handleDeleteActivity`, `handleArchiveActivity`/`handleUnarchiveActivity`: replace `activity.TeamID` usage with a timeline lookup — call `s.timelines.GetByID(activity.TimelineID)` to retrieve `timeline.TeamID` for the membership check
+- WebSocket broadcasts: derive `TeamID` from the same timeline lookup before `s.bus.Publish`
+- Move activity routes to timeline scope: `POST /teams/{id}/activities` → `POST /timelines/{id}/activities`; `GET /teams/{id}/activities` → `GET /timelines/{id}/activities` (no `?timelineId=` param — it is now the path param); remove the old team-scoped routes
+- `handleCreateActivity`: path param is now `timelineId`; look up the timeline to get `teamID` for the membership check; `timelineId` is no longer in the request body
+- `handleListActivities`: path param is now `timelineId`; no query param needed
+- Add `/timelines` prefix to the Go mux and Vite proxy (activities already sit under `/timelines/*` for status routes — this is consistent)
+
+*Frontend:*
+- `Activity` generated type: `teamId` field removed; `timelineId` becomes `string` (non-optional)
+- Rename `useTeamActivities(teamId, from, to, timelineId)` → `useTimelineActivities(timelineId, from, to)` — URL becomes `/timelines/{id}/activities`
+- Rename `useCreateActivity(teamId)` → `useCreateActivity(timelineId)` — URL becomes `/timelines/{id}/activities`; remove `timelineId` from request body since it is in the URL
+- Update cache keys: `keys.teamActivities` → `keys.timelineActivities(timelineId, from, to)`; WS cache updates match on `['timelines', timelineId, 'activities']`
+- `GanttView`: prop changes from `teamId + timelineId` to just `timelineId` for the activities query (still receives `teamId` for the members query)
+- `ActivityCreatePanel`: `teamId` prop removed (only `timelineId` needed); `useCreateActivity` called with `timelineId`
+- `DashboardPage`: pass `activeTimelineId` to `ActivityCreatePanel` (already done); update `GanttView` activities hook call; keep `teamId` only for the members query
+- Update OpenAPI spec: move activity endpoints under `/timelines/{timelineId}/activities`; regenerate TS types
+
+*Tests:*
+- Update `TestCreateActivity_*`, `TestListActivities_*`, `TestUpdateActivity_*` handler tests: seed a timeline, use `/timelines/{timelineId}/activities` path, remove `teamId` from activity body
+- Update `TestActivityRepo_*` db tests: `makeActivity` helper no longer sets `TeamID`; all `ListByTeam` calls become `ListByTimeline`
+- Add `TestActivityRepo_ListByTimeline_Filter` to verify timeline scoping works correctly
+
+**Exit criteria — safe to pause when:**
+- `activities` table has no `team_id` column; `timeline_id` is `NOT NULL`
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+- Gantt view still loads activities for the active timeline
+- Creating an activity from the panel associates it with the correct timeline; creating on a different timeline does not bleed into the wrong Gantt view
+- `PRAGMA foreign_key_check` returns no rows after migration runs against a copy of the test DB
+- No remaining references to `activity.TeamID` / `activity["teamId"]` in Go or TS source (grep confirms)
+
+---
+
+### Phase 10.4.3 — UI Consistency — Modals, Sidebar & Toolbar
 **Status:** ⬜ | **Effort:** M (1–2 days)
 
 Standardizes visual patterns across the three main modals (Team, Member, Timeline), the sidebar, and the Gantt toolbar. Today these surfaces use three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and a mix of hardcoded hex colors vs CSS variables.

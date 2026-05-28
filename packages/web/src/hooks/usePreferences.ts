@@ -17,12 +17,15 @@ const prefsKey = (timelineId?: string) =>
 
 /** Returns all preferences for the given scope (global when timelineId is absent). */
 export function usePreferences(timelineId?: string) {
-  const { getAccessToken } = useAuth()
+  const { getAccessToken, accessToken, initializing } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
   const qs = timelineId ? `?timeline_id=${encodeURIComponent(timelineId)}` : ''
   return useQuery({
     queryKey: prefsKey(timelineId),
     queryFn: () => authFetch<UserPreference[]>(`/users/me/preferences${qs}`),
+    // Don't fire while the session is being restored or when logged out —
+    // this hook is called from ThemeSync which mounts outside ProtectedRoute.
+    enabled: !initializing && !!accessToken,
   })
 }
 

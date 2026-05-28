@@ -2,10 +2,10 @@
  * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
  *
  * Defaults come from the drag selection: start/end date and the lane member.
- * Submits via POST /teams/:id/activities.
+ * Submits via POST /teams/:id/activities with the active timelineId.
  */
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { X, ArrowRight, Loader2 } from 'lucide-react'
 import MemberAvatar from '@/components/MemberAvatar'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
@@ -18,6 +18,7 @@ const PANEL_WIDTH = 300
 interface Props {
   open: boolean
   teamId: string
+  timelineId: string
   members: Member[]
   defaultStart: string
   defaultEnd: string
@@ -37,6 +38,7 @@ const LABEL: React.CSSProperties = {
 export default function ActivityCreatePanel({
   open,
   teamId,
+  timelineId,
   members,
   defaultStart,
   defaultEnd,
@@ -53,6 +55,18 @@ export default function ActivityCreatePanel({
   const [assignedIds, setAssignedIds] = useState<string[]>(
     defaultMemberId ? [defaultMemberId] : [],
   )
+
+  // Reset all fields to defaults each time the panel opens so re-opening
+  // the panel always shows a blank form rather than the previous session's data.
+  useEffect(() => {
+    if (!open) return
+    setTitle('')
+    setDescription('')
+    setStartDate(defaultStart)
+    setEndDate(defaultEnd)
+    setIdentity({ color: '#288C9B', icon: '__none__' })
+    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const creating = createMutation.isPending
   const titleTrimmed = title.trim()
@@ -71,6 +85,7 @@ export default function ActivityCreatePanel({
         title: titleTrimmed,
         startAt: `${startDate}T00:00:00Z`,
         endAt: `${endDate}T00:00:00Z`,
+        timelineId: timelineId || undefined,
         description: description.trim() || null,
         color: identity.color,
         icon: identity.icon,

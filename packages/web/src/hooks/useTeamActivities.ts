@@ -22,8 +22,8 @@ type PatchTimelineInput = components['schemas']['PatchTimelineInput']
 /** Query key factory — centralises cache key strings. */
 export const keys = {
   myTeams: () => ['teams'] as const,
-  teamActivities: (teamId: string, from?: string, to?: string) =>
-    ['teams', teamId, 'activities', { from, to }] as const,
+  teamActivities: (teamId: string, from?: string, to?: string, timelineId?: string) =>
+    ['teams', teamId, 'activities', { from, to, timelineId }] as const,
   teamMembers: (teamId: string) =>
     ['teams', teamId, 'members'] as const,
   teamTimelines: (teamId: string) =>
@@ -65,17 +65,18 @@ export function useTeamTimelines(teamId: string) {
   })
 }
 
-/** Fetches all activities for a team, optionally filtered by date range. */
-export function useTeamActivities(teamId: string, from?: string, to?: string) {
+/** Fetches activities for a team, optionally filtered by timeline and date range. */
+export function useTeamActivities(teamId: string, from?: string, to?: string, timelineId?: string) {
   const { getAccessToken } = useAuth()
   const authFetch = createAuthFetch(getAccessToken)
 
   return useQuery({
-    queryKey: keys.teamActivities(teamId, from, to),
+    queryKey: keys.teamActivities(teamId, from, to, timelineId),
     queryFn: async () => {
       const params = new URLSearchParams()
       if (from) params.set('from', from)
       if (to) params.set('to', to)
+      if (timelineId) params.set('timelineId', timelineId)
       const qs = params.toString()
       return (await authFetch<Activity[] | null>(`/teams/${teamId}/activities${qs ? `?${qs}` : ''}`)) ?? []
     },
@@ -164,6 +165,7 @@ interface CreateActivityInput {
   title: string
   startAt: string
   endAt: string
+  timelineId?: string
   description?: string | null
   color?: string | null
   icon?: string | null

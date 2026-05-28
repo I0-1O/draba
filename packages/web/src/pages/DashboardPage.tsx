@@ -370,6 +370,7 @@ function DashboardShell() {
           {view === 'gantt' && teamId ? (
             <GanttView
               teamId={teamId}
+              timelineId={activeTimelineId}
               startDate={activeTimeline?.startDate}
               endDate={activeTimeline?.endDate}
               groupBy={groupBy}
@@ -418,6 +419,7 @@ function DashboardShell() {
       <ActivityCreatePanel
         open={Boolean(createDefaults) && !selectedApiActivity}
         teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
         members={ganttMembers}
         defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
         defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
