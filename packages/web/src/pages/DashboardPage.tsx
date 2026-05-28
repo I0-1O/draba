@@ -124,7 +124,6 @@ function DashboardShell() {
   // Timeline modal state
   const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
   const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
-  const unarchiveTimeline = useUnarchiveTimeline(teamId)
 
   // Hide-closed-statuses toggle (GanttToolbar → GanttView filter)
   const [hideClosed, setHideClosed] = useState(false)
@@ -158,11 +157,13 @@ function DashboardShell() {
     setActiveTeamId(id)
   }, [])
 
+  const unarchiveTimeline = useUnarchiveTimeline(teamId)
+
   const { data: timelines = [] } = useTeamTimelines(teamId)
   const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
   const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
-  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
   const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
+  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
   // Initialize activeTimelineId from the saved global pref (selected_timeline),
   // falling back to timelines[0] when no pref is stored or the saved timeline
   // is no longer in the list. Waits for global prefs to settle so we don't

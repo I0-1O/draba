@@ -7,8 +7,8 @@
  *            Access tab (grant/revoke member access)
  */
 
-import { useState, useEffect, useRef } from 'react'
-import { X, Plus, Trash2, ChevronDown, Check, AlertTriangle } from 'lucide-react'
+import { useState, useRef } from 'react'
+import { X, Plus, Trash2, Check, AlertTriangle } from 'lucide-react'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import { Badge } from '@/components/identity/Badge'
 import type { Identity } from '@/components/identity/identity-constants'
@@ -35,7 +35,6 @@ import type { components } from '@draba/shared'
 type Timeline = components['schemas']['Timeline']
 type Status = components['schemas']['Status']
 type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
 
 // ── Prop types ────────────────────────────────────────────────────────────────
 

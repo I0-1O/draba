@@ -111,10 +111,6 @@ const DEMO_TIMELINES: Timeline[] = [
   { id: '4', name: 'Project Pinky and the Brain', color: '#E11D48', icon: <Megaphone {...ICON_SM} />, startDate: '2026-11-15', endDate: '2026-12-20' },
 ];
 
-const DEMO_ARCHIVED: Timeline[] = [
-  { id: 'a1', name: 'Q1 Roadmap',      color: '#64748B', icon: <LineChart {...ICON_SM} /> },
-  { id: 'a2', name: 'Product Launch',  color: '#64748B', icon: <Megaphone {...ICON_SM} /> },
-];
 
 const DEMO_MEMBERS: Member[] = [
   { id: '1', name: 'Lindsay K.', initials: 'LK', color: '#1A97A2' },
@@ -440,7 +436,7 @@ export default function Sidebar({ collapsed, onToggle, onActiveColorChange, onAc
       }))
     : DEMO_TIMELINES
 
-  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t, i) => ({
+  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
     id: t.id,
     name: t.name,
     color: t.color ?? '#64748B',
