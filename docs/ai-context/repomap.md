@@ -189,6 +189,7 @@ packages/
           GanttGrid.tsx
           GanttToolbar.tsx
           GanttView.tsx
+          granularity.test.ts
           granularity.ts
         identity/
           Badge.tsx
@@ -225,6 +226,7 @@ packages/
         FindContext.tsx
       hooks/
         useDarkMode.ts
+        useFormatDate.test.ts
         useFormatDate.ts
         useMemberManagement.ts
         usePreferences.ts
@@ -235,6 +237,7 @@ packages/
         useTeamActivities.ts
         useWebSocket.ts
       lib/
+        api.test.ts
         api.ts
         findMatcher.test.ts
         findMatcher.ts
@@ -9360,231 +9363,6 @@ ALTER TABLE activity_assignments RENAME TO event_assignments;
 **Take a DB backup before applying migration 005.** This is the one irreversible step if you don't have a backup.
 ````
 
-## File: docs/TESTING.md
-````markdown
-# Testing & Review Procedures
-
-This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
-
-For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
-
----
-
-## Test environment setup (manual, do once per host)
-
-These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
-
-### Step 1 — One-time host prep (manual)
-On the docker host, as the `draba-test` user (created in the SSH setup steps below):
-
-1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
-2. Create `~/.draba-test.env` (chmod 600) with:
-   ```
-   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
-   DRABA_TEST_ADMIN_EMAIL=test-admin@local
-   DRABA_TEST_INVITE_EMAIL=invitee@local
-   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
-   DRABA_CONTAINER=draba
-   ```
-   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
-   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
-
-### Step 2 — Per-run reset (manual or SSH-driven)
-Before each `/test-phase` run that needs a clean DB, run on the docker host:
-```bash
-./scripts/reset-test-env.sh
-```
-This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
-
-### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
-On the machine where you run Claude (this Windows box):
-- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
-- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
-- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
-
-### What's manual vs automated, at a glance
-
-| Step | Where it runs | Who does it |
-|---|---|---|
-| Host prep (Step 1) | Docker host | **You, once** |
-| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
-| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
-| API smoke against live container | Dev box → live container | Claude |
-| Logging the run to `docs/log.md` | Dev box | Claude |
-
----
-
-## Global procedures
-
-These run regardless of phase.
-
-### Static checks
-- `cd packages/api && golangci-lint run`
-- `cd packages/api && go vet ./...`
-- `pnpm --filter web lint`
-- `pnpm --filter web build`
-
-### Unit & integration
-- `cd packages/api && go test -count=1 ./...`
-- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
-
-### Live smoke target
-Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
-1. `DRABA_TEST_URL` environment variable, if set.
-2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
-3. If neither is available, the subagent reports **skipped**, not failed.
-
-### Review checklist (always)
-- CONVENTIONS.md compliance
-- No scope creep beyond the phase's ROADMAP entry
-- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
-- No secrets, no `.env` files, no host-specific values committed
-- Migrations idempotent (re-run produces no diff)
-- `docs/log.md` updated with a dated entry
-
----
-
-## Subagent map
-
-| Subagent | Scope | Active from |
-|---|---|---|
-| `static-check` | lint + vet + web typecheck/build | Phase 1 |
-| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
-| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
-| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
-| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
-| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
-| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
-| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
-
----
-
-## Per-phase procedures
-
-### Phase 1 — Project Infrastructure
-
-**static-check**
-- `go build ./...` from `packages/api/` succeeds with no errors
-- `pnpm build` from `packages/web/` succeeds
-- `golangci-lint run` is clean
-- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
-
-### Phase 2 — API Foundation (DB & Auth)
-
-**unit-test**
-- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
-- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
-  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
-  - `Validate` rejects a token signed with a different secret (tampered signature)
-  - `Validate` rejects an expired token
-  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
-  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
-  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
-- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
-  - `GetValid` returns `sql.ErrNoRows` for an expired invite
-  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
-
-**schema-check**
-- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
-- Restart the container; assert migration runner produces no schema changes (idempotency)
-
-**api-smoke** (against `$DRABA_TEST_URL`)
-- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
-- `POST /auth/register` with an invalid/missing invite token → 4xx
-- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
-- `POST /auth/login` with the registered credentials → 200, returns JWT
-- `POST /auth/login` with a non-existent email → 401
-- `POST /auth/login` with bad credentials → 401
-- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
-- `POST /auth/refresh` with an access token (wrong type) → 401
-- `POST /auth/refresh` with a token signed by a different secret → 401
-- A subsequent authenticated request with the issued JWT → 200 (validates signing)
-
-**security-review**
-- No password fields stored in plaintext (grep migrations + handlers)
-- JWT secret loaded from env/config, not hardcoded
-- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
-- No SQL string concatenation in queries
-
-### Phase 3 — Core API (Events & Teams)
-
-**api-smoke**
-- `POST /teams` → returns team (201 Created)
-- `GET /teams/:id` with member token → 200 OK, returns team
-- `GET /teams/:id` with non-member token → 403 Forbidden
-- `POST /teams/:id/invites` → returns invite token (201 Created)
-- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
-- `POST /teams/:id/activities` (body: `name`, `startAt`, `endAt` as RFC3339), then `GET /teams/:id/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
-- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
-- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
-- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
-- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
-
-**security-review**
-- Every new route requires auth middleware
-- Team membership enforced on every team-scoped endpoint
-
-### Phase 4 — OpenAPI Spec & Type Generation
-
-**type-sync**
-- `pnpm generate` succeeds with no errors
-- `git diff` after generate is empty (committed types match spec)
-- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
-
-### Phase 5 — Real-Time (WebSocket)
-
-**unit-test**
-- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
-- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
-- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
-
-**ws-smoke**
-- Two clients on team A both receive a delta within 500ms of an event mutation
-- A client on team B does not receive team A's events
-- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
-  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
-
-### Phase 6 — Timelines
-
-**unit-test**
-- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
-  - Grant access then revoke; `HasAccess` returns false after revoke
-  - Revoking access that was never granted is a no-op (no error)
-- `timeline_repo.ListByTeam` — unit test needed:
-  - Returns all non-archived timelines for a team in descending creation order
-  - Returns empty slice (not error) when team has no timelines
-
-**api-smoke**
-- `POST /teams/:id/timelines` with JWT → 201 Created
-- `GET /timelines/:id` with JWT (user on access list) → 200 OK
-- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
-- `GET /timelines/share/:token` → 200 OK without requiring auth
-
-### Phase 7 — Web — Scaffold
-
-**web-e2e**
-- Navigating to protected routes unauthenticated redirects to `/login`
-- Successful login redirects to the main app view and stores the token
-- TanStack Query successfully fetches team/event data from the API
-- WebSocket client successfully connects and maintains a heartbeat
-
-**Known gap — frontend component unit tests**
-No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
-
-### Phase 8+ — Web
-
-*Stubs.* Detailed assertions added when each phase begins.
-
----
-
-## Adding tests for a new phase
-
-1. Find the phase's section in this file (or add one if missing).
-2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
-3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
-4. That's it — `/test-phase` will pick it up on the next run.
-````
-
 ## File: packages/api/internal/api/activity_handler.go
 ````go
 package api
@@ -11234,6 +11012,68 @@ import type { Activity, Team, Timeline } from '@draba/shared'
 - The Go structs in `packages/api/internal/models/` should mirror the OpenAPI schemas
 ````
 
+## File: packages/web/src/components/gantt/granularity.test.ts
+````typescript
+import { describe, it, expect } from 'vitest'
+import { generateColumns } from './granularity'
+
+// ── generateColumns — weekStart option ───────────────────────────────────────
+
+// Jan 2026 layout:
+//   Mon Jan  5 (ISO week start)
+//   Sun Jan  4 (Sunday week start)
+//
+// Jan 1 2026 is a Thursday.
+
+const JAN1 = new Date(2026, 0, 1)   // Thu
+const JAN31 = new Date(2026, 0, 31) // Sat
+
+describe('generateColumns — weekStart', () => {
+  it('monday week start: first week column begins on Monday Dec 29', () => {
+    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
+    // Jan 1 is Thursday; Monday ISO week start = Dec 29 2025
+    expect(cols[0].start.getDay()).toBe(1) // 1 = Monday
+    expect(cols[0].start.getDate()).toBe(29)
+  })
+
+  it('sunday week start: first week column begins on Sunday Dec 28', () => {
+    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'sunday' })
+    // Jan 1 is Thursday; Sunday week start = Dec 28 2025
+    expect(cols[0].start.getDay()).toBe(0) // 0 = Sunday
+    expect(cols[0].start.getDate()).toBe(28)
+  })
+
+  it('default (no option) behaves like monday', () => {
+    const defaultCols = generateColumns(JAN1, JAN31, 'week')
+    const mondayCols  = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
+    expect(defaultCols[0].start.getTime()).toBe(mondayCols[0].start.getTime())
+  })
+})
+
+// ── generateColumns — locale option ──────────────────────────────────────────
+
+describe('generateColumns — locale', () => {
+  it('en-US: month column label contains English month name', () => {
+    const cols = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
+    expect(cols[0].label).toMatch(/Jan/)
+  })
+
+  it('en-GB: day column label shows day-first ordering (e.g. "1 Jan")', () => {
+    const cols = generateColumns(JAN1, JAN31, 'day', { locale: 'en-GB' })
+    // en-GB {month:'short', day:'numeric'} → "1 Jan"
+    expect(cols[0].label).toMatch(/Jan/)
+    // The day should come first in en-GB
+    expect(cols[0].label).toMatch(/^1/)
+  })
+
+  it('default locale behaves like en-US', () => {
+    const defaultCols = generateColumns(JAN1, JAN31, 'month')
+    const usCols      = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
+    expect(defaultCols[0].label).toBe(usCols[0].label)
+  })
+})
+````
+
 ## File: packages/web/src/components/layout/FindBar.tsx
 ````typescript
 /**
@@ -11655,44 +11495,6 @@ export default function ActivityPanel({ activity, members, onClose, onChange, on
 }
 ````
 
-## File: packages/web/src/components/BrandingSync.tsx
-````typescript
-/**
- * BrandingSync — fetches /settings/branding on app start and applies:
- *   - instance name → document.title
- *   - accent color  → --primary CSS variable override on <html>
- *
- * Renders nothing; exists only for side-effects.
- */
-
-import { useEffect } from 'react'
-import { usePublicSettings } from '@/hooks/usePublicSettings'
-
-export default function BrandingSync() {
-  const { data } = usePublicSettings()
-
-  useEffect(() => {
-    if (!data) return
-
-    // Update the browser tab title if an instance name is configured.
-    if (data.instanceName) {
-      document.title = data.instanceName
-    }
-
-    // Apply accent color override as a CSS custom property. The accent color
-    // is stored as a hex string (e.g. "#288C9B") and overrides --primary.
-    const root = document.documentElement
-    if (data.accentColor) {
-      root.style.setProperty('--accent-override', data.accentColor)
-    } else {
-      root.style.removeProperty('--accent-override')
-    }
-  }, [data])
-
-  return null
-}
-````
-
 ## File: packages/web/src/components/RoleDropdown.tsx
 ````typescript
 /**
@@ -11967,52 +11769,43 @@ export function useDarkMode() {
 }
 ````
 
-## File: packages/web/src/hooks/useFormatDate.ts
+## File: packages/web/src/hooks/useFormatDate.test.ts
 ````typescript
-/**
- * useFormatDate — returns a formatter that respects the user's stored
- * date_format preference.
- *
- * Supported formats (matching PreferencesPage options):
- *   "MMM D, YYYY"  → "Jan 5, 2026"
- *   "MM/DD/YYYY"   → "01/05/2026"
- *   "DD/MM/YYYY"   → "05/01/2026"
- *   "YYYY-MM-DD"   → "2026-01-05"
- */
+import { describe, it, expect } from 'vitest'
+import { formatDate } from './useFormatDate'
 
-import { useCallback } from 'react'
-import { usePreferenceMap } from '@/hooks/usePreferences'
+// ── formatDate ────────────────────────────────────────────────────────────────
 
-export type DateFormat = 'MMM D, YYYY' | 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD'
+describe('formatDate', () => {
+  // January 5, 2026
+  const d = new Date(2026, 0, 5)
 
-function pad2(n: number): string {
-  return n.toString().padStart(2, '0')
-}
+  it('MM/DD/YYYY → zero-padded month/day/year', () => {
+    expect(formatDate(d, 'MM/DD/YYYY')).toBe('01/05/2026')
+  })
 
-function formatDate(date: Date, fmt: string): string {
-  const y = date.getFullYear()
-  const m = date.getMonth() + 1
-  const d = date.getDate()
+  it('DD/MM/YYYY → zero-padded day/month/year', () => {
+    expect(formatDate(d, 'DD/MM/YYYY')).toBe('05/01/2026')
+  })
 
-  switch (fmt) {
-    case 'MM/DD/YYYY':
-      return `${pad2(m)}/${pad2(d)}/${y}`
-    case 'DD/MM/YYYY':
-      return `${pad2(d)}/${pad2(m)}/${y}`
-    case 'YYYY-MM-DD':
-      return `${y}-${pad2(m)}-${pad2(d)}`
-    default:
-      // "MMM D, YYYY" — default
-      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-  }
-}
+  it('YYYY-MM-DD → ISO-style', () => {
+    expect(formatDate(d, 'YYYY-MM-DD')).toBe('2026-01-05')
+  })
 
-/** Returns a stable formatter function for the user's date_format preference. */
-export function useFormatDate(): (date: Date) => string {
-  const prefMap = usePreferenceMap()
-  const fmt = (prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY'
-  return useCallback((date: Date) => formatDate(date, fmt), [fmt])
-}
+  it('MMM D, YYYY (default) → English short month', () => {
+    expect(formatDate(d, 'MMM D, YYYY')).toBe('Jan 5, 2026')
+  })
+
+  it('unknown format falls through to MMM D, YYYY default', () => {
+    // Any unrecognised string uses the en-US toLocaleDateString fallback.
+    expect(formatDate(d, 'unknown')).toBe('Jan 5, 2026')
+  })
+
+  it('December 31 — single-digit day does not get zero-padded in default format', () => {
+    const dec31 = new Date(2026, 11, 31)
+    expect(formatDate(dec31, 'MMM D, YYYY')).toBe('Dec 31, 2026')
+  })
+})
 ````
 
 ## File: packages/web/src/hooks/usePreferences.ts
@@ -12247,6 +12040,154 @@ export function useWebSocket({ token, teamIds = [], onMessage }: Options) {
 
   return { status, subscribe } as const
 }
+````
+
+## File: packages/web/src/lib/api.test.ts
+````typescript
+/**
+ * Tests for the 401 silent-refresh interceptor in api.ts.
+ *
+ * We mock globalThis.fetch so no real HTTP is made. The module-level
+ * _silentRefresh / _refreshInFlight state is reset between tests via
+ * configureSilentRefresh(null).
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  ApiError,
+  configureSilentRefresh,
+  createAuthFetch,
+} from './api'
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function okResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function errorResponse(status: number, code: string, message: string): Response {
+  return new Response(JSON.stringify({ error: { code, message } }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+// ── Setup / teardown ──────────────────────────────────────────────────────────
+
+beforeEach(() => {
+  vi.spyOn(globalThis, 'fetch')
+  // Always reset the registered callback so tests don't bleed into each other.
+  configureSilentRefresh(null)
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  configureSilentRefresh(null)
+})
+
+// ── createAuthFetch — happy path ──────────────────────────────────────────────
+
+describe('createAuthFetch', () => {
+  it('returns parsed JSON on a 200 response', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(okResponse({ hello: 'world' }))
+
+    const authFetch = createAuthFetch(() => 'token-abc')
+    const result = await authFetch<{ hello: string }>('/test')
+
+    expect(result).toEqual({ hello: 'world' })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/test'),
+      expect.objectContaining({ headers: expect.any(Headers) }),
+    )
+  })
+
+  it('throws ApiError on a non-401 failure without retrying', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(403, 'FORBIDDEN', 'No access'))
+
+    const silentRefresh = vi.fn()
+    configureSilentRefresh(silentRefresh)
+    const authFetch = createAuthFetch(() => 'token-abc')
+
+    await expect(authFetch('/test')).rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' })
+    expect(silentRefresh).not.toHaveBeenCalled()
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  // ── 401 retry behaviour ───────────────────────────────────────────────────
+
+  it('on 401: calls silentRefresh, then retries with the new token', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
+      .mockResolvedValueOnce(okResponse({ ok: true }))
+
+    const silentRefresh = vi.fn().mockResolvedValue('new-token')
+    configureSilentRefresh(silentRefresh)
+    const authFetch = createAuthFetch(() => 'old-token')
+
+    const result = await authFetch<{ ok: boolean }>('/protected')
+
+    expect(result).toEqual({ ok: true })
+    expect(silentRefresh).toHaveBeenCalledOnce()
+    expect(fetch).toHaveBeenCalledTimes(2)
+    // Second call should carry the new token.
+    const secondCall = vi.mocked(fetch).mock.calls[1]
+    const secondHeaders = secondCall[1]?.headers as Headers
+    expect(secondHeaders.get('Authorization')).toBe('Bearer new-token')
+  })
+
+  it('on 401: if silentRefresh returns null, re-throws the original 401', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
+
+    const silentRefresh = vi.fn().mockResolvedValue(null)
+    configureSilentRefresh(silentRefresh)
+    const authFetch = createAuthFetch(() => 'old-token')
+
+    await expect(authFetch('/protected')).rejects.toMatchObject({ status: 401 })
+    // No retry attempted after null token.
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('on 401: with no silentRefresh registered, throws immediately without retry', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
+
+    // No configureSilentRefresh call — _silentRefresh stays null.
+    const authFetch = createAuthFetch(() => 'token')
+
+    await expect(authFetch('/protected')).rejects.toMatchObject({ status: 401 })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  // ── configureSilentRefresh teardown ──────────────────────────────────────
+
+  it('configureSilentRefresh(null) disables the interceptor after registration', async () => {
+    const silentRefresh = vi.fn().mockResolvedValue('new-token')
+    configureSilentRefresh(silentRefresh)
+    configureSilentRefresh(null) // immediately de-register
+
+    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
+
+    const authFetch = createAuthFetch(() => 'token')
+    await expect(authFetch('/test')).rejects.toMatchObject({ status: 401 })
+    // silentRefresh must NOT have been called — it was de-registered.
+    expect(silentRefresh).not.toHaveBeenCalled()
+  })
+})
+
+// ── ApiError ──────────────────────────────────────────────────────────────────
+
+describe('ApiError', () => {
+  it('is instanceof ApiError', () => {
+    const err = new ApiError(404, 'NOT_FOUND', 'missing')
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err).toBeInstanceOf(Error)
+    expect(err.status).toBe(404)
+    expect(err.code).toBe('NOT_FOUND')
+  })
+})
 ````
 
 ## File: packages/web/src/lib/identity-constants.test.ts
@@ -13594,6 +13535,231 @@ packages/api/
 ### CI/CD
 
 - [TBD — GitHub Actions; build + test on PR; publish Docker image on tag]
+````
+
+## File: docs/TESTING.md
+````markdown
+# Testing & Review Procedures
+
+This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
+
+For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
+
+---
+
+## Test environment setup (manual, do once per host)
+
+These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
+
+### Step 1 — One-time host prep (manual)
+On the docker host, as the `draba-test` user (created in the SSH setup steps below):
+
+1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
+2. Create `~/.draba-test.env` (chmod 600) with:
+   ```
+   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
+   DRABA_TEST_ADMIN_EMAIL=test-admin@local
+   DRABA_TEST_INVITE_EMAIL=invitee@local
+   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
+   DRABA_CONTAINER=draba
+   ```
+   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
+   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
+
+### Step 2 — Per-run reset (manual or SSH-driven)
+Before each `/test-phase` run that needs a clean DB, run on the docker host:
+```bash
+./scripts/reset-test-env.sh
+```
+This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
+
+### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
+On the machine where you run Claude (this Windows box):
+- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
+- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
+- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
+
+### What's manual vs automated, at a glance
+
+| Step | Where it runs | Who does it |
+|---|---|---|
+| Host prep (Step 1) | Docker host | **You, once** |
+| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
+| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
+| API smoke against live container | Dev box → live container | Claude |
+| Logging the run to `docs/log.md` | Dev box | Claude |
+
+---
+
+## Global procedures
+
+These run regardless of phase.
+
+### Static checks
+- `cd packages/api && golangci-lint run`
+- `cd packages/api && go vet ./...`
+- `pnpm --filter web lint`
+- `pnpm --filter web build`
+
+### Unit & integration
+- `cd packages/api && go test -count=1 ./...`
+- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
+
+### Live smoke target
+Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
+1. `DRABA_TEST_URL` environment variable, if set.
+2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
+3. If neither is available, the subagent reports **skipped**, not failed.
+
+### Review checklist (always)
+- CONVENTIONS.md compliance
+- No scope creep beyond the phase's ROADMAP entry
+- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
+- No secrets, no `.env` files, no host-specific values committed
+- Migrations idempotent (re-run produces no diff)
+- `docs/log.md` updated with a dated entry
+
+---
+
+## Subagent map
+
+| Subagent | Scope | Active from |
+|---|---|---|
+| `static-check` | lint + vet + web typecheck/build | Phase 1 |
+| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
+| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
+| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
+| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
+| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
+| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
+| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
+
+---
+
+## Per-phase procedures
+
+### Phase 1 — Project Infrastructure
+
+**static-check**
+- `go build ./...` from `packages/api/` succeeds with no errors
+- `pnpm build` from `packages/web/` succeeds
+- `golangci-lint run` is clean
+- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
+
+### Phase 2 — API Foundation (DB & Auth)
+
+**unit-test**
+- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
+- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
+  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
+  - `Validate` rejects a token signed with a different secret (tampered signature)
+  - `Validate` rejects an expired token
+  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
+  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
+  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
+- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
+  - `GetValid` returns `sql.ErrNoRows` for an expired invite
+  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
+
+**schema-check**
+- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `activities`, `activity_tags`, `activity_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `status_templates`, `status_template_items`, `statuses`, `instance_settings`, `password_reset_tokens`
+- Restart the container; assert migration runner produces no schema changes (idempotency)
+
+**api-smoke** (against `$DRABA_TEST_URL`)
+- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
+- `POST /auth/register` with an invalid/missing invite token → 4xx
+- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
+- `POST /auth/login` with the registered credentials → 200, returns JWT
+- `POST /auth/login` with a non-existent email → 401
+- `POST /auth/login` with bad credentials → 401
+- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
+- `POST /auth/refresh` with an access token (wrong type) → 401
+- `POST /auth/refresh` with a token signed by a different secret → 401
+- A subsequent authenticated request with the issued JWT → 200 (validates signing)
+
+**security-review**
+- No password fields stored in plaintext (grep migrations + handlers)
+- JWT secret loaded from env/config, not hardcoded
+- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
+- No SQL string concatenation in queries
+
+### Phase 3 — Core API (Events & Teams)
+
+**api-smoke**
+- `POST /teams` → returns team (201 Created)
+- `GET /teams/:id` with member token → 200 OK, returns team
+- `GET /teams/:id` with non-member token → 403 Forbidden
+- `POST /teams/:id/invites` → returns invite token (201 Created)
+- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
+- `POST /teams/:id/activities` (body: `name`, `startAt`, `endAt` as RFC3339), then `GET /teams/:id/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
+- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
+- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
+- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
+- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
+
+**security-review**
+- Every new route requires auth middleware
+- Team membership enforced on every team-scoped endpoint
+
+### Phase 4 — OpenAPI Spec & Type Generation
+
+**type-sync**
+- `pnpm generate` succeeds with no errors
+- `git diff` after generate is empty (committed types match spec)
+- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
+
+### Phase 5 — Real-Time (WebSocket)
+
+**unit-test**
+- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
+- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
+- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
+
+**ws-smoke**
+- Two clients on team A both receive a delta within 500ms of an event mutation
+- A client on team B does not receive team A's events
+- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
+  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
+
+### Phase 6 — Timelines
+
+**unit-test**
+- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
+  - Grant access then revoke; `HasAccess` returns false after revoke
+  - Revoking access that was never granted is a no-op (no error)
+- `timeline_repo.ListByTeam` — unit test needed:
+  - Returns all non-archived timelines for a team in descending creation order
+  - Returns empty slice (not error) when team has no timelines
+
+**api-smoke**
+- `POST /teams/:id/timelines` with JWT → 201 Created
+- `GET /timelines/:id` with JWT (user on access list) → 200 OK
+- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
+- `GET /timelines/share/:token` → 200 OK without requiring auth
+
+### Phase 7 — Web — Scaffold
+
+**web-e2e**
+- Navigating to protected routes unauthenticated redirects to `/login`
+- Successful login redirects to the main app view and stores the token
+- TanStack Query successfully fetches team/event data from the API
+- WebSocket client successfully connects and maintains a heartbeat
+
+**Known gap — frontend component unit tests**
+No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
+
+### Phase 8+ — Web
+
+*Stubs.* Detailed assertions added when each phase begins.
+
+---
+
+## Adding tests for a new phase
+
+1. Find the phase's section in this file (or add one if missing).
+2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
+3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
+4. That's it — `/test-phase` will pick it up on the next run.
 ````
 
 ## File: packages/api/internal/api/middleware.go
@@ -15638,6 +15804,61 @@ export default function EmptyState({ icon, message, description }: EmptyStatePro
 }
 ````
 
+## File: packages/web/src/components/BrandingSync.tsx
+````typescript
+/**
+ * BrandingSync — fetches /settings/branding on app start and applies:
+ *   - instance name → document.title (and module-level makeDocTitle helper)
+ *   - accent color  → --primary CSS variable override on <html>
+ *
+ * Renders nothing; exists only for side-effects.
+ *
+ * Page-level title pattern: import makeDocTitle and call it in a useEffect.
+ * Example: document.title = makeDocTitle('Settings')  →  "Settings — Acme"
+ */
+
+import { useEffect } from 'react'
+import { usePublicSettings } from '@/hooks/usePublicSettings'
+
+// Shared at module level so makeDocTitle is always current without React context.
+let _instanceBaseName = 'draba'
+
+/** Returns a document title following the "{page} — {app}" convention. */
+export function makeDocTitle(pageName?: string): string {
+  return pageName ? `${pageName} — ${_instanceBaseName}` : _instanceBaseName
+}
+
+/** Hex color guard — rejects anything that isn't a 6-digit hex string. */
+function isValidHex(value: string): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(value)
+}
+
+export default function BrandingSync() {
+  const { data } = usePublicSettings()
+
+  useEffect(() => {
+    if (!data) return
+
+    // Update the module-level name first so makeDocTitle is current for any
+    // page titles set after this effect runs.
+    _instanceBaseName = data.instanceName || 'draba'
+    document.title = makeDocTitle()
+
+    // Apply accent color override directly to --primary so all Tailwind utilities
+    // (bg-primary, text-primary, ring-primary…) pick it up without extra CSS rules.
+    // Removing the property falls back to the HSL value defined in index.css.
+    const root = document.documentElement
+    if (data.accentColor && isValidHex(data.accentColor)) {
+      root.style.setProperty('--primary', data.accentColor)
+    } else {
+      root.style.removeProperty('--primary')
+    }
+  }, [data])
+
+  return null
+}
+````
+
 ## File: packages/web/src/components/MemberAvatar.tsx
 ````typescript
 /**
@@ -15803,6 +16024,55 @@ export function useFind(): FindContextValue {
   const ctx = useContext(FindContext)
   if (!ctx) throw new Error('useFind must be used inside FindProvider')
   return ctx
+}
+````
+
+## File: packages/web/src/hooks/useFormatDate.ts
+````typescript
+/**
+ * useFormatDate — returns a formatter that respects the user's stored
+ * date_format preference.
+ *
+ * Supported formats (matching PreferencesPage options):
+ *   "MMM D, YYYY"  → "Jan 5, 2026"
+ *   "MM/DD/YYYY"   → "01/05/2026"
+ *   "DD/MM/YYYY"   → "05/01/2026"
+ *   "YYYY-MM-DD"   → "2026-01-05"
+ */
+
+import { useCallback } from 'react'
+import { usePreferenceMap } from '@/hooks/usePreferences'
+
+export type DateFormat = 'MMM D, YYYY' | 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD'
+
+function pad2(n: number): string {
+  return n.toString().padStart(2, '0')
+}
+
+/** Pure formatting function — exported for use outside React (utilities, tests). */
+export function formatDate(date: Date, fmt: string): string {
+  const y = date.getFullYear()
+  const m = date.getMonth() + 1
+  const d = date.getDate()
+
+  switch (fmt) {
+    case 'MM/DD/YYYY':
+      return `${pad2(m)}/${pad2(d)}/${y}`
+    case 'DD/MM/YYYY':
+      return `${pad2(d)}/${pad2(m)}/${y}`
+    case 'YYYY-MM-DD':
+      return `${y}-${pad2(m)}-${pad2(d)}`
+    default:
+      // "MMM D, YYYY" — default
+      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  }
+}
+
+/** Returns a stable formatter function for the user's date_format preference. */
+export function useFormatDate(): (date: Date) => string {
+  const prefMap = usePreferenceMap()
+  const fmt = (prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY'
+  return useCallback((date: Date) => formatDate(date, fmt), [fmt])
 }
 ````
 
@@ -17364,247 +17634,6 @@ jobs:
         with:
           commit_message: "chore: update automated AI repomap [skip ci]"
           file_pattern: docs/ai-context/repomap.md
-````
-
-## File: packages/api/internal/api/admin_handler.go
-````go
-package api
-
-import (
-	"encoding/json"
-	"log/slog"
-	"net/http"
-
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-)
-
-// requireSuperadmin is a shared guard for admin endpoints. Returns false
-// and writes a 403 if the caller is not a superadmin.
-func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
-		return false
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return false
-	}
-	return true
-}
-
-// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
-// with the password masked. Superadmin-only.
-func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	cfg, err := s.mailer.LoadConfig()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
-		return
-	}
-	if cfg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
-		return
-	}
-
-	// Mask the password in the response.
-	masked := *cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
-// validates it by sending a test email to the caller's address. Superadmin-only.
-func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
-		return
-	}
-
-	// Fetch caller email for the validation test.
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
-		return
-	}
-
-	// Validate by sending a test email before persisting.
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		slog.Warn("smtp validation failed", "err", err)
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
-		return
-	}
-
-	if err := s.mailer.SaveConfig(&cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
-		return
-	}
-
-	masked := cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
-// provided config without persisting it. Superadmin-only.
-func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
-		return
-	}
-
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		slog.Warn("smtp test failed", "err", err)
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
-}
-
-// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
-// Superadmin-only.
-func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-	if err := s.mailer.DeleteConfig(); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
-// defaults. Superadmin-only.
-func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name", "accent_color"}
-	settings := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := s.instanceSets.Get(k)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
-			return
-		}
-		settings[k] = v
-	}
-
-	// Apply defaults for missing keys.
-	if settings["registration_policy"] == "" {
-		settings["registration_policy"] = "invite_only"
-	}
-	if settings["default_timezone"] == "" {
-		settings["default_timezone"] = "UTC"
-	}
-	if settings["default_date_format"] == "" {
-		settings["default_date_format"] = "MMM D, YYYY"
-	}
-	if settings["default_week_start"] == "" {
-		settings["default_week_start"] = "monday"
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
-}
-
-// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
-// instance-level settings. Superadmin-only.
-func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var body map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Validate known keys and values.
-	allowed := map[string]bool{
-		"registration_policy": true,
-		"default_timezone":    true,
-		"default_date_format": true,
-		"default_week_start":  true,
-		"instance_name":       true,
-		"accent_color":        true,
-	}
-	for k := range body {
-		if !allowed[k] {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
-			return
-		}
-	}
-	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
-		return
-	}
-	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
-		return
-	}
-
-	for k, v := range body {
-		if err := s.instanceSets.Set(k, v); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
-}
-
-// handleGetPublicBranding handles GET /settings/branding. Returns the
-// instance name and accent color without requiring authentication, so the
-// login page and shared timeline views can display branding before sign-in.
-func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
-	name, _ := s.instanceSets.Get("instance_name")
-	accent, _ := s.instanceSets.Get("accent_color")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"instanceName": name,
-		"accentColor":  accent,
-	})
-}
-
-func smtpTestBody() string {
-	return `<html><body>
-<p>This is a test email from <strong>draba</strong>.</p>
-<p>If you received this, your SMTP configuration is working correctly.</p>
-</body></html>`
-}
 ````
 
 ## File: packages/api/internal/api/auth_handler.go
@@ -20041,201 +20070,247 @@ describe('matchActivities', () => {
 })
 ````
 
-## File: packages/web/src/pages/settings/OrganizationPage.tsx
-````typescript
-/**
- * /settings/organization — Superadmin: organization name, registration policy,
- * and system-wide defaults (language placeholder, timezone, week start).
- * Language support is deferred to Phase 10.7 — Localization & Language Support.
- */
+## File: packages/api/internal/api/admin_handler.go
+````go
+package api
 
-import { useState, useEffect } from 'react'
-import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
 
-export default function OrganizationPage() {
-  const { data } = useAdminSettings()
-  const patch = usePatchAdminSettings()
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+)
 
-  const settings = data?.settings ?? {}
-  const [orgName, setOrgName] = useState('')
-  const [accentColor, setAccentColor] = useState('')
-  const [regPolicy, setRegPolicy] = useState('invite_only')
-  const [timezone, setTimezone] = useState('UTC')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+// requireSuperadmin is a shared guard for admin endpoints. Returns false
+// and writes a 403 if the caller is not a superadmin.
+func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
+		return false
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return false
+	}
+	return true
+}
 
-  useEffect(() => {
-    setOrgName(settings.instance_name || '')
-    setAccentColor(settings.accent_color || '')
-    setRegPolicy(settings.registration_policy || 'invite_only')
-    setTimezone(settings.default_timezone || 'UTC')
-    setWeekStart(settings.default_week_start || 'monday')
-  }, [JSON.stringify(settings)])
+// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
+// with the password masked. Superadmin-only.
+func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
 
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await patch.mutateAsync({
-        instance_name: orgName,
-        accent_color: accentColor,
-        registration_policy: regPolicy,
-        default_timezone: timezone,
-        default_week_start: weekStart,
-      })
-      setFeedback({ type: 'success', msg: 'Settings saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
-    }
-  }
+	cfg, err := s.mailer.LoadConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
+		return
+	}
+	if cfg == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
+		return
+	}
 
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        System-wide identity and defaults for this draba installation.
-      </p>
+	// Mask the password in the response.
+	masked := *cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
 
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Identity
-        </h3>
+// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
+// validates it by sending a test email to the caller's address. Superadmin-only.
+func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
 
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Organization name</Label>
-          <Input
-            value={orgName}
-            onChange={e => setOrgName(e.target.value)}
-            placeholder="My Company"
-            className="max-w-xs"
-          />
-          <p className="text-xs text-muted-foreground m-0">
-            Shown in the browser tab title and login page.
-          </p>
-        </div>
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
+		return
+	}
 
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Accent color</Label>
-          <div className="flex items-center gap-3">
-            <input
-              type="color"
-              value={accentColor || '#288C9B'}
-              onChange={e => setAccentColor(e.target.value)}
-              className="h-9 w-14 rounded border border-border cursor-pointer bg-transparent"
-            />
-            <Input
-              value={accentColor}
-              onChange={e => setAccentColor(e.target.value)}
-              placeholder="#288C9B"
-              className="max-w-[140px] font-mono text-[13px]"
-            />
-            {accentColor && (
-              <button
-                type="button"
-                onClick={() => setAccentColor('')}
-                className="text-xs text-muted-foreground hover:text-foreground cursor-pointer bg-transparent border-none"
-              >
-                Reset
-              </button>
-            )}
-          </div>
-          <p className="text-xs text-muted-foreground m-0">
-            Overrides the primary color globally. Leave blank to use the default teal.
-          </p>
-        </div>
+	// Fetch caller email for the validation test.
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
+		return
+	}
 
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Registration policy</Label>
-          <div className="flex gap-2">
-            {[
-              { v: 'invite_only', label: 'Invite only' },
-              { v: 'open', label: 'Open registration' },
-            ].map(({ v, label }) => (
-              <button
-                key={v}
-                onClick={() => setRegPolicy(v)}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
-                  regPolicy === v
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
+	// Validate by sending a test email before persisting.
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp validation failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
+		return
+	}
 
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
-          System defaults
-        </h3>
-        <p className="text-xs text-muted-foreground mb-4">
-          Applied to new accounts when the user hasn't set their own preference.
-        </p>
+	if err := s.mailer.SaveConfig(&cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
+		return
+	}
 
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default language</Label>
-          <select
-            disabled
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
-          >
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
+	masked := cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
 
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default timezone</Label>
-          <select
-            value={timezone}
-            onChange={e => setTimezone(e.target.value)}
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
-          >
-            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
+// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
+// provided config without persisting it. Superadmin-only.
+func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
 
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
 
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-      <Button onClick={handleSave} disabled={patch.isPending}>
-        {patch.isPending ? 'Saving…' : 'Save settings'}
-      </Button>
-    </div>
-  )
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
+		return
+	}
+
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp test failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
+}
+
+// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
+// Superadmin-only.
+func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+	if err := s.mailer.DeleteConfig(); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
+// defaults. Superadmin-only.
+func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name", "accent_color"}
+	settings := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := s.instanceSets.Get(k)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
+			return
+		}
+		settings[k] = v
+	}
+
+	// Apply defaults for missing keys.
+	if settings["registration_policy"] == "" {
+		settings["registration_policy"] = "invite_only"
+	}
+	if settings["default_timezone"] == "" {
+		settings["default_timezone"] = "UTC"
+	}
+	if settings["default_date_format"] == "" {
+		settings["default_date_format"] = "MMM D, YYYY"
+	}
+	if settings["default_week_start"] == "" {
+		settings["default_week_start"] = "monday"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+}
+
+// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
+// instance-level settings. Superadmin-only.
+func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Validate known keys and values.
+	allowed := map[string]bool{
+		"registration_policy": true,
+		"default_timezone":    true,
+		"default_date_format": true,
+		"default_week_start":  true,
+		"instance_name":       true,
+		"accent_color":        true,
+	}
+	for k := range body {
+		if !allowed[k] {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
+			return
+		}
+	}
+	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
+		return
+	}
+	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
+		return
+	}
+
+	for k, v := range body {
+		if err := s.instanceSets.Set(k, v); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
+}
+
+// handleGetPublicBranding handles GET /settings/branding. Returns the
+// instance name and accent color without requiring authentication, so the
+// login page and shared timeline views can display branding before sign-in.
+//
+// Only cosmetic settings are exposed here. Never add sensitive keys (SMTP
+// credentials, JWT secrets, registration policy, etc.) to this handler.
+func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
+	name, _ := s.instanceSets.Get("instance_name")
+	accent, _ := s.instanceSets.Get("accent_color")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"instanceName": name,
+		"accentColor":  accent,
+	})
+}
+
+func smtpTestBody() string {
+	return `<html><body>
+<p>This is a test email from <strong>draba</strong>.</p>
+<p>If you received this, your SMTP configuration is working correctly.</p>
+</body></html>`
 }
 ````
 
@@ -21131,523 +21206,435 @@ func newRepoID() string {
 }
 ````
 
-## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
+## File: packages/web/src/components/filters/FilterDropdown.tsx
 ````typescript
 /**
- * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
- *
- * Fields: icon (stub), title, dates + allDay, assigned to (member rows),
- * status (stub), tags (stub), color, parent activity (stub), % complete (stub),
- * location, url, description. All functional fields save on change/blur via
- * PATCH /activities/:id.
+ * Top-bar filter selector. Surfaces presets, a per-member section, a
+ * team-promoted filters section (stub), and the user's saved filters.
+ * Selection is stored in FilterContext; wiring to the events list lands
+ * when real views render in Phase 8.
  */
 
-import { useState, useEffect } from 'react'
-import { X, Trash2, ArrowRight, Loader2, Tag, ChevronDown } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-
-const PANEL_WIDTH = 300
+import { useEffect, useRef, useState } from 'react'
+import {
+  Layers, Clock, User, AlertCircle, UserX,
+  ChevronDown, Plus, Check, Settings2,
+} from 'lucide-react'
+import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { useSavedFilters } from '@/hooks/useSavedFilters'
+import { useAuth } from '@/contexts/AuthContext'
 
 interface Props {
-  event: ApiActivity | null
-  open: boolean
-  members: Member[]
-  teamId: string
-  timelineId?: string
-  onClose: () => void
+  teamId?: string
+  onOpenEditor: () => void
 }
 
-// ── Small helpers ─────────────────────────────────────────────────────────────
+// ── Preset definitions ───────────────────────────────────────────────────────
 
-function toDateInput(iso: string): string { return iso.slice(0, 10) }
-function toISODate(d: string): string { return `${d}T00:00:00Z` }
+type PresetId = 'all' | 'upcoming' | 'my' | 'overdue' | 'noassign'
 
-const SEC_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 700,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  marginBottom: 6,
+interface Preset {
+  id: PresetId
+  label: string
+  icon: React.ReactNode
+  subtitle?: string
 }
 
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 3,
-  width: 68,
-  flexShrink: 0,
+const ICON_PRESET = { size: 14, strokeWidth: 1.8 } as const
+
+const PRESETS: Preset[] = [
+  { id: 'all',      label: 'All activities',  icon: <Layers     {...ICON_PRESET} /> },
+  { id: 'upcoming', label: 'Upcoming',         icon: <Clock      {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
+  { id: 'my',       label: 'My events',        icon: <User       {...ICON_PRESET} /> },
+  { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
+  { id: 'noassign', label: 'No assignee',      icon: <UserX      {...ICON_PRESET} /> },
+]
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Narrow TeamMemberWithUser to only those with a real user account. */
+function hasUserId<T extends { userId?: string | null }>(m: T): m is T & { userId: string } {
+  return typeof m.userId === 'string' && m.userId.length > 0
 }
 
-const STUB_VALUE: React.CSSProperties = {
-  fontSize: 12,
-  color: 'var(--muted-foreground)',
-  opacity: 0.5,
-  flex: 1,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 4,
-  cursor: 'default',
-  userSelect: 'none',
+function activeLabel(
+  active: ActiveFilter,
+  members: { userId: string; displayName: string }[],
+  saved: { id: string; name: string }[],
+): string {
+  if (active.kind === 'preset') return PRESETS.find(p => p.id === active.id)?.label ?? 'Filter'
+  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.displayName ?? 'Member'
+  return saved.find(s => s.id === active.id)?.name ?? 'Saved filter'
 }
 
-const DIVIDER: React.CSSProperties = {
-  borderTop: '1px solid var(--border)',
-  margin: '10px 0',
+function activeMemberColor(
+  active: ActiveFilter,
+  members: { userId: string; color?: string | null }[],
+): string | null {
+  if (active.kind !== 'member') return null
+  return members.find(m => m.userId === active.userId)?.color ?? null
 }
 
-const INPUT: React.CSSProperties = {
-  width: '100%',
-  boxSizing: 'border-box' as const,
-  fontSize: 12,
-  color: 'var(--foreground)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-  padding: '5px 8px',
-  outline: 'none',
-  background: 'var(--background)',
-  fontFamily: 'var(--font-sans)',
+// ── Sub-components ───────────────────────────────────────────────────────────
+
+interface ItemRowProps {
+  icon?: React.ReactNode
+  /** Rendered in the 8px-dot slot when provided (overrides icon). */
+  dotColor?: string
+  label: string
+  subtitle?: string
+  active: boolean
+  /** Gear button shown on hover for custom filters. */
+  onConfigure?: () => void
+  onClick: () => void
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
+function ItemRow({ icon, dotColor, label, subtitle, active, onConfigure, onClick }: ItemRowProps) {
+  const [hovered, setHovered] = useState(false)
+  const [gearHovered, setGearHovered] = useState(false)
 
-export default function ActivityDetailPanel({ event, open, members, teamId, timelineId, onClose }: Props) {
-  const updateMutation = useUpdateActivity(teamId)
-  const deleteMutation = useDeleteActivity(teamId)
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId ?? '')
+  const rowBg = active
+    ? 'rgba(40,140,155,.09)'
+    : hovered
+    ? 'var(--muted)'
+    : 'transparent'
 
-  const [title, setTitle] = useState(event?.title ?? '')
-  const [description, setDescription] = useState(event?.description ?? '')
-  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
-  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
-  const [allDay, setAllDay] = useState(event?.allDay ?? false)
-  const [identity, setIdentity] = useState<Identity>({
-    color: event?.color ?? '#288C9B',
-    icon: event?.icon ?? '__none__',
-  })
-  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
-  const [location, setLocation] = useState(event?.location ?? '')
-  const [url, setUrl] = useState(event?.url ?? '')
-  const [confirmDelete, setConfirmDelete] = useState(false)
+  const labelColor = active ? 'var(--primary)' : 'var(--foreground)'
+  const labelWeight = active ? 600 : 400
 
-  // Re-sync when the selected activity changes.
-  useEffect(() => {
-    if (!event) return
-    setTitle(event.title)
-    setDescription(event.description ?? '')
-    setStartDate(toDateInput(event.startAt))
-    setEndDate(toDateInput(event.endAt))
-    setAllDay(event.allDay)
-    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
-    setAssignedIds(event.assignedMemberIds ?? [])
-    setLocation(event.location ?? '')
-    setUrl(event.url ?? '')
-    setConfirmDelete(false)
-  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const saving = updateMutation.isPending
-  const deleting = deleteMutation.isPending
-
-  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
-    if (!event) return
-    updateMutation.mutate({ activityId: event.id, patch })
-  }
-
-  function handleTitleBlur() {
-    if (title.trim() && title !== event?.title) save({ title: title.trim() })
-  }
-
-  function handleDescriptionBlur() {
-    if (description !== (event?.description ?? '')) save({ description: description || null })
-  }
-
-  function handleLocationBlur() {
-    if (location !== (event?.location ?? '')) save({ location: location || null })
-  }
-
-  function handleUrlBlur() {
-    if (url !== (event?.url ?? '')) save({ url: url || null })
-  }
-
-  function handleStartDateChange(val: string) {
-    setStartDate(val)
-    if (val && val <= endDate) save({ startAt: toISODate(val) })
-  }
-
-  function handleEndDateChange(val: string) {
-    setEndDate(val)
-    if (val && val >= startDate) save({ endAt: toISODate(val) })
-  }
-
-  function handleAllDayToggle() {
-    const next = !allDay
-    setAllDay(next)
-    save({ allDay: next })
-  }
-
-  function handleIdentityChange(next: Identity) {
-    setIdentity(next)
-    save({ color: next.color, icon: next.icon })
-  }
-
-  function toggleAssignee(memberId: string) {
-    const next = assignedIds.includes(memberId)
-      ? assignedIds.filter(id => id !== memberId)
-      : [...assignedIds, memberId]
-    setAssignedIds(next)
-    save({ assignedMemberIds: next })
-  }
-
-  function handleDelete() {
-    if (!event) return
-    deleteMutation.mutate(event.id, { onSuccess: onClose })
-  }
+  const showGear = onConfigure && hovered
+  const showCheck = active && !showGear
 
   return (
     <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
         display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
+        alignItems: 'center',
+        padding: '5px 10px 5px 14px',
+        background: rowBg,
+        cursor: 'pointer',
+        transition: 'background 0.08s',
       }}
+      onClick={onClick}
     >
-      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-        {!event ? null : (<>
+      {/* 16px icon / dot slot */}
+      <div style={{ width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: active ? 'var(--primary)' : 'var(--muted-foreground)' }}>
+        {dotColor ? (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor }} />
+        ) : (
+          icon
+        )}
+      </div>
 
-        {/* ── Header bar ── */}
+      {/* Label + subtitle */}
+      <div style={{ flex: 1, minWidth: 0, marginLeft: 8 }}>
         <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '0 12px', height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)', flexShrink: 0,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
-            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
+          fontSize: 13,
+          fontWeight: labelWeight,
+          color: labelColor,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+          title={label}
+        >
+          {label}
+        </div>
+        {subtitle && (
+          <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {subtitle}
           </div>
+        )}
+      </div>
+
+      {/* 24px right slot */}
+      <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        {showGear ? (
           <button
-            onClick={onClose}
+            onClick={e => { e.stopPropagation(); onConfigure?.() }}
+            onMouseEnter={() => setGearHovered(true)}
+            onMouseLeave={() => setGearHovered(false)}
             style={{
-              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', color: 'var(--muted-foreground)',
+              width: 22,
+              height: 22,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: gearHovered ? '#dde2e8' : 'var(--muted, #EDF0F3)',
+              border: 'none',
+              borderRadius: 5,
+              cursor: 'pointer',
+              color: 'var(--muted-foreground)',
+              transition: 'background 0.1s',
             }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
           >
-            <X size={14} strokeWidth={2} />
+            <Settings2 size={12} strokeWidth={1.8} />
           </button>
-        </div>
-
-        {/* ── Scrollable body ── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
-
-          {/* Identity widget + Title */}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
-            <div style={{ marginTop: 2, flexShrink: 0 }}>
-              <IdentityWidget
-                identity={identity}
-                name={title || event?.title || ''}
-                shape="square"
-                onChange={handleIdentityChange}
-              />
-            </div>
-            {/* Title */}
-            <input
-              value={title}
-              onChange={e => setTitle(e.target.value)}
-              onBlur={handleTitleBlur}
-              style={{
-                flex: 1, fontSize: 13, fontWeight: 600,
-                color: 'var(--foreground)', border: '1px solid transparent',
-                borderRadius: 'var(--radius-md)', padding: '5px 6px',
-                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-              }}
-              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* ── WHEN ── */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>When</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-              <input
-                type="date" value={startDate}
-                onChange={e => handleStartDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-              <input
-                type="date" value={endDate} min={startDate}
-                onChange={e => handleEndDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-              <input
-                type="checkbox" checked={allDay} onChange={handleAllDayToggle}
-                style={{ width: 13, height: 13, cursor: 'pointer', accentColor: 'var(--primary)' }}
-              />
-              <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>All day</span>
-            </label>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* ── ASSIGNED TO ── */}
-          {members.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={SEC_LABEL}>Assigned to</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                {members.map(m => {
-                  const assigned = assignedIds.includes(m.id)
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => toggleAssignee(m.id)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '5px 6px',
-                        border: 'none', borderRadius: 'var(--radius-md)',
-                        background: 'none', cursor: 'pointer', textAlign: 'left',
-                        opacity: assigned ? 1 : 0.45,
-                        transition: 'opacity 0.1s, background 0.1s',
-                      }}
-                      onMouseEnter={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.opacity = '1' }}
-                      onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.opacity = assigned ? '1' : '0.45' }}
-                    >
-                      <MemberAvatar member={m} size={20} />
-                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                      {assigned && (
-                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          <div style={DIVIDER} />
-
-          {/* ── CLASSIFY ── */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Classify</div>
-
-            {/* Status picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Status</span>
-              {statuses.length > 0 ? (
-                <div style={{ flex: 1 }}>
-                  <select
-                    value={event?.statusId ?? ''}
-                    onChange={e => save({ statusId: e.target.value || null } as Parameters<typeof save>[0])}
-                    style={{
-                      fontSize: 12, padding: '3px 8px', border: '1px solid var(--border)',
-                      borderRadius: 6, background: 'var(--background)', color: 'var(--foreground)',
-                      cursor: 'pointer', width: '100%',
-                    }}
-                  >
-                    <option value="">— No status —</option>
-                    {statuses.map(s => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                  </select>
-                </div>
-              ) : (
-                <div style={{ ...STUB_VALUE }}>
-                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
-                </div>
-              )}
-            </div>
-
-            {/* Tags stub */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
-              <span style={FIELD_LABEL}>Tags</span>
-              <div style={{ ...STUB_VALUE }}>
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 100,
-                  border: '1px dashed var(--border)', lineHeight: 1.5,
-                  display: 'flex', alignItems: 'center', gap: 3,
-                }}>
-                  <Tag size={9} strokeWidth={2} /> Add tag
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
-              </div>
-            </div>
-
-            {/* Identity (color + icon) — handled by the widget in the title row above */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>Identity</span>
-              <div style={{ flex: 1, fontSize: 11, color: 'var(--muted-foreground)', opacity: 0.7 }}>
-                Use the icon above to edit
-              </div>
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* ── DETAILS ── */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Details</div>
-
-            {/* Parent activity stub */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Parent</span>
-              <div style={{ ...STUB_VALUE }}>
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 4,
-                  border: '1px solid var(--border)', lineHeight: 1.5,
-                  display: 'flex', alignItems: 'center', gap: 3,
-                }}>
-                  None <ChevronDown size={10} strokeWidth={2} />
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
-              </div>
-            </div>
-
-            {/* % Complete stub */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Progress</span>
-              <div style={{ ...STUB_VALUE }}>
-                <div style={{
-                  flex: 1, height: 4, background: 'var(--border)',
-                  borderRadius: 2, overflow: 'hidden', maxWidth: 80,
-                }}>
-                  <div style={{ width: `${event.percentComplete ?? 0}%`, height: '100%', background: 'var(--primary)', borderRadius: 2 }} />
-                </div>
-                <span style={{ fontSize: 11, marginLeft: 5 }}>{event.percentComplete ?? 0}%</span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
-              </div>
-            </div>
-
-            {/* Location (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Location</span>
-              <input
-                value={location}
-                onChange={e => setLocation(e.target.value)}
-                onBlur={handleLocationBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-
-            {/* URL (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>URL</span>
-              <input
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-                onBlur={handleUrlBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* ── NOTES ── */}
-          <div style={{ marginBottom: 8 }}>
-            <div style={SEC_LABEL}>Notes</div>
-            <textarea
-              value={description}
-              rows={3}
-              onChange={e => setDescription(e.target.value)}
-              onBlur={handleDescriptionBlur}
-              placeholder="Add notes…"
-              style={{
-                ...INPUT, resize: 'vertical', lineHeight: 1.5, padding: '6px 8px',
-              }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-              onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-            />
-          </div>
-
-        </div>
-
-        {/* ── Footer ── */}
-        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-          {confirmDelete ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
-                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
-              </p>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  onClick={() => setConfirmDelete(false)}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                    background: 'var(--card)', color: 'var(--foreground)',
-                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                  }}
-                >Cancel</button>
-                <button
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: 'none',
-                    background: 'var(--destructive)', color: 'white',
-                    cursor: deleting ? 'not-allowed' : 'pointer',
-                    fontFamily: 'var(--font-sans)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  }}
-                >
-                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                  Delete
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setConfirmDelete(true)}
-              style={{
-                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                fontSize: 12, fontWeight: 600, padding: 7,
-                borderRadius: 'var(--radius-md)', border: 'none',
-                background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
-                cursor: 'pointer', fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <Trash2 size={12} strokeWidth={2} />
-              Delete activity
-            </button>
-          )}
-        </div>
-
-        </>)}
+        ) : showCheck ? (
+          <Check size={13} strokeWidth={2.5} color="var(--primary)" />
+        ) : null}
       </div>
     </div>
+  )
+}
+
+// ── Section header ───────────────────────────────────────────────────────────
+
+interface SectionHeaderProps {
+  label: string
+  teamBadge?: boolean
+}
+
+function SectionHeader({ label, teamBadge }: SectionHeaderProps) {
+  return (
+    <div style={{
+      padding: '10px 14px 3px',
+      fontSize: 10,
+      fontWeight: 700,
+      letterSpacing: '0.8px',
+      textTransform: 'uppercase',
+      color: 'var(--muted-foreground)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+    }}>
+      {label}
+      {teamBadge && (
+        <span style={{
+          fontSize: 9,
+          fontWeight: 700,
+          color: 'var(--primary)',
+          background: 'rgba(40,140,155,.1)',
+          border: '1px solid rgba(40,140,155,.25)',
+          borderRadius: 99,
+          padding: '1px 5px',
+          letterSpacing: 0,
+          textTransform: 'none',
+        }}>
+          Team
+        </span>
+      )}
+    </div>
+  )
+}
+
+function Divider() {
+  return <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+}
+
+// ── Main component ───────────────────────────────────────────────────────────
+
+export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
+  const { activeFilter, setActiveFilter } = useFilter()
+  const { user } = useAuth()
+  const { data: members = [] } = useTeamMembers(teamId)
+  const { data: saved = [] } = useSavedFilters(teamId)
+
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [])
+
+  const membersWithUser = members.filter(hasUserId)
+  const label = activeLabel(activeFilter, membersWithUser, saved)
+  const memberDotColor = activeMemberColor(activeFilter, membersWithUser)
+  const currentUserId = (user as { id?: string } | null)?.id ?? ''
+
+  const isDefaultFilter = activeFilter.kind === 'preset' && activeFilter.id === 'all'
+
+  function select(f: ActiveFilter) {
+    setActiveFilter(f)
+    setOpen(false)
+  }
+
+  function isSelected(f: ActiveFilter): boolean {
+    if (f.kind !== activeFilter.kind) return false
+    if (f.kind === 'preset' && activeFilter.kind === 'preset') return f.id === activeFilter.id
+    if (f.kind === 'member' && activeFilter.kind === 'member') return f.userId === activeFilter.userId
+    if (f.kind === 'saved' && activeFilter.kind === 'saved') return f.id === activeFilter.id
+    return false
+  }
+
+  // Trigger appearance — teal tint when a non-default filter is active.
+  const triggerBg = isDefaultFilter ? 'transparent' : 'rgba(40,140,155,.09)'
+  const triggerBorder = isDefaultFilter ? 'var(--border)' : 'rgba(40,140,155,.22)'
+  const triggerColor = isDefaultFilter ? 'var(--foreground)' : 'var(--primary)'
+  const triggerWeight = isDefaultFilter ? 400 : 600
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      {/* Trigger */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        title="Filter"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          cursor: 'pointer',
+          fontFamily: 'var(--font-sans)',
+          border: `1px solid ${triggerBorder}`,
+          borderRadius: 6,
+          background: triggerBg,
+          color: triggerColor,
+          padding: '5px 9px 5px 8px',
+          height: 30,
+          fontSize: 13,
+          fontWeight: triggerWeight,
+          maxWidth: 220,
+          transition: 'all 0.12s',
+        }}
+      >
+        {/* Icon: colored dot when a member filter is active, otherwise Filter icon */}
+        {memberDotColor && !isDefaultFilter ? (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: memberDotColor, flexShrink: 0 }} />
+        ) : (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: 'var(--muted-foreground)' }}>
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+          </svg>
+        )}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+          {label}
+        </span>
+        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {/* Dropdown panel */}
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 8px)',
+            right: 0,
+            width: 284,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            boxShadow: '0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)',
+            zIndex: 100,
+            paddingBottom: 4,
+            maxHeight: 460,
+            overflowY: 'auto',
+          }}
+        >
+          {/* Presets */}
+          <SectionHeader label="Presets" />
+          {PRESETS.map(p => {
+            const f: ActiveFilter = { kind: 'preset', id: p.id }
+            return (
+              <ItemRow
+                key={p.id}
+                icon={p.icon}
+                label={p.label}
+                subtitle={p.subtitle}
+                active={isSelected(f)}
+                onClick={() => select(f)}
+              />
+            )
+          })}
+
+          {/* Members */}
+          {membersWithUser.length > 0 && (
+            <>
+              <Divider />
+              <SectionHeader label="Members" />
+              {membersWithUser.map(m => {
+                const f: ActiveFilter = { kind: 'member', userId: m.userId }
+                const name = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName
+                return (
+                  <ItemRow
+                    key={m.userId}
+                    dotColor={m.color ?? '#8b949e'}
+                    label={name}
+                    active={isSelected(f)}
+                    onClick={() => select(f)}
+                  />
+                )
+              })}
+            </>
+          )}
+
+          {/* Team filters — stub; no API support yet */}
+          <Divider />
+          <SectionHeader label="Team filters" teamBadge />
+          <div style={{ padding: '6px 14px 4px', fontSize: 12, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+            No team filters yet
+          </div>
+
+          {/* My filters */}
+          {saved.length > 0 && (
+            <>
+              <Divider />
+              <SectionHeader label="My filters" />
+              {saved.map(s => {
+                const f: ActiveFilter = { kind: 'saved', id: s.id }
+                return (
+                  <ItemRow
+                    key={s.id}
+                    label={s.name}
+                    active={isSelected(f)}
+                    onConfigure={() => { onOpenEditor(); setOpen(false) }}
+                    onClick={() => select(f)}
+                  />
+                )
+              })}
+            </>
+          )}
+
+          {/* Footer — add filter */}
+          <Divider />
+          <AddFilterRow onClick={() => { onOpenEditor(); setOpen(false) }} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Add filter footer row ─────────────────────────────────────────────────────
+
+function AddFilterRow({ onClick }: { onClick: () => void }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        width: '100%',
+        padding: '7px 14px',
+        background: hovered ? 'var(--muted)' : 'transparent',
+        border: 'none',
+        fontSize: 13,
+        fontWeight: hovered ? 600 : 400,
+        color: hovered ? 'var(--primary)' : 'var(--muted-foreground)',
+        cursor: 'pointer',
+        fontFamily: 'var(--font-sans)',
+        textAlign: 'left',
+        transition: 'all 0.1s',
+      }}
+    >
+      <Plus size={14} strokeWidth={2} />
+      Add filter
+    </button>
   )
 }
 ````
@@ -22537,6 +22524,210 @@ export function useAdminUsers(orphanedOnly = false) {
 }
 ````
 
+## File: packages/web/src/pages/settings/OrganizationPage.tsx
+````typescript
+/**
+ * /settings/organization — Superadmin: organization name, registration policy,
+ * and system-wide defaults (language placeholder, timezone, week start).
+ * Language support is deferred to Phase 10.7 — Localization & Language Support.
+ */
+
+import { useState, useEffect } from 'react'
+import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+export default function OrganizationPage() {
+  const { data } = useAdminSettings()
+  const patch = usePatchAdminSettings()
+
+  const settings = data?.settings ?? {}
+  const [orgName, setOrgName] = useState('')
+  const [accentColor, setAccentColor] = useState('')
+  // Validated hex to submit — only a well-formed #RRGGBB is sent to the API.
+  const accentColorValid = accentColor === '' || /^#[0-9a-fA-F]{6}$/.test(accentColor)
+  const [regPolicy, setRegPolicy] = useState('invite_only')
+  const [timezone, setTimezone] = useState('UTC')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setOrgName(settings.instance_name || '')
+    setAccentColor(settings.accent_color || '')
+    setRegPolicy(settings.registration_policy || 'invite_only')
+    setTimezone(settings.default_timezone || 'UTC')
+    setWeekStart(settings.default_week_start || 'monday')
+  }, [JSON.stringify(settings)])
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await patch.mutateAsync({
+        instance_name: orgName,
+        // Only submit a valid hex value; empty string clears the override.
+        accent_color: accentColorValid ? accentColor : '',
+        registration_policy: regPolicy,
+        default_timezone: timezone,
+        default_week_start: weekStart,
+      })
+      setFeedback({ type: 'success', msg: 'Settings saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        System-wide identity and defaults for this draba installation.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Identity
+        </h3>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Organization name</Label>
+          <Input
+            value={orgName}
+            onChange={e => setOrgName(e.target.value)}
+            placeholder="My Company"
+            className="max-w-xs"
+          />
+          <p className="text-xs text-muted-foreground m-0">
+            Shown in the browser tab title and login page.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Accent color</Label>
+          <div className="flex items-center gap-3">
+            <input
+              type="color"
+              value={accentColor || '#288C9B'}
+              onChange={e => setAccentColor(e.target.value)}
+              className="h-9 w-14 rounded border border-border cursor-pointer bg-transparent"
+            />
+            <Input
+              value={accentColor}
+              onChange={e => setAccentColor(e.target.value)}
+              placeholder="#288C9B"
+              className={`max-w-[140px] font-mono text-[13px] ${!accentColorValid ? 'border-destructive' : ''}`}
+            />
+            {accentColor && (
+              <button
+                type="button"
+                onClick={() => setAccentColor('')}
+                className="text-xs text-muted-foreground hover:text-foreground cursor-pointer bg-transparent border-none"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          {!accentColorValid && (
+            <p className="text-xs text-destructive m-0">Must be a 6-digit hex color (e.g. #288C9B).</p>
+          )}
+          <p className="text-xs text-muted-foreground m-0">
+            Overrides the primary color globally. Leave blank to use the default teal.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Registration policy</Label>
+          <div className="flex gap-2">
+            {[
+              { v: 'invite_only', label: 'Invite only' },
+              { v: 'open', label: 'Open registration' },
+            ].map(({ v, label }) => (
+              <button
+                key={v}
+                onClick={() => setRegPolicy(v)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
+                  regPolicy === v
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
+          System defaults
+        </h3>
+        <p className="text-xs text-muted-foreground mb-4">
+          Applied to new accounts when the user hasn't set their own preference.
+        </p>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default language</Label>
+          <select
+            disabled
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
+          >
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default timezone</Label>
+          <select
+            value={timezone}
+            onChange={e => setTimezone(e.target.value)}
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
+          >
+            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+      <Button onClick={handleSave} disabled={patch.isPending}>
+        {patch.isPending ? 'Saving…' : 'Save settings'}
+      </Button>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/types/index.ts
 ````typescript
 /**
@@ -22850,6 +23041,529 @@ Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visu
 - SSO / SAML / OAuth login (email + password only for v1)
 - MCP server integration (parking lot — token auth system is designed to support it when ready)
 - CLI binary (parking lot — token auth system is designed to support it when ready)
+````
+
+## File: packages/api/internal/api/timeline_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
+// list the non-archived timelines for a team.
+func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timelines)
+}
+
+// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
+// user must be a member of the team. The creator is automatically granted
+// timeline-admin access.
+func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	member, err := s.teams.GetMember(teamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	var req createTimelineBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if req.StartDate == "" || req.EndDate == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startDate and endDate are required")
+		return
+	}
+
+	const dateLayout = "2006-01-02"
+	startDate, err := time.Parse(dateLayout, req.StartDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startDate format")
+		return
+	}
+	endDate, err := time.Parse(dateLayout, req.EndDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endDate format")
+		return
+	}
+
+	if endDate.Before(startDate) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
+		return
+	}
+
+	now := time.Now()
+	timeline := &models.Timeline{
+		ID:          newID(),
+		TeamID:      teamID,
+		Name:        strings.TrimSpace(req.Name),
+		Description: req.Description,
+		Notes:       req.Notes,
+		StartDate:   startDate.Format(dateLayout),
+		EndDate:     endDate.Format(dateLayout),
+		Color:       req.Color,
+		Icon:        req.Icon,
+		ShareToken:  newID(),
+		IcalToken:   newID(),
+		CreatedBy:   claims.UserID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.timelines.Create(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	// Always grant the creator timeline-admin access so they can manage it.
+	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	// Copy the selected (or first) status template into live statuses for this timeline.
+	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID, req.TemplateID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusCreated, timeline)
+}
+
+// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
+// be a member of the timeline's team. Team admins may access any timeline;
+// other members require an entry in timeline_access.
+func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	// Hide archived timelines from the standard read path unless ?archived=true.
+	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	// Team admins can access all timelines; members need an explicit grant.
+	if member.Role != "admin" {
+		ok, err := s.timelines.HasAccess(timelineID, member.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
+// admins or timeline admins may archive.
+func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, true)
+}
+
+// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
+func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, false)
+}
+
+// setTimelineArchive is the shared archive/unarchive implementation. Access
+// is admin-only: the caller must be a team admin, or hold timeline_access
+// with role='admin' for this timeline.
+func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+	// Team admins always pass. Per-timeline admin grants are not consulted
+	// here — granular timeline-admin checks are tracked for Phase 10.3.
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+	}
+	if err := s.timelines.SetArchived(timelineID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+	timeline.ArchivedAt = at
+	timeline.UpdatedAt = time.Now().UTC()
+
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleUpdateTimeline handles PATCH /timelines/{id}. Only a team admin or a
+// member with timeline_access role='admin' may rename or change dates.
+func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	var req PatchTimelineJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		timeline.Name = name
+	}
+	if req.StartDate != nil {
+		timeline.StartDate = *req.StartDate
+	}
+	if req.EndDate != nil {
+		timeline.EndDate = *req.EndDate
+	}
+	if req.Color != nil {
+		timeline.Color = req.Color
+	}
+	if req.Icon != nil {
+		timeline.Icon = req.Icon
+	}
+	if req.Description != nil {
+		timeline.Description = req.Description
+	}
+	if req.Notes != nil {
+		timeline.Notes = req.Notes
+	}
+	timeline.UpdatedAt = time.Now().UTC()
+
+	if err := s.timelines.Update(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleDeleteTimeline handles DELETE /timelines/{id}. Hard-deletes the
+// timeline; only a team admin may delete. Cascades to statuses and
+// timeline_access via foreign key.
+func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+		return
+	}
+
+	if err := s.timelines.Delete(timelineID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListTimelineAccess handles GET /teams/{id}/timelines/{timelineId}/access.
+// Team members may list the access grants for any timeline they can view.
+func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+
+	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleGrantTimelineAccess handles PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may manage the access list.
+func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	// Verify the target member exists and belongs to the same team as the
+	// timeline — prevents cross-team grants if a member ID is guessed.
+	targetMember, err := s.teams.GetMemberByID(targetMemberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	if targetMember.TeamID != timeline.TeamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
+		return
+	}
+
+	var req GrantTimelineAccessJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Role != "admin" && req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	if err := s.timelines.GrantAccess(timelineID, targetMemberID, req.Role); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleRevokeTimelineAccess handles DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may revoke access.
+func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+
+	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	if err := s.timelines.RevokeAccess(timelineID, targetMemberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// canAdminTimeline reports whether a team member may perform admin operations
+// on a timeline. Team admins always pass; members must hold timeline_access
+// with role='admin'.
+func (s *Server) canAdminTimeline(member *models.TeamMember, timelineID string) bool {
+	if member.Role == "admin" {
+		return true
+	}
+	role, err := s.timelines.GetAccessRole(timelineID, member.ID)
+	if err != nil {
+		return false
+	}
+	return role == "admin"
+}
+
+// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
+// authentication is required; the token itself is the credential.
+func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	timeline, err := s.timelines.GetByShareToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
+}
 ````
 
 ## File: packages/api/internal/api/user_handler.go
@@ -23199,620 +23913,530 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
-## File: packages/web/src/components/filters/FilterDropdown.tsx
+## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
 ````typescript
 /**
- * Top-bar filter selector. Surfaces presets, a per-member section, a
- * team-promoted filters section (stub), and the user's saved filters.
- * Selection is stored in FilterContext; wiring to the events list lands
- * when real views render in Phase 8.
- */
-
-import { useEffect, useRef, useState } from 'react'
-import {
-  Layers, Clock, User, AlertCircle, UserX,
-  ChevronDown, Plus, Check, Settings2,
-} from 'lucide-react'
-import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { useSavedFilters } from '@/hooks/useSavedFilters'
-import { useAuth } from '@/contexts/AuthContext'
-
-interface Props {
-  teamId?: string
-  onOpenEditor: () => void
-}
-
-// ── Preset definitions ───────────────────────────────────────────────────────
-
-type PresetId = 'all' | 'upcoming' | 'my' | 'overdue' | 'noassign'
-
-interface Preset {
-  id: PresetId
-  label: string
-  icon: React.ReactNode
-  subtitle?: string
-}
-
-const ICON_PRESET = { size: 14, strokeWidth: 1.8 } as const
-
-const PRESETS: Preset[] = [
-  { id: 'all',      label: 'All activities',  icon: <Layers     {...ICON_PRESET} /> },
-  { id: 'upcoming', label: 'Upcoming',         icon: <Clock      {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
-  { id: 'my',       label: 'My events',        icon: <User       {...ICON_PRESET} /> },
-  { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
-  { id: 'noassign', label: 'No assignee',      icon: <UserX      {...ICON_PRESET} /> },
-]
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Narrow TeamMemberWithUser to only those with a real user account. */
-function hasUserId<T extends { userId?: string | null }>(m: T): m is T & { userId: string } {
-  return typeof m.userId === 'string' && m.userId.length > 0
-}
-
-function activeLabel(
-  active: ActiveFilter,
-  members: { userId: string; displayName: string }[],
-  saved: { id: string; name: string }[],
-): string {
-  if (active.kind === 'preset') return PRESETS.find(p => p.id === active.id)?.label ?? 'Filter'
-  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.displayName ?? 'Member'
-  return saved.find(s => s.id === active.id)?.name ?? 'Saved filter'
-}
-
-function activeMemberColor(
-  active: ActiveFilter,
-  members: { userId: string; color?: string | null }[],
-): string | null {
-  if (active.kind !== 'member') return null
-  return members.find(m => m.userId === active.userId)?.color ?? null
-}
-
-// ── Sub-components ───────────────────────────────────────────────────────────
-
-interface ItemRowProps {
-  icon?: React.ReactNode
-  /** Rendered in the 8px-dot slot when provided (overrides icon). */
-  dotColor?: string
-  label: string
-  subtitle?: string
-  active: boolean
-  /** Gear button shown on hover for custom filters. */
-  onConfigure?: () => void
-  onClick: () => void
-}
-
-function ItemRow({ icon, dotColor, label, subtitle, active, onConfigure, onClick }: ItemRowProps) {
-  const [hovered, setHovered] = useState(false)
-  const [gearHovered, setGearHovered] = useState(false)
-
-  const rowBg = active
-    ? 'rgba(40,140,155,.09)'
-    : hovered
-    ? 'var(--muted)'
-    : 'transparent'
-
-  const labelColor = active ? 'var(--primary)' : 'var(--foreground)'
-  const labelWeight = active ? 600 : 400
-
-  const showGear = onConfigure && hovered
-  const showCheck = active && !showGear
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        padding: '5px 10px 5px 14px',
-        background: rowBg,
-        cursor: 'pointer',
-        transition: 'background 0.08s',
-      }}
-      onClick={onClick}
-    >
-      {/* 16px icon / dot slot */}
-      <div style={{ width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: active ? 'var(--primary)' : 'var(--muted-foreground)' }}>
-        {dotColor ? (
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor }} />
-        ) : (
-          icon
-        )}
-      </div>
-
-      {/* Label + subtitle */}
-      <div style={{ flex: 1, minWidth: 0, marginLeft: 8 }}>
-        <div style={{
-          fontSize: 13,
-          fontWeight: labelWeight,
-          color: labelColor,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-          title={label}
-        >
-          {label}
-        </div>
-        {subtitle && (
-          <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {subtitle}
-          </div>
-        )}
-      </div>
-
-      {/* 24px right slot */}
-      <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-        {showGear ? (
-          <button
-            onClick={e => { e.stopPropagation(); onConfigure?.() }}
-            onMouseEnter={() => setGearHovered(true)}
-            onMouseLeave={() => setGearHovered(false)}
-            style={{
-              width: 22,
-              height: 22,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: gearHovered ? '#dde2e8' : 'var(--muted, #EDF0F3)',
-              border: 'none',
-              borderRadius: 5,
-              cursor: 'pointer',
-              color: 'var(--muted-foreground)',
-              transition: 'background 0.1s',
-            }}
-          >
-            <Settings2 size={12} strokeWidth={1.8} />
-          </button>
-        ) : showCheck ? (
-          <Check size={13} strokeWidth={2.5} color="var(--primary)" />
-        ) : null}
-      </div>
-    </div>
-  )
-}
-
-// ── Section header ───────────────────────────────────────────────────────────
-
-interface SectionHeaderProps {
-  label: string
-  teamBadge?: boolean
-}
-
-function SectionHeader({ label, teamBadge }: SectionHeaderProps) {
-  return (
-    <div style={{
-      padding: '10px 14px 3px',
-      fontSize: 10,
-      fontWeight: 700,
-      letterSpacing: '0.8px',
-      textTransform: 'uppercase',
-      color: 'var(--muted-foreground)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-    }}>
-      {label}
-      {teamBadge && (
-        <span style={{
-          fontSize: 9,
-          fontWeight: 700,
-          color: 'var(--primary)',
-          background: 'rgba(40,140,155,.1)',
-          border: '1px solid rgba(40,140,155,.25)',
-          borderRadius: 99,
-          padding: '1px 5px',
-          letterSpacing: 0,
-          textTransform: 'none',
-        }}>
-          Team
-        </span>
-      )}
-    </div>
-  )
-}
-
-function Divider() {
-  return <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
-}
-
-// ── Main component ───────────────────────────────────────────────────────────
-
-export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
-  const { activeFilter, setActiveFilter } = useFilter()
-  const { user } = useAuth()
-  const { data: members = [] } = useTeamMembers(teamId)
-  const { data: saved = [] } = useSavedFilters(teamId)
-
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [])
-
-  const membersWithUser = members.filter(hasUserId)
-  const label = activeLabel(activeFilter, membersWithUser, saved)
-  const memberDotColor = activeMemberColor(activeFilter, membersWithUser)
-  const currentUserId = (user as { id?: string } | null)?.id ?? ''
-
-  const isDefaultFilter = activeFilter.kind === 'preset' && activeFilter.id === 'all'
-
-  function select(f: ActiveFilter) {
-    setActiveFilter(f)
-    setOpen(false)
-  }
-
-  function isSelected(f: ActiveFilter): boolean {
-    if (f.kind !== activeFilter.kind) return false
-    if (f.kind === 'preset' && activeFilter.kind === 'preset') return f.id === activeFilter.id
-    if (f.kind === 'member' && activeFilter.kind === 'member') return f.userId === activeFilter.userId
-    if (f.kind === 'saved' && activeFilter.kind === 'saved') return f.id === activeFilter.id
-    return false
-  }
-
-  // Trigger appearance — teal tint when a non-default filter is active.
-  const triggerBg = isDefaultFilter ? 'transparent' : 'rgba(40,140,155,.09)'
-  const triggerBorder = isDefaultFilter ? 'var(--border)' : 'rgba(40,140,155,.22)'
-  const triggerColor = isDefaultFilter ? 'var(--foreground)' : 'var(--primary)'
-  const triggerWeight = isDefaultFilter ? 400 : 600
-
-  return (
-    <div ref={ref} style={{ position: 'relative' }}>
-      {/* Trigger */}
-      <button
-        onClick={() => setOpen(o => !o)}
-        title="Filter"
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          cursor: 'pointer',
-          fontFamily: 'var(--font-sans)',
-          border: `1px solid ${triggerBorder}`,
-          borderRadius: 6,
-          background: triggerBg,
-          color: triggerColor,
-          padding: '5px 9px 5px 8px',
-          height: 30,
-          fontSize: 13,
-          fontWeight: triggerWeight,
-          maxWidth: 220,
-          transition: 'all 0.12s',
-        }}
-      >
-        {/* Icon: colored dot when a member filter is active, otherwise Filter icon */}
-        {memberDotColor && !isDefaultFilter ? (
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: memberDotColor, flexShrink: 0 }} />
-        ) : (
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: 'var(--muted-foreground)' }}>
-            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-          </svg>
-        )}
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-          {label}
-        </span>
-        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {/* Dropdown panel */}
-      {open && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 8px)',
-            right: 0,
-            width: 284,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 8,
-            boxShadow: '0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)',
-            zIndex: 100,
-            paddingBottom: 4,
-            maxHeight: 460,
-            overflowY: 'auto',
-          }}
-        >
-          {/* Presets */}
-          <SectionHeader label="Presets" />
-          {PRESETS.map(p => {
-            const f: ActiveFilter = { kind: 'preset', id: p.id }
-            return (
-              <ItemRow
-                key={p.id}
-                icon={p.icon}
-                label={p.label}
-                subtitle={p.subtitle}
-                active={isSelected(f)}
-                onClick={() => select(f)}
-              />
-            )
-          })}
-
-          {/* Members */}
-          {membersWithUser.length > 0 && (
-            <>
-              <Divider />
-              <SectionHeader label="Members" />
-              {membersWithUser.map(m => {
-                const f: ActiveFilter = { kind: 'member', userId: m.userId }
-                const name = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName
-                return (
-                  <ItemRow
-                    key={m.userId}
-                    dotColor={m.color ?? '#8b949e'}
-                    label={name}
-                    active={isSelected(f)}
-                    onClick={() => select(f)}
-                  />
-                )
-              })}
-            </>
-          )}
-
-          {/* Team filters — stub; no API support yet */}
-          <Divider />
-          <SectionHeader label="Team filters" teamBadge />
-          <div style={{ padding: '6px 14px 4px', fontSize: 12, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-            No team filters yet
-          </div>
-
-          {/* My filters */}
-          {saved.length > 0 && (
-            <>
-              <Divider />
-              <SectionHeader label="My filters" />
-              {saved.map(s => {
-                const f: ActiveFilter = { kind: 'saved', id: s.id }
-                return (
-                  <ItemRow
-                    key={s.id}
-                    label={s.name}
-                    active={isSelected(f)}
-                    onConfigure={() => { onOpenEditor(); setOpen(false) }}
-                    onClick={() => select(f)}
-                  />
-                )
-              })}
-            </>
-          )}
-
-          {/* Footer — add filter */}
-          <Divider />
-          <AddFilterRow onClick={() => { onOpenEditor(); setOpen(false) }} />
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Add filter footer row ─────────────────────────────────────────────────────
-
-function AddFilterRow({ onClick }: { onClick: () => void }) {
-  const [hovered, setHovered] = useState(false)
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        width: '100%',
-        padding: '7px 14px',
-        background: hovered ? 'var(--muted)' : 'transparent',
-        border: 'none',
-        fontSize: 13,
-        fontWeight: hovered ? 600 : 400,
-        color: hovered ? 'var(--primary)' : 'var(--muted-foreground)',
-        cursor: 'pointer',
-        fontFamily: 'var(--font-sans)',
-        textAlign: 'left',
-        transition: 'all 0.1s',
-      }}
-    >
-      <Plus size={14} strokeWidth={2} />
-      Add filter
-    </button>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
+ * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
+ *
+ * Fields: icon (stub), title, dates + allDay, assigned to (member rows),
+ * status (stub), tags (stub), color, parent activity (stub), % complete (stub),
+ * location, url, description. All functional fields save on change/blur via
+ * PATCH /activities/:id.
  */
 
 import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
+import { X, Trash2, ArrowRight, Loader2, Tag, ChevronDown } from 'lucide-react'
+import { useFormatDate } from '@/hooks/useFormatDate'
+import MemberAvatar from '@/components/MemberAvatar'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
 
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
+type ApiActivity = components['schemas']['Activity']
 
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
+const PANEL_WIDTH = 300
 
-const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
+interface Props {
+  event: ApiActivity | null
+  open: boolean
+  members: Member[]
+  teamId: string
+  timelineId?: string
+  onClose: () => void
+}
 
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-  const { theme: currentTheme, applyTheme } = useDarkMode()
+// ── Small helpers ─────────────────────────────────────────────────────────────
 
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+function toDateInput(iso: string): string { return iso.slice(0, 10) }
+function toISODate(d: string): string { return `${d}T00:00:00Z` }
 
+const SEC_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.08em',
+  marginBottom: 6,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.07em',
+  marginBottom: 3,
+  width: 68,
+  flexShrink: 0,
+}
+
+const STUB_VALUE: React.CSSProperties = {
+  fontSize: 12,
+  color: 'var(--muted-foreground)',
+  opacity: 0.5,
+  flex: 1,
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  cursor: 'default',
+  userSelect: 'none',
+}
+
+const DIVIDER: React.CSSProperties = {
+  borderTop: '1px solid var(--border)',
+  margin: '10px 0',
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box' as const,
+  fontSize: 12,
+  color: 'var(--foreground)',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-md)',
+  padding: '5px 8px',
+  outline: 'none',
+  background: 'var(--background)',
+  fontFamily: 'var(--font-sans)',
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export default function ActivityDetailPanel({ event, open, members, teamId, timelineId, onClose }: Props) {
+  const updateMutation = useUpdateActivity(teamId)
+  const deleteMutation = useDeleteActivity(teamId)
+  const formatDate = useFormatDate()
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId ?? '')
+
+  const [title, setTitle] = useState(event?.title ?? '')
+  const [description, setDescription] = useState(event?.description ?? '')
+  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
+  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
+  const [allDay, setAllDay] = useState(event?.allDay ?? false)
+  const [identity, setIdentity] = useState<Identity>({
+    color: event?.color ?? '#288C9B',
+    icon: event?.icon ?? '__none__',
+  })
+  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
+  const [location, setLocation] = useState(event?.location ?? '')
+  const [url, setUrl] = useState(event?.url ?? '')
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // Re-sync when the selected activity changes.
   useEffect(() => {
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-    const savedTheme = prefMap['theme'] as string | undefined
-    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
-  }, [JSON.stringify(prefMap)]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (!event) return
+    setTitle(event.title)
+    setDescription(event.description ?? '')
+    setStartDate(toDateInput(event.startAt))
+    setEndDate(toDateInput(event.endAt))
+    setAllDay(event.allDay)
+    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
+    setAssignedIds(event.assignedMemberIds ?? [])
+    setLocation(event.location ?? '')
+    setUrl(event.url ?? '')
+    setConfirmDelete(false)
+  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  function handleThemeChange(t: 'light' | 'dark') {
-    setTheme(t)
-    applyTheme(t)
+  const saving = updateMutation.isPending
+  const deleting = deleteMutation.isPending
+
+  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
+    if (!event) return
+    updateMutation.mutate({ activityId: event.id, patch })
   }
 
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await Promise.all([
-        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
-        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
-        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
-        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
-      ])
-      setFeedback({ type: 'success', msg: 'Preferences saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
-    }
+  function handleTitleBlur() {
+    if (title.trim() && title !== event?.title) save({ title: title.trim() })
+  }
+
+  function handleDescriptionBlur() {
+    if (description !== (event?.description ?? '')) save({ description: description || null })
+  }
+
+  function handleLocationBlur() {
+    if (location !== (event?.location ?? '')) save({ location: location || null })
+  }
+
+  function handleUrlBlur() {
+    if (url !== (event?.url ?? '')) save({ url: url || null })
+  }
+
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val && val <= endDate) save({ startAt: toISODate(val) })
+  }
+
+  function handleEndDateChange(val: string) {
+    setEndDate(val)
+    if (val && val >= startDate) save({ endAt: toISODate(val) })
+  }
+
+  function handleAllDayToggle() {
+    const next = !allDay
+    setAllDay(next)
+    save({ allDay: next })
+  }
+
+  function handleIdentityChange(next: Identity) {
+    setIdentity(next)
+    save({ color: next.color, icon: next.icon })
+  }
+
+  function toggleAssignee(memberId: string) {
+    const next = assignedIds.includes(memberId)
+      ? assignedIds.filter(id => id !== memberId)
+      : [...assignedIds, memberId]
+    setAssignedIds(next)
+    save({ assignedMemberIds: next })
+  }
+
+  function handleDelete() {
+    if (!event) return
+    deleteMutation.mutate(event.id, { onSuccess: onClose })
   }
 
   return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Personal appearance and regional settings.
-      </p>
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {!event ? null : (<>
 
-      {/* Regional */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Regional
-        </h3>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Language</Label>
-          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Timezone</Label>
-          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Date format</Label>
-          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
+        {/* ── Header bar ── */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0 12px', height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)', flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
+            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
           </div>
+          <button
+            onClick={onClose}
+            style={{
+              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', color: 'var(--muted-foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <X size={14} strokeWidth={2} />
+          </button>
         </div>
-      </div>
 
-      {/* Appearance */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Appearance
-        </h3>
-        <div className="flex flex-col gap-1.5 mb-2">
-          <Label>Theme</Label>
-          <div className="flex gap-2">
-            {(['light', 'dark'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  theme === t
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
+        {/* ── Scrollable body ── */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
+
+          {/* Identity widget + Title */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
+            <div style={{ marginTop: 2, flexShrink: 0 }}>
+              <IdentityWidget
+                identity={identity}
+                name={title || event?.title || ''}
+                shape="square"
+                onChange={handleIdentityChange}
+              />
+            </div>
+            {/* Title */}
+            <input
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              onBlur={handleTitleBlur}
+              style={{
+                flex: 1, fontSize: 13, fontWeight: 600,
+                color: 'var(--foreground)', border: '1px solid transparent',
+                borderRadius: 'var(--radius-md)', padding: '5px 6px',
+                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
+              }}
+              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
+              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
+            />
           </div>
-          <p className="text-xs text-muted-foreground m-0">
-            Applies immediately. Persisted server-side so it syncs across devices.
-          </p>
+
+          <div style={DIVIDER} />
+
+          {/* ── WHEN ── */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>When</div>
+            {/* Human-readable date summary respecting the user's date_format preference */}
+            {startDate && endDate && (
+              <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginBottom: 6 }}>
+                {formatDate(new Date(startDate))} – {formatDate(new Date(endDate))}
+              </div>
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <input
+                type="date" value={startDate}
+                onChange={e => handleStartDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
+              <input
+                type="date" value={endDate} min={startDate}
+                onChange={e => handleEndDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <input
+                type="checkbox" checked={allDay} onChange={handleAllDayToggle}
+                style={{ width: 13, height: 13, cursor: 'pointer', accentColor: 'var(--primary)' }}
+              />
+              <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>All day</span>
+            </label>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* ── ASSIGNED TO ── */}
+          {members.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={SEC_LABEL}>Assigned to</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                {members.map(m => {
+                  const assigned = assignedIds.includes(m.id)
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => toggleAssignee(m.id)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '5px 6px',
+                        border: 'none', borderRadius: 'var(--radius-md)',
+                        background: 'none', cursor: 'pointer', textAlign: 'left',
+                        opacity: assigned ? 1 : 0.45,
+                        transition: 'opacity 0.1s, background 0.1s',
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.opacity = '1' }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.opacity = assigned ? '1' : '0.45' }}
+                    >
+                      <MemberAvatar member={m} size={20} />
+                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
+                      {assigned && (
+                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          <div style={DIVIDER} />
+
+          {/* ── CLASSIFY ── */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Classify</div>
+
+            {/* Status picker */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Status</span>
+              {statuses.length > 0 ? (
+                <div style={{ flex: 1 }}>
+                  <select
+                    value={event?.statusId ?? ''}
+                    onChange={e => save({ statusId: e.target.value || null } as Parameters<typeof save>[0])}
+                    style={{
+                      fontSize: 12, padding: '3px 8px', border: '1px solid var(--border)',
+                      borderRadius: 6, background: 'var(--background)', color: 'var(--foreground)',
+                      cursor: 'pointer', width: '100%',
+                    }}
+                  >
+                    <option value="">— No status —</option>
+                    {statuses.map(s => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div style={{ ...STUB_VALUE }}>
+                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
+                </div>
+              )}
+            </div>
+
+            {/* Tags stub */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+              <span style={FIELD_LABEL}>Tags</span>
+              <div style={{ ...STUB_VALUE }}>
+                <span style={{
+                  fontSize: 11, padding: '2px 8px', borderRadius: 100,
+                  border: '1px dashed var(--border)', lineHeight: 1.5,
+                  display: 'flex', alignItems: 'center', gap: 3,
+                }}>
+                  <Tag size={9} strokeWidth={2} /> Add tag
+                </span>
+                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
+              </div>
+            </div>
+
+            {/* Identity (color + icon) — handled by the widget in the title row above */}
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <span style={FIELD_LABEL}>Identity</span>
+              <div style={{ flex: 1, fontSize: 11, color: 'var(--muted-foreground)', opacity: 0.7 }}>
+                Use the icon above to edit
+              </div>
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* ── DETAILS ── */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Details</div>
+
+            {/* Parent activity stub */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Parent</span>
+              <div style={{ ...STUB_VALUE }}>
+                <span style={{
+                  fontSize: 11, padding: '2px 8px', borderRadius: 4,
+                  border: '1px solid var(--border)', lineHeight: 1.5,
+                  display: 'flex', alignItems: 'center', gap: 3,
+                }}>
+                  None <ChevronDown size={10} strokeWidth={2} />
+                </span>
+                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
+              </div>
+            </div>
+
+            {/* % Complete stub */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Progress</span>
+              <div style={{ ...STUB_VALUE }}>
+                <div style={{
+                  flex: 1, height: 4, background: 'var(--border)',
+                  borderRadius: 2, overflow: 'hidden', maxWidth: 80,
+                }}>
+                  <div style={{ width: `${event.percentComplete ?? 0}%`, height: '100%', background: 'var(--primary)', borderRadius: 2 }} />
+                </div>
+                <span style={{ fontSize: 11, marginLeft: 5 }}>{event.percentComplete ?? 0}%</span>
+                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
+              </div>
+            </div>
+
+            {/* Location (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Location</span>
+              <input
+                value={location}
+                onChange={e => setLocation(e.target.value)}
+                onBlur={handleLocationBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+
+            {/* URL (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <span style={FIELD_LABEL}>URL</span>
+              <input
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                onBlur={handleUrlBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* ── NOTES ── */}
+          <div style={{ marginBottom: 8 }}>
+            <div style={SEC_LABEL}>Notes</div>
+            <textarea
+              value={description}
+              rows={3}
+              onChange={e => setDescription(e.target.value)}
+              onBlur={handleDescriptionBlur}
+              placeholder="Add notes…"
+              style={{
+                ...INPUT, resize: 'vertical', lineHeight: 1.5, padding: '6px 8px',
+              }}
+              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+              onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+            />
+          </div>
+
         </div>
+
+        {/* ── Footer ── */}
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+          {confirmDelete ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
+                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
+              </p>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                    background: 'var(--card)', color: 'var(--foreground)',
+                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                  }}
+                >Cancel</button>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: 'none',
+                    background: 'var(--destructive)', color: 'white',
+                    cursor: deleting ? 'not-allowed' : 'pointer',
+                    fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  }}
+                >
+                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmDelete(true)}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                fontSize: 12, fontWeight: 600, padding: 7,
+                borderRadius: 'var(--radius-md)', border: 'none',
+                background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
+                cursor: 'pointer', fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <Trash2 size={12} strokeWidth={2} />
+              Delete activity
+            </button>
+          )}
+        </div>
+
+        </>)}
       </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <Button onClick={handleSave} disabled={upsert.isPending}>
-        {upsert.isPending ? 'Saving…' : 'Save preferences'}
-      </Button>
     </div>
   )
 }
@@ -24687,529 +25311,6 @@ func getenv(key, fallback string) string {
 }
 ````
 
-## File: packages/api/internal/api/timeline_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
-// list the non-archived timelines for a team.
-func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
-		return
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timelines)
-}
-
-// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
-// user must be a member of the team. The creator is automatically granted
-// timeline-admin access.
-func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	var req createTimelineBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if strings.TrimSpace(req.Name) == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-	if req.StartDate == "" || req.EndDate == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startDate and endDate are required")
-		return
-	}
-
-	const dateLayout = "2006-01-02"
-	startDate, err := time.Parse(dateLayout, req.StartDate)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startDate format")
-		return
-	}
-	endDate, err := time.Parse(dateLayout, req.EndDate)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endDate format")
-		return
-	}
-
-	if endDate.Before(startDate) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
-		return
-	}
-
-	now := time.Now()
-	timeline := &models.Timeline{
-		ID:          newID(),
-		TeamID:      teamID,
-		Name:        strings.TrimSpace(req.Name),
-		Description: req.Description,
-		Notes:       req.Notes,
-		StartDate:   startDate.Format(dateLayout),
-		EndDate:     endDate.Format(dateLayout),
-		Color:       req.Color,
-		Icon:        req.Icon,
-		ShareToken:  newID(),
-		IcalToken:   newID(),
-		CreatedBy:   claims.UserID,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	if err := s.timelines.Create(timeline); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	// Always grant the creator timeline-admin access so they can manage it.
-	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	// Copy the selected (or first) status template into live statuses for this timeline.
-	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID, req.TemplateID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusCreated, timeline)
-}
-
-// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
-// be a member of the timeline's team. Team admins may access any timeline;
-// other members require an entry in timeline_access.
-func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	// Hide archived timelines from the standard read path unless ?archived=true.
-	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	// Team admins can access all timelines; members need an explicit grant.
-	if member.Role != "admin" {
-		ok, err := s.timelines.HasAccess(timelineID, member.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-			return
-		}
-		if !ok {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
-// admins or timeline admins may archive.
-func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, true)
-}
-
-// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
-func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, false)
-}
-
-// setTimelineArchive is the shared archive/unarchive implementation. Access
-// is admin-only: the caller must be a team admin, or hold timeline_access
-// with role='admin' for this timeline.
-func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	// Team admins always pass. Per-timeline admin grants are not consulted
-	// here — granular timeline-admin checks are tracked for Phase 10.3.
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-	}
-	if err := s.timelines.SetArchived(timelineID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	timeline.ArchivedAt = at
-	timeline.UpdatedAt = time.Now().UTC()
-
-	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleUpdateTimeline handles PATCH /timelines/{id}. Only a team admin or a
-// member with timeline_access role='admin' may rename or change dates.
-func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	var req PatchTimelineJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
-			return
-		}
-		timeline.Name = name
-	}
-	if req.StartDate != nil {
-		timeline.StartDate = *req.StartDate
-	}
-	if req.EndDate != nil {
-		timeline.EndDate = *req.EndDate
-	}
-	if req.Color != nil {
-		timeline.Color = req.Color
-	}
-	if req.Icon != nil {
-		timeline.Icon = req.Icon
-	}
-	if req.Description != nil {
-		timeline.Description = req.Description
-	}
-	if req.Notes != nil {
-		timeline.Notes = req.Notes
-	}
-	timeline.UpdatedAt = time.Now().UTC()
-
-	if err := s.timelines.Update(timeline); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleDeleteTimeline handles DELETE /timelines/{id}. Hard-deletes the
-// timeline; only a team admin may delete. Cascades to statuses and
-// timeline_access via foreign key.
-func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
-		return
-	}
-
-	if err := s.timelines.Delete(timelineID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleListTimelineAccess handles GET /teams/{id}/timelines/{timelineId}/access.
-// Team members may list the access grants for any timeline they can view.
-func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
-		return
-	}
-
-	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
-		return
-	}
-
-	entries, err := s.timelines.ListAccess(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
-		return
-	}
-	writeJSON(w, http.StatusOK, entries)
-}
-
-// handleGrantTimelineAccess handles PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
-// Only team admins or timeline admins may manage the access list.
-func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	targetMemberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	// Verify the target member exists and belongs to the same team as the
-	// timeline — prevents cross-team grants if a member ID is guessed.
-	targetMember, err := s.teams.GetMemberByID(targetMemberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-	if targetMember.TeamID != timeline.TeamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
-		return
-	}
-
-	var req GrantTimelineAccessJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Role != "admin" && req.Role != "member" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
-		return
-	}
-
-	if err := s.timelines.GrantAccess(timelineID, targetMemberID, req.Role); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-
-	entries, err := s.timelines.ListAccess(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-	writeJSON(w, http.StatusOK, entries)
-}
-
-// handleRevokeTimelineAccess handles DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}.
-// Only team admins or timeline admins may revoke access.
-func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	targetMemberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
-		return
-	}
-
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
-		return
-	}
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	if err := s.timelines.RevokeAccess(timelineID, targetMemberID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// canAdminTimeline reports whether a team member may perform admin operations
-// on a timeline. Team admins always pass; members must hold timeline_access
-// with role='admin'.
-func (s *Server) canAdminTimeline(member *models.TeamMember, timelineID string) bool {
-	if member.Role == "admin" {
-		return true
-	}
-	role, err := s.timelines.GetAccessRole(timelineID, member.ID)
-	if err != nil {
-		return false
-	}
-	return role == "admin"
-}
-
-// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
-// authentication is required; the token itself is the credential.
-func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	timeline, err := s.timelines.GetByShareToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
-}
-````
-
 ## File: packages/web/src/components/layout/TopBar.tsx
 ````typescript
 /**
@@ -25807,6 +25908,193 @@ export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
 }
 ````
 
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
+ */
+
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
+
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
+
+const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
+
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+  const { theme: currentTheme, applyTheme } = useDarkMode()
+
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+    const savedTheme = prefMap['theme'] as string | undefined
+    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
+  }, [JSON.stringify(prefMap)])
+
+  function handleThemeChange(t: 'light' | 'dark') {
+    setTheme(t)
+    applyTheme(t)
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
+        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
+        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
+        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Personal appearance and regional settings.
+      </p>
+
+      {/* Regional */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Regional
+        </h3>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Language</Label>
+          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Date format</Label>
+          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Appearance */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Appearance
+        </h3>
+        <div className="flex flex-col gap-1.5 mb-2">
+          <Label>Theme</Label>
+          <div className="flex gap-2">
+            {(['light', 'dark'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  theme === t
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground m-0">
+            Applies immediately. Persisted server-side so it syncs across devices.
+          </p>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/components/MemberModal.tsx
 ````typescript
 /**
@@ -26339,6 +26627,461 @@ export default defineConfig(({ mode }) => {
     },
   }
 })
+````
+
+## File: packages/api/internal/db/team_repo.go
+````go
+package db
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ErrDuplicateName is returned by TeamRepo.Create when the generated slug
+// collides with an existing team's slug (UNIQUE constraint on teams.slug).
+var ErrDuplicateName = errors.New("team name already taken")
+
+// TeamRepo is the persistence layer for Team records and their membership
+// join table.
+type TeamRepo struct {
+	db *sqlx.DB
+}
+
+// NewTeamRepo returns a TeamRepo backed by db.
+func NewTeamRepo(db *sqlx.DB) *TeamRepo {
+	return &TeamRepo{db: db}
+}
+
+// Create inserts a new Team row. Returns ErrDuplicateName if the slug is
+// already taken.
+func (r *TeamRepo) Create(team *models.Team) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO teams (id, name, slug, description, notes, color, icon, created_at, updated_at)
+		VALUES (:id, :name, :slug, :description, :notes, :color, :icon, :created_at, :updated_at)
+	`, team)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateName
+		}
+		return fmt.Errorf("creating team: %w", err)
+	}
+	return nil
+}
+
+// Update writes mutable team fields (name, slug, description, notes, color,
+// icon, updated_at). It does not touch archived_at or created_at.
+func (r *TeamRepo) Update(team *models.Team) error {
+	_, err := r.db.NamedExec(`
+		UPDATE teams
+		SET name = :name, slug = :slug, description = :description, notes = :notes,
+		    color = :color, icon = :icon, updated_at = :updated_at
+		WHERE id = :id
+	`, team)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateName
+		}
+		return fmt.Errorf("updating team: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears the archived_at timestamp on a team.
+func (r *TeamRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(`UPDATE teams SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now(), id)
+	if err != nil {
+		return fmt.Errorf("setting team archived: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Team by primary key.
+func (r *TeamRepo) GetByID(id string) (*models.Team, error) {
+	var t models.Team
+	err := r.db.Get(&t, `SELECT * FROM teams WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting team: %w", err)
+	}
+	return &t, nil
+}
+
+// AddMember inserts a team_members row. m.ID must be pre-populated by the caller.
+func (r *TeamRepo) AddMember(m *models.TeamMember) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at)
+		VALUES (:id, :team_id, :user_id, :display_name, :role, :color, :icon, :joined_at)
+	`, m)
+	if err != nil {
+		return fmt.Errorf("adding team member: %w", err)
+	}
+	return nil
+}
+
+// GetMember returns the team_members row for a given (team, user) pair.
+func (r *TeamRepo) GetMember(teamID, userID string) (*models.TeamMember, error) {
+	var m models.TeamMember
+	err := r.db.Get(&m, `
+		SELECT * FROM team_members WHERE team_id = ? AND user_id = ?
+	`, teamID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("getting team member: %w", err)
+	}
+	return &m, nil
+}
+
+// ListMembers returns active (non-archived) members of a team, including
+// login-less Participants. A LEFT JOIN handles Participants who have no users
+// row; COALESCE prefers the per-team display_name override, then falls back to users.
+func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, error) {
+	return r.listMembers(teamID, false)
+}
+
+// ListMembersAll returns all members of a team, including inactivated members.
+func (r *TeamRepo) ListMembersAll(teamID string) ([]*models.TeamMemberWithUser, error) {
+	return r.listMembers(teamID, true)
+}
+
+func (r *TeamRepo) listMembers(teamID string, includeArchived bool) ([]*models.TeamMemberWithUser, error) {
+	var members []*models.TeamMemberWithUser
+	query := `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.team_id = ?`
+	if !includeArchived {
+		query += ` AND tm.archived_at IS NULL`
+	}
+	query += ` ORDER BY tm.joined_at ASC`
+	if err := r.db.Select(&members, query, teamID); err != nil {
+		return nil, fmt.Errorf("listing team members: %w", err)
+	}
+	return members, nil
+}
+
+// ListByUserID returns all teams the given user belongs to, ordered by
+// creation date ascending. When includeArchived is false (the default),
+// archived teams are excluded.
+func (r *TeamRepo) ListByUserID(userID string, includeArchived bool) ([]*models.Team, error) {
+	teams := make([]*models.Team, 0)
+	query := `
+		SELECT t.* FROM teams t
+		JOIN team_members tm ON tm.team_id = t.id
+		WHERE tm.user_id = ?`
+	if !includeArchived {
+		query += ` AND t.archived_at IS NULL`
+	}
+	query += ` ORDER BY t.created_at ASC`
+	if err := r.db.Select(&teams, query, userID); err != nil {
+		return nil, fmt.Errorf("listing teams for user: %w", err)
+	}
+	return teams, nil
+}
+
+// ListAll returns every team in the system, optionally including archived ones.
+// Used by superadmin callers who need visibility across all teams.
+func (r *TeamRepo) ListAll(includeArchived bool) ([]*models.Team, error) {
+	teams := make([]*models.Team, 0)
+	query := `SELECT * FROM teams`
+	if !includeArchived {
+		query += ` WHERE archived_at IS NULL`
+	}
+	query += ` ORDER BY created_at ASC`
+	if err := r.db.Select(&teams, query); err != nil {
+		return nil, fmt.Errorf("listing all teams: %w", err)
+	}
+	return teams, nil
+}
+
+// Count returns the total number of teams.
+func (r *TeamRepo) Count() (int, error) {
+	var count int
+	err := r.db.Get(&count, `SELECT COUNT(*) FROM teams`)
+	if err != nil {
+		return 0, fmt.Errorf("counting teams: %w", err)
+	}
+	return count, nil
+}
+
+// GetMemberByID fetches a team_members row by its primary key. Unlike
+// GetMember (which looks up by team+userID pair), this is the canonical
+// lookup used by member-scoped routes that receive a memberId path param.
+func (r *TeamRepo) GetMemberByID(memberID string) (*models.TeamMemberWithUser, error) {
+	var m models.TeamMemberWithUser
+	err := r.db.Get(&m, `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.id = ?
+	`, memberID)
+	if err != nil {
+		return nil, fmt.Errorf("getting team member by id: %w", err)
+	}
+	return &m, nil
+}
+
+// UpdateMember applies mutable identity and role fields to a team_members row.
+// Only non-nil arguments are written; nil fields retain their current values.
+func (r *TeamRepo) UpdateMember(memberID string, displayName, color, icon, role *string) error {
+	// Fetch current values so we can apply the partial update.
+	type row struct {
+		DisplayName *string `db:"display_name"`
+		Color       *string `db:"color"`
+		Icon        *string `db:"icon"`
+		Role        string  `db:"role"`
+	}
+	var cur row
+	if err := r.db.Get(&cur, `SELECT display_name, color, icon, role FROM team_members WHERE id = ?`, memberID); err != nil {
+		return fmt.Errorf("fetching member for update: %w", err)
+	}
+	if displayName != nil {
+		cur.DisplayName = displayName
+	}
+	if color != nil {
+		cur.Color = color
+	}
+	if icon != nil {
+		cur.Icon = icon
+	}
+	if role != nil {
+		cur.Role = *role
+	}
+	_, err := r.db.Exec(`
+		UPDATE team_members SET display_name = ?, color = ?, icon = ?, role = ? WHERE id = ?
+	`, cur.DisplayName, cur.Color, cur.Icon, cur.Role, memberID)
+	if err != nil {
+		return fmt.Errorf("updating team member: %w", err)
+	}
+	return nil
+}
+
+// DeleteMember removes a team_members row. The caller is responsible for
+// verifying that the member is not the last admin before calling this, and
+// must delete the member's timeline_access rows first (RESTRICT FK).
+func (r *TeamRepo) DeleteMember(memberID string) error {
+	_, err := r.db.Exec(`DELETE FROM team_members WHERE id = ?`, memberID)
+	if err != nil {
+		return fmt.Errorf("deleting team member: %w", err)
+	}
+	return nil
+}
+
+// CountMemberAssignments returns how many activity_assignments rows reference
+// this team member. Callers use this count to block hard-delete when history exists.
+func (r *TeamRepo) CountMemberAssignments(memberID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?
+	`, memberID)
+	if err != nil {
+		return 0, fmt.Errorf("counting member assignments: %w", err)
+	}
+	return count, nil
+}
+
+// DeleteMemberTimelineAccess removes all timeline_access entries for a member.
+// Must be called before DeleteMember; the RESTRICT FK on
+// timeline_access.team_member_id blocks the team_members deletion otherwise.
+func (r *TeamRepo) DeleteMemberTimelineAccess(memberID string) error {
+	_, err := r.db.Exec(`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID)
+	if err != nil {
+		return fmt.Errorf("deleting member timeline access: %w", err)
+	}
+	return nil
+}
+
+// SetMemberArchived sets or clears archived_at on a team_members row.
+func (r *TeamRepo) SetMemberArchived(memberID string, at *time.Time) error {
+	_, err := r.db.Exec(`UPDATE team_members SET archived_at = ? WHERE id = ?`, at, memberID)
+	if err != nil {
+		return fmt.Errorf("setting member archived: %w", err)
+	}
+	return nil
+}
+
+// CountAdmins counts non-archived admin members of a team. Used to enforce
+// the "cannot remove last admin" constraint.
+func (r *TeamRepo) CountAdmins(teamID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM team_members
+		WHERE team_id = ? AND role = 'admin' AND archived_at IS NULL
+	`, teamID)
+	if err != nil {
+		return 0, fmt.Errorf("counting admins: %w", err)
+	}
+	return count, nil
+}
+
+// CountTeamsForUser returns how many teams a user belongs to. Used to enforce
+// the "single team" constraint for hard deletion.
+func (r *TeamRepo) CountTeamsForUser(userID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM team_members WHERE user_id = ? AND archived_at IS NULL
+	`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("counting user teams: %w", err)
+	}
+	return count, nil
+}
+
+// GetMemberStats computes activity and timeline counts for a team member.
+func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) {
+	now := time.Now()
+	var stats models.MemberStats
+
+	// Timeline counts via timeline_access.
+	if err := r.db.Get(&stats.ActiveTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		WHERE ta.team_member_id = ? AND t.archived_at IS NULL
+	`, memberID); err != nil {
+		return nil, fmt.Errorf("counting active timelines: %w", err)
+	}
+	if err := r.db.Get(&stats.ArchivedTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		WHERE ta.team_member_id = ? AND t.archived_at IS NOT NULL
+	`, memberID); err != nil {
+		return nil, fmt.Errorf("counting archived timelines: %w", err)
+	}
+
+	// Activity counts from activity_assignments.
+	rows, err := r.db.Query(`
+		SELECT
+			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                                     THEN 1 ELSE 0 END), 0) AS archived,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                                     THEN 1 ELSE 0 END), 0) AS past_due,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ?                   THEN 1 ELSE 0 END), 0) AS running,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                                     THEN 1 ELSE 0 END), 0) AS upcoming
+		FROM activity_assignments aa
+		JOIN activities a ON a.id = aa.activity_id
+		WHERE aa.team_member_id = ?
+	`, now, now, now, now, memberID)
+	if err != nil {
+		return nil, fmt.Errorf("computing activity stats: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
+			return nil, fmt.Errorf("scanning activity stats: %w", err)
+		}
+	}
+
+	return &stats, nil
+}
+
+// GetUserStats aggregates activity and timeline counts across all of a user's
+// team memberships. Used by GET /users/me/stats for the profile page.
+func (r *TeamRepo) GetUserStats(userID string) (*models.MemberStats, error) {
+	now := time.Now()
+	var stats models.MemberStats
+
+	if err := r.db.Get(&stats.ActiveTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting active timelines: %w", err)
+	}
+	if err := r.db.Get(&stats.ArchivedTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NOT NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting archived timelines: %w", err)
+	}
+
+	rows, err := r.db.Query(`
+		SELECT
+			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ? THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                   THEN 1 ELSE 0 END), 0)
+		FROM activity_assignments aa
+		JOIN activities a ON a.id = aa.activity_id
+		JOIN team_members tm ON tm.id = aa.team_member_id
+		WHERE tm.user_id = ?
+	`, now, now, now, now, userID)
+	if err != nil {
+		return nil, fmt.Errorf("computing activity stats: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
+			return nil, fmt.Errorf("scanning activity stats: %w", err)
+		}
+	}
+
+	return &stats, nil
+}
+
+// GetMemberAllTeams returns all team memberships for a user (across all teams).
+// Used to populate the "Teams" section of the Member Edit Modal.
+func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUser, error) {
+	var members []*models.TeamMemberWithUser
+	err := r.db.Select(&members, `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.user_id = ?
+		ORDER BY tm.joined_at ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("getting member all teams: %w", err)
+	}
+	return members, nil
+}
+
+// SetInviteLinkToken sets the reusable invite link token on a team. Passing
+// nil clears it (revoking the link).
+func (r *TeamRepo) SetInviteLinkToken(teamID string, token *string) error {
+	_, err := r.db.Exec(
+		`UPDATE teams SET invite_link_token = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		token, teamID,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return fmt.Errorf("invite link token collision: %w", err)
+		}
+		return fmt.Errorf("setting invite link token: %w", err)
+	}
+	return nil
+}
+
+// GetByInviteLinkToken looks up a team by its invite_link_token. Returns
+// sql.ErrNoRows (wrapped) when no matching team is found.
+func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
+	var t models.Team
+	err := r.db.Get(&t, `
+		SELECT * FROM teams WHERE invite_link_token = ? AND archived_at IS NULL
+	`, token)
+	if err != nil {
+		return nil, fmt.Errorf("getting team by invite link: %w", err)
+	}
+	return &t, nil
+}
 ````
 
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
@@ -28282,461 +29025,6 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
 }
 ````
 
-## File: packages/api/internal/db/team_repo.go
-````go
-package db
-
-import (
-	"errors"
-	"fmt"
-	"strings"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ErrDuplicateName is returned by TeamRepo.Create when the generated slug
-// collides with an existing team's slug (UNIQUE constraint on teams.slug).
-var ErrDuplicateName = errors.New("team name already taken")
-
-// TeamRepo is the persistence layer for Team records and their membership
-// join table.
-type TeamRepo struct {
-	db *sqlx.DB
-}
-
-// NewTeamRepo returns a TeamRepo backed by db.
-func NewTeamRepo(db *sqlx.DB) *TeamRepo {
-	return &TeamRepo{db: db}
-}
-
-// Create inserts a new Team row. Returns ErrDuplicateName if the slug is
-// already taken.
-func (r *TeamRepo) Create(team *models.Team) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO teams (id, name, slug, description, notes, color, icon, created_at, updated_at)
-		VALUES (:id, :name, :slug, :description, :notes, :color, :icon, :created_at, :updated_at)
-	`, team)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return ErrDuplicateName
-		}
-		return fmt.Errorf("creating team: %w", err)
-	}
-	return nil
-}
-
-// Update writes mutable team fields (name, slug, description, notes, color,
-// icon, updated_at). It does not touch archived_at or created_at.
-func (r *TeamRepo) Update(team *models.Team) error {
-	_, err := r.db.NamedExec(`
-		UPDATE teams
-		SET name = :name, slug = :slug, description = :description, notes = :notes,
-		    color = :color, icon = :icon, updated_at = :updated_at
-		WHERE id = :id
-	`, team)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return ErrDuplicateName
-		}
-		return fmt.Errorf("updating team: %w", err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears the archived_at timestamp on a team.
-func (r *TeamRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(`UPDATE teams SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now(), id)
-	if err != nil {
-		return fmt.Errorf("setting team archived: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Team by primary key.
-func (r *TeamRepo) GetByID(id string) (*models.Team, error) {
-	var t models.Team
-	err := r.db.Get(&t, `SELECT * FROM teams WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting team: %w", err)
-	}
-	return &t, nil
-}
-
-// AddMember inserts a team_members row. m.ID must be pre-populated by the caller.
-func (r *TeamRepo) AddMember(m *models.TeamMember) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at)
-		VALUES (:id, :team_id, :user_id, :display_name, :role, :color, :icon, :joined_at)
-	`, m)
-	if err != nil {
-		return fmt.Errorf("adding team member: %w", err)
-	}
-	return nil
-}
-
-// GetMember returns the team_members row for a given (team, user) pair.
-func (r *TeamRepo) GetMember(teamID, userID string) (*models.TeamMember, error) {
-	var m models.TeamMember
-	err := r.db.Get(&m, `
-		SELECT * FROM team_members WHERE team_id = ? AND user_id = ?
-	`, teamID, userID)
-	if err != nil {
-		return nil, fmt.Errorf("getting team member: %w", err)
-	}
-	return &m, nil
-}
-
-// ListMembers returns active (non-archived) members of a team, including
-// login-less Participants. A LEFT JOIN handles Participants who have no users
-// row; COALESCE prefers the per-team display_name override, then falls back to users.
-func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, error) {
-	return r.listMembers(teamID, false)
-}
-
-// ListMembersAll returns all members of a team, including inactivated members.
-func (r *TeamRepo) ListMembersAll(teamID string) ([]*models.TeamMemberWithUser, error) {
-	return r.listMembers(teamID, true)
-}
-
-func (r *TeamRepo) listMembers(teamID string, includeArchived bool) ([]*models.TeamMemberWithUser, error) {
-	var members []*models.TeamMemberWithUser
-	query := `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.team_id = ?`
-	if !includeArchived {
-		query += ` AND tm.archived_at IS NULL`
-	}
-	query += ` ORDER BY tm.joined_at ASC`
-	if err := r.db.Select(&members, query, teamID); err != nil {
-		return nil, fmt.Errorf("listing team members: %w", err)
-	}
-	return members, nil
-}
-
-// ListByUserID returns all teams the given user belongs to, ordered by
-// creation date ascending. When includeArchived is false (the default),
-// archived teams are excluded.
-func (r *TeamRepo) ListByUserID(userID string, includeArchived bool) ([]*models.Team, error) {
-	teams := make([]*models.Team, 0)
-	query := `
-		SELECT t.* FROM teams t
-		JOIN team_members tm ON tm.team_id = t.id
-		WHERE tm.user_id = ?`
-	if !includeArchived {
-		query += ` AND t.archived_at IS NULL`
-	}
-	query += ` ORDER BY t.created_at ASC`
-	if err := r.db.Select(&teams, query, userID); err != nil {
-		return nil, fmt.Errorf("listing teams for user: %w", err)
-	}
-	return teams, nil
-}
-
-// ListAll returns every team in the system, optionally including archived ones.
-// Used by superadmin callers who need visibility across all teams.
-func (r *TeamRepo) ListAll(includeArchived bool) ([]*models.Team, error) {
-	teams := make([]*models.Team, 0)
-	query := `SELECT * FROM teams`
-	if !includeArchived {
-		query += ` WHERE archived_at IS NULL`
-	}
-	query += ` ORDER BY created_at ASC`
-	if err := r.db.Select(&teams, query); err != nil {
-		return nil, fmt.Errorf("listing all teams: %w", err)
-	}
-	return teams, nil
-}
-
-// Count returns the total number of teams.
-func (r *TeamRepo) Count() (int, error) {
-	var count int
-	err := r.db.Get(&count, `SELECT COUNT(*) FROM teams`)
-	if err != nil {
-		return 0, fmt.Errorf("counting teams: %w", err)
-	}
-	return count, nil
-}
-
-// GetMemberByID fetches a team_members row by its primary key. Unlike
-// GetMember (which looks up by team+userID pair), this is the canonical
-// lookup used by member-scoped routes that receive a memberId path param.
-func (r *TeamRepo) GetMemberByID(memberID string) (*models.TeamMemberWithUser, error) {
-	var m models.TeamMemberWithUser
-	err := r.db.Get(&m, `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.id = ?
-	`, memberID)
-	if err != nil {
-		return nil, fmt.Errorf("getting team member by id: %w", err)
-	}
-	return &m, nil
-}
-
-// UpdateMember applies mutable identity and role fields to a team_members row.
-// Only non-nil arguments are written; nil fields retain their current values.
-func (r *TeamRepo) UpdateMember(memberID string, displayName, color, icon, role *string) error {
-	// Fetch current values so we can apply the partial update.
-	type row struct {
-		DisplayName *string `db:"display_name"`
-		Color       *string `db:"color"`
-		Icon        *string `db:"icon"`
-		Role        string  `db:"role"`
-	}
-	var cur row
-	if err := r.db.Get(&cur, `SELECT display_name, color, icon, role FROM team_members WHERE id = ?`, memberID); err != nil {
-		return fmt.Errorf("fetching member for update: %w", err)
-	}
-	if displayName != nil {
-		cur.DisplayName = displayName
-	}
-	if color != nil {
-		cur.Color = color
-	}
-	if icon != nil {
-		cur.Icon = icon
-	}
-	if role != nil {
-		cur.Role = *role
-	}
-	_, err := r.db.Exec(`
-		UPDATE team_members SET display_name = ?, color = ?, icon = ?, role = ? WHERE id = ?
-	`, cur.DisplayName, cur.Color, cur.Icon, cur.Role, memberID)
-	if err != nil {
-		return fmt.Errorf("updating team member: %w", err)
-	}
-	return nil
-}
-
-// DeleteMember removes a team_members row. The caller is responsible for
-// verifying that the member is not the last admin before calling this, and
-// must delete the member's timeline_access rows first (RESTRICT FK).
-func (r *TeamRepo) DeleteMember(memberID string) error {
-	_, err := r.db.Exec(`DELETE FROM team_members WHERE id = ?`, memberID)
-	if err != nil {
-		return fmt.Errorf("deleting team member: %w", err)
-	}
-	return nil
-}
-
-// CountMemberAssignments returns how many activity_assignments rows reference
-// this team member. Callers use this count to block hard-delete when history exists.
-func (r *TeamRepo) CountMemberAssignments(memberID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?
-	`, memberID)
-	if err != nil {
-		return 0, fmt.Errorf("counting member assignments: %w", err)
-	}
-	return count, nil
-}
-
-// DeleteMemberTimelineAccess removes all timeline_access entries for a member.
-// Must be called before DeleteMember; the RESTRICT FK on
-// timeline_access.team_member_id blocks the team_members deletion otherwise.
-func (r *TeamRepo) DeleteMemberTimelineAccess(memberID string) error {
-	_, err := r.db.Exec(`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID)
-	if err != nil {
-		return fmt.Errorf("deleting member timeline access: %w", err)
-	}
-	return nil
-}
-
-// SetMemberArchived sets or clears archived_at on a team_members row.
-func (r *TeamRepo) SetMemberArchived(memberID string, at *time.Time) error {
-	_, err := r.db.Exec(`UPDATE team_members SET archived_at = ? WHERE id = ?`, at, memberID)
-	if err != nil {
-		return fmt.Errorf("setting member archived: %w", err)
-	}
-	return nil
-}
-
-// CountAdmins counts non-archived admin members of a team. Used to enforce
-// the "cannot remove last admin" constraint.
-func (r *TeamRepo) CountAdmins(teamID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM team_members
-		WHERE team_id = ? AND role = 'admin' AND archived_at IS NULL
-	`, teamID)
-	if err != nil {
-		return 0, fmt.Errorf("counting admins: %w", err)
-	}
-	return count, nil
-}
-
-// CountTeamsForUser returns how many teams a user belongs to. Used to enforce
-// the "single team" constraint for hard deletion.
-func (r *TeamRepo) CountTeamsForUser(userID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM team_members WHERE user_id = ? AND archived_at IS NULL
-	`, userID)
-	if err != nil {
-		return 0, fmt.Errorf("counting user teams: %w", err)
-	}
-	return count, nil
-}
-
-// GetMemberStats computes activity and timeline counts for a team member.
-func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) {
-	now := time.Now()
-	var stats models.MemberStats
-
-	// Timeline counts via timeline_access.
-	if err := r.db.Get(&stats.ActiveTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		WHERE ta.team_member_id = ? AND t.archived_at IS NULL
-	`, memberID); err != nil {
-		return nil, fmt.Errorf("counting active timelines: %w", err)
-	}
-	if err := r.db.Get(&stats.ArchivedTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		WHERE ta.team_member_id = ? AND t.archived_at IS NOT NULL
-	`, memberID); err != nil {
-		return nil, fmt.Errorf("counting archived timelines: %w", err)
-	}
-
-	// Activity counts from activity_assignments.
-	rows, err := r.db.Query(`
-		SELECT
-			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                                     THEN 1 ELSE 0 END), 0) AS archived,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                                     THEN 1 ELSE 0 END), 0) AS past_due,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ?                   THEN 1 ELSE 0 END), 0) AS running,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                                     THEN 1 ELSE 0 END), 0) AS upcoming
-		FROM activity_assignments aa
-		JOIN activities a ON a.id = aa.activity_id
-		WHERE aa.team_member_id = ?
-	`, now, now, now, now, memberID)
-	if err != nil {
-		return nil, fmt.Errorf("computing activity stats: %w", err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
-			return nil, fmt.Errorf("scanning activity stats: %w", err)
-		}
-	}
-
-	return &stats, nil
-}
-
-// GetUserStats aggregates activity and timeline counts across all of a user's
-// team memberships. Used by GET /users/me/stats for the profile page.
-func (r *TeamRepo) GetUserStats(userID string) (*models.MemberStats, error) {
-	now := time.Now()
-	var stats models.MemberStats
-
-	if err := r.db.Get(&stats.ActiveTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		JOIN team_members tm ON tm.id = ta.team_member_id
-		WHERE tm.user_id = ? AND t.archived_at IS NULL
-	`, userID); err != nil {
-		return nil, fmt.Errorf("counting active timelines: %w", err)
-	}
-	if err := r.db.Get(&stats.ArchivedTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		JOIN team_members tm ON tm.id = ta.team_member_id
-		WHERE tm.user_id = ? AND t.archived_at IS NOT NULL
-	`, userID); err != nil {
-		return nil, fmt.Errorf("counting archived timelines: %w", err)
-	}
-
-	rows, err := r.db.Query(`
-		SELECT
-			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                   THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                   THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                   THEN 1 ELSE 0 END), 0)
-		FROM activity_assignments aa
-		JOIN activities a ON a.id = aa.activity_id
-		JOIN team_members tm ON tm.id = aa.team_member_id
-		WHERE tm.user_id = ?
-	`, now, now, now, now, userID)
-	if err != nil {
-		return nil, fmt.Errorf("computing activity stats: %w", err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
-			return nil, fmt.Errorf("scanning activity stats: %w", err)
-		}
-	}
-
-	return &stats, nil
-}
-
-// GetMemberAllTeams returns all team memberships for a user (across all teams).
-// Used to populate the "Teams" section of the Member Edit Modal.
-func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUser, error) {
-	var members []*models.TeamMemberWithUser
-	err := r.db.Select(&members, `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.user_id = ?
-		ORDER BY tm.joined_at ASC
-	`, userID)
-	if err != nil {
-		return nil, fmt.Errorf("getting member all teams: %w", err)
-	}
-	return members, nil
-}
-
-// SetInviteLinkToken sets the reusable invite link token on a team. Passing
-// nil clears it (revoking the link).
-func (r *TeamRepo) SetInviteLinkToken(teamID string, token *string) error {
-	_, err := r.db.Exec(
-		`UPDATE teams SET invite_link_token = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		token, teamID,
-	)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return fmt.Errorf("invite link token collision: %w", err)
-		}
-		return fmt.Errorf("setting invite link token: %w", err)
-	}
-	return nil
-}
-
-// GetByInviteLinkToken looks up a team by its invite_link_token. Returns
-// sql.ErrNoRows (wrapped) when no matching team is found.
-func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
-	var t models.Team
-	err := r.db.Get(&t, `
-		SELECT * FROM teams WHERE invite_link_token = ? AND archived_at IS NULL
-	`, token)
-	if err != nil {
-		return nil, fmt.Errorf("getting team by invite link: %w", err)
-	}
-	return &t, nil
-}
-````
-
 ## File: packages/api/internal/api/team_handler.go
 ````go
 package api
@@ -29822,439 +30110,6 @@ func flatten[T any](s []*T) []T {
 }
 ````
 
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTeamActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { usePreferenceMap } from '@/hooks/usePreferences';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-interface Props {
-  teamId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  /** When true, activities with a closed status are hidden. */
-  hideClosed?: boolean;
-  /** Set of status IDs that are marked is_closed. Used with hideClosed. */
-  closedStatusIds?: Set<string>;
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-}
-
-/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
-function statusColorFromId(statusId: string | null | undefined): string {
-  if (!statusId) return '#6b7280';
-  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
-  let h = 0;
-  for (let i = 0; i < statusId.length; i++) {
-    h = statusId.charCodeAt(i) + ((h << 5) - h);
-    h |= 0;
-  }
-  return palette[Math.abs(h) % palette.length];
-}
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate type that carries original API fields alongside view-state. */
-interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-  }
-
-  if (groupBy === 'member') {
-    const buckets: Record<string, RichActivity[]> = {};
-    for (const ev of sorted) {
-      const key = ev.primaryMemberId ?? '__none__';
-      (buckets[key] ??= []).push(ev);
-    }
-
-    const rows: GanttRow[] = [];
-    for (const m of members) {
-      const evs = buckets[m.id];
-      if (!evs?.length) continue;
-      rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-    }
-    const unassigned = buckets['__none__'];
-    if (unassigned?.length) {
-      rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
-      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    const placed = new Set<string>();
-    const rows: GanttRow[] = [];
-
-    for (const ev of sorted) {
-      if (placed.has(ev.id) || ev.parentActivityId) continue;
-      placed.add(ev.id);
-      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-
-      for (const child of sorted) {
-        if (child.parentActivityId === ev.id) {
-          placed.add(child.id);
-          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
-        }
-      }
-    }
-
-    for (const ev of sorted) {
-      if (!placed.has(ev.id)) {
-        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
-      }
-    }
-
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-export default function GanttView({
-  teamId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  hideClosed = false,
-  closedStatusIds,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onMembersLoaded,
-  onSelectApiActivity,
-}: Props) {
-  const updateActivity = useUpdateActivity(teamId);
-  const today = todayMidnight();
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  const globalPrefs = usePreferenceMap();
-  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTeamActivities(teamId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  const visibleActivities = useMemo(() => {
-    if (!hideClosed || !closedStatusIds?.size) return apiActivities
-    return apiActivities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-  }, [apiActivities, hideClosed, closedStatusIds])
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    updateActivity.mutate({
-      activityId,
-      patch: {
-        startAt: newStartDate.toISOString(),
-        endAt: newEndDate.toISOString(),
-      },
-    });
-  }, [updateActivity]);
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={onLaneDrag}
-        onBarDrag={handleBarDrag}
-        onClearFilters={filtersActive ? () => {} : undefined}
-      />
-    </div>
-  );
-}
-````
-
 ## File: packages/api/internal/api/server.go
 ````go
 // Package api hosts the HTTP handlers, routing, and middleware for the
@@ -30830,6 +30685,443 @@ type Invite struct {
 	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
 	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
 	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
+}
+````
+
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTeamActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+interface Props {
+  teamId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  /** When true, activities with a closed status are hidden. */
+  hideClosed?: boolean;
+  /** Set of status IDs that are marked is_closed. Used with hideClosed. */
+  closedStatusIds?: Set<string>;
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+}
+
+/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
+function statusColorFromId(statusId: string | null | undefined): string {
+  if (!statusId) return '#6b7280';
+  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
+  let h = 0;
+  for (let i = 0; i < statusId.length; i++) {
+    h = statusId.charCodeAt(i) + ((h << 5) - h);
+    h |= 0;
+  }
+  return palette[Math.abs(h) % palette.length];
+}
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate type that carries original API fields alongside view-state. */
+interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+  }
+
+  if (groupBy === 'member') {
+    const buckets: Record<string, RichActivity[]> = {};
+    for (const ev of sorted) {
+      const key = ev.primaryMemberId ?? '__none__';
+      (buckets[key] ??= []).push(ev);
+    }
+
+    const rows: GanttRow[] = [];
+    for (const m of members) {
+      const evs = buckets[m.id];
+      if (!evs?.length) continue;
+      rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+    }
+    const unassigned = buckets['__none__'];
+    if (unassigned?.length) {
+      rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
+      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    const placed = new Set<string>();
+    const rows: GanttRow[] = [];
+
+    for (const ev of sorted) {
+      if (placed.has(ev.id) || ev.parentActivityId) continue;
+      placed.add(ev.id);
+      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+
+      for (const child of sorted) {
+        if (child.parentActivityId === ev.id) {
+          placed.add(child.id);
+          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
+        }
+      }
+    }
+
+    for (const ev of sorted) {
+      if (!placed.has(ev.id)) {
+        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
+      }
+    }
+
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export default function GanttView({
+  teamId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  hideClosed = false,
+  closedStatusIds,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onMembersLoaded,
+  onSelectApiActivity,
+}: Props) {
+  const updateActivity = useUpdateActivity(teamId);
+  const today = todayMidnight();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTeamActivities(teamId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  const visibleActivities = useMemo(() => {
+    if (!hideClosed || !closedStatusIds?.size) return apiActivities
+    return apiActivities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+  }, [apiActivities, hideClosed, closedStatusIds])
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = visibleActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    updateActivity.mutate({
+      activityId,
+      patch: {
+        startAt: newStartDate.toISOString(),
+        endAt: newEndDate.toISOString(),
+      },
+    });
+  }, [updateActivity]);
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={onLaneDrag}
+        onBarDrag={handleBarDrag}
+        onClearFilters={filtersActive ? () => {} : undefined}
+      />
+    </div>
+  );
 }
 ````
 
@@ -31664,6 +31956,26 @@ export interface paths {
         put?: never;
         /** Send a test email using supplied config without saving */
         post: operations["testSMTPConfig"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings/branding": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get public branding settings (no auth required)
+         * @description Returns the instance name and accent color. Intentionally public so the login page and shared timeline views can display branding before sign-in. Only cosmetic settings are exposed here.
+         */
+        get: operations["getPublicBranding"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -34176,6 +34488,31 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    getPublicBranding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Public branding values. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description Admin-configured name shown in the browser tab and login page. */
+                        instanceName?: string;
+                        /** @description 6-digit hex override for the primary color (e.g. "#288C9B"). Empty string means no override. */
+                        accentColor?: string;
+                    };
+                };
+            };
         };
     };
     getAdminSettings: {
@@ -37397,6 +37734,31 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /settings/branding:
+    get:
+      operationId: getPublicBranding
+      summary: Get public branding settings (no auth required)
+      description: >
+        Returns the instance name and accent color. Intentionally public so the
+        login page and shared timeline views can display branding before sign-in.
+        Only cosmetic settings are exposed here.
+      tags: [settings]
+      security: []
+      responses:
+        "200":
+          description: Public branding values.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instanceName:
+                    type: string
+                    description: Admin-configured name shown in the browser tab and login page.
+                  accentColor:
+                    type: string
+                    description: 6-digit hex override for the primary color (e.g. "#288C9B"). Empty string means no override.
 
   /admin/settings:
     get:
@@ -41692,6 +42054,37 @@ Admin tools for database backup visibility, manual backups, and scheduled backup
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-05-28 — /review-phase 10.4.1 fixes
+
+**Blockers resolved:**
+- `GanttView.tsx`: Maps `date_format` pref to BCP 47 locale (`DD/MM/YYYY` → `en-GB`, others → `en-US`); passes `locale` to `generateColumns` — column labels now respect the user's date ordering preference
+- `ActivityDetailPanel.tsx`: Wired `useFormatDate`; formatted date range summary line added above native date inputs
+- `BrandingSync.tsx`: Fixed accent color to set `--primary` directly (not `--accent-override`); added `isValidHex()` guard; exported `makeDocTitle(pageName?)` helper for the `${page} — ${app}` title pattern
+- `openapi.yaml`: Added `GET /settings/branding` with `security: []` and full response schema; regenerated TS types
+- `settings_handler_test.go`: Added `TestPatchAdminSettings_AccentColor`, `TestGetPublicBranding_NoAuth`, `TestGetPublicBranding_EmptyWhenUnset`
+- `api.test.ts`: New file — 7 tests covering `createAuthFetch` happy path, non-401 errors, 401 retry, null-token re-throw, unregistered interceptor, de-registration teardown, and `ApiError` identity
+- `useFormatDate.ts`: Exported `formatDate` pure function; new `useFormatDate.test.ts` with 6 branch tests
+- `granularity.test.ts`: New test file — 6 tests covering `weekStart` (monday/sunday/default) and `locale` (en-US/en-GB/default) params
+
+**Suggestions resolved:**
+- `OrganizationPage.tsx`: Hex validation (`/^#[0-9a-fA-F]{6}$/`) on accent color input; invalid value blocked from PATCH; inline error shown
+- `PreferencesPage.tsx`: Added why-comment to `eslint-disable-next-line` for `JSON.stringify(prefMap)` dep stabilization
+- `admin_handler.go`: Added comment to `handleGetPublicBranding` warning against adding sensitive keys to the public endpoint
+
+**Nit resolved:**
+- `BrandingSync.tsx`: `makeDocTitle()` helper exported so pages can set `"PageName — AppName"` titles; document.title set via `makeDocTitle()` at root level
+
+---
+
+## 2026-05-28 — /test-phase 10.4.1
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (ws-smoke heartbeat 3-cycle skipped — 30s server interval exceeds smoke budget, mechanism verified in code; web-e2e browser runtime skipped — dev server not confirmed running, all assertions pass code-level)
+- Smoke target: http://epcot.lan:8081
+- Note: TESTING.md Phase 2 schema-check table list updated (old names `team_statuses`, `events`, `event_tags`, `event_assignments` → current names)
 
 ---
 
