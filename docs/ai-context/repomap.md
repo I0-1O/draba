@@ -9955,69 +9955,6 @@ ALTER TABLE activities ADD COLUMN timeline_id TEXT REFERENCES timelines(id) ON D
 CREATE INDEX IF NOT EXISTS idx_activities_timeline_id ON activities(timeline_id);
 ````
 
-## File: packages/api/internal/db/migrations/015_normalize_activities.sql
-````sql
--- Backfill any activities that lack a timeline_id by assigning them to the
--- team's oldest timeline. In practice this column has been populated since
--- Phase 10.4.1, so the UPDATE should affect zero rows on current data.
-UPDATE activities
-SET timeline_id = (
-    SELECT id FROM timelines
-    WHERE team_id = activities.team_id
-    ORDER BY created_at ASC
-    LIMIT 1
-)
-WHERE timeline_id IS NULL;
-
--- Rebuild the activities table to:
---   1. Drop the redundant team_id column (activity → timeline → team is sufficient)
---   2. Harden timeline_id to NOT NULL with ON DELETE CASCADE
--- SQLite does not support DROP COLUMN with FK changes, so we use
--- the CREATE-new / INSERT / DROP-old / RENAME pattern.
-CREATE TABLE activities_new (
-    id                 TEXT PRIMARY KEY,
-    timeline_id        TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
-    title              TEXT NOT NULL,
-    description        TEXT,
-    icon               TEXT,
-    color              TEXT,
-    start_at           DATETIME NOT NULL,
-    end_at             DATETIME NOT NULL,
-    all_day            BOOLEAN NOT NULL DEFAULT 0,
-    status_id          TEXT REFERENCES statuses(id) ON DELETE SET NULL,
-    parent_activity_id TEXT REFERENCES activities(id),
-    percent_complete   INTEGER,
-    location           TEXT,
-    url                TEXT,
-    rrule              TEXT,
-    caldav_uid         TEXT,
-    google_event_id    TEXT,
-    created_by         TEXT NOT NULL REFERENCES users(id),
-    created_at         DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at         DATETIME NOT NULL DEFAULT (datetime('now')),
-    archived_at        DATETIME
-);
-
-INSERT INTO activities_new (
-    id, timeline_id, title, description, icon, color,
-    start_at, end_at, all_day, status_id, parent_activity_id,
-    percent_complete, location, url, rrule, caldav_uid, google_event_id,
-    created_by, created_at, updated_at, archived_at
-)
-SELECT
-    id, timeline_id, title, description, icon, color,
-    start_at, end_at, all_day, status_id, parent_activity_id,
-    percent_complete, location, url, rrule, caldav_uid, google_event_id,
-    created_by, created_at, updated_at, archived_at
-FROM activities
-WHERE timeline_id IS NOT NULL;
-
-DROP TABLE activities;
-ALTER TABLE activities_new RENAME TO activities;
-
-CREATE INDEX IF NOT EXISTS idx_activities_timeline_id ON activities(timeline_id);
-````
-
 ## File: packages/api/internal/db/api_token_repo.go
 ````go
 package db
@@ -14320,6 +14257,70 @@ ALTER TABLE activity_tags RENAME COLUMN event_id TO activity_id;
 ALTER TABLE activity_assignments RENAME COLUMN event_id TO activity_id;
 ````
 
+## File: packages/api/internal/db/migrations/015_normalize_activities.sql
+````sql
+-- Backfill any activities that lack a timeline_id by assigning them to the
+-- team's oldest timeline. In practice this column has been populated since
+-- Phase 10.4.1, so the UPDATE should affect zero rows on current data.
+UPDATE activities
+SET timeline_id = (
+    SELECT id FROM timelines
+    WHERE team_id = activities.team_id
+    ORDER BY created_at ASC
+    LIMIT 1
+)
+WHERE timeline_id IS NULL;
+
+-- Rebuild the activities table to:
+--   1. Drop the redundant team_id column (activity → timeline → team is sufficient)
+--   2. Harden timeline_id to NOT NULL with ON DELETE CASCADE
+-- SQLite does not support DROP COLUMN with FK changes, so we use
+-- the CREATE-new / INSERT / DROP-old / RENAME pattern.
+CREATE TABLE activities_new (
+    id                 TEXT PRIMARY KEY,
+    timeline_id        TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+    title              TEXT NOT NULL,
+    description        TEXT,
+    icon               TEXT,
+    color              TEXT,
+    start_at           DATETIME NOT NULL,
+    end_at             DATETIME NOT NULL,
+    all_day            BOOLEAN NOT NULL DEFAULT 0,
+    status_id          TEXT REFERENCES statuses(id) ON DELETE SET NULL,
+    parent_activity_id TEXT REFERENCES activities(id),
+    percent_complete   INTEGER,
+    location           TEXT,
+    url                TEXT,
+    rrule              TEXT,
+    caldav_uid         TEXT,
+    google_event_id    TEXT,
+    created_by         TEXT NOT NULL REFERENCES users(id),
+    created_at         DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at         DATETIME NOT NULL DEFAULT (datetime('now')),
+    archived_at        DATETIME
+);
+
+INSERT INTO activities_new (
+    id, timeline_id, title, description, icon, color,
+    start_at, end_at, all_day, status_id, parent_activity_id,
+    percent_complete, location, url, rrule, caldav_uid, google_event_id,
+    created_by, created_at, updated_at, archived_at
+)
+SELECT
+    id, timeline_id, title, description, icon, color,
+    start_at, end_at, all_day, status_id, parent_activity_id,
+    percent_complete, location, url, rrule, caldav_uid, google_event_id,
+    created_by, created_at, updated_at, archived_at
+-- No WHERE filter: any row with NULL timeline_id after backfill violates the
+-- NOT NULL constraint and aborts the migration loudly rather than silently dropping data.
+FROM activities;
+
+DROP TABLE activities;
+ALTER TABLE activities_new RENAME TO activities;
+
+CREATE INDEX IF NOT EXISTS idx_activities_timeline_id ON activities(timeline_id);
+````
+
 ## File: packages/api/internal/events/bus.go
 ````go
 // Package events provides the in-process pub/sub bus. Every write operation
@@ -14703,6 +14704,260 @@ func doSend(c *smtp.Client, from, to, msg string) error {
 		return fmt.Errorf("smtp write body: %w", err)
 	}
 	return w.Close()
+}
+````
+
+## File: packages/web/src/components/gantt/granularity.ts
+````typescript
+/**
+ * Time-granularity helpers for the Gantt view.
+ *
+ * Generates column definitions and maps event date ranges to fractional
+ * column positions at any granularity (day → year).
+ */
+
+export type TimeGranularity = 'day' | 'week' | 'month' | 'quarter' | 'year';
+
+export interface ColumnDef {
+  label: string;
+  /** Secondary label rendered on a second line (used for week numbers). */
+  sublabel?: string;
+  start: Date;
+  end: Date;
+  /** Calendar days this column spans (varies for months, quarters, years). */
+  days: number;
+}
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function daysBetween(a: Date, b: Date): number {
+  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
+}
+
+function startOfDay(d: Date): Date {
+  const r = new Date(d);
+  r.setHours(0, 0, 0, 0);
+  return r;
+}
+
+function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
+  const r = startOfDay(d);
+  const day = r.getDay(); // 0=Sun, 1=Mon, …, 6=Sat
+  if (weekStart === 'sunday') {
+    r.setDate(r.getDate() - day);
+  } else {
+    // Monday = ISO week start
+    r.setDate(r.getDate() - ((day + 6) % 7));
+  }
+  return r;
+}
+
+function startOfMonth(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+
+function startOfQuarter(d: Date): Date {
+  const q = Math.floor(d.getMonth() / 3) * 3;
+  return new Date(d.getFullYear(), q, 1);
+}
+
+function startOfYear(d: Date): Date {
+  return new Date(d.getFullYear(), 0, 1);
+}
+
+export function addDays(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setDate(r.getDate() + n);
+  return r;
+}
+
+function addMonths(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setMonth(r.getMonth() + n);
+  return r;
+}
+
+function endOfPeriod(start: Date, gran: TimeGranularity): Date {
+  switch (gran) {
+    case 'day':     return addDays(start, 1);
+    case 'week':    return addDays(start, 7);
+    case 'month':   return addMonths(start, 1);
+    case 'quarter': return addMonths(start, 3);
+    case 'year':    return addMonths(start, 12);
+  }
+}
+
+function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sunday' = 'monday'): Date {
+  switch (gran) {
+    case 'day':     return startOfDay(d);
+    case 'week':    return startOfWeek(d, weekStart);
+    case 'month':   return startOfMonth(d);
+    case 'quarter': return startOfQuarter(d);
+    case 'year':    return startOfYear(d);
+  }
+}
+
+// ── Label formatting ────────────────────────────────────────────────────────
+
+/** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
+function isoWeekNumber(d: Date): number {
+  const date = new Date(d);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
+  const week1 = new Date(date.getFullYear(), 0, 4);
+  return 1 + Math.round(
+    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getDay() + 6) % 7)) / 7,
+  );
+}
+
+function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
+  switch (gran) {
+    case 'day':
+      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+    case 'week': {
+      const end = addDays(start, 6);
+      const sameMonth = start.getMonth() === end.getMonth();
+      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+      const e = sameMonth
+        ? end.getDate().toString()
+        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+      return `${s}–${e}`;
+    }
+    case 'month':
+      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric' });
+    case 'quarter': {
+      const q = Math.floor(start.getMonth() / 3) + 1;
+      return `Q${q} ${start.getFullYear()}`;
+    }
+    case 'year':
+      return start.getFullYear().toString();
+  }
+}
+
+// ── Column generation ───────────────────────────────────────────────────────
+
+export interface GenerateColumnsOptions {
+  /** Which day the week grid starts on. Defaults to 'monday' (ISO). */
+  weekStart?: 'monday' | 'sunday';
+  /** BCP 47 locale tag for month name formatting. Defaults to 'en-US'. */
+  locale?: string;
+}
+
+export function generateColumns(
+  viewStart: Date,
+  viewEnd: Date,
+  granularity: TimeGranularity,
+  options?: GenerateColumnsOptions,
+): ColumnDef[] {
+  const weekStart = options?.weekStart ?? 'monday';
+  const locale = options?.locale ?? 'en-US';
+  const columns: ColumnDef[] = [];
+  let cur = periodStart(viewStart, granularity, weekStart);
+
+  while (cur <= viewEnd) {
+    const next = endOfPeriod(cur, granularity);
+    // Clamp to view bounds for the first and last columns
+    const colStart = cur < viewStart ? viewStart : cur;
+    const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
+    columns.push({
+      label: formatLabel(cur, granularity, locale),
+      sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
+      start: cur,
+      end: next,
+      days: daysBetween(colStart, colEnd),
+    });
+    cur = next;
+  }
+
+  return columns;
+}
+
+// ── Event positioning ───────────────────────────────────────────────────────
+
+/** Fractional position within the column array. */
+export function positionInColumns(
+  eventStart: Date,
+  eventEnd: Date,
+  columns: ColumnDef[],
+): { startCol: number; span: number } {
+  if (columns.length === 0) return { startCol: 0, span: 0 };
+
+  const evStartMs = eventStart.getTime();
+  const evEndMs = eventEnd.getTime();
+
+  let startCol = 0;
+  let endCol = columns.length;
+
+  for (let i = 0; i < columns.length; i++) {
+    const col = columns[i];
+    const colStartMs = col.start.getTime();
+    const colEndMs = col.end.getTime();
+    const colSpanMs = colEndMs - colStartMs;
+
+    if (evStartMs >= colStartMs && evStartMs < colEndMs) {
+      startCol = i + (colSpanMs > 0 ? (evStartMs - colStartMs) / colSpanMs : 0);
+    }
+    // End is inclusive day, so add 1 day for positioning
+    const evEndNextDayMs = evEndMs + 86_400_000;
+    if (evEndNextDayMs > colStartMs && evEndNextDayMs <= colEndMs) {
+      endCol = i + (colSpanMs > 0 ? (evEndNextDayMs - colStartMs) / colSpanMs : 1);
+    }
+  }
+
+  const span = Math.max(endCol - startCol, 0.15);
+  return { startCol, span };
+}
+
+// ── Today position ──────────────────────────────────────────────────────────
+
+export function todayColumnPosition(columns: ColumnDef[]): number {
+  const now = startOfDay(new Date());
+  const nowMs = now.getTime();
+
+  for (let i = 0; i < columns.length; i++) {
+    const col = columns[i];
+    const colStartMs = col.start.getTime();
+    const colEndMs = col.end.getTime();
+    if (nowMs >= colStartMs && nowMs < colEndMs) {
+      const colSpanMs = colEndMs - colStartMs;
+      return i + (colSpanMs > 0 ? (nowMs - colStartMs) / colSpanMs : 0.5);
+    }
+  }
+  return -1;
+}
+
+// ── Auto-fit ────────────────────────────────────────────────────────────────
+
+const GRANULARITIES: TimeGranularity[] = ['day', 'week', 'month', 'quarter', 'year'];
+const BASE_COL_WIDTH = 80;
+
+export function autoFitGranularity(
+  viewStart: Date,
+  viewEnd: Date,
+  viewportWidth: number,
+): TimeGranularity {
+  const targetCols = Math.max(viewportWidth / BASE_COL_WIDTH, 2);
+
+  let best: TimeGranularity = 'month';
+  let bestDiff = Infinity;
+
+  for (const gran of GRANULARITIES) {
+    const cols = generateColumns(viewStart, viewEnd, gran).length;
+    if (cols < 2) continue;
+    // Prefer the finest granularity that fits within 50-150% of viewport
+    const ratio = cols / targetCols;
+    if (ratio >= 0.4 && ratio <= 1.5) {
+      // Within range — prefer finest (earliest in array)
+      return gran;
+    }
+    const diff = Math.abs(ratio - 1);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = gran;
+    }
+  }
+
+  return best;
 }
 ````
 
@@ -15295,6 +15550,113 @@ export function IdentityWidget({ identity, name, shape = 'square', onChange }: P
         document.body,
       )}
     </>
+  );
+}
+````
+
+## File: packages/web/src/components/layout/TopBar.tsx
+````typescript
+/**
+ * Top toolbar above the active view. Left side: global app navigation
+ * (view switcher) and global object actions (Share). Right side: global
+ * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
+ * then whatever the parent injects into `rightSlot` (typically the profile menu).
+ *
+ * View-specific controls (date nav, zoom) intentionally live elsewhere —
+ * a context-sensitive sub-toolbar hosts them.
+ */
+
+import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
+import FilterDropdown from '@/components/filters/FilterDropdown';
+import FindBar from '@/components/layout/FindBar';
+import { useFind } from '@/contexts/FindContext';
+import { cn } from '@/lib/utils';
+
+export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
+
+interface Props {
+  view: ViewMode;
+  teamId?: string;
+  timelineName?: string;
+  onViewChange: (view: ViewMode) => void;
+  onOpenFilterEditor: () => void;
+  rightSlot?: React.ReactNode;
+}
+
+const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
+  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
+  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
+  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
+  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
+];
+
+export default function TopBar({
+  view,
+  teamId,
+  timelineName,
+  onViewChange,
+  onOpenFilterEditor,
+  rightSlot,
+}: Props) {
+  const { findBarOpen, setFindBarOpen } = useFind();
+
+  return (
+    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
+      {/* Left zone: view switcher */}
+      <div className="flex items-center justify-start shrink-0">
+        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
+          {VIEWS.map(v => (
+            <button
+              key={v.id}
+              onClick={() => onViewChange(v.id)}
+              className={cn(
+                'flex items-center justify-center gap-[5px]',
+                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
+                'border-none cursor-pointer',
+                view === v.id
+                  ? 'bg-card text-foreground shadow-sm'
+                  : 'bg-transparent text-muted-foreground',
+              )}
+            >
+              {v.icon}
+              {v.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Center zone: timeline name — truncates with ellipsis when narrow */}
+      <div className="flex-1 min-w-0 flex items-center justify-center px-3">
+        <span
+          title={timelineName}
+          className="text-xs font-medium text-muted-foreground truncate select-none"
+        >
+          {timelineName}
+        </span>
+      </div>
+
+      {/* Right zone: Find bar / trigger, Filter, profile slot */}
+      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
+        {findBarOpen ? (
+          <FindBar />
+        ) : (
+          <button
+            onClick={() => setFindBarOpen(true)}
+            title="Find in view (Ctrl+F)"
+            className={cn(
+              'flex items-center justify-center w-7 h-7',
+              'border border-border rounded-md bg-card',
+              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
+              'transition-colors shrink-0',
+            )}
+          >
+            <Search size={13} strokeWidth={1.8} />
+          </button>
+        )}
+        <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
+        {rightSlot}
+      </div>
+    </div>
   );
 }
 ````
@@ -17100,447 +17462,6 @@ jobs:
           file_pattern: docs/ai-context/repomap.md
 ````
 
-## File: packages/api/internal/api/activity_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
-// The authenticated user must be a member of the team.
-func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-
-	var req CreateActivityJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
-		return
-	}
-	if req.StartAt.IsZero() || req.EndAt.IsZero() {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
-		return
-	}
-	if req.EndAt.Before(req.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	allDay := false
-	if req.AllDay != nil {
-		allDay = *req.AllDay
-	}
-
-	now := time.Now()
-	activity := &models.Activity{
-		ID:               newID(),
-		TimelineID:       timelineID,
-		Title:            req.Title,
-		Description:      req.Description,
-		Icon:             req.Icon,
-		Color:            req.Color,
-		StartAt:          req.StartAt,
-		EndAt:            req.EndAt,
-		AllDay:           allDay,
-		StatusID:         req.StatusId,
-		ParentActivityID: req.ParentActivityId,
-		PercentComplete:  req.PercentComplete,
-		Location:         req.Location,
-		URL:              req.Url,
-		Rrule:            req.Rrule,
-		CreatedBy:        claims.UserID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-	if err := s.activities.Create(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-
-	if req.AssignedMemberIds != nil {
-		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *req.AssignedMemberIds
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusCreated, activity)
-}
-
-// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
-// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
-func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-
-	var from, to *time.Time
-	if v := r.URL.Query().Get("from"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		from = &t
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		to = &t
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, acts)
-}
-
-// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
-// the request body are applied; the caller must be a member of the activity's team.
-func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	// Decode into a map so we can detect which fields the caller provided.
-	var patch map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if v, ok := patch["title"]; ok {
-		if err := json.Unmarshal(v, &activity.Title); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
-			return
-		}
-	}
-	if v, ok := patch["description"]; ok {
-		if err := json.Unmarshal(v, &activity.Description); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
-			return
-		}
-	}
-	if v, ok := patch["icon"]; ok {
-		if err := json.Unmarshal(v, &activity.Icon); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
-			return
-		}
-	}
-	if v, ok := patch["color"]; ok {
-		if err := json.Unmarshal(v, &activity.Color); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
-			return
-		}
-	}
-	if v, ok := patch["startAt"]; ok {
-		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
-			return
-		}
-	}
-	if v, ok := patch["endAt"]; ok {
-		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
-			return
-		}
-	}
-	if v, ok := patch["allDay"]; ok {
-		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
-			return
-		}
-	}
-	if v, ok := patch["statusId"]; ok {
-		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
-			return
-		}
-	}
-	if v, ok := patch["parentActivityId"]; ok {
-		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
-			return
-		}
-	}
-	if v, ok := patch["percentComplete"]; ok {
-		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
-			return
-		}
-	}
-	if v, ok := patch["location"]; ok {
-		if err := json.Unmarshal(v, &activity.Location); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
-			return
-		}
-	}
-	if v, ok := patch["url"]; ok {
-		if err := json.Unmarshal(v, &activity.URL); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
-			return
-		}
-	}
-	if v, ok := patch["rrule"]; ok {
-		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
-			return
-		}
-	}
-
-	var newAssignees *[]string
-	if v, ok := patch["assignedMemberIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
-			return
-		}
-		newAssignees = &ids
-	}
-
-	if activity.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
-		return
-	}
-	if activity.EndAt.Before(activity.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	activity.UpdatedAt = time.Now()
-	if err := s.activities.Update(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if newAssignees != nil {
-		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *newAssignees
-	} else {
-		// Populate current assignments so the response always includes them.
-		existing, err := s.activities.GetAssignments(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = existing
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
-// may archive an activity; the row is soft-deleted (archived_at set) so it is
-// hidden from list responses by default but can be restored.
-func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, true)
-}
-
-// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
-func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, false)
-}
-
-// setActivityArchive is the shared implementation for the archive/unarchive
-// endpoints. When archive is true, archived_at is set to now; otherwise it
-// is cleared.
-func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	activityID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-	}
-	if err := s.activities.SetArchived(activityID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-	activity.ArchivedAt = at
-	activity.UpdatedAt = time.Now().UTC()
-
-	// Re-populate assignments for a stable response shape.
-	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
-		activity.AssignedMemberIDs = ids
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
-// activity's team may delete it.
-func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	if err := s.activities.Delete(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	s.bus.Publish(events.Message{
-		Type:    events.ActivityDeleted,
-		TeamID:  timeline.TeamID,
-		Payload: map[string]string{"id": activityID},
-	})
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
 ## File: packages/api/internal/api/auth_handler.go
 ````go
 package api
@@ -18655,362 +18576,236 @@ func ptrEqual(a, b *string) bool {
 }
 ````
 
-## File: packages/web/src/components/gantt/granularity.ts
+## File: packages/web/src/components/gantt/GanttToolbar.tsx
 ````typescript
 /**
- * Time-granularity helpers for the Gantt view.
- *
- * Generates column definitions and maps event date ranges to fractional
- * column positions at any granularity (day → year).
+ * GanttToolbar — the thin sub-toolbar that sits between the top bar and
+ * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
+ * export stub.
  */
 
-export type TimeGranularity = 'day' | 'week' | 'month' | 'quarter' | 'year';
-
-export interface ColumnDef {
-  label: string;
-  /** Secondary label rendered on a second line (used for week numbers). */
-  sublabel?: string;
-  start: Date;
-  end: Date;
-  /** Calendar days this column spans (varies for months, quarters, years). */
-  days: number;
-}
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function daysBetween(a: Date, b: Date): number {
-  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
-}
-
-function startOfDay(d: Date): Date {
-  const r = new Date(d);
-  r.setHours(0, 0, 0, 0);
-  return r;
-}
-
-function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
-  const r = startOfDay(d);
-  const day = r.getDay(); // 0=Sun, 1=Mon, …, 6=Sat
-  if (weekStart === 'sunday') {
-    r.setDate(r.getDate() - day);
-  } else {
-    // Monday = ISO week start
-    r.setDate(r.getDate() - ((day + 6) % 7));
-  }
-  return r;
-}
-
-function startOfMonth(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), 1);
-}
-
-function startOfQuarter(d: Date): Date {
-  const q = Math.floor(d.getMonth() / 3) * 3;
-  return new Date(d.getFullYear(), q, 1);
-}
-
-function startOfYear(d: Date): Date {
-  return new Date(d.getFullYear(), 0, 1);
-}
-
-export function addDays(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setDate(r.getDate() + n);
-  return r;
-}
-
-function addMonths(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setMonth(r.getMonth() + n);
-  return r;
-}
-
-function endOfPeriod(start: Date, gran: TimeGranularity): Date {
-  switch (gran) {
-    case 'day':     return addDays(start, 1);
-    case 'week':    return addDays(start, 7);
-    case 'month':   return addMonths(start, 1);
-    case 'quarter': return addMonths(start, 3);
-    case 'year':    return addMonths(start, 12);
-  }
-}
-
-function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sunday' = 'monday'): Date {
-  switch (gran) {
-    case 'day':     return startOfDay(d);
-    case 'week':    return startOfWeek(d, weekStart);
-    case 'month':   return startOfMonth(d);
-    case 'quarter': return startOfQuarter(d);
-    case 'year':    return startOfYear(d);
-  }
-}
-
-// ── Label formatting ────────────────────────────────────────────────────────
-
-/** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
-function isoWeekNumber(d: Date): number {
-  const date = new Date(d);
-  date.setHours(0, 0, 0, 0);
-  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
-  const week1 = new Date(date.getFullYear(), 0, 4);
-  return 1 + Math.round(
-    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getDay() + 6) % 7)) / 7,
-  );
-}
-
-function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
-  switch (gran) {
-    case 'day':
-      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
-    case 'week': {
-      const end = addDays(start, 6);
-      const sameMonth = start.getMonth() === end.getMonth();
-      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
-      const e = sameMonth
-        ? end.getDate().toString()
-        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
-      return `${s}–${e}`;
-    }
-    case 'month':
-      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric' });
-    case 'quarter': {
-      const q = Math.floor(start.getMonth() / 3) + 1;
-      return `Q${q} ${start.getFullYear()}`;
-    }
-    case 'year':
-      return start.getFullYear().toString();
-  }
-}
-
-// ── Column generation ───────────────────────────────────────────────────────
-
-export interface GenerateColumnsOptions {
-  /** Which day the week grid starts on. Defaults to 'monday' (ISO). */
-  weekStart?: 'monday' | 'sunday';
-  /** BCP 47 locale tag for month name formatting. Defaults to 'en-US'. */
-  locale?: string;
-}
-
-export function generateColumns(
-  viewStart: Date,
-  viewEnd: Date,
-  granularity: TimeGranularity,
-  options?: GenerateColumnsOptions,
-): ColumnDef[] {
-  const weekStart = options?.weekStart ?? 'monday';
-  const locale = options?.locale ?? 'en-US';
-  const columns: ColumnDef[] = [];
-  let cur = periodStart(viewStart, granularity, weekStart);
-
-  while (cur <= viewEnd) {
-    const next = endOfPeriod(cur, granularity);
-    // Clamp to view bounds for the first and last columns
-    const colStart = cur < viewStart ? viewStart : cur;
-    const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
-    columns.push({
-      label: formatLabel(cur, granularity, locale),
-      sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
-      start: cur,
-      end: next,
-      days: daysBetween(colStart, colEnd),
-    });
-    cur = next;
-  }
-
-  return columns;
-}
-
-// ── Event positioning ───────────────────────────────────────────────────────
-
-/** Fractional position within the column array. */
-export function positionInColumns(
-  eventStart: Date,
-  eventEnd: Date,
-  columns: ColumnDef[],
-): { startCol: number; span: number } {
-  if (columns.length === 0) return { startCol: 0, span: 0 };
-
-  const evStartMs = eventStart.getTime();
-  const evEndMs = eventEnd.getTime();
-
-  let startCol = 0;
-  let endCol = columns.length;
-
-  for (let i = 0; i < columns.length; i++) {
-    const col = columns[i];
-    const colStartMs = col.start.getTime();
-    const colEndMs = col.end.getTime();
-    const colSpanMs = colEndMs - colStartMs;
-
-    if (evStartMs >= colStartMs && evStartMs < colEndMs) {
-      startCol = i + (colSpanMs > 0 ? (evStartMs - colStartMs) / colSpanMs : 0);
-    }
-    // End is inclusive day, so add 1 day for positioning
-    const evEndNextDayMs = evEndMs + 86_400_000;
-    if (evEndNextDayMs > colStartMs && evEndNextDayMs <= colEndMs) {
-      endCol = i + (colSpanMs > 0 ? (evEndNextDayMs - colStartMs) / colSpanMs : 1);
-    }
-  }
-
-  const span = Math.max(endCol - startCol, 0.15);
-  return { startCol, span };
-}
-
-// ── Today position ──────────────────────────────────────────────────────────
-
-export function todayColumnPosition(columns: ColumnDef[]): number {
-  const now = startOfDay(new Date());
-  const nowMs = now.getTime();
-
-  for (let i = 0; i < columns.length; i++) {
-    const col = columns[i];
-    const colStartMs = col.start.getTime();
-    const colEndMs = col.end.getTime();
-    if (nowMs >= colStartMs && nowMs < colEndMs) {
-      const colSpanMs = colEndMs - colStartMs;
-      return i + (colSpanMs > 0 ? (nowMs - colStartMs) / colSpanMs : 0.5);
-    }
-  }
-  return -1;
-}
-
-// ── Auto-fit ────────────────────────────────────────────────────────────────
-
-const GRANULARITIES: TimeGranularity[] = ['day', 'week', 'month', 'quarter', 'year'];
-const BASE_COL_WIDTH = 80;
-
-export function autoFitGranularity(
-  viewStart: Date,
-  viewEnd: Date,
-  viewportWidth: number,
-): TimeGranularity {
-  const targetCols = Math.max(viewportWidth / BASE_COL_WIDTH, 2);
-
-  let best: TimeGranularity = 'month';
-  let bestDiff = Infinity;
-
-  for (const gran of GRANULARITIES) {
-    const cols = generateColumns(viewStart, viewEnd, gran).length;
-    if (cols < 2) continue;
-    // Prefer the finest granularity that fits within 50-150% of viewport
-    const ratio = cols / targetCols;
-    if (ratio >= 0.4 && ratio <= 1.5) {
-      // Within range — prefer finest (earliest in array)
-      return gran;
-    }
-    const diff = Math.abs(ratio - 1);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      best = gran;
-    }
-  }
-
-  return best;
-}
-````
-
-## File: packages/web/src/components/layout/TopBar.tsx
-````typescript
-/**
- * Top toolbar above the active view. Left side: global app navigation
- * (view switcher) and global object actions (Share). Right side: global
- * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
- * then whatever the parent injects into `rightSlot` (typically the profile menu).
- *
- * View-specific controls (date nav, zoom) intentionally live elsewhere —
- * a context-sensitive sub-toolbar hosts them.
- */
-
-import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
-import FilterDropdown from '@/components/filters/FilterDropdown';
-import FindBar from '@/components/layout/FindBar';
-import { useFind } from '@/contexts/FindContext';
+import { Download, Share2, Plus, Minus } from 'lucide-react';
+import type { TimeGranularity } from './granularity';
 import { cn } from '@/lib/utils';
 
-export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
+export type { TimeGranularity } from './granularity';
+export type GroupBy = 'none' | 'member' | 'parent';
+export type SortBy = 'startDate' | 'endDate' | 'title';
+export type ColorBy = 'activity' | 'member' | 'status';
 
 interface Props {
-  view: ViewMode;
-  teamId?: string;
-  timelineName?: string;
-  onViewChange: (view: ViewMode) => void;
-  onOpenFilterEditor: () => void;
-  rightSlot?: React.ReactNode;
+  groupBy: GroupBy;
+  onGroupByChange: (g: GroupBy) => void;
+  sortBy: SortBy;
+  onSortByChange: (s: SortBy) => void;
+  granularity: TimeGranularity | 'auto';
+  onGranularityChange: (g: TimeGranularity | 'auto') => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  hideClosed?: boolean;
+  onHideClosedChange?: (v: boolean) => void;
+  onExport: () => void;
+  onShare?: () => void;
 }
 
-const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
-  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
-  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
-  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
-  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
-];
+const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label   = 'text-[11px] text-muted-foreground shrink-0';
+const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
 
-export default function TopBar({
-  view,
-  teamId,
-  timelineName,
-  onViewChange,
-  onOpenFilterEditor,
-  rightSlot,
+export default function GanttToolbar({
+  groupBy,
+  onGroupByChange,
+  sortBy,
+  onSortByChange,
+  granularity,
+  onGranularityChange,
+  colorBy,
+  onColorByChange,
+  hideClosed = false,
+  onHideClosedChange,
+  onExport,
+  onShare,
 }: Props) {
-  const { findBarOpen, setFindBarOpen } = useFind();
+  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
+  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
+  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
+    ? granularityMap.indexOf(granularity as never)
+    : 0;
+  const currentLabel = granularityLabels[currentIndex];
+
+  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseInt(e.target.value, 10);
+    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
+  };
 
   return (
-    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
-      {/* Left zone: view switcher */}
-      <div className="flex items-center justify-start shrink-0">
-        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
-          {VIEWS.map(v => (
-            <button
-              key={v.id}
-              onClick={() => onViewChange(v.id)}
-              className={cn(
-                'flex items-center justify-center gap-[5px]',
-                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
-                'border-none cursor-pointer',
-                view === v.id
-                  ? 'bg-card text-foreground shadow-sm'
-                  : 'bg-transparent text-muted-foreground',
-              )}
-            >
-              {v.icon}
-              {v.label}
-            </button>
-          ))}
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
+      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
+      <style>{`
+        .gantt-zoom-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          background: transparent;
+        }
+        .gantt-zoom-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          margin-top: -4px;
+        }
+        .gantt-zoom-slider::-moz-range-thumb {
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          border: none;
+        }
+        .gantt-zoom-slider::-webkit-slider-runnable-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+        .gantt-zoom-slider::-moz-range-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+      `}</style>
+
+      {/* Zoom (granularity) */}
+      <div className="flex items-center gap-1.5 h-[26px]">
+        <button
+          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 0}
+          title="Zoom out"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Minus size={14} />
+        </button>
+
+        <div className="relative w-20 h-[26px] flex items-center">
+          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
+            {[0, 1, 2, 3, 4, 5].map(i => (
+              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
+            ))}
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="5"
+            step="1"
+            value={currentIndex}
+            onChange={handleSliderChange}
+            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
+            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          />
+        </div>
+
+        <button
+          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 5}
+          title="Zoom in"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Plus size={14} />
+        </button>
+
+        <div
+          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          className={cn(
+            'flex items-center justify-center w-[22px] h-[22px]',
+            'bg-card border border-border rounded-sm text-xs font-mono select-none',
+            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
+          )}
+        >
+          {currentLabel}
         </div>
       </div>
 
-      {/* Center zone: timeline name — truncates with ellipsis when narrow */}
-      <div className="flex-1 min-w-0 flex items-center justify-center px-3">
-        <span
-          title={timelineName}
-          className="text-xs font-medium text-muted-foreground truncate select-none"
-        >
-          {timelineName}
-        </span>
-      </div>
+      <div className={divider} />
 
-      {/* Right zone: Find bar / trigger, Filter, profile slot */}
-      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
-        {findBarOpen ? (
-          <FindBar />
-        ) : (
-          <button
-            onClick={() => setFindBarOpen(true)}
-            title="Find in view (Ctrl+F)"
-            className={cn(
-              'flex items-center justify-center w-7 h-7',
-              'border border-border rounded-md bg-card',
-              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
-              'transition-colors shrink-0',
-            )}
-          >
-            <Search size={13} strokeWidth={1.8} />
-          </button>
-        )}
-        <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
-        {rightSlot}
-      </div>
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as GroupBy)}
+      >
+        <option value="none">None</option>
+        <option value="member">Member</option>
+        <option value="parent">Parent activity</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Sort by */}
+      <span className={label}>Sort by</span>
+      <select
+        className={select}
+        value={sortBy}
+        onChange={e => onSortByChange(e.target.value as SortBy)}
+      >
+        <option value="startDate">Start date</option>
+        <option value="endDate">End date</option>
+        <option value="title">Title A–Z</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      {onHideClosedChange && (
+        <>
+          <div className={divider} />
+          <label className="flex items-center gap-1.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={hideClosed}
+              onChange={e => onHideClosedChange(e.target.checked)}
+              className="w-3 h-3 cursor-pointer accent-primary"
+            />
+            <span className="text-[11px] text-muted-foreground">Hide closed</span>
+          </label>
+        </>
+      )}
+
+      <div className="flex-1" />
+
+      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
+        <Download size={13} strokeWidth={1.8} />
+        Export
+      </button>
+
+      <button className={ctrlBtn} onClick={onShare} title="Share">
+        <Share2 size={13} strokeWidth={1.8} />
+        Share
+      </button>
     </div>
   );
 }
@@ -20405,6 +20200,459 @@ Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visu
 - SSO / SAML / OAuth login (email + password only for v1)
 - MCP server integration (parking lot — token auth system is designed to support it when ready)
 - CLI binary (parking lot — token auth system is designed to support it when ready)
+````
+
+## File: packages/api/internal/api/activity_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
+// The authenticated user must be a member of the team.
+func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+
+	var req CreateActivityJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
+		return
+	}
+	if req.StartAt.IsZero() || req.EndAt.IsZero() {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
+		return
+	}
+	if req.EndAt.Before(req.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	allDay := false
+	if req.AllDay != nil {
+		allDay = *req.AllDay
+	}
+
+	now := time.Now()
+	activity := &models.Activity{
+		ID:               newID(),
+		TimelineID:       timelineID,
+		Title:            req.Title,
+		Description:      req.Description,
+		Icon:             req.Icon,
+		Color:            req.Color,
+		StartAt:          req.StartAt,
+		EndAt:            req.EndAt,
+		AllDay:           allDay,
+		StatusID:         req.StatusId,
+		ParentActivityID: req.ParentActivityId,
+		PercentComplete:  req.PercentComplete,
+		Location:         req.Location,
+		URL:              req.Url,
+		Rrule:            req.Rrule,
+		CreatedBy:        claims.UserID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := s.activities.Create(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+
+	if req.AssignedMemberIds != nil {
+		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *req.AssignedMemberIds
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusCreated, activity)
+}
+
+// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
+// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
+func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+
+	var from, to *time.Time
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		from = &t
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		to = &t
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, acts)
+}
+
+// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
+// the request body are applied; the caller must be a member of the activity's team.
+func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	// Decode into a map so we can detect which fields the caller provided.
+	var patch map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if v, ok := patch["title"]; ok {
+		if err := json.Unmarshal(v, &activity.Title); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
+			return
+		}
+	}
+	if v, ok := patch["description"]; ok {
+		if err := json.Unmarshal(v, &activity.Description); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
+			return
+		}
+	}
+	if v, ok := patch["icon"]; ok {
+		if err := json.Unmarshal(v, &activity.Icon); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
+			return
+		}
+	}
+	if v, ok := patch["color"]; ok {
+		if err := json.Unmarshal(v, &activity.Color); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
+			return
+		}
+	}
+	if v, ok := patch["startAt"]; ok {
+		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
+			return
+		}
+	}
+	if v, ok := patch["endAt"]; ok {
+		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
+			return
+		}
+	}
+	if v, ok := patch["allDay"]; ok {
+		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
+			return
+		}
+	}
+	if v, ok := patch["statusId"]; ok {
+		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
+			return
+		}
+	}
+	if v, ok := patch["parentActivityId"]; ok {
+		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
+			return
+		}
+	}
+	if v, ok := patch["percentComplete"]; ok {
+		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
+			return
+		}
+	}
+	if v, ok := patch["location"]; ok {
+		if err := json.Unmarshal(v, &activity.Location); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
+			return
+		}
+	}
+	if v, ok := patch["url"]; ok {
+		if err := json.Unmarshal(v, &activity.URL); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
+			return
+		}
+	}
+	if v, ok := patch["rrule"]; ok {
+		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
+			return
+		}
+	}
+
+	var newAssignees *[]string
+	if v, ok := patch["assignedMemberIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
+			return
+		}
+		newAssignees = &ids
+	}
+
+	if activity.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
+		return
+	}
+	if activity.EndAt.Before(activity.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	activity.UpdatedAt = time.Now()
+	if err := s.activities.Update(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if newAssignees != nil {
+		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *newAssignees
+	} else {
+		// Populate current assignments so the response always includes them.
+		existing, err := s.activities.GetAssignments(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = existing
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
+// may archive an activity; the row is soft-deleted (archived_at set) so it is
+// hidden from list responses by default but can be restored.
+func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, true)
+}
+
+// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
+func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, false)
+}
+
+// setActivityArchive is the shared implementation for the archive/unarchive
+// endpoints. When archive is true, archived_at is set to now; otherwise it
+// is cleared.
+func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	activityID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+	}
+	if err := s.activities.SetArchived(activityID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+	activity.ArchivedAt = at
+	activity.UpdatedAt = time.Now().UTC()
+
+	// Re-populate assignments for a stable response shape.
+	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
+		activity.AssignedMemberIDs = ids
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
+// activity's team may delete it.
+func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	if err := s.activities.Delete(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	s.bus.Publish(events.Message{
+		Type:    events.ActivityDeleted,
+		TeamID:  timeline.TeamID,
+		Payload: map[string]string{"id": activityID},
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
 ````
 
 ## File: packages/api/internal/api/admin_handler.go
@@ -24157,241 +24405,6 @@ export default function ActivityCreatePanel({
 }
 ````
 
-## File: packages/web/src/components/gantt/GanttToolbar.tsx
-````typescript
-/**
- * GanttToolbar — the thin sub-toolbar that sits between the top bar and
- * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
- * export stub.
- */
-
-import { Download, Share2, Plus, Minus } from 'lucide-react';
-import type { TimeGranularity } from './granularity';
-import { cn } from '@/lib/utils';
-
-export type { TimeGranularity } from './granularity';
-export type GroupBy = 'none' | 'member' | 'parent';
-export type SortBy = 'startDate' | 'endDate' | 'title';
-export type ColorBy = 'activity' | 'member' | 'status';
-
-interface Props {
-  groupBy: GroupBy;
-  onGroupByChange: (g: GroupBy) => void;
-  sortBy: SortBy;
-  onSortByChange: (s: SortBy) => void;
-  granularity: TimeGranularity | 'auto';
-  onGranularityChange: (g: TimeGranularity | 'auto') => void;
-  colorBy: ColorBy;
-  onColorByChange: (c: ColorBy) => void;
-  hideClosed?: boolean;
-  onHideClosedChange?: (v: boolean) => void;
-  onExport: () => void;
-  onShare?: () => void;
-}
-
-const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
-const divider = 'w-px h-4 bg-border shrink-0';
-const label   = 'text-[11px] text-muted-foreground shrink-0';
-const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-export default function GanttToolbar({
-  groupBy,
-  onGroupByChange,
-  sortBy,
-  onSortByChange,
-  granularity,
-  onGranularityChange,
-  colorBy,
-  onColorByChange,
-  hideClosed = false,
-  onHideClosedChange,
-  onExport,
-  onShare,
-}: Props) {
-  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
-  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
-  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
-    ? granularityMap.indexOf(granularity as never)
-    : 0;
-  const currentLabel = granularityLabels[currentIndex];
-
-  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = parseInt(e.target.value, 10);
-    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
-  };
-
-  return (
-    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
-      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
-      <style>{`
-        .gantt-zoom-slider {
-          -webkit-appearance: none;
-          appearance: none;
-          background: transparent;
-        }
-        .gantt-zoom-slider::-webkit-slider-thumb {
-          -webkit-appearance: none;
-          appearance: none;
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          margin-top: -4px;
-        }
-        .gantt-zoom-slider::-moz-range-thumb {
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          border: none;
-        }
-        .gantt-zoom-slider::-webkit-slider-runnable-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-        .gantt-zoom-slider::-moz-range-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-      `}</style>
-
-      {/* Zoom (granularity) */}
-      <div className="flex items-center gap-1.5 h-[26px]">
-        <button
-          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 0}
-          title="Zoom out"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Minus size={14} />
-        </button>
-
-        <div className="relative w-20 h-[26px] flex items-center">
-          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
-            {[0, 1, 2, 3, 4, 5].map(i => (
-              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
-            ))}
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="5"
-            step="1"
-            value={currentIndex}
-            onChange={handleSliderChange}
-            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
-            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          />
-        </div>
-
-        <button
-          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 5}
-          title="Zoom in"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Plus size={14} />
-        </button>
-
-        <div
-          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          className={cn(
-            'flex items-center justify-center w-[22px] h-[22px]',
-            'bg-card border border-border rounded-sm text-xs font-mono select-none',
-            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
-          )}
-        >
-          {currentLabel}
-        </div>
-      </div>
-
-      <div className={divider} />
-
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as GroupBy)}
-      >
-        <option value="none">None</option>
-        <option value="member">Member</option>
-        <option value="parent">Parent activity</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Sort by */}
-      <span className={label}>Sort by</span>
-      <select
-        className={select}
-        value={sortBy}
-        onChange={e => onSortByChange(e.target.value as SortBy)}
-      >
-        <option value="startDate">Start date</option>
-        <option value="endDate">End date</option>
-        <option value="title">Title A–Z</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      {onHideClosedChange && (
-        <>
-          <div className={divider} />
-          <label className="flex items-center gap-1.5 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={hideClosed}
-              onChange={e => onHideClosedChange(e.target.checked)}
-              className="w-3 h-3 cursor-pointer accent-primary"
-            />
-            <span className="text-[11px] text-muted-foreground">Hide closed</span>
-          </label>
-        </>
-      )}
-
-      <div className="flex-1" />
-
-      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
-        <Download size={13} strokeWidth={1.8} />
-        Export
-      </button>
-
-      <button className={ctrlBtn} onClick={onShare} title="Share">
-        <Share2 size={13} strokeWidth={1.8} />
-        Share
-      </button>
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/pages/settings/ProfilePage.tsx
 ````typescript
 /**
@@ -25790,193 +25803,6 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
 }
 ````
 
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
- */
-
-import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
-
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
-
-const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
-
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-  const { theme: currentTheme, applyTheme } = useDarkMode()
-
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-    const savedTheme = prefMap['theme'] as string | undefined
-    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
-  }, [JSON.stringify(prefMap)])
-
-  function handleThemeChange(t: 'light' | 'dark') {
-    setTheme(t)
-    applyTheme(t)
-  }
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await Promise.all([
-        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
-        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
-        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
-        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
-      ])
-      setFeedback({ type: 'success', msg: 'Preferences saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Personal appearance and regional settings.
-      </p>
-
-      {/* Regional */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Regional
-        </h3>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Language</Label>
-          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Timezone</Label>
-          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Date format</Label>
-          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Appearance */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Appearance
-        </h3>
-        <div className="flex flex-col gap-1.5 mb-2">
-          <Label>Theme</Label>
-          <div className="flex gap-2">
-            {(['light', 'dark'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  theme === t
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground m-0">
-            Applies immediately. Persisted server-side so it syncs across devices.
-          </p>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <Button onClick={handleSave} disabled={upsert.isPending}>
-        {upsert.isPending ? 'Saving…' : 'Save preferences'}
-      </Button>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
 ````typescript
 /**
@@ -26866,6 +26692,193 @@ export default function GanttGrid({
       )}
     </div>
   );
+}
+````
+
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
+ */
+
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
+
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
+
+const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
+
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+  const { theme: currentTheme, applyTheme } = useDarkMode()
+
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+    const savedTheme = prefMap['theme'] as string | undefined
+    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
+  }, [JSON.stringify(prefMap)])
+
+  function handleThemeChange(t: 'light' | 'dark') {
+    setTheme(t)
+    applyTheme(t)
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
+        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
+        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
+        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Personal appearance and regional settings.
+      </p>
+
+      {/* Regional */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Regional
+        </h3>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Language</Label>
+          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Date format</Label>
+          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Appearance */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Appearance
+        </h3>
+        <div className="flex flex-col gap-1.5 mb-2">
+          <Label>Theme</Label>
+          <div className="flex gap-2">
+            {(['light', 'dark'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  theme === t
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground m-0">
+            Applies immediately. Persisted server-side so it syncs across devices.
+          </p>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
+    </div>
+  )
 }
 ````
 
@@ -30255,280 +30268,6 @@ func flatten[T any](s []*T) []T {
 }
 ````
 
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
-}
-````
-
 ## File: packages/web/src/components/gantt/GanttView.tsx
 ````typescript
 /**
@@ -30966,6 +30705,280 @@ export default function GanttView({
       />
     </div>
   );
+}
+````
+
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
 }
 ````
 
@@ -42321,6 +42334,25 @@ Admin tools for database backup visibility, manual backups, and scheduled backup
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-05-28 — /review-phase 10.4.2 fixes
+
+**Blockers resolved:**
+- Migration 015: removed `WHERE timeline_id IS NOT NULL` filter from `INSERT INTO activities_new` — any row with NULL timeline_id after backfill now aborts the migration with a NOT NULL constraint error rather than being silently dropped
+- `handleUpdateActivity`, `setActivityArchive`, `handleDeleteActivity`: added `sql.ErrNoRows` check on the timeline lookup so a missing/deleted timeline returns 404 instead of 500 and skipping the auth check
+- Added `TestCreateActivity_TimelineNotFound`, `TestListActivities_TimelineNotFound`: verify 404 when timelineId does not exist
+- Added `TestCreateActivity_TimelineDifferentTeam`, `TestListActivities_TimelineDifferentTeam`: verify 404 when timeline belongs to a different team than the URL's team ID
+- Added `TestMigrate_015_NormalizesActivities`: asserts `activities.team_id` is absent, `activities.timeline_id` is present, and FK is ON DELETE CASCADE to timelines
+
+---
+
+## 2026-05-28 — /test-phase 10.4.2
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke
+- Result: 7 pass, 0 fail, 0 skip (web-e2e not run — no Phase 10.4.2 assertions defined)
+- Smoke target: http://epcot.lan:8081
 
 ---
 
