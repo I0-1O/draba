@@ -32,12 +32,7 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
@@ -110,7 +105,6 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	timelineID := r.PathValue("timelineId")
-	claims := claimsFromContext(r.Context())
 
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
@@ -126,12 +120,7 @@ func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
@@ -167,7 +156,6 @@ func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
 // the request body are applied; the caller must be a member of the activity's team.
 func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
 	activityID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	activity, err := s.activities.GetByID(activityID)
 	if err != nil {
@@ -189,12 +177,7 @@ func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
 		return
 	}
 
@@ -346,7 +329,6 @@ func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request)
 // is cleared.
 func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
 	activityID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	activity, err := s.activities.GetByID(activityID)
 	if err != nil {
@@ -368,12 +350,7 @@ func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, arch
 		return
 	}
 
-	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
 		return
 	}
 
@@ -404,7 +381,6 @@ func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, arch
 // activity's team may delete it.
 func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 	activityID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	activity, err := s.activities.GetByID(activityID)
 	if err != nil {
@@ -426,12 +402,7 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
 		return
 	}
 

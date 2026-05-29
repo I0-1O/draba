@@ -16,14 +16,8 @@ import (
 // list the non-archived timelines for a team.
 func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
@@ -44,13 +38,8 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
 
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
 		return
 	}
 
@@ -129,7 +118,6 @@ func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
 // other members require an entry in timeline_access.
 func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
@@ -146,17 +134,12 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
 		return
 	}
 
-	// Team admins can access all timelines; members need an explicit grant.
+	// Team admins (and superadmins) can access all timelines; members need an explicit grant.
 	if member.Role != "admin" {
 		ok, err := s.timelines.HasAccess(timelineID, member.ID)
 		if err != nil {
@@ -188,7 +171,6 @@ func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request)
 // with role='admin' for this timeline.
 func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
 	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
@@ -200,19 +182,7 @@ func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, arch
 		return
 	}
 
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	// Team admins always pass. Per-timeline admin grants are not consulted
-	// here — granular timeline-admin checks are tracked for Phase 10.3.
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+	if _, ok := s.requireTeamAdmin(w, r, timeline.TeamID); !ok {
 		return
 	}
 
@@ -236,7 +206,6 @@ func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, arch
 // member with timeline_access role='admin' may rename or change dates.
 func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
 	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
@@ -248,13 +217,8 @@ func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
 		return
 	}
 
@@ -311,7 +275,6 @@ func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
 // timeline_access via foreign key.
 func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
 	timelineID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
@@ -323,17 +286,7 @@ func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+	if _, ok := s.requireTeamAdmin(w, r, timeline.TeamID); !ok {
 		return
 	}
 
@@ -349,7 +302,6 @@ func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
 // Team members may list the access grants for any timeline they can view.
 func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request) {
 	timelineID := r.PathValue("timelineId")
-	claims := claimsFromContext(r.Context())
 
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
@@ -361,12 +313,7 @@ func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if _, err := s.teams.GetMember(timeline.TeamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
 		return
 	}
 
@@ -383,7 +330,6 @@ func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request
 func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Request) {
 	timelineID := r.PathValue("timelineId")
 	targetMemberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
 
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
@@ -395,13 +341,8 @@ func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
 		return
 	}
 	if !s.canAdminTimeline(member, timelineID) {
@@ -453,7 +394,6 @@ func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Request) {
 	timelineID := r.PathValue("timelineId")
 	targetMemberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
 
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
@@ -465,13 +405,8 @@ func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
 		return
 	}
 	if !s.canAdminTimeline(member, timelineID) {

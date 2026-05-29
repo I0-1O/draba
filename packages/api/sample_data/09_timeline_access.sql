@@ -36,7 +36,6 @@ INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
 
 -- Marketing Cross Functional timelines
 INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
-  ('tl-mcf-rebrand', 'tm-mcf-brian', 'admin'),
   ('tl-mcf-rebrand', 'tm-mcf-scott', 'admin'),
   ('tl-mcf-rebrand', 'tm-mcf-paula', 'admin'),
   ('tl-mcf-rebrand', 'tm-mcf-corey', 'member'),

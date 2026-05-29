@@ -16,12 +16,7 @@ func (s *Server) handleListSavedFilters(w http.ResponseWriter, r *http.Request) 
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
 
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
@@ -39,12 +34,7 @@ func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request)
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
 
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create saved filter")
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 

@@ -51,14 +51,14 @@ func TestSampleDataLoads(t *testing.T) {
 	counts := map[string]int{
 		"users":                 13,
 		"teams":                 3,
-		"team_members":          17,
+		"team_members":          16,
 		"timelines":             6,
 		"activities":            58,
 		"activity_assignments":  69,
 		"statuses":              27,
 		"status_templates":      5,
 		"status_template_items": 21,
-		"timeline_access":       33,
+		"timeline_access":       32,
 	}
 
 	for table, want := range counts {

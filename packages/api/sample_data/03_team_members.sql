@@ -18,11 +18,8 @@ INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon,
   ('tm-pb-kristen', 't-pb-tiger-team', 'u-kristen-k',       NULL, 'member', '#F59E0B', '__name_words__', datetime('now', '-88 days')),
   ('tm-pb-jamie',   't-pb-tiger-team', 'u-jamie-f',         NULL, 'member', '#84CC16', '__name_words__', datetime('now', '-88 days'));
 
--- Marketing Cross Functional (6 members: 3 admin, 3 member)
--- Brian added as admin so super admins can test all teams until superadmin
--- team-access bypass is implemented.
+-- Marketing Cross Functional (5 members: 2 admin, 3 member)
 INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at) VALUES
-  ('tm-mcf-brian', 't-marketing-cross-func', 'u-brian-rieb',       NULL, 'admin',  '#3B82F6', '__name_words__', datetime('now', '-75 days')),
   ('tm-mcf-scott', 't-marketing-cross-func', 'u-scott-fitzgerald', NULL, 'admin',  '#8B5CF6', '__name_words__', datetime('now', '-75 days')),
   ('tm-mcf-paula', 't-marketing-cross-func', 'u-paula-h',         NULL, 'admin',  '#A855F7', '__name_words__', datetime('now', '-75 days')),
   ('tm-mcf-corey', 't-marketing-cross-func', 'u-corey-f',         NULL, 'member', '#EF4444', '__name_words__', datetime('now', '-75 days')),

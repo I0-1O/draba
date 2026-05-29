@@ -17,14 +17,8 @@ import (
 // Any team member may list the team's status templates.
 func (s *Server) handleListStatusTemplates(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list status templates")
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
@@ -42,17 +36,7 @@ func (s *Server) handleCreateStatusTemplate(w http.ResponseWriter, r *http.Reque
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
 
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status template")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -100,7 +84,6 @@ func (s *Server) handleCreateStatusTemplate(w http.ResponseWriter, r *http.Reque
 // Team admins only.
 func (s *Server) handleUpdateStatusTemplate(w http.ResponseWriter, r *http.Request) {
 	templateID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	t, err := s.statuses.GetTemplate(templateID)
 	if err != nil {
@@ -112,17 +95,7 @@ func (s *Server) handleUpdateStatusTemplate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status template")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+	if _, ok := s.requireTeamAdmin(w, r, t.TeamID); !ok {
 		return
 	}
 
@@ -159,7 +132,6 @@ func (s *Server) handleUpdateStatusTemplate(w http.ResponseWriter, r *http.Reque
 // Team admins only. Blocked if it is the last template on the team.
 func (s *Server) handleDeleteStatusTemplate(w http.ResponseWriter, r *http.Request) {
 	templateID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	t, err := s.statuses.GetTemplate(templateID)
 	if err != nil {
@@ -171,17 +143,7 @@ func (s *Server) handleDeleteStatusTemplate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status template")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+	if _, ok := s.requireTeamAdmin(w, r, t.TeamID); !ok {
 		return
 	}
 
@@ -208,7 +170,6 @@ func (s *Server) handleDeleteStatusTemplate(w http.ResponseWriter, r *http.Reque
 // Team admins only.
 func (s *Server) handleCreateTemplateItem(w http.ResponseWriter, r *http.Request) {
 	templateID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	t, err := s.statuses.GetTemplate(templateID)
 	if err != nil {
@@ -220,17 +181,7 @@ func (s *Server) handleCreateTemplateItem(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create template item")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+	if _, ok := s.requireTeamAdmin(w, r, t.TeamID); !ok {
 		return
 	}
 
@@ -280,7 +231,6 @@ func (s *Server) handleCreateTemplateItem(w http.ResponseWriter, r *http.Request
 // Team admins only.
 func (s *Server) handleUpdateTemplateItem(w http.ResponseWriter, r *http.Request) {
 	itemID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	item, err := s.statuses.GetTemplateItem(itemID)
 	if err != nil {
@@ -298,17 +248,7 @@ func (s *Server) handleUpdateTemplateItem(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update template item")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+	if _, ok := s.requireTeamAdmin(w, r, t.TeamID); !ok {
 		return
 	}
 
@@ -350,7 +290,6 @@ func (s *Server) handleUpdateTemplateItem(w http.ResponseWriter, r *http.Request
 // Team admins only. Blocked if it is the last item in the template.
 func (s *Server) handleDeleteTemplateItem(w http.ResponseWriter, r *http.Request) {
 	itemID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	item, err := s.statuses.GetTemplateItem(itemID)
 	if err != nil {
@@ -368,17 +307,7 @@ func (s *Server) handleDeleteTemplateItem(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	member, err := s.teams.GetMember(t.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete template item")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "team admin role required")
+	if _, ok := s.requireTeamAdmin(w, r, t.TeamID); !ok {
 		return
 	}
 
@@ -405,7 +334,6 @@ func (s *Server) handleDeleteTemplateItem(w http.ResponseWriter, r *http.Request
 // Any member with access to the timeline may list its statuses.
 func (s *Server) handleListTimelineStatuses(w http.ResponseWriter, r *http.Request) {
 	timelineID := r.PathValue("timelineId")
-	claims := claimsFromContext(r.Context())
 
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
@@ -417,13 +345,8 @@ func (s *Server) handleListTimelineStatuses(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list statuses")
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
 		return
 	}
 
@@ -451,7 +374,6 @@ func (s *Server) handleListTimelineStatuses(w http.ResponseWriter, r *http.Reque
 // Only a team admin or timeline admin may add statuses.
 func (s *Server) handleCreateTimelineStatus(w http.ResponseWriter, r *http.Request) {
 	timelineID := r.PathValue("timelineId")
-	claims := claimsFromContext(r.Context())
 
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
@@ -463,13 +385,8 @@ func (s *Server) handleCreateTimelineStatus(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create status")
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
 		return
 	}
 	if !s.canAdminTimeline(member, timelineID) {
@@ -526,7 +443,6 @@ func (s *Server) handleCreateTimelineStatus(w http.ResponseWriter, r *http.Reque
 // Only a team admin or timeline admin may update statuses.
 func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	statusID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	st, err := s.statuses.GetStatus(statusID)
 	if err != nil {
@@ -544,13 +460,8 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update status")
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
 		return
 	}
 	if !s.canAdminTimeline(member, st.TimelineID) {
@@ -598,7 +509,6 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 // replacementStatusId must be provided in the request body.
 func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 	statusID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
 	st, err := s.statuses.GetStatus(statusID)
 	if err != nil {
@@ -616,13 +526,8 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	member, err := s.teams.GetMember(timeline.TeamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete status")
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
 		return
 	}
 	if !s.canAdminTimeline(member, st.TimelineID) {

@@ -112,17 +112,7 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
 
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can send invites")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -170,14 +160,8 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 // or the caller is just not on it).
 func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get team")
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
@@ -196,14 +180,8 @@ func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list members")
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
@@ -221,19 +199,8 @@ func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
 // before patching.
 func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update team")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can update a team")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -292,19 +259,8 @@ func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 // the row, so activity history on the team is preserved and recovery is possible.
 func (s *Server) handleArchiveTeam(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive team")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can archive a team")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -328,19 +284,8 @@ func (s *Server) handleArchiveTeam(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUnarchiveTeam(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to unarchive team")
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can unarchive a team")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -378,14 +323,8 @@ func slugify(name string) string {
 func (s *Server) handleGetMember(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	memberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
 
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member")
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
@@ -444,19 +383,8 @@ func (s *Server) handleGetMember(w http.ResponseWriter, r *http.Request) {
 // handleAddMember adds an existing registered user to the team by their userID.
 func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	admin, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to add member")
-		return
-	}
-	if admin.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can add members")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -521,13 +449,8 @@ func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
 	memberID := r.PathValue("memberId")
 	claims := claimsFromContext(r.Context())
 
-	callerMember, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
+	callerMember, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
 		return
 	}
 
@@ -595,19 +518,8 @@ func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	memberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
 
-	admin, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
-		return
-	}
-	if admin.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can remove members")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -675,19 +587,8 @@ func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	memberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
 
-	admin, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
-		return
-	}
-	if admin.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can inactivate members")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -735,19 +636,8 @@ func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUnarchiveMember(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	memberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
 
-	admin, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
-		return
-	}
-	if admin.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can reactivate members")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -781,19 +671,8 @@ func (s *Server) handleUnarchiveMember(w http.ResponseWriter, r *http.Request) {
 // handleCreateParticipant creates a login-less team member (Participant).
 func (s *Server) handleCreateParticipant(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	admin, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create participant")
-		return
-	}
-	if admin.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can create participants")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -842,19 +721,8 @@ func (s *Server) handleCreateParticipant(w http.ResponseWriter, r *http.Request)
 // handleListInvites returns all pending invites for the team.
 func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	admin, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list invites")
-		return
-	}
-	if admin.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can list invites")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -870,19 +738,8 @@ func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	inviteID := r.PathValue("inviteId")
-	claims := claimsFromContext(r.Context())
 
-	admin, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite")
-		return
-	}
-	if admin.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can revoke invites")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -905,19 +762,8 @@ func (s *Server) handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
 // registration handler.
 func (s *Server) handleCreateInviteLink(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	admin, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite link")
-		return
-	}
-	if admin.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can manage invite links")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -934,19 +780,8 @@ func (s *Server) handleCreateInviteLink(w http.ResponseWriter, r *http.Request) 
 // null if none is set.
 func (s *Server) handleGetInviteLink(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	admin, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get invite link")
-		return
-	}
-	if admin.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can view invite links")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -973,19 +808,8 @@ func (s *Server) handleResetInviteLink(w http.ResponseWriter, r *http.Request) {
 // handleDeleteInviteLink revokes the current invite link by clearing the token.
 func (s *Server) handleDeleteInviteLink(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
 
-	admin, err := s.teams.GetMember(teamID, claims.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite link")
-		return
-	}
-	if admin.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can revoke invite links")
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
 		return
 	}
 
@@ -1036,14 +860,8 @@ func (s *Server) handleSearchUsers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetMemberStats(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	memberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
 
-	if _, err := s.teams.GetMember(teamID, claims.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member stats")
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
