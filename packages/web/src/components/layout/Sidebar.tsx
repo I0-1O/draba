@@ -57,7 +57,7 @@ interface Props {
   onUnarchiveTeam?: (teamId: string) => void;
   /** True when the current user is an admin of the active team. */
   canEditTeam?: boolean;
-  /** Live member list from the API. Falls back to demo data when empty. */
+  /** Live member list from the API. */
   members?: TeamMemberWithUser[];
   /** Called when the user clicks the gear icon on a member row. */
   onEditMember?: (member: TeamMemberWithUser) => void;
@@ -89,26 +89,6 @@ function formatDateRange(startDate?: string, endDate?: string): string {
   return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
 }
 
-interface Member {
-  id: string;
-  name: string;
-  initials: string;
-  color: string;
-}
-
-const DEMO_TIMELINES: Timeline[] = [
-  { id: '1', name: 'Q1 2027 Roadmap',            color: '#1A97A2', icon: null, startDate: '2027-01-01', endDate: '2027-03-31' },
-  { id: '2', name: 'New Logo GTM',                color: '#6366F1', icon: null, startDate: '2026-12-01', endDate: '2027-01-15' },
-  { id: '3', name: 'Q4 2026 Roadmap',             color: '#F17B2B', icon: null, startDate: '2026-10-01', endDate: '2026-12-31' },
-  { id: '4', name: 'Project Pinky and the Brain', color: '#E11D48', icon: null, startDate: '2026-11-15', endDate: '2026-12-20' },
-];
-
-
-const DEMO_MEMBERS: Member[] = [
-  { id: '1', name: 'Lindsay K.', initials: 'LK', color: '#1A97A2' },
-  { id: '2', name: 'John Doe',   initials: 'JD', color: '#6366F1' },
-  { id: '3', name: 'Sarah M.',   initials: 'SM', color: '#F17B2B' },
-];
 
 interface TimelineItemProps {
   timeline: Timeline;
@@ -409,7 +389,7 @@ const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', 
 export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
   const { user } = useAuth();
   const currentUserId = (user as { id?: string } | null)?.id;
-  const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
+  const [internalActiveId, setInternalActiveId] = useState('');
   const [teamOpen, setTeamOpen] = useState(true);
   const [activityOpen, setActivityOpen] = useState(true);
   const [connectorsOpen, setConnectorsOpen] = useState(true);
@@ -418,16 +398,14 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
   const [membersOpen, setMembersOpen] = useState(true);
   const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
 
-  const timelines: Timeline[] = apiTimelines?.length
-    ? apiTimelines.map((t, i) => ({
-        id: t.id,
-        name: t.name,
-        color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
-        icon: t.icon ?? null,
-        startDate: t.startDate,
-        endDate: t.endDate,
-      }))
-    : DEMO_TIMELINES
+  const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
+    icon: t.icon ?? null,
+    startDate: t.startDate,
+    endDate: t.endDate,
+  }))
 
   const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
     id: t.id,
@@ -438,7 +416,7 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
     endDate: t.endDate,
   }))
   const activeId = activeTimelineId ?? internalActiveId
-  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0];
+  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0] ?? null;
 
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
   const dragging = useRef(false);
@@ -551,18 +529,20 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
               />
             </div>
             {/* Active timeline — click to expand */}
-            <div
-              title={activeTimeline.name}
-              onClick={onToggle}
-              style={{ cursor: 'pointer' }}
-            >
-              <Badge
-                identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
-                name={activeTimeline.name}
-                shape="square"
-                size={28}
-              />
-            </div>
+            {activeTimeline && (
+              <div
+                title={activeTimeline.name}
+                onClick={onToggle}
+                style={{ cursor: 'pointer' }}
+              >
+                <Badge
+                  identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
+                  name={activeTimeline.name}
+                  shape="square"
+                  size={28}
+                />
+              </div>
+            )}
 
             {/* New activity */}
             <button
@@ -722,11 +702,10 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
 
                 {membersOpen && (
                   <div style={{ paddingBottom: 8 }}>
-                    {(apiMembers ?? DEMO_MEMBERS.map(m => ({ id: m.id, teamId: '', userId: null, displayName: m.name, role: 'member', color: m.color, icon: null, joinedAt: '', email: '', avatarUrl: null }))).map(m => {
+                    {(apiMembers ?? []).map(m => {
                       const displayName = (m as TeamMemberWithUser).displayName || m.id;
                       const color = m.color ?? '#8b949e';
                       const icon = (m as TeamMemberWithUser).icon ?? null;
-                      const isReal = Boolean(apiMembers);
                       return (
                         <MemberSidebarRow
                           key={m.id}
@@ -734,7 +713,7 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
                           color={color}
                           icon={icon}
                           isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
-                          onEdit={isReal && onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
+                          onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
                             ? () => onEditMember(m as TeamMemberWithUser)
                             : undefined}
                         />
@@ -969,7 +948,7 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
                   color: 'rgba(255,255,255,0.22)',
                   letterSpacing: '0.02em',
                 }}>
-                  {activeTimeline.name}
+                  {activeTimeline?.name}
                 </div>
                 {/* Stub: connected Trello board */}
                 <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
