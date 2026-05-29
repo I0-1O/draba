@@ -779,32 +779,32 @@ Removes `activities.team_id` (redundant now that `timeline_id` is stored). Harde
 Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
 
 **Inline name editing (3 → 1):**
-- [ ] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus
-- [ ] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle`
-- [ ] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle`
-- [ ] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle`
+- [x] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus — 2026-05-28
+- [x] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle` — 2026-05-28
 
 **Archive/restore buttons (3 → 1):**
-- [ ] Standardize archive button: amber styling with Archive icon (align with MemberModal's prominence)
-- [ ] Standardize restore button: teal styling with Archive icon
-- [ ] Fix `TeamModal.tsx` archive button (currently neutral gray, looks disabled)
-- [ ] Fix `TimelineModal.tsx` archive button (currently no icon, border-only)
+- [x] Standardize archive button: amber bg+border+icon (aligned with MemberModal prominence) — 2026-05-28
+- [x] Standardize restore button: teal bg+border+RotateCcw icon — 2026-05-28
+- [x] Fix `TeamModal.tsx` archive button (was neutral gray) — 2026-05-28
+- [x] Fix `TimelineModal.tsx` archive button (was border-only, no icon) — 2026-05-28
 
 **Confirmation dialogs (3 → 1):**
-- [ ] Consolidate into single `ConfirmDialog` component with color variants (red=destructive, amber=archive, indigo=promote, teal=restore)
-- [ ] Replace `MemberModal.tsx` custom ConfirmDialog
-- [ ] Replace `TeamModal.tsx` ArchiveDialog
-- [ ] Replace `TimelineModal.tsx` inline confirmation panels
+- [x] Consolidate into shared `ConfirmDialog` component with color variants (red, amber, indigo, teal) — 2026-05-28
+- [x] Replace `MemberModal.tsx` custom ConfirmDialog — 2026-05-28
+- [x] Replace `TeamModal.tsx` ArchiveDialog — 2026-05-28
+- [x] Replace `TimelineModal.tsx` inline confirmation panels — 2026-05-28
 
 **Color system (mixed → CSS variables):**
-- [ ] Migrate `TeamModal.tsx` hardcoded hex colors (`#21262d`, `#30363d`, etc.) to CSS variables
-- [ ] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables
-- [ ] Verify `TimelineModal.tsx` CSS variable usage is consistent
+- [x] Migrate `TeamModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Verified `TimelineModal.tsx` CSS variable usage is consistent — 2026-05-28
 
 **Sidebar & toolbar audit:**
-- [ ] Sidebar member/timeline rows: verify Badge usage, hover states, gear icon consistency
-- [ ] Gantt toolbar controls: verify button styling matches modal footer patterns
-- [ ] Fix any inconsistencies found
+- [x] Sidebar member/timeline rows: Badge usage, hover states, gear icon consistency verified — 2026-05-28
+- [x] Gantt toolbar controls: Tailwind + CSS vars, consistent with modal footer patterns — 2026-05-28
+- [x] No inconsistencies requiring fixes found — 2026-05-28
 
 ---
 

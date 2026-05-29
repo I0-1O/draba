@@ -2,6 +2,47 @@
 
 ---
 
+## 2026-05-28 — Phase 10.4.3: UI Consistency — Modals, Sidebar & Toolbar
+
+**Goal:** Standardize visual patterns across TeamModal, MemberModal, and TimelineModal — three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
+
+**Shared components created:**
+- `components/shared/InlineEditableTitle.tsx`: always-visible name input with a bottom border that appears on hover/focus; used in all three modals to replace three divergent editing patterns
+- `components/shared/ConfirmDialog.tsx`: shared confirmation panel with four color variants (red=destructive, amber=archive, indigo=promote, teal=restore); replaces `MemberModal`'s local `ConfirmDialog`, `TeamModal`'s `ArchiveDialog`, and `TimelineModal`'s inline return-replacement confirmations
+
+**TeamModal.tsx:**
+- Removed `nameEditing` state machine (div/input toggle); replaced with `InlineEditableTitle`
+- Removed `nameInputRef` and associated focus/effect logic; Escape now closes the modal directly
+- Replaced `ArchiveDialog` component with shared `ConfirmDialog variant="amber"`; footer hides when confirm is showing
+- Archive button: neutral gray → amber bg+border+`Archive` icon
+- Restore button: neutral gray → teal bg+border+`RotateCcw` icon
+- Migrated all structural hex colors (`#21262d`, `#30363d`, `#2d333b`, `#484f58`, `#8b949e`, `#e6edf3`) to CSS variables (`var(--card)`, `var(--border)`, `var(--muted)`, `var(--muted-foreground)`, `var(--foreground)`)
+
+**MemberModal.tsx:**
+- Replaced local `ConfirmDialog` component with shared one
+- Replaced focus-underline name input with `InlineEditableTitle`
+- Migrated all structural hex colors to CSS variables
+
+**TimelineModal.tsx:**
+- Replaced separate-overlay archive/delete confirmation returns with inline `ConfirmDialog` components (shown in content area; footer hides when confirm is showing) — matches TeamModal/MemberModal UX
+- Archive button: border-only, no icon → amber bg+border+`Archive` icon
+- Restore button: amber border-only → teal bg+border+`RotateCcw` icon
+- Was already using CSS variables; no color migration needed
+
+**Sidebar audit:** Badge usage, hover states (`rgba(255,255,255,0.05)`), and `Settings2` gear icons consistent across all row types (TimelineItem, TeamRow, MemberSidebarRow). No fixes required.
+
+**Toolbar audit:** GanttToolbar uses Tailwind classes + CSS variables throughout; `ctrlBtn` pattern consistent with modal footer buttons. No fixes required.
+
+**Exit criteria:**
+- ✅ All three modals use `InlineEditableTitle` for name editing — identical visual behavior
+- ✅ Archive and restore buttons look identical across all three modals (amber archive, teal restore, both with icons)
+- ✅ All confirmation dialogs use shared `ConfirmDialog` with appropriate color variants
+- ✅ No hardcoded structural hex colors in modal components; all use CSS variables
+- ✅ Sidebar/toolbar audited — consistent, no fixes needed
+- ✅ `pnpm --filter web lint` clean
+
+---
+
 ## 2026-05-28 — /review-phase 10.4.2 fixes
 
 **Blockers resolved:**

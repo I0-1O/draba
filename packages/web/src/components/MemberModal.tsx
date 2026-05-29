@@ -15,6 +15,8 @@ import type { Identity } from '@/components/identity/identity-constants'
 import { Badge } from '@/components/identity/Badge'
 import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
 import { useAuth } from '@/contexts/AuthContext'
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import type { components } from '@draba/shared'
 
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
@@ -39,47 +41,8 @@ const chipStyle = (color: string): React.CSSProperties => ({
 })
 
 const cancelBtn: React.CSSProperties = {
-  background: 'none', border: '1px solid #30363d', color: '#8b949e',
-  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit',
-}
-
-interface ConfirmDialogProps {
-  variant: 'indigo' | 'amber' | 'red'
-  icon: React.ReactNode
-  title: string
-  body: string
-  confirmLabel: string
-  busy: boolean
-  onCancel: () => void
-  onConfirm: () => void
-}
-
-function ConfirmDialog({ variant, icon, title, body, confirmLabel, busy, onCancel, onConfirm }: ConfirmDialogProps) {
-  const colors = { indigo: '#6366F1', amber: '#F59E0B', red: '#EF4444' }
-  const c = colors[variant]
-  return (
-    <div style={{ padding: '28px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, textAlign: 'center' }}>
-      <div style={{ width: 48, height: 48, borderRadius: 12, background: `${c}20`, border: `1.5px solid ${c}44`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        {icon}
-      </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3' }}>{title}</div>
-      <div style={{ fontSize: 13, color: '#8b949e', lineHeight: 1.6, maxWidth: 340 }}>{body}</div>
-      <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
-        <button onClick={onCancel} disabled={busy} style={cancelBtn}>Cancel</button>
-        <button
-          onClick={onConfirm}
-          disabled={busy}
-          style={{
-            background: `${c}22`, border: `1px solid ${c}66`, color: c,
-            fontWeight: 600, fontSize: 13, padding: '7px 18px',
-            borderRadius: 7, cursor: 'pointer', opacity: busy ? 0.6 : 1, fontFamily: 'inherit',
-          }}
-        >
-          {busy ? 'Working…' : confirmLabel}
-        </button>
-      </div>
-    </div>
-  )
+  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
+  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -105,17 +68,17 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
         onClick={e => { if (e.target === e.currentTarget) onClose() }}
         style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
       >
-        <div style={{ width: 560, height: 300, background: '#21262d', border: '1px solid #30363d', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
-          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 4, display: 'flex' }}>
+        <div style={{ width: 560, height: 300, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
+          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
             <X size={18} />
           </button>
           {isError ? (
             <>
               <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
-              <button onClick={onClose} style={{ fontSize: 12, color: '#8b949e', background: 'none', border: '1px solid #30363d', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit' }}>Dismiss</button>
+              <button onClick={onClose} style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>Dismiss</button>
             </>
           ) : (
-            <span style={{ color: '#484f58', fontSize: 13 }}>Loading…</span>
+            <span style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</span>
           )}
         </div>
       </div>,
@@ -185,7 +148,7 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
       style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
     >
-      <div style={{ width: 560, maxHeight: '90vh', background: '#21262d', border: '1px solid #30363d', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{ width: 560, maxHeight: '90vh', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
         {/* Confirm overlays */}
         {confirm === 'promote' && (
@@ -240,7 +203,7 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
         {confirm === null && (
           <>
             {/* Header */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid #30363d', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
               <div style={{ flexShrink: 0 }}>
                 <IdentityWidget
                   identity={effectiveIdentity}
@@ -250,34 +213,25 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
                 />
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, color: '#484f58', fontWeight: 600, letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 3 }}>
+                <div style={{ fontSize: 11, color: 'var(--muted-foreground)', fontWeight: 600, letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 3 }}>
                   {isParticipant ? 'Participant' : 'Team Member'}
                   {isInactivated && ' · Inactive'}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   {(isAdmin || currentUser?.id === detail.userId) ? (
-                    <input
+                    <InlineEditableTitle
                       value={displayName ?? detail.displayName}
-                      onChange={e => setDisplayName(e.target.value)}
-                      style={{
-                        fontSize: 16, fontWeight: 600, color: '#e6edf3',
-                        background: 'transparent', border: 'none', outline: 'none',
-                        padding: '1px 4px', margin: '-1px -4px',
-                        borderRadius: 4, fontFamily: 'inherit',
-                        minWidth: 0, flex: 1,
-                      }}
-                      onFocus={e => { e.currentTarget.style.background = '#2d333b'; e.currentTarget.style.border = '1px solid #30363d' }}
-                      onBlur={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.border = 'none' }}
+                      onChange={setDisplayName}
                     />
                   ) : (
-                    <span style={{ fontSize: 16, fontWeight: 600, color: '#e6edf3' }}>{effectiveName}</span>
+                    <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{effectiveName}</span>
                   )}
                   {isParticipant && (
-                    <span style={{ fontSize: 11, fontWeight: 600, background: '#F59E0B20', border: '1px solid #F59E0B44', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
                   )}
                 </div>
               </div>
-              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', padding: 4, display: 'flex', flexShrink: 0 }}>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex', flexShrink: 0 }}>
                 <X size={18} />
               </button>
             </div>
@@ -288,8 +242,8 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
               {/* Email */}
               {!isParticipant && (
                 <div style={{ marginBottom: 20 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
-                  <div style={{ fontSize: 13, color: '#8b949e', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
+                  <div style={{ fontSize: 13, color: 'var(--muted-foreground)', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {detail.email}
                   </div>
                 </div>
@@ -297,44 +251,44 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
 
               {/* Timeline stats */}
               <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
                   <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
                   Timelines
                 </label>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <div style={chipStyle('#1A97A2')}>
                     <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
-                    <span style={{ fontSize: 11, color: '#8b949e', marginTop: 2 }}>Active</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Active</span>
                   </div>
                   <div style={chipStyle('#484f58')}>
                     <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
-                    <span style={{ fontSize: 11, color: '#484f58', marginTop: 2 }}>Archived</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
                   </div>
                 </div>
               </div>
 
               {/* Activity stats */}
               <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
                   <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
                   Activities
                 </label>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
                     <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
-                    <span style={{ fontSize: 10, color: '#8b949e', marginTop: 2 }}>Past due</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Past due</span>
                   </div>
                   <div style={chipStyle('#1A97A2')}>
                     <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
-                    <span style={{ fontSize: 10, color: '#8b949e', marginTop: 2 }}>Running</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Running</span>
                   </div>
                   <div style={chipStyle('#3B82F6')}>
                     <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
-                    <span style={{ fontSize: 10, color: '#8b949e', marginTop: 2 }}>Upcoming</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Upcoming</span>
                   </div>
                   <div style={chipStyle('#484f58')}>
                     <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
-                    <span style={{ fontSize: 10, color: '#484f58', marginTop: 2 }}>Archived</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
                   </div>
                 </div>
               </div>
@@ -342,16 +296,16 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
               {/* Teams list */}
               {detail.teams.length > 0 && (
                 <div style={{ marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
                     <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
                     Teams ({detail.teams.length})
                   </label>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     {detail.teams.map((tm: TeamMemberWithUser) => (
-                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: '#2d333b', borderRadius: 7 }}>
+                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--muted)', borderRadius: 7 }}>
                         <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
-                        <span style={{ fontSize: 13, color: '#e6edf3', flex: 1 }}>{tm.teamId}</span>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : '#8b949e', background: tm.role === 'admin' ? '#1A97A220' : '#2d333b', border: `1px solid ${tm.role === 'admin' ? '#1A97A244' : '#30363d'}`, borderRadius: 99, padding: '1px 8px' }}>
+                        <span style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{tm.teamId}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : 'var(--muted-foreground)', background: tm.role === 'admin' ? 'rgba(26,151,162,0.12)' : 'var(--muted)', border: `1px solid ${tm.role === 'admin' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`, borderRadius: 99, padding: '1px 8px' }}>
                           {tm.role}
                         </span>
                       </div>
@@ -362,7 +316,7 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
 
               {/* Joined date */}
               <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: '#2d333b', borderRadius: 6, fontSize: 12, color: '#8b949e' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: 'var(--muted)', borderRadius: 6, fontSize: 12, color: 'var(--muted-foreground)' }}>
                   <Clock size={12} />
                   Joined {new Date(detail.joinedAt).toLocaleDateString()}
                 </div>
@@ -370,10 +324,10 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
 
               {/* Account section — non-participant only */}
               {!isParticipant && isAdmin && (
-                <div style={{ borderTop: '1px solid #30363d', paddingTop: 16, marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
                   <button
-                    style={{ fontSize: 12, color: '#484f58', background: 'none', border: '1px solid #30363d', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'inherit' }}
+                    style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'var(--font-sans)' }}
                     title="SMTP is not configured"
                     disabled
                   >
@@ -384,8 +338,8 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
 
               {/* Superadmin actions */}
               {isSuperadmin && !isParticipant && (
-                <div style={{ borderTop: '1px solid #30363d', paddingTop: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: '#484f58', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
                     <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
                     Super Admin Actions
                   </label>
@@ -393,7 +347,7 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
                     {!isInactivated && (
                       <button
                         onClick={() => setConfirm('promote')}
-                        style={{ fontSize: 12, color: '#6366F1', background: '#6366F114', border: '1px solid #6366F144', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                        style={{ fontSize: 12, color: '#6366F1', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
                       >
                         <Shield size={13} />
                         Promote to Super Admin
@@ -403,14 +357,14 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
                       <button
                         onClick={handleReactivate}
                         disabled={busy}
-                        style={{ fontSize: 12, color: '#1A97A2', background: '#1A97A214', border: '1px solid #1A97A244', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', opacity: busy ? 0.6 : 1 }}
+                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', opacity: busy ? 0.6 : 1 }}
                       >
                         Reactivate account
                       </button>
                     ) : (
                       <button
                         onClick={() => setConfirm('inactivate')}
-                        style={{ fontSize: 12, color: '#F59E0B', background: '#F59E0B14', border: '1px solid #F59E0B44', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                        style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
                       >
                         <Archive size={13} />
                         Inactivate
@@ -419,7 +373,7 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
                     {detail.deletable && (
                       <button
                         onClick={() => setConfirm('delete')}
-                        style={{ fontSize: 12, color: '#EF4444', background: '#EF444414', border: '1px solid #EF444444', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
                       >
                         <Trash2 size={13} />
                         Delete
@@ -430,7 +384,7 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
                     {!detail.userArchivedAt && (
                       <button
                         onClick={() => setConfirm('revoke')}
-                        style={{ fontSize: 12, color: '#EF4444', background: '#EF444414', border: '1px solid #EF444444', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
                       >
                         <ShieldOff size={13} />
                         Revoke all access
@@ -438,12 +392,12 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
                     )}
                   </div>
                   {activeActivityCount > 0 && (
-                    <div style={{ fontSize: 11, color: '#484f58', marginTop: 8 }}>
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 8 }}>
                       Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
                     </div>
                   )}
                   {revokeResult && (
-                    <div style={{ fontSize: 12, color: '#e6edf3', background: '#EF444414', border: '1px solid #EF444433', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
+                    <div style={{ fontSize: 12, color: 'var(--foreground)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
                       Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
                     </div>
                   )}
@@ -452,13 +406,13 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
             </div>
 
             {/* Footer */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid #30363d', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
               <button onClick={onClose} style={cancelBtn}>Cancel</button>
               {(isAdmin || currentUser?.id === detail.userId) && (
                 <button
                   onClick={handleSave}
                   disabled={busy}
-                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'inherit' }}
+                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'var(--font-sans)' }}
                 >
                   {busy ? 'Saving…' : 'Save changes'}
                 </button>

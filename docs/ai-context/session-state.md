@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short._
 
-**Last updated:** 2026-05-28 (Phase 10.4.2 complete — automated checks pass)
+**Last updated:** 2026-05-28 (Phase 10.4.3 complete — automated checks pass)
 
 ---
 
@@ -19,8 +19,38 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.3 | Timelines — Full CRUD (API + UI) | ✅ | ⬜ needs Docker verification |
 | 10.4.1 | Preference Consumption & Session Handling | ✅ | ⬜ needs Docker verification |
 | 10.4.2 | Activity Schema Normalization | ✅ | ⬜ needs Docker verification |
+| 10.4.3 | UI Consistency — Modals, Sidebar & Toolbar | ✅ | ⬜ needs Docker verification |
 
-Next phase to build: **10.4.3** — UI Consistency (modals, sidebar, toolbar). Backup moved to Phase 17.
+Next phase to build: **10.5** — Communications Testing.
+
+---
+
+## Phase 10.4.3 — UI Consistency — Modals, Sidebar & Toolbar (2026-05-28 — not yet Docker-verified)
+
+**Shared components created:**
+- `components/shared/InlineEditableTitle.tsx`: always-input with bottom border on hover/focus; replaces three divergent name-editing patterns
+- `components/shared/ConfirmDialog.tsx`: four color variants (red, amber, indigo, teal); replaces MemberModal's local ConfirmDialog, TeamModal's ArchiveDialog, TimelineModal's inline confirmation panels
+
+**TeamModal.tsx:**
+- Removed `nameEditing` state machine; replaced with `InlineEditableTitle`
+- Archive confirm: `ArchiveDialog` → shared `ConfirmDialog variant="amber"` (inline in content area, footer hidden during confirm)
+- Archive button: neutral gray → amber bg+border+Archive icon
+- Restore button: neutral gray → teal bg+border+RotateCcw icon
+- All structural hex colors migrated to CSS variables
+
+**MemberModal.tsx:**
+- Local `ConfirmDialog` → shared component
+- Name input replaced with `InlineEditableTitle`
+- All structural hex colors migrated to CSS variables
+
+**TimelineModal.tsx:**
+- Archive/delete confirmations: separate full overlays → inline `ConfirmDialog` in content area (footer hidden during confirm)
+- Archive button: border-only, no icon → amber bg+border+Archive icon
+- Restore button: amber border-only → teal bg+border+RotateCcw icon
+
+**Sidebar audit:** Consistent — Badge usage, hover states, gear icons all uniform across row types. No changes needed.
+
+**Toolbar audit:** GanttToolbar uses Tailwind + CSS variables consistently. No changes needed.
 
 ---
 

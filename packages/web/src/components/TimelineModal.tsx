@@ -7,7 +7,7 @@
  */
 
 import { useState } from 'react'
-import { X, Plus, Trash2, Check, AlertTriangle } from 'lucide-react'
+import { X, Plus, Trash2, Check, Archive, RotateCcw } from 'lucide-react'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import { Badge } from '@/components/identity/Badge'
 import type { Identity } from '@/components/identity/identity-constants'
@@ -25,6 +25,8 @@ import {
   useDeleteTimelineStatus,
 } from '@/hooks/useStatusTemplates'
 import { useStatusTemplates } from '@/hooks/useStatusTemplates'
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import type { components } from '@draba/shared'
 
 type Timeline = components['schemas']['Timeline']
@@ -98,6 +100,20 @@ const TEXTAREA: React.CSSProperties = {
   minHeight: 68,
   fontFamily: 'var(--font-sans)',
   lineHeight: 1.5,
+}
+
+const archiveBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
+  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
+  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+}
+
+const restoreBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
+  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
+  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
 }
 
 function tabStyle(active: boolean): React.CSSProperties {
@@ -374,60 +390,6 @@ export default function TimelineModal({ mode, teamId, timeline, canAdmin = false
     }
   }
 
-  if (showDeleteConfirm && timeline) {
-    return (
-      <div style={OVERLAY}>
-        <div style={{ ...PANEL, maxWidth: 440 }}>
-          <div style={{ padding: 28, textAlign: 'center' }}>
-            <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'rgba(239,68,68,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
-              <AlertTriangle width={22} height={22} color="var(--destructive)" />
-            </div>
-            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10 }}>Delete timeline?</div>
-            <div style={{ fontSize: 13, color: 'var(--muted-foreground)', marginBottom: 24, lineHeight: 1.5 }}>
-              This permanently deletes <strong>{timeline.name}</strong> and all its statuses. Activities are not deleted — they remain in the team.
-            </div>
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
-              <button onClick={() => setShowDeleteConfirm(false)} style={{ padding: '8px 18px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancel</button>
-              <button
-                onClick={() => deleteTimeline.mutate(timeline.id, { onSuccess: onClose })}
-                style={{ padding: '8px 18px', border: 'none', borderRadius: 7, background: 'var(--destructive)', color: 'white', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
-              >
-                Delete timeline
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  if (showArchiveConfirm && timeline) {
-    return (
-      <div style={OVERLAY}>
-        <div style={{ ...PANEL, maxWidth: 440 }}>
-          <div style={{ padding: 28, textAlign: 'center' }}>
-            <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'rgba(245,158,11,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
-              <AlertTriangle width={22} height={22} color="#F59E0B" />
-            </div>
-            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10 }}>Archive timeline?</div>
-            <div style={{ fontSize: 13, color: 'var(--muted-foreground)', marginBottom: 24, lineHeight: 1.5 }}>
-              <strong>{timeline.name}</strong> will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.
-            </div>
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
-              <button onClick={() => setShowArchiveConfirm(false)} style={{ padding: '8px 18px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancel</button>
-              <button
-                onClick={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
-                style={{ padding: '8px 18px', border: 'none', borderRadius: 7, background: '#F59E0B', color: 'white', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
-              >
-                Archive timeline
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div style={OVERLAY}>
       <div style={PANEL} onClick={e => e.stopPropagation()}>
@@ -443,17 +405,11 @@ export default function TimelineModal({ mode, teamId, timeline, canAdmin = false
             <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4 }}>
               {mode === 'new' ? 'NEW TIMELINE' : 'EDIT TIMELINE'}
             </div>
-            <input
-              autoFocus={mode === 'new'}
+            <InlineEditableTitle
               value={name}
-              onChange={e => { setName(e.target.value); setError('') }}
+              onChange={v => { setName(v); setError('') }}
               placeholder="Timeline name"
-              style={{
-                width: '100%', boxSizing: 'border-box',
-                fontSize: 15, fontWeight: 700, color: 'var(--foreground)',
-                background: 'none', border: 'none', outline: 'none',
-                padding: 0, fontFamily: 'var(--font-sans)',
-              }}
+              autoFocus={mode === 'new'}
             />
           </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
@@ -473,7 +429,30 @@ export default function TimelineModal({ mode, teamId, timeline, canAdmin = false
 
         {/* Content */}
         <div style={CONTENT}>
-          {activeTab === 'settings' && (
+          {/* Archive confirmation — replaces tab content */}
+          {showArchiveConfirm && timeline ? (
+            <ConfirmDialog
+              variant="amber"
+              icon={<Archive size={22} color="#F59E0B" />}
+              title="Archive timeline?"
+              body={`${timeline.name} will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.`}
+              confirmLabel="Archive timeline"
+              busy={archiveTimeline.isPending}
+              onCancel={() => setShowArchiveConfirm(false)}
+              onConfirm={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
+            />
+          ) : showDeleteConfirm && timeline ? (
+            <ConfirmDialog
+              variant="red"
+              icon={<Trash2 size={22} color="#EF4444" />}
+              title="Delete timeline?"
+              body={`This permanently deletes ${timeline.name} and all its statuses. Activities are not deleted — they remain in the team.`}
+              confirmLabel="Delete timeline"
+              busy={deleteTimeline.isPending}
+              onCancel={() => setShowDeleteConfirm(false)}
+              onConfirm={() => deleteTimeline.mutate(timeline.id, { onSuccess: onClose })}
+            />
+          ) : activeTab === 'settings' ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
               {/* Date range */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -555,78 +534,76 @@ export default function TimelineModal({ mode, teamId, timeline, canAdmin = false
                 </div>
               )}
             </div>
+          ) : (
+            activeTab === 'statuses' && timeline && (
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
+                  Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
+                </div>
+
+                <div style={{ marginBottom: 4 }}>
+                  {statuses.map(s => (
+                    <StatusRow
+                      key={s.id}
+                      status={s}
+                      canDelete={statuses.length > 1}
+                      teamId={teamId}
+                      timelineId={timeline.id}
+                      allStatuses={statuses}
+                    />
+                  ))}
+                </div>
+
+                <AddStatusForm teamId={teamId} timelineId={timeline.id} primaryColor={timelineColor} />
+              </div>
+            )
           )}
+        </div>
 
-          {activeTab === 'statuses' && timeline && (
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
-                Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
-              </div>
-
-              <div style={{ marginBottom: 4 }}>
-                {statuses.map(s => (
-                  <StatusRow
-                    key={s.id}
-                    status={s}
-                    canDelete={statuses.length > 1}
-                    teamId={teamId}
-                    timelineId={timeline.id}
-                    allStatuses={statuses}
-                  />
-                ))}
-              </div>
-
-              <AddStatusForm teamId={teamId} timelineId={timeline.id} primaryColor={timelineColor} />
+        {/* Footer — hidden when a confirm dialog is showing */}
+        {!showArchiveConfirm && !showDeleteConfirm && (
+          <div style={FOOTER}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {mode === 'edit' && timeline && canAdmin && !timeline.archivedAt && (
+                <button onClick={() => setShowArchiveConfirm(true)} style={archiveBtnStyle}>
+                  <Archive size={13} />
+                  Archive
+                </button>
+              )}
+              {mode === 'edit' && timeline && canAdmin && timeline.archivedAt && onUnarchive && (
+                <button onClick={() => onUnarchive(timeline.id)} style={restoreBtnStyle}>
+                  <RotateCcw size={13} />
+                  Restore
+                </button>
+              )}
+              {mode === 'edit' && timeline && canAdmin && (
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                >
+                  Delete
+                </button>
+              )}
             </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div style={FOOTER}>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {mode === 'edit' && timeline && canAdmin && !timeline.archivedAt && (
+            <div style={{ display: 'flex', gap: 8 }}>
               <button
-                onClick={() => setShowArchiveConfirm(true)}
-                style={{ fontSize: 12, padding: '7px 12px', border: '1px solid #F59E0B44', borderRadius: 7, background: 'none', color: '#F59E0B', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                onClick={onClose}
+                style={{ fontSize: 13, padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', color: 'var(--muted-foreground)' }}
               >
-                Archive
+                Cancel
               </button>
-            )}
-            {mode === 'edit' && timeline && canAdmin && timeline.archivedAt && onUnarchive && (
-              <button
-                onClick={() => onUnarchive(timeline.id)}
-                style={{ fontSize: 12, padding: '7px 12px', border: '1px solid #F59E0B44', borderRadius: 7, background: 'none', color: '#F59E0B', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-              >
-                Restore
-              </button>
-            )}
-            {mode === 'edit' && timeline && canAdmin && (
-              <button
-                onClick={() => setShowDeleteConfirm(true)}
-                style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-              >
-                Delete
-              </button>
-            )}
+              {activeTab === 'settings' && (
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  style={{ fontSize: 13, fontWeight: 600, padding: '8px 18px', border: 'none', borderRadius: 7, background: timelineColor, color: 'white', cursor: saving ? 'wait' : 'pointer', fontFamily: 'var(--font-sans)' }}
+                >
+                  {saving ? 'Saving…' : mode === 'new' ? 'Create timeline' : 'Save changes'}
+                </button>
+              )}
+            </div>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              onClick={onClose}
-              style={{ fontSize: 13, padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-            >
-              Cancel
-            </button>
-            {activeTab === 'settings' && (
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                style={{ fontSize: 13, fontWeight: 600, padding: '8px 18px', border: 'none', borderRadius: 7, background: timelineColor, color: 'white', cursor: saving ? 'wait' : 'pointer', fontFamily: 'var(--font-sans)' }}
-              >
-                {saving ? 'Saving…' : mode === 'new' ? 'Create timeline' : 'Save changes'}
-              </button>
-            )}
-          </div>
-        </div>
+        )}
       </div>
     </div>
   )

@@ -42,7 +42,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | 🔄 |
 | 10.4.1 | [Preference Consumption & Session Handling](#phase-1041--preference-consumption--session-handling) | S–M — 1–2 days | 🔄 |
 | 10.4.2 | [Activity Schema Normalization — Drop team_id](#phase-1042--activity-schema-normalization--drop-team_id) | S — ½–1 day | ✅ |
-| 10.4.3 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1043--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ⬜ |
+| 10.4.3 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1043--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ✅ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
 | 10.7 | [Localization & Language Support](#phase-107--localization--language-support) | L — 3–5 days | ⬜ |
@@ -1039,7 +1039,7 @@ Removes `activities.team_id` now that `timeline_id` is stored and the relationsh
 ---
 
 ### Phase 10.4.3 — UI Consistency — Modals, Sidebar & Toolbar
-**Status:** ⬜ | **Effort:** M (1–2 days)
+**Status:** ✅ Done — 2026-05-28 | **Effort:** M (1–2 days)
 
 Standardizes visual patterns across the three main modals (Team, Member, Timeline), the sidebar, and the Gantt toolbar. Today these surfaces use three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and a mix of hardcoded hex colors vs CSS variables.
 
