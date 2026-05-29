@@ -90,6 +90,7 @@ docs/
   REQUIREMENTS.md
   REVIEW.md
   ROADMAP.md
+  SAMPLE_DATA.md
   TASKS.md
   TESTING.md
 packages/
@@ -165,6 +166,18 @@ packages/
         hub.go
     migrations/
       001_initial_schema.sql
+    sample_data/
+      00_flush.sql
+      01_users.sql
+      02_teams.sql
+      03_team_members.sql
+      04_status_templates.sql
+      05_timelines.sql
+      06_statuses.sql
+      07_activities.sql
+      08_activity_assignments.sql
+      09_timeline_access.sql
+      README.md
     ui/
       static/
         .gitkeep
@@ -3088,39 +3101,6 @@ EXPOSE 8080
 CMD ["draba"]
 ````
 
-## File: packages/api/go.mod
-````
-module github.com/I0-1O/draba/packages/api
-
-go 1.24.0
-
-require (
-	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/gorilla/websocket v1.5.3
-	github.com/jmoiron/sqlx v1.4.0
-	github.com/stretchr/testify v1.11.1
-	golang.org/x/crypto v0.46.0
-	modernc.org/sqlite v1.34.5
-)
-
-require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/oapi-codegen/runtime v1.4.0 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
-	modernc.org/libc v1.61.6 // indirect
-	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.8.0 // indirect
-)
-````
-
 ## File: packages/shared/package.json
 ````json
 {
@@ -3228,6 +3208,72 @@ export default function RightSidebar({ open, title, onClose, children }: Props) 
       </div>
     </div>
   )
+}
+````
+
+## File: packages/web/src/components/shared/EmptyState.tsx
+````typescript
+/**
+ * EmptyState — centered placeholder for views with no data.
+ */
+
+interface EmptyStateProps {
+  icon?: React.ReactNode;
+  message: string;
+  description?: string;
+}
+
+function DrabaIcon() {
+  return (
+    <svg
+      width="120"
+      height="120"
+      viewBox="0 0 536 536"
+      fill="currentColor"
+      style={{ fillRule: 'evenodd', clipRule: 'evenodd' }}
+    >
+      <g transform="matrix(1.754455,0,0,1.754455,-155.155119,-239.401045)">
+        <path d="M132.527,289.267L117.826,289.267C115.02,292.375 110.96,294.329 106.447,294.329C97.987,294.329 91.118,287.46 91.118,278.999C91.118,270.538 97.987,263.669 106.447,263.669C110.96,263.669 115.02,265.623 117.826,268.731L132.527,268.731L132.527,275.454L121.365,275.454C121.634,276.592 121.777,277.779 121.777,278.999C121.777,280.219 121.634,281.406 121.365,282.544L132.527,282.544L132.527,289.267ZM132.527,268.731L132.527,248.571L351.429,248.571L351.429,308.819L181.595,308.819C184.05,311.537 185.546,315.139 185.546,319.087C185.546,323.035 184.05,326.637 181.595,329.355L351.429,329.355L351.429,365.258C351.429,379.823 339.603,391.648 325.038,391.648L158.918,391.648C146.067,391.648 135.35,382.443 133.004,370.273C133.284,370.007 133.553,369.73 133.812,369.443L316.769,369.443C314.314,366.724 312.818,363.123 312.818,359.175C312.818,355.227 314.314,351.625 316.769,348.906L133.812,348.906C133.409,348.46 132.98,348.037 132.527,347.641L132.527,289.267L300.783,289.267C298.328,286.549 296.832,282.947 296.832,278.999C296.832,275.051 298.328,271.449 300.783,268.731L132.527,268.731ZM351.429,308.819L364.552,308.819C367.358,305.711 371.418,303.757 375.93,303.757C384.391,303.757 391.26,310.626 391.26,319.087C391.26,327.548 384.391,334.417 375.93,334.417C371.418,334.417 367.358,332.463 364.552,329.355L351.429,329.355L351.429,322.631L361.013,322.631C360.743,321.494 360.601,320.307 360.601,319.087C360.601,317.867 360.743,316.68 361.013,315.542L351.429,315.542L351.429,308.819ZM133.004,370.273C130.253,372.894 126.53,374.504 122.434,374.504C113.973,374.504 107.104,367.635 107.104,359.175C107.104,350.714 113.973,343.845 122.434,343.845C126.298,343.845 129.83,345.278 132.527,347.641L132.527,365.258C132.527,366.972 132.691,368.649 133.004,370.273ZM132.527,282.544L132.527,275.454L175.669,275.454L175.669,275.623C177.532,275.623 179.045,277.136 179.045,278.999C179.045,280.862 177.532,282.375 175.669,282.375L175.669,282.544L132.527,282.544ZM351.429,315.542L351.429,322.631L306.709,322.631L306.709,322.463C304.845,322.463 303.333,320.95 303.333,319.087C303.333,317.224 304.845,315.711 306.709,315.711L306.709,315.542L351.429,315.542ZM267.724,322.294C265.861,322.294 264.348,320.781 264.348,318.918C264.348,317.055 265.861,315.542 267.724,315.542C269.587,315.542 271.1,317.055 271.1,318.918C271.1,320.781 269.587,322.294 267.724,322.294ZM280.441,322.294C278.578,322.294 277.065,320.781 277.065,318.918C277.065,317.055 278.578,315.542 280.441,315.542C282.304,315.542 283.817,317.055 283.817,318.918C283.817,320.781 282.304,322.294 280.441,322.294ZM293.158,322.463C291.295,322.463 289.782,320.95 289.782,319.087C289.782,317.224 291.295,315.711 293.158,315.711C295.021,315.711 296.534,317.224 296.534,319.087C296.534,320.95 295.021,322.463 293.158,322.463ZM375.93,326.99C380.292,326.99 383.833,323.449 383.833,319.087C383.833,314.725 380.292,311.184 375.93,311.184C371.569,311.184 368.027,314.725 368.027,319.087C368.027,323.449 371.569,326.99 375.93,326.99ZM164.265,334.417C172.726,334.417 179.595,327.548 179.595,319.087C179.595,310.626 172.726,303.757 164.265,303.757C155.804,303.757 148.935,310.626 148.935,319.087C148.935,327.548 155.804,334.417 164.265,334.417ZM164.265,326.99C159.903,326.99 156.362,323.449 156.362,319.087C156.362,314.725 159.903,311.184 164.265,311.184C168.627,311.184 172.168,314.725 172.168,319.087C172.168,323.449 168.627,326.99 164.265,326.99ZM334.099,343.845C325.638,343.845 318.769,350.714 318.769,359.175C318.769,367.635 325.638,374.504 334.099,374.504C342.56,374.504 349.429,367.635 349.429,359.175C349.429,350.714 342.56,343.845 334.099,343.845ZM334.099,351.272C338.461,351.272 342.002,354.813 342.002,359.175C342.002,363.536 338.461,367.078 334.099,367.078C329.737,367.078 326.196,363.536 326.196,359.175C326.196,354.813 329.737,351.272 334.099,351.272ZM318.113,263.669C309.652,263.669 302.783,270.538 302.783,278.999C302.783,287.46 309.652,294.329 318.113,294.329C326.573,294.329 333.442,287.46 333.442,278.999C333.442,270.538 326.573,263.669 318.113,263.669ZM318.113,271.096C322.474,271.096 326.016,274.637 326.016,278.999C326.016,283.361 322.474,286.902 318.113,286.902C313.751,286.902 310.21,283.361 310.21,278.999C310.21,274.637 313.751,271.096 318.113,271.096ZM217.923,355.968C219.786,355.968 221.299,357.48 221.299,359.344C221.299,361.207 219.786,362.719 217.923,362.719C216.06,362.719 214.547,361.207 214.547,359.344C214.547,357.48 216.06,355.968 217.923,355.968ZM205.206,355.799C207.069,355.799 208.582,357.312 208.582,359.175C208.582,361.038 207.069,362.551 205.206,362.551C203.343,362.551 201.83,361.038 201.83,359.175C201.83,357.312 203.343,355.799 205.206,355.799ZM230.64,355.968C232.503,355.968 234.016,357.48 234.016,359.344C234.016,361.207 232.503,362.719 230.64,362.719C228.777,362.719 227.264,361.207 227.264,359.344C227.264,357.48 228.777,355.968 230.64,355.968ZM137.351,355.63L191.655,355.63L191.655,355.799C193.518,355.799 195.031,357.312 195.031,359.175C195.031,361.038 193.518,362.551 191.655,362.551L191.655,362.719L137.351,362.719C137.62,361.581 137.763,360.395 137.763,359.175C137.763,357.955 137.62,356.768 137.351,355.63ZM106.447,271.096C102.086,271.096 98.545,274.637 98.545,278.999C98.545,283.361 102.086,286.902 106.447,286.902C110.809,286.902 114.35,283.361 114.35,278.999C114.35,274.637 110.809,271.096 106.447,271.096ZM122.434,351.272C118.072,351.272 114.531,354.813 114.531,359.175C114.531,363.536 118.072,367.078 122.434,367.078C126.795,367.078 130.336,363.536 130.336,359.175C130.336,354.813 126.795,351.272 122.434,351.272ZM189.22,275.623C191.083,275.623 192.596,277.136 192.596,278.999C192.596,280.862 191.083,282.375 189.22,282.375C187.357,282.375 185.844,280.862 185.844,278.999C185.844,277.136 187.357,275.623 189.22,275.623ZM201.937,275.792C203.8,275.792 205.313,277.305 205.313,279.168C205.313,281.031 203.8,282.544 201.937,282.544C200.074,282.544 198.561,281.031 198.561,279.168C198.561,277.305 200.074,275.792 201.937,275.792ZM214.654,275.792C216.517,275.792 218.03,277.305 218.03,279.168C218.03,281.031 216.517,282.544 214.654,282.544C212.791,282.544 211.278,281.031 211.278,279.168C211.278,277.305 212.791,275.792 214.654,275.792ZM309.166,183.956L325.038,183.956C339.603,183.956 351.429,195.781 351.429,210.347L351.429,240.659L132.527,240.659L132.527,210.347C132.527,195.781 144.353,183.956 158.918,183.956L172.478,183.956L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705L185.644,183.956L296,183.956L296,177.705C296,174.072 298.95,171.123 302.583,171.123C306.216,171.123 309.166,174.072 309.166,177.705L309.166,183.956Z" />
+      </g>
+    </svg>
+  );
+}
+
+export default function EmptyState({ icon, message, description }: EmptyStateProps) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 12,
+        color: 'var(--muted-foreground)',
+      }}
+    >
+      <div>
+        {icon ?? <DrabaIcon />}
+      </div>
+      <span
+        style={{
+          fontSize: 14,
+          fontFamily: 'var(--font-sans)',
+        }}
+      >
+        {message}
+      </span>
+      {description && (
+        <span
+          style={{
+            fontSize: 13,
+            opacity: 0.7,
+            fontFamily: 'var(--font-sans)',
+          }}
+        >
+          {description}
+        </span>
+      )}
+    </div>
+  );
 }
 ````
 
@@ -3943,6 +3989,113 @@ CMD ["pnpm", "dev", "--host"]
   },
   "include": ["vite.config.ts"]
 }
+````
+
+## File: scripts/reset-test-env.sh
+````bash
+#!/usr/bin/env bash
+#
+# Reset the draba test environment to a known clean state.
+# Run on the docker host (epcot.lan) as the `draba-test` user
+# (which must be in the `docker` group). No sudo required.
+#
+# What it does:
+#   1. Stops the `draba` container
+#   2. Wipes the SQLite DB files via a one-off `alpine` container
+#      (so file permissions inside the bind mount don't matter)
+#   3. Starts `draba` — its boot-time migration runner creates the
+#      fresh schema
+#   4. Waits up to 30s for `schema_migrations` to be queryable
+#   5. Stops `draba` again, seeds a bootstrap team + a known invite
+#      token via a one-off `sqlite3` container, then restarts
+#
+# Required env (sourced from $HOME/.draba-test.env at the top):
+#   DRABA_TEST_INVITE_TOKEN  — known token the api-smoke subagent uses
+#   DRABA_TEST_ADMIN_EMAIL   — bootstrap admin (invite issuer) email
+#   DRABA_TEST_INVITE_EMAIL  — email the invite is issued to; the
+#                              smoke test registers as this user
+#                              (default: invitee@local)
+#   DRABA_DB_DIR             — host bind-mount dir holding draba.db
+#   DRABA_CONTAINER          — container name (default: draba)
+#   DRABA_DB_FILENAME        — DB filename inside DRABA_DB_DIR
+#                              (default: draba.db)
+
+set -euo pipefail
+
+ENV_FILE="${HOME}/.draba-test.env"
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+fi
+
+: "${DRABA_TEST_INVITE_TOKEN:?must be set in ~/.draba-test.env}"
+: "${DRABA_TEST_ADMIN_EMAIL:?must be set in ~/.draba-test.env}"
+: "${DRABA_DB_DIR:?must be set in ~/.draba-test.env}"
+DRABA_CONTAINER="${DRABA_CONTAINER:-draba}"
+DRABA_DB_FILENAME="${DRABA_DB_FILENAME:-draba.db}"
+DRABA_TEST_INVITE_EMAIL="${DRABA_TEST_INVITE_EMAIL:-invitee@local}"
+
+SQLITE_IMG="keinos/sqlite3:latest"
+ALPINE_IMG="alpine:latest"
+
+echo "[1/6] Stopping container '$DRABA_CONTAINER'..."
+docker stop "$DRABA_CONTAINER" >/dev/null
+
+echo "[2/6] Wiping DB files in $DRABA_DB_DIR..."
+docker run --rm -v "$DRABA_DB_DIR:/data" "$ALPINE_IMG" sh -c \
+    "rm -f /data/${DRABA_DB_FILENAME} /data/${DRABA_DB_FILENAME}-shm /data/${DRABA_DB_FILENAME}-wal"
+
+echo "[3/6] Starting container (migrations run on boot)..."
+docker start "$DRABA_CONTAINER" >/dev/null
+
+echo "[4/6] Waiting for migrations to complete..."
+for i in $(seq 1 30); do
+    if docker run --rm -v "$DRABA_DB_DIR:/data:ro" "$SQLITE_IMG" \
+         sqlite3 "/data/${DRABA_DB_FILENAME}" \
+         "SELECT 1 FROM schema_migrations LIMIT 1;" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+    if [[ "$i" -eq 30 ]]; then
+        echo "ERROR: migrations did not complete within 30s" >&2
+        exit 1
+    fi
+done
+
+echo "[5/6] Stopping container to seed exclusively..."
+docker stop "$DRABA_CONTAINER" >/dev/null
+
+ADMIN_ID="bootstrap-admin"
+TEAM_ID="bootstrap-team"
+INVITE_ID="bootstrap-invite"
+EXPIRES=$(date -u -d '+7 days' '+%Y-%m-%d %H:%M:%S')
+
+# DRABA_TEST_ADMIN_PASSWORD_HASH — bcrypt hash of the admin's login password.
+# If not set in ~/.draba-test.env, the admin row is seeded as non-loginable
+# (suitable for CI-only runs where only the invite flow is tested).
+DRABA_TEST_ADMIN_PASSWORD_HASH="${DRABA_TEST_ADMIN_PASSWORD_HASH:-x-not-loginable}"
+
+docker run --rm -i --user 0:0 -v "$DRABA_DB_DIR:/data" "$SQLITE_IMG" \
+    sqlite3 "/data/${DRABA_DB_FILENAME}" <<SQL
+INSERT INTO users (id, email, password_hash, display_name, is_superadmin)
+VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', '${DRABA_TEST_ADMIN_PASSWORD_HASH}', 'Test Bootstrap', 1);
+
+INSERT INTO teams (id, name, slug)
+VALUES ('${TEAM_ID}', 'Test Team', 'test-team');
+
+INSERT INTO team_members (id, team_id, user_id, role)
+VALUES ('bootstrap-admin-member', '${TEAM_ID}', '${ADMIN_ID}', 'admin');
+
+INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at)
+VALUES ('${INVITE_ID}', '${TEAM_ID}', '${DRABA_TEST_INVITE_EMAIL}', '${DRABA_TEST_INVITE_TOKEN}', 'member', '${ADMIN_ID}', '${EXPIRES}');
+SQL
+
+echo "[6/6] Restarting container..."
+docker start "$DRABA_CONTAINER" >/dev/null
+
+echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
 ````
 
 ## File: skills/go-comments.md
@@ -9442,6 +9595,287 @@ ALTER TABLE activity_assignments RENAME TO event_assignments;
 **Take a DB backup before applying migration 005.** This is the one irreversible step if you don't have a backup.
 ````
 
+## File: docs/SAMPLE_DATA.md
+````markdown
+# Sample Data Procedure
+
+Guide for generating and maintaining a sample data SQL script that can flush and reload the database with realistic test data. Run this procedure whenever the schema changes in a way that affects the sample dataset.
+
+## When to regenerate
+
+- A migration adds, removes, or renames a column used by sample data
+- A new table is added that should be populated for a realistic experience
+- Identity system colors or icons change
+- Status template structure changes
+
+## How to run
+
+Sample data lives in `packages/api/sample_data/` as numbered per-table SQL files. Files are concatenated in sort order to form a complete flush-and-reload script.
+
+```bash
+# SQLite CLI
+cat packages/api/sample_data/*.sql | sqlite3 draba.db
+
+# Verify
+go test ./internal/db/ -run TestSampleDataLoads
+```
+
+### Updating a single table
+
+When a schema change affects one table, edit only that file (e.g. add a column to `01_users.sql`). Run the test to verify. No need to regenerate the entire dataset.
+
+---
+
+## Data generation rules
+
+### Passwords
+
+All user passwords must be `password` (minimum 8 characters per the app's validation). Store the bcrypt hash of `password` at cost 12 (the project standard). Generate the hash once and reuse it across all user rows.
+
+Current hash: `$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG`
+
+### Identity fields (color + icon)
+
+Every record that has identity fields (`color` and `icon` columns) gets a randomly chosen color and icon, subject to these rules:
+
+| Entity | color | icon | Notes |
+|---|---|---|---|
+| Teams | Random hex from palette | Random Lucide icon or `__name_2__` | |
+| Timelines | Random hex from palette | Random Lucide icon or `__none__` | |
+| Activities | Random hex from palette | Random Lucide icon or `__none__` | |
+| Users | Random hex from palette | `__name_words__` | Always use `__name_words__` for users |
+| Team members | Random hex from palette | `__name_words__` | Always use `__name_words__` for members |
+
+**Color palette** (16 colors, store as hex):
+
+| ID | Hex |
+|---|---|
+| teal | `#288C9B` |
+| cyan | `#06B6D4` |
+| blue | `#3B82F6` |
+| indigo | `#6366F1` |
+| violet | `#8B5CF6` |
+| purple | `#A855F7` |
+| pink | `#EC4899` |
+| rose | `#F43F5E` |
+| red | `#EF4444` |
+| orange | `#F97316` |
+| amber | `#F59E0B` |
+| yellow | `#EAB308` |
+| lime | `#84CC16` |
+| green | `#22C55E` |
+| slate | `#64748B` |
+| stone | `#78716C` |
+
+**Icon options for non-user/member entities** (pick from 64 Lucide IDs):
+`activity`, `archive`, `award`, `bar-chart`, `bell`, `bookmark`, `briefcase`, `calendar`, `check-circle`, `clipboard`, `clock`, `cloud`, `code`, `coffee`, `compass`, `cpu`, `database`, `download`, `edit`, `eye`, `file-text`, `filter`, `flag`, `folder`, `git-branch`, `globe`, `grid`, `heart`, `help-circle`, `home`, `info`, `layers`, `link`, `list`, `lock`, `mail`, `map`, `message-circle`, `moon`, `package`, `pencil`, `phone`, `pie-chart`, `plug`, `refresh-cw`, `search`, `server`, `settings`, `share`, `shield`, `star`, `sun`, `tag`, `target`, `terminal`, `trash`, `trending-up`, `upload`, `user`, `users`, `wifi`, `zap`, `alert-circle`, `copy`
+
+Or use the special tokens: `__none__` (color only), `__name_1__` (first letter), `__name_2__` (first two letters), `__name_words__` (initials).
+
+### IDs
+
+All IDs are UUIDs (TEXT). Generate deterministic UUIDs for sample data so the script is idempotent.
+
+### Timestamps
+
+Use relative dates anchored to "now" so the data always looks current:
+- `created_at` / `joined_at`: spread across the past few months
+- Timeline `start_date` / `end_date`: see per-timeline specs below
+- Activity date ranges: distributed within their timeline's window
+
+### Deletion order (flush)
+
+See `sample_data/00_flush.sql` — deletes all data in reverse FK dependency order. Tables NOT flushed: `schema_migrations`, `instance_settings`, `saved_filters`.
+
+---
+
+## Dataset specification
+
+### Super admins
+
+Set `is_superadmin = 1` on these users:
+
+| Name | Email |
+|---|---|
+| Brian Rieb | brian@rieb.cc |
+| Scott Fitzgerald | scott@fitzgerald.example |
+
+### Users
+
+Create a user row for every person referenced below. Each user gets:
+- Deterministic UUID
+- Email derived from name (e.g. `brian@rieb.cc` for Brian, `lindsay.k@example.com` for Lindsay K.)
+- `password_hash`: bcrypt of `pass`
+- `color`: random hex from palette
+- `icon`: `__name_words__`
+
+Full user list (deduplicated across all teams):
+- Brian Rieb (super admin)
+- Scott Fitzgerald (super admin)
+- Lindsay K.
+- Erik B
+- Michelle T
+- Codi K
+- Dan S
+- Kristen K
+- Jamie F
+- Paula H
+- Corey F
+- Dan B
+- Rick S
+
+### Teams
+
+#### 1. Product Marketing
+
+- **Slug**: `product-marketing`
+- **Identity**: random color + random icon
+- **Members**:
+
+| Person | Role | Notes |
+|---|---|---|
+| Brian R | `admin` | |
+| Lindsay K | `member` | |
+| Erik B | `admin` | |
+| Michelle T | `member` | |
+| Contractor | `member` | Participant: `user_id = NULL`, `display_name = 'Contractor'` |
+
+- **Status templates**:
+  - **Default**: Planning, In Progress, Done
+  - **Workload**: Planning, In Progress, Blockers, Done, Deferred, Cancelled
+
+- **Timelines**:
+
+  **Q1 Workload**
+  - 3-month window (e.g. now − 1 month → now + 2 months)
+  - ~20 activities: PMM work (competitive analysis, messaging docs, launch plans, analyst briefings, content reviews, etc.)
+  - Most activities assigned to one person
+  - Uses **Workload** statuses
+  - Distribute statuses realistically (some done, some in progress, a few planning)
+
+  **Sales Kick Off**
+  - 2-month window
+  - ~10 activities: sales enablement prep (deck creation, battle cards, demo scripts, training sessions, etc.)
+  - Activities assigned to multiple people
+  - Uses **Default** statuses
+
+  **Q2 Workload** *(archived)*
+  - 3-month window in the past (set `archived_at`)
+  - ~5 activities: high-level PMM tasks
+  - Most assigned to one person
+  - Uses **Workload** statuses
+
+#### 2. P&B Tiger Team *(archived)*
+
+- **Slug**: `pb-tiger-team`
+- **Identity**: random color + random icon
+- **`archived_at`**: set to a past date
+- **Members**:
+
+| Person | Role |
+|---|---|
+| Brian R | `admin` |
+| Scott F | `member` |
+| Codi K | `admin` |
+| Dan S | `member` |
+| Kristen K | `member` |
+| Jamie F | `member` |
+
+Note: Kristen K is described as a "participant" in the brief, but the schema only supports `admin` and `member` roles. External participants use `user_id = NULL`. Since Kristen is a named user, she is a `member`.
+
+- **Status templates**:
+  - **Default**: Planning, In Progress, Done
+
+- **Timelines**:
+
+  **Right to Win Initiative**
+  - 2-month window
+  - ~4 activities: researching and presenting the right-to-win for a product
+  - Uses **Default** statuses
+
+  **Displacement GTM**
+  - 3-month window
+  - ~4 activities: building a GTM for a displacement play, sales enablement
+  - Uses **Default** statuses
+
+#### 3. Marketing Cross Functional
+
+- **Slug**: `marketing-cross-functional`
+- **Identity**: random color + random icon
+- **Members**:
+
+| Person | Role |
+|---|---|
+| Scott F | `admin` |
+| Paula H | `admin` |
+| Corey F | `member` |
+| Dan B | `member` |
+| Rick S | `member` |
+
+- **Status templates**:
+  - **Default**: Planning, In Progress, Done
+  - **Workload**: Planning, In Progress, Blockers, Done, Deferred, Cancelled
+
+- **Timelines**:
+
+  **Web Site Rebrand**
+  - 6-month window
+  - ~15 activities: rebranding and rebuilding the corporate website (design system, content migration, SEO audit, stakeholder reviews, launch prep, etc.)
+  - Uses **Workload** statuses
+
+---
+
+## Activity content guidelines
+
+When generating activity titles and descriptions, make them sound like real PMM / marketing work:
+
+- **PMM activities**: Competitive battlecard update, Analyst briefing prep, Q1 messaging framework, Product launch checklist, Win/loss interview synthesis, Pricing positioning doc, Sales one-pager refresh
+- **Sales enablement**: SKO keynote deck, Demo environment setup, Objection handling workshop, New rep onboarding kit, Customer story video
+- **Website/brand**: Brand guidelines v2, Homepage hero redesign, SEO keyword audit, Content migration plan, Analytics tagging spec, Stakeholder review meeting, Accessibility audit, Launch readiness checklist
+
+Activities should have realistic date ranges (a few days to a few weeks each), spread across their timeline window without excessive overlap.
+
+---
+
+## Schema reference (current as of migration 015)
+
+This section summarizes the tables and columns that sample data touches. Regenerate this section if migrations change the schema.
+
+### Core tables
+
+```
+users (id, email, password_hash, display_name, avatar_url, color, icon, is_superadmin, created_at, updated_at, archived_at)
+teams (id, name, slug, color, icon, description, notes, archived_at, invite_link_token, created_at, updated_at)
+team_members (id, team_id, user_id, display_name, role, color, icon, joined_at, archived_at)
+timelines (id, team_id, name, start_date, end_date, description, notes, color, icon, share_token, ical_token, created_by, created_at, updated_at, archived_at)
+activities (id, timeline_id, title, description, icon, color, start_at, end_at, all_day, status_id, parent_activity_id, percent_complete, location, url, created_by, created_at, updated_at, archived_at)
+```
+
+### Junction / child tables
+
+```
+activity_assignments (activity_id, team_member_id)
+activity_tags (activity_id, tag)
+timeline_access (timeline_id, team_member_id, role)
+status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
+status_template_items (id, template_id, name, color, icon, is_closed, position)
+statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+```
+
+### Tables NOT in sample data scope
+
+```
+schema_migrations — managed by the migration runner
+instance_settings — configured per deployment
+saved_filters — user-generated at runtime
+calendar_connections — requires real OAuth credentials
+api_tokens — generated at runtime
+invites — generated at runtime
+password_reset_tokens — generated at runtime
+user_preferences — set by users at runtime
+```
+````
+
 ## File: packages/api/internal/api/api_token_handler.go
 ````go
 package api
@@ -10467,6 +10901,557 @@ func (r *PasswordResetTokenRepo) MarkUsed(id string) error {
 }
 ````
 
+## File: packages/api/sample_data/00_flush.sql
+````sql
+-- Flush all sample-data tables in FK-safe (reverse dependency) order.
+-- Tables NOT flushed: schema_migrations, instance_settings, saved_filters.
+
+DELETE FROM activity_assignments;
+DELETE FROM activity_tags;
+DELETE FROM activities;
+DELETE FROM statuses;
+DELETE FROM status_template_items;
+DELETE FROM status_templates;
+DELETE FROM timeline_access;
+DELETE FROM timelines;
+DELETE FROM team_members;
+DELETE FROM teams;
+DELETE FROM user_preferences;
+DELETE FROM password_reset_tokens;
+DELETE FROM invites;
+DELETE FROM api_tokens;
+DELETE FROM calendar_connections;
+DELETE FROM users;
+````
+
+## File: packages/api/sample_data/01_users.sql
+````sql
+-- Users: 13 total (2 super admins).
+-- Password for all users: "password" (bcrypt cost 12).
+-- Icon: __name_words__ (initials badge) for all users.
+
+INSERT INTO users (id, email, password_hash, display_name, color, icon, is_superadmin, created_at, updated_at) VALUES
+  ('u-brian-rieb',        'brian@rieb.cc',             '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Brian Rieb',        '#3B82F6', '__name_words__', 1, datetime('now', '-90 days'), datetime('now', '-1 days')),
+  ('u-scott-fitzgerald',  'scott@fitzgerald.example',  '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Scott Fitzgerald',  '#8B5CF6', '__name_words__', 1, datetime('now', '-90 days'), datetime('now', '-2 days')),
+  ('u-lindsay-k',         'lindsay.k@example.com',     '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Lindsay K.',        '#EC4899', '__name_words__', 0, datetime('now', '-85 days'), datetime('now', '-3 days')),
+  ('u-erik-b',            'erik.b@example.com',        '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Erik B',            '#F97316', '__name_words__', 0, datetime('now', '-85 days'), datetime('now', '-3 days')),
+  ('u-michelle-t',        'michelle.t@example.com',    '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Michelle T',        '#22C55E', '__name_words__', 0, datetime('now', '-80 days'), datetime('now', '-5 days')),
+  ('u-codi-k',            'codi.k@example.com',        '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Codi K',            '#06B6D4', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
+  ('u-dan-s',             'dan.s@example.com',         '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Dan S',             '#F43F5E', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
+  ('u-kristen-k',         'kristen.k@example.com',     '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Kristen K',         '#F59E0B', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
+  ('u-jamie-f',           'jamie.f@example.com',       '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Jamie F',           '#84CC16', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
+  ('u-paula-h',           'paula.h@example.com',       '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Paula H',           '#A855F7', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-4 days')),
+  ('u-corey-f',           'corey.f@example.com',       '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Corey F',           '#EF4444', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-6 days')),
+  ('u-dan-b',             'dan.b@example.com',         '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Dan B',             '#6366F1', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-6 days')),
+  ('u-rick-s',            'rick.s@example.com',        '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Rick S',            '#288C9B', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-7 days'));
+````
+
+## File: packages/api/sample_data/02_teams.sql
+````sql
+-- Teams: 3 total (1 archived).
+
+INSERT INTO teams (id, name, slug, color, icon, created_at, updated_at) VALUES
+  ('t-product-marketing',    'Product Marketing',          'product-marketing',          '#F97316', 'briefcase', datetime('now', '-90 days'), datetime('now', '-1 days')),
+  ('t-pb-tiger-team',        'P&B Tiger Team',             'pb-tiger-team',              '#EF4444', 'target',    datetime('now', '-88 days'), datetime('now', '-30 days')),
+  ('t-marketing-cross-func', 'Marketing Cross Functional', 'marketing-cross-functional', '#8B5CF6', 'globe',     datetime('now', '-75 days'), datetime('now', '-2 days'));
+
+UPDATE teams SET archived_at = datetime('now', '-30 days') WHERE id = 't-pb-tiger-team';
+````
+
+## File: packages/api/sample_data/03_team_members.sql
+````sql
+-- Team members: 16 total (includes 1 external participant with user_id=NULL).
+-- Icon: __name_words__ (initials badge) for all members.
+
+-- Product Marketing (5 members: 2 admin, 2 member, 1 external participant)
+INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at) VALUES
+  ('tm-pm-brian',      't-product-marketing', 'u-brian-rieb',  NULL,         'admin',  '#3B82F6', '__name_words__', datetime('now', '-90 days')),
+  ('tm-pm-lindsay',    't-product-marketing', 'u-lindsay-k',  NULL,         'member', '#EC4899', '__name_words__', datetime('now', '-85 days')),
+  ('tm-pm-erik',       't-product-marketing', 'u-erik-b',     NULL,         'admin',  '#F97316', '__name_words__', datetime('now', '-85 days')),
+  ('tm-pm-michelle',   't-product-marketing', 'u-michelle-t', NULL,         'member', '#22C55E', '__name_words__', datetime('now', '-80 days')),
+  ('tm-pm-contractor', 't-product-marketing', NULL,           'Contractor', 'member', '#64748B', '__name_words__', datetime('now', '-70 days'));
+
+-- P&B Tiger Team (6 members: 2 admin, 4 member)
+INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at) VALUES
+  ('tm-pb-brian',   't-pb-tiger-team', 'u-brian-rieb',       NULL, 'admin',  '#3B82F6', '__name_words__', datetime('now', '-88 days')),
+  ('tm-pb-scott',   't-pb-tiger-team', 'u-scott-fitzgerald', NULL, 'member', '#8B5CF6', '__name_words__', datetime('now', '-88 days')),
+  ('tm-pb-codi',    't-pb-tiger-team', 'u-codi-k',          NULL, 'admin',  '#06B6D4', '__name_words__', datetime('now', '-88 days')),
+  ('tm-pb-dan',     't-pb-tiger-team', 'u-dan-s',           NULL, 'member', '#F43F5E', '__name_words__', datetime('now', '-88 days')),
+  ('tm-pb-kristen', 't-pb-tiger-team', 'u-kristen-k',       NULL, 'member', '#F59E0B', '__name_words__', datetime('now', '-88 days')),
+  ('tm-pb-jamie',   't-pb-tiger-team', 'u-jamie-f',         NULL, 'member', '#84CC16', '__name_words__', datetime('now', '-88 days'));
+
+-- Marketing Cross Functional (6 members: 3 admin, 3 member)
+-- Brian added as admin so super admins can test all teams until superadmin
+-- team-access bypass is implemented.
+INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at) VALUES
+  ('tm-mcf-brian', 't-marketing-cross-func', 'u-brian-rieb',       NULL, 'admin',  '#3B82F6', '__name_words__', datetime('now', '-75 days')),
+  ('tm-mcf-scott', 't-marketing-cross-func', 'u-scott-fitzgerald', NULL, 'admin',  '#8B5CF6', '__name_words__', datetime('now', '-75 days')),
+  ('tm-mcf-paula', 't-marketing-cross-func', 'u-paula-h',         NULL, 'admin',  '#A855F7', '__name_words__', datetime('now', '-75 days')),
+  ('tm-mcf-corey', 't-marketing-cross-func', 'u-corey-f',         NULL, 'member', '#EF4444', '__name_words__', datetime('now', '-75 days')),
+  ('tm-mcf-dan',   't-marketing-cross-func', 'u-dan-b',           NULL, 'member', '#6366F1', '__name_words__', datetime('now', '-75 days')),
+  ('tm-mcf-rick',  't-marketing-cross-func', 'u-rick-s',          NULL, 'member', '#288C9B', '__name_words__', datetime('now', '-75 days'));
+````
+
+## File: packages/api/sample_data/04_status_templates.sql
+````sql
+-- Status templates and their items.
+-- 5 templates total: Default + Workload for PM and MCF, Default for P&B.
+
+-- Product Marketing: Default
+INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
+  ('st-pm-default', 't-product-marketing', 'Default', 0, 'u-brian-rieb', datetime('now', '-90 days'), datetime('now', '-90 days'));
+INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
+  ('sti-pm-d-planning',   'st-pm-default', 'Planning',    '#64748B', 0, 0),
+  ('sti-pm-d-inprogress', 'st-pm-default', 'In Progress', '#3B82F6', 0, 1),
+  ('sti-pm-d-done',       'st-pm-default', 'Done',        '#22C55E', 1, 2);
+
+-- Product Marketing: Workload
+INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
+  ('st-pm-workload', 't-product-marketing', 'Workload', 1, 'u-brian-rieb', datetime('now', '-90 days'), datetime('now', '-90 days'));
+INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
+  ('sti-pm-w-planning',   'st-pm-workload', 'Planning',    '#64748B', 0, 0),
+  ('sti-pm-w-inprogress', 'st-pm-workload', 'In Progress', '#3B82F6', 0, 1),
+  ('sti-pm-w-blockers',   'st-pm-workload', 'Blockers',    '#EF4444', 0, 2),
+  ('sti-pm-w-done',       'st-pm-workload', 'Done',        '#22C55E', 1, 3),
+  ('sti-pm-w-deferred',   'st-pm-workload', 'Deferred',    '#F59E0B', 1, 4),
+  ('sti-pm-w-cancelled',  'st-pm-workload', 'Cancelled',   '#78716C', 1, 5);
+
+-- P&B Tiger Team: Default
+INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
+  ('st-pb-default', 't-pb-tiger-team', 'Default', 0, 'u-brian-rieb', datetime('now', '-88 days'), datetime('now', '-88 days'));
+INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
+  ('sti-pb-d-planning',   'st-pb-default', 'Planning',    '#64748B', 0, 0),
+  ('sti-pb-d-inprogress', 'st-pb-default', 'In Progress', '#3B82F6', 0, 1),
+  ('sti-pb-d-done',       'st-pb-default', 'Done',        '#22C55E', 1, 2);
+
+-- Marketing Cross Functional: Default
+INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
+  ('st-mcf-default', 't-marketing-cross-func', 'Default', 0, 'u-scott-fitzgerald', datetime('now', '-75 days'), datetime('now', '-75 days'));
+INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
+  ('sti-mcf-d-planning',   'st-mcf-default', 'Planning',    '#64748B', 0, 0),
+  ('sti-mcf-d-inprogress', 'st-mcf-default', 'In Progress', '#3B82F6', 0, 1),
+  ('sti-mcf-d-done',       'st-mcf-default', 'Done',        '#22C55E', 1, 2);
+
+-- Marketing Cross Functional: Workload
+INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
+  ('st-mcf-workload', 't-marketing-cross-func', 'Workload', 1, 'u-scott-fitzgerald', datetime('now', '-75 days'), datetime('now', '-75 days'));
+INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
+  ('sti-mcf-w-planning',   'st-mcf-workload', 'Planning',    '#64748B', 0, 0),
+  ('sti-mcf-w-inprogress', 'st-mcf-workload', 'In Progress', '#3B82F6', 0, 1),
+  ('sti-mcf-w-blockers',   'st-mcf-workload', 'Blockers',    '#EF4444', 0, 2),
+  ('sti-mcf-w-done',       'st-mcf-workload', 'Done',        '#22C55E', 1, 3),
+  ('sti-mcf-w-deferred',   'st-mcf-workload', 'Deferred',    '#F59E0B', 1, 4),
+  ('sti-mcf-w-cancelled',  'st-mcf-workload', 'Cancelled',   '#78716C', 1, 5);
+````
+
+## File: packages/api/sample_data/05_timelines.sql
+````sql
+-- Timelines: 6 total (1 archived).
+
+-- Product Marketing: Q1 Workload (3 months: now-1mo to now+2mo)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
+  ('tl-pm-q1', 't-product-marketing', 'Q1 Workload',
+   date('now', '-30 days'), date('now', '+60 days'),
+   '#F97316', 'bar-chart',
+   'share-pm-q1-token', 'ical-pm-q1-token',
+   'u-brian-rieb', datetime('now', '-30 days'), datetime('now', '-1 days'));
+
+-- Product Marketing: Sales Kick Off (2 months: now to now+2mo)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
+  ('tl-pm-sko', 't-product-marketing', 'Sales Kick Off',
+   date('now'), date('now', '+60 days'),
+   '#06B6D4', 'award',
+   'share-pm-sko-token', 'ical-pm-sko-token',
+   'u-erik-b', datetime('now', '-14 days'), datetime('now', '-2 days'));
+
+-- Product Marketing: Q2 Workload (archived, 3 months in the past)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at, archived_at) VALUES
+  ('tl-pm-q2', 't-product-marketing', 'Q2 Workload',
+   date('now', '-180 days'), date('now', '-90 days'),
+   '#F59E0B', 'clipboard',
+   'share-pm-q2-token', 'ical-pm-q2-token',
+   'u-brian-rieb', datetime('now', '-180 days'), datetime('now', '-90 days'), datetime('now', '-85 days'));
+
+-- P&B Tiger Team: Right to Win Initiative (2 months)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
+  ('tl-pb-rtw', 't-pb-tiger-team', 'Right to Win Initiative',
+   date('now', '-120 days'), date('now', '-60 days'),
+   '#EF4444', 'search',
+   'share-pb-rtw-token', 'ical-pb-rtw-token',
+   'u-brian-rieb', datetime('now', '-120 days'), datetime('now', '-60 days'));
+
+-- P&B Tiger Team: Displacement GTM (3 months)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
+  ('tl-pb-gtm', 't-pb-tiger-team', 'Displacement GTM',
+   date('now', '-150 days'), date('now', '-60 days'),
+   '#F43F5E', 'trending-up',
+   'share-pb-gtm-token', 'ical-pb-gtm-token',
+   'u-codi-k', datetime('now', '-150 days'), datetime('now', '-60 days'));
+
+-- Marketing Cross Functional: Web Site Rebrand (6 months: now-2mo to now+4mo)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
+  ('tl-mcf-rebrand', 't-marketing-cross-func', 'Web Site Rebrand',
+   date('now', '-60 days'), date('now', '+120 days'),
+   '#A855F7', 'globe',
+   'share-mcf-rebrand-token', 'ical-mcf-rebrand-token',
+   'u-scott-fitzgerald', datetime('now', '-60 days'), datetime('now', '-2 days'));
+````
+
+## File: packages/api/sample_data/06_statuses.sql
+````sql
+-- Live statuses: one set per timeline, copied from the team's status template.
+
+-- Q1 Workload (Workload statuses)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-q1-planning',   'tl-pm-q1', 'Planning',    '#64748B', 0, 0, datetime('now', '-30 days'), datetime('now', '-30 days')),
+  ('s-q1-inprogress', 'tl-pm-q1', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-30 days'), datetime('now', '-30 days')),
+  ('s-q1-blockers',   'tl-pm-q1', 'Blockers',    '#EF4444', 0, 2, datetime('now', '-30 days'), datetime('now', '-30 days')),
+  ('s-q1-done',       'tl-pm-q1', 'Done',        '#22C55E', 1, 3, datetime('now', '-30 days'), datetime('now', '-30 days')),
+  ('s-q1-deferred',   'tl-pm-q1', 'Deferred',    '#F59E0B', 1, 4, datetime('now', '-30 days'), datetime('now', '-30 days')),
+  ('s-q1-cancelled',  'tl-pm-q1', 'Cancelled',   '#78716C', 1, 5, datetime('now', '-30 days'), datetime('now', '-30 days'));
+
+-- Sales Kick Off (Default statuses)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-sko-planning',   'tl-pm-sko', 'Planning',    '#64748B', 0, 0, datetime('now', '-14 days'), datetime('now', '-14 days')),
+  ('s-sko-inprogress', 'tl-pm-sko', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-14 days'), datetime('now', '-14 days')),
+  ('s-sko-done',       'tl-pm-sko', 'Done',        '#22C55E', 1, 2, datetime('now', '-14 days'), datetime('now', '-14 days'));
+
+-- Q2 Workload (Workload statuses, archived timeline)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-q2-planning',   'tl-pm-q2', 'Planning',    '#64748B', 0, 0, datetime('now', '-180 days'), datetime('now', '-180 days')),
+  ('s-q2-inprogress', 'tl-pm-q2', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-180 days'), datetime('now', '-180 days')),
+  ('s-q2-blockers',   'tl-pm-q2', 'Blockers',    '#EF4444', 0, 2, datetime('now', '-180 days'), datetime('now', '-180 days')),
+  ('s-q2-done',       'tl-pm-q2', 'Done',        '#22C55E', 1, 3, datetime('now', '-180 days'), datetime('now', '-180 days')),
+  ('s-q2-deferred',   'tl-pm-q2', 'Deferred',    '#F59E0B', 1, 4, datetime('now', '-180 days'), datetime('now', '-180 days')),
+  ('s-q2-cancelled',  'tl-pm-q2', 'Cancelled',   '#78716C', 1, 5, datetime('now', '-180 days'), datetime('now', '-180 days'));
+
+-- Right to Win Initiative (Default statuses)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-rtw-planning',   'tl-pb-rtw', 'Planning',    '#64748B', 0, 0, datetime('now', '-120 days'), datetime('now', '-120 days')),
+  ('s-rtw-inprogress', 'tl-pb-rtw', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-120 days'), datetime('now', '-120 days')),
+  ('s-rtw-done',       'tl-pb-rtw', 'Done',        '#22C55E', 1, 2, datetime('now', '-120 days'), datetime('now', '-120 days'));
+
+-- Displacement GTM (Default statuses)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-gtm-planning',   'tl-pb-gtm', 'Planning',    '#64748B', 0, 0, datetime('now', '-150 days'), datetime('now', '-150 days')),
+  ('s-gtm-inprogress', 'tl-pb-gtm', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-150 days'), datetime('now', '-150 days')),
+  ('s-gtm-done',       'tl-pb-gtm', 'Done',        '#22C55E', 1, 2, datetime('now', '-150 days'), datetime('now', '-150 days'));
+
+-- Web Site Rebrand (Workload statuses)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-reb-planning',   'tl-mcf-rebrand', 'Planning',    '#64748B', 0, 0, datetime('now', '-60 days'), datetime('now', '-60 days')),
+  ('s-reb-inprogress', 'tl-mcf-rebrand', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-60 days'), datetime('now', '-60 days')),
+  ('s-reb-blockers',   'tl-mcf-rebrand', 'Blockers',    '#EF4444', 0, 2, datetime('now', '-60 days'), datetime('now', '-60 days')),
+  ('s-reb-done',       'tl-mcf-rebrand', 'Done',        '#22C55E', 1, 3, datetime('now', '-60 days'), datetime('now', '-60 days')),
+  ('s-reb-deferred',   'tl-mcf-rebrand', 'Deferred',    '#F59E0B', 1, 4, datetime('now', '-60 days'), datetime('now', '-60 days')),
+  ('s-reb-cancelled',  'tl-mcf-rebrand', 'Cancelled',   '#78716C', 1, 5, datetime('now', '-60 days'), datetime('now', '-60 days'));
+````
+
+## File: packages/api/sample_data/07_activities.sql
+````sql
+-- Activities: 58 total across 6 timelines.
+
+-- ── Q1 Workload (20 activities, Workload statuses) ───────────────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
+  ('a-q1-01', 'tl-pm-q1', 'Competitive landscape analysis',      'Deep-dive on top 5 competitors — positioning, pricing, recent launches.', '#3B82F6', 'search',         datetime('now', '-28 days'), datetime('now', '-18 days'), 's-q1-done',       'u-brian-rieb',  datetime('now', '-28 days'), datetime('now', '-18 days')),
+  ('a-q1-02', 'tl-pm-q1', 'Competitive battlecard refresh',      'Update sales battlecards with latest competitive intel.',                  '#06B6D4', 'shield',         datetime('now', '-20 days'), datetime('now', '-12 days'), 's-q1-done',       'u-brian-rieb',  datetime('now', '-20 days'), datetime('now', '-12 days')),
+  ('a-q1-03', 'tl-pm-q1', 'Q1 messaging framework',              'Core positioning and messaging for Q1 product launches.',                  '#8B5CF6', 'file-text',      datetime('now', '-25 days'), datetime('now', '-10 days'), 's-q1-done',       'u-lindsay-k',   datetime('now', '-25 days'), datetime('now', '-10 days')),
+  ('a-q1-04', 'tl-pm-q1', 'Analyst briefing prep — Gartner',     'Slide deck and talking points for Gartner analyst meeting.',               '#F97316', 'briefcase',      datetime('now', '-15 days'), datetime('now', '-8 days'),  's-q1-done',       'u-erik-b',      datetime('now', '-15 days'), datetime('now', '-8 days')),
+  ('a-q1-05', 'tl-pm-q1', 'Analyst briefing prep — Forrester',   'Deck and prep for Forrester wave discussion.',                             '#F97316', 'briefcase',      datetime('now', '-12 days'), datetime('now', '-5 days'),  's-q1-done',       'u-erik-b',      datetime('now', '-12 days'), datetime('now', '-5 days')),
+  ('a-q1-06', 'tl-pm-q1', 'Product launch checklist — v4.2',     'End-to-end launch readiness: docs, blog, enablement, PR.',                 '#22C55E', 'check-circle',   datetime('now', '-20 days'), datetime('now', '-3 days'),  's-q1-done',       'u-brian-rieb',  datetime('now', '-20 days'), datetime('now', '-3 days')),
+  ('a-q1-07', 'tl-pm-q1', 'Win/loss interview synthesis',        'Summarize Q4 win/loss interviews into themes and recommendations.',         '#EC4899', 'message-circle', datetime('now', '-18 days'), datetime('now', '-7 days'),  's-q1-done',       'u-michelle-t',  datetime('now', '-18 days'), datetime('now', '-7 days')),
+  ('a-q1-08', 'tl-pm-q1', 'Pricing positioning doc',             'Updated pricing rationale and competitive positioning matrix.',             '#F43F5E', 'trending-up',    datetime('now', '-10 days'), datetime('now', '+5 days'),  's-q1-inprogress', 'u-brian-rieb',  datetime('now', '-10 days'), datetime('now', '-2 days')),
+  ('a-q1-09', 'tl-pm-q1', 'Sales one-pager refresh',             'Refresh the 2-sided sales leave-behind for Q1 messaging.',                 '#84CC16', 'file-text',      datetime('now', '-8 days'),  datetime('now', '+3 days'),  's-q1-inprogress', 'u-lindsay-k',   datetime('now', '-8 days'),  datetime('now', '-2 days')),
+  ('a-q1-10', 'tl-pm-q1', 'Customer story — Acme Corp',          'Draft case study from Acme Corp expansion deal.',                          '#288C9B', 'star',           datetime('now', '-14 days'), datetime('now', '-4 days'),  's-q1-done',       'u-michelle-t',  datetime('now', '-14 days'), datetime('now', '-4 days')),
+  ('a-q1-11', 'tl-pm-q1', 'Content calendar planning',           'Map out blog, social, and email content for next 6 weeks.',                '#A855F7', 'calendar',       datetime('now', '-5 days'),  datetime('now', '+7 days'),  's-q1-inprogress', 'u-lindsay-k',   datetime('now', '-5 days'),  datetime('now', '-1 days')),
+  ('a-q1-12', 'tl-pm-q1', 'Webinar script — platform overview',  'Script and slide deck for monthly product webinar.',                       '#6366F1', 'edit',           datetime('now', '-3 days'),  datetime('now', '+10 days'), 's-q1-planning',   'u-erik-b',      datetime('now', '-3 days'),  datetime('now', '-1 days')),
+  ('a-q1-13', 'tl-pm-q1', 'Partner co-marketing brief',          'Joint value prop and co-marketing plan with PartnerCo.',                   '#F59E0B', 'share',          datetime('now', '-7 days'),  datetime('now', '+4 days'),  's-q1-inprogress', 'u-brian-rieb',  datetime('now', '-7 days'),  datetime('now', '-1 days')),
+  ('a-q1-14', 'tl-pm-q1', 'AR/PR coordination — Q1 launch',     'Coordinate PR release and analyst outreach for v4.2 launch.',              '#EF4444', 'globe',          datetime('now', '-6 days'),  datetime('now', '+5 days'),  's-q1-inprogress', 'u-erik-b',      datetime('now', '-6 days'),  datetime('now', '-1 days')),
+  ('a-q1-15', 'tl-pm-q1', 'Persona refresh workshop',            'Internal workshop to validate and update buyer personas.',                 '#78716C', 'users',          datetime('now', '+2 days'),  datetime('now', '+5 days'),  's-q1-planning',   'u-michelle-t',  datetime('now', '-2 days'),  datetime('now', '-1 days')),
+  ('a-q1-16', 'tl-pm-q1', 'ROI calculator update',               'Refresh the interactive ROI calculator with new benchmark data.',          '#06B6D4', 'pie-chart',      datetime('now', '+5 days'),  datetime('now', '+18 days'), 's-q1-planning',   'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-q1-17', 'tl-pm-q1', 'Demo environment setup',              'Provision and configure demo environment for Q1 launches.',                '#288C9B', 'server',         datetime('now', '-4 days'),  datetime('now', '+3 days'),  's-q1-blockers',   'u-erik-b',      datetime('now', '-4 days'),  datetime('now', '-1 days')),
+  ('a-q1-18', 'tl-pm-q1', 'Competitive teardown — NewCo launch', 'Rapid response analysis of NewCo product announcement.',                  '#EF4444', 'alert-circle',   datetime('now', '+7 days'),  datetime('now', '+14 days'), 's-q1-planning',   'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-q1-19', 'tl-pm-q1', 'Sales enablement newsletter — March', 'Monthly enablement digest: new assets, competitive updates, wins.',        '#22C55E', 'mail',           datetime('now', '+10 days'), datetime('now', '+14 days'), 's-q1-planning',   'u-lindsay-k',   datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-q1-20', 'tl-pm-q1', 'Quarterly business review deck',      'PMM section of the QBR deck: pipeline impact, content metrics.',           '#F97316', 'bar-chart',      datetime('now', '+14 days'), datetime('now', '+21 days'), 's-q1-planning',   'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days'));
+
+-- ── Sales Kick Off (10 activities, Default statuses) ─────────────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
+  ('a-sko-01', 'tl-pm-sko', 'SKO keynote deck',                    'Main stage presentation — product vision and roadmap.',                  '#3B82F6', 'star',           datetime('now', '+2 days'),  datetime('now', '+14 days'), 's-sko-inprogress', 'u-erik-b',     datetime('now', '-10 days'), datetime('now', '-1 days')),
+  ('a-sko-02', 'tl-pm-sko', 'Competitive battle card workshop',    'Interactive session: how to use battlecards in live deals.',             '#EF4444', 'shield',         datetime('now', '+7 days'),  datetime('now', '+12 days'), 's-sko-planning',   'u-brian-rieb', datetime('now', '-10 days'), datetime('now', '-1 days')),
+  ('a-sko-03', 'tl-pm-sko', 'Demo script — enterprise tier',       'Step-by-step demo flow for enterprise prospects.',                       '#22C55E', 'code',           datetime('now', '+3 days'),  datetime('now', '+10 days'), 's-sko-inprogress', 'u-erik-b',     datetime('now', '-8 days'),  datetime('now', '-1 days')),
+  ('a-sko-04', 'tl-pm-sko', 'New rep onboarding kit',              'Welcome pack: product overview, personas, competitive cheat sheet.',     '#F97316', 'package',        datetime('now', '+5 days'),  datetime('now', '+15 days'), 's-sko-planning',   'u-lindsay-k',  datetime('now', '-7 days'),  datetime('now', '-1 days')),
+  ('a-sko-05', 'tl-pm-sko', 'Objection handling playbook',         'Top 15 objections with response frameworks and proof points.',           '#8B5CF6', 'message-circle', datetime('now', '+8 days'),  datetime('now', '+18 days'), 's-sko-planning',   'u-brian-rieb', datetime('now', '-6 days'),  datetime('now', '-1 days')),
+  ('a-sko-06', 'tl-pm-sko', 'Customer story video — GlobalTech',   'Film and edit 3-minute customer testimonial video.',                     '#EC4899', 'eye',            datetime('now', '+1 days'),  datetime('now', '+20 days'), 's-sko-inprogress', 'u-michelle-t', datetime('now', '-12 days'), datetime('now', '-1 days')),
+  ('a-sko-07', 'tl-pm-sko', 'Sales training session — pricing',    'Live training: positioning premium tier and handling price objections.', '#F59E0B', 'trending-up',    datetime('now', '+14 days'), datetime('now', '+16 days'), 's-sko-planning',   'u-brian-rieb', datetime('now', '-5 days'),  datetime('now', '-1 days')),
+  ('a-sko-08', 'tl-pm-sko', 'SKO swag and logistics',              'Coordinate branded materials, venue AV, and printed collateral.',        '#64748B', 'package',        datetime('now'),             datetime('now', '+25 days'), 's-sko-inprogress', 'u-lindsay-k',  datetime('now', '-14 days'), datetime('now', '-1 days')),
+  ('a-sko-09', 'tl-pm-sko', 'Breakout session — vertical selling', 'Prep for healthcare and finserv vertical breakout sessions.',            '#06B6D4', 'layers',         datetime('now', '+10 days'), datetime('now', '+18 days'), 's-sko-planning',   'u-erik-b',     datetime('now', '-4 days'),  datetime('now', '-1 days')),
+  ('a-sko-10', 'tl-pm-sko', 'Post-SKO follow-up plan',             'Email sequences and resource hub for post-event reinforcement.',         '#84CC16', 'mail',           datetime('now', '+20 days'), datetime('now', '+30 days'), 's-sko-planning',   'u-michelle-t', datetime('now', '-3 days'),  datetime('now', '-1 days'));
+
+-- ── Q2 Workload (5 activities, archived, Workload statuses) ──────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
+  ('a-q2-01', 'tl-pm-q2', 'Q2 product launch plan',           'High-level launch timeline and DRI assignments for Q2 releases.',     '#3B82F6', 'calendar',     datetime('now', '-175 days'), datetime('now', '-140 days'), 's-q2-done',     'u-brian-rieb', datetime('now', '-178 days'), datetime('now', '-140 days')),
+  ('a-q2-02', 'tl-pm-q2', 'Analyst day preparation',           'Materials and dry-run for annual analyst day event.',                 '#F97316', 'briefcase',    datetime('now', '-160 days'), datetime('now', '-130 days'), 's-q2-done',     'u-erik-b',     datetime('now', '-165 days'), datetime('now', '-130 days')),
+  ('a-q2-03', 'tl-pm-q2', 'Mid-year messaging audit',          'Review all external messaging for consistency with Q2 positioning.', '#EC4899', 'eye',          datetime('now', '-145 days'), datetime('now', '-115 days'), 's-q2-done',     'u-lindsay-k',  datetime('now', '-150 days'), datetime('now', '-115 days')),
+  ('a-q2-04', 'tl-pm-q2', 'Competitive intel digest — June',   'Monthly competitive summary for sales and leadership.',              '#EF4444', 'alert-circle', datetime('now', '-120 days'), datetime('now', '-100 days'), 's-q2-done',     'u-brian-rieb', datetime('now', '-125 days'), datetime('now', '-100 days')),
+  ('a-q2-05', 'tl-pm-q2', 'Customer advisory board planning',  'Agenda and invite list for H2 customer advisory board session.',     '#22C55E', 'users',        datetime('now', '-110 days'), datetime('now', '-92 days'),  's-q2-deferred', 'u-michelle-t', datetime('now', '-115 days'), datetime('now', '-92 days'));
+
+-- ── Right to Win Initiative (4 activities, Default statuses) ─────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
+  ('a-rtw-01', 'tl-pb-rtw', 'Market sizing research',         'TAM/SAM/SOM analysis for the target segment.',                       '#3B82F6', 'pie-chart',      datetime('now', '-118 days'), datetime('now', '-100 days'), 's-rtw-done', 'u-dan-s',     datetime('now', '-118 days'), datetime('now', '-100 days')),
+  ('a-rtw-02', 'tl-pb-rtw', 'Customer interview round',       'Interview 8 target-segment customers on needs and pain points.',     '#22C55E', 'message-circle', datetime('now', '-105 days'), datetime('now', '-85 days'),  's-rtw-done', 'u-kristen-k', datetime('now', '-105 days'), datetime('now', '-85 days')),
+  ('a-rtw-03', 'tl-pb-rtw', 'Right-to-win framework doc',     'Synthesize research into the right-to-win positioning framework.',   '#F97316', 'file-text',      datetime('now', '-90 days'),  datetime('now', '-70 days'),  's-rtw-done', 'u-brian-rieb', datetime('now', '-90 days'),  datetime('now', '-70 days')),
+  ('a-rtw-04', 'tl-pb-rtw', 'Leadership presentation',        'Present findings and recommendation to exec team.',                  '#8B5CF6', 'award',          datetime('now', '-72 days'),  datetime('now', '-62 days'),  's-rtw-done', 'u-codi-k',    datetime('now', '-72 days'),  datetime('now', '-62 days'));
+
+-- ── Displacement GTM (4 activities, Default statuses) ────────────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
+  ('a-gtm-01', 'tl-pb-gtm', 'Displacement playbook draft',    'End-to-end playbook: triggers, objections, migration path.',         '#EF4444', 'flag',        datetime('now', '-148 days'), datetime('now', '-120 days'), 's-gtm-done', 'u-codi-k',           datetime('now', '-148 days'), datetime('now', '-120 days')),
+  ('a-gtm-02', 'tl-pb-gtm', 'Migration ROI calculator',       'Build ROI model showing TCO advantage of switching.',               '#22C55E', 'trending-up', datetime('now', '-125 days'), datetime('now', '-95 days'),  's-gtm-done', 'u-dan-s',            datetime('now', '-125 days'), datetime('now', '-95 days')),
+  ('a-gtm-03', 'tl-pb-gtm', 'Sales enablement training',      'Train AEs on displacement selling motion and objection handling.',   '#F59E0B', 'users',       datetime('now', '-100 days'), datetime('now', '-75 days'),  's-gtm-done', 'u-jamie-f',          datetime('now', '-100 days'), datetime('now', '-75 days')),
+  ('a-gtm-04', 'tl-pb-gtm', 'Pilot program launch',           'Identify 3 pilot accounts and run displacement proof-of-concept.',  '#3B82F6', 'target',      datetime('now', '-80 days'),  datetime('now', '-62 days'),  's-gtm-done', 'u-scott-fitzgerald', datetime('now', '-80 days'),  datetime('now', '-62 days'));
+
+-- ── Web Site Rebrand (15 activities, Workload statuses) ──────────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
+  ('a-reb-01', 'tl-mcf-rebrand', 'Brand audit and gap analysis',        'Audit current brand assets against new brand strategy.',              '#8B5CF6', 'search',       datetime('now', '-58 days'), datetime('now', '-42 days'), 's-reb-done',       'u-scott-fitzgerald', datetime('now', '-58 days'), datetime('now', '-42 days')),
+  ('a-reb-02', 'tl-mcf-rebrand', 'Design system v2',                    'New component library: typography, color, spacing, elevation.',       '#3B82F6', 'grid',         datetime('now', '-50 days'), datetime('now', '-25 days'), 's-reb-done',       'u-paula-h',          datetime('now', '-50 days'), datetime('now', '-25 days')),
+  ('a-reb-03', 'tl-mcf-rebrand', 'Homepage hero redesign',              'New hero section: headline, value prop, CTA, and imagery.',           '#EC4899', 'eye',          datetime('now', '-30 days'), datetime('now', '-10 days'), 's-reb-done',       'u-corey-f',          datetime('now', '-30 days'), datetime('now', '-10 days')),
+  ('a-reb-04', 'tl-mcf-rebrand', 'SEO keyword audit',                   'Comprehensive keyword analysis and content gap identification.',      '#22C55E', 'search',       datetime('now', '-45 days'), datetime('now', '-20 days'), 's-reb-done',       'u-rick-s',           datetime('now', '-45 days'), datetime('now', '-20 days')),
+  ('a-reb-05', 'tl-mcf-rebrand', 'Content migration plan',              'Map existing pages to new IA; identify pages to create/retire.',      '#F97316', 'list',         datetime('now', '-35 days'), datetime('now', '-15 days'), 's-reb-done',       'u-dan-b',            datetime('now', '-35 days'), datetime('now', '-15 days')),
+  ('a-reb-06', 'tl-mcf-rebrand', 'Analytics tagging spec',              'Define UTM strategy, event taxonomy, and GA4 configuration.',         '#06B6D4', 'pie-chart',    datetime('now', '-20 days'), datetime('now', '-5 days'),  's-reb-done',       'u-rick-s',           datetime('now', '-20 days'), datetime('now', '-5 days')),
+  ('a-reb-07', 'tl-mcf-rebrand', 'Accessibility audit',                 'WCAG 2.1 AA audit of all new page templates.',                       '#F43F5E', 'shield',       datetime('now', '-10 days'), datetime('now', '+5 days'),  's-reb-inprogress', 'u-corey-f',          datetime('now', '-10 days'), datetime('now', '-2 days')),
+  ('a-reb-08', 'tl-mcf-rebrand', 'Product pages rewrite',               'Rewrite all product/feature pages with new messaging.',               '#A855F7', 'file-text',    datetime('now', '-8 days'),  datetime('now', '+15 days'), 's-reb-inprogress', 'u-scott-fitzgerald', datetime('now', '-8 days'),  datetime('now', '-1 days')),
+  ('a-reb-09', 'tl-mcf-rebrand', 'Blog template redesign',              'New blog index and post templates matching brand refresh.',            '#84CC16', 'edit',         datetime('now', '-5 days'),  datetime('now', '+10 days'), 's-reb-inprogress', 'u-paula-h',          datetime('now', '-5 days'),  datetime('now', '-1 days')),
+  ('a-reb-10', 'tl-mcf-rebrand', 'Stakeholder review — round 1',        'First exec review of homepage, product pages, and navigation.',       '#64748B', 'users',        datetime('now', '+5 days'),  datetime('now', '+8 days'),  's-reb-planning',   'u-scott-fitzgerald', datetime('now', '-3 days'),  datetime('now', '-1 days')),
+  ('a-reb-11', 'tl-mcf-rebrand', 'Photography and illustration sprint', 'Commission new brand photography and custom illustrations.',          '#F59E0B', 'eye',          datetime('now', '+3 days'),  datetime('now', '+25 days'), 's-reb-planning',   'u-paula-h',          datetime('now', '-2 days'),  datetime('now', '-1 days')),
+  ('a-reb-12', 'tl-mcf-rebrand', 'Pricing page overhaul',               'Redesign pricing page with new tier structure and FAQ.',              '#EF4444', 'trending-up',  datetime('now', '+10 days'), datetime('now', '+30 days'), 's-reb-planning',   'u-dan-b',            datetime('now', '-2 days'),  datetime('now', '-1 days')),
+  ('a-reb-13', 'tl-mcf-rebrand', 'Redirect map and 301 plan',           'Map all old URLs to new structure; configure redirects.',             '#78716C', 'link',         datetime('now', '+15 days'), datetime('now', '+35 days'), 's-reb-planning',   'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-reb-14', 'tl-mcf-rebrand', 'Launch readiness checklist',          'Pre-launch verification: performance, SEO, analytics, redirects.',   '#288C9B', 'check-circle', datetime('now', '+30 days'), datetime('now', '+40 days'), 's-reb-planning',   'u-scott-fitzgerald', datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-reb-15', 'tl-mcf-rebrand', 'Post-launch monitoring plan',         'Week-1 monitoring: traffic, errors, search console, conversions.',   '#F97316', 'activity',     datetime('now', '+40 days'), datetime('now', '+50 days'), 's-reb-planning',   'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days'));
+````
+
+## File: packages/api/sample_data/08_activity_assignments.sql
+````sql
+-- Activity assignments: links activities to team members.
+-- Q1 Workload: mostly single-person. SKO: multi-person. Others: single.
+
+-- Q1 Workload
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-q1-01', 'tm-pm-brian'),
+  ('a-q1-02', 'tm-pm-brian'),
+  ('a-q1-03', 'tm-pm-lindsay'),
+  ('a-q1-04', 'tm-pm-erik'),
+  ('a-q1-05', 'tm-pm-erik'),
+  ('a-q1-06', 'tm-pm-brian'),
+  ('a-q1-07', 'tm-pm-michelle'),
+  ('a-q1-08', 'tm-pm-brian'),
+  ('a-q1-09', 'tm-pm-lindsay'),
+  ('a-q1-10', 'tm-pm-michelle'),
+  ('a-q1-11', 'tm-pm-lindsay'),
+  ('a-q1-12', 'tm-pm-erik'),
+  ('a-q1-13', 'tm-pm-brian'),
+  ('a-q1-14', 'tm-pm-erik'),
+  ('a-q1-15', 'tm-pm-michelle'),
+  ('a-q1-16', 'tm-pm-brian'),
+  ('a-q1-17', 'tm-pm-erik'),
+  ('a-q1-18', 'tm-pm-brian'),
+  ('a-q1-19', 'tm-pm-lindsay'),
+  ('a-q1-20', 'tm-pm-brian');
+
+-- Sales Kick Off (multi-person assignments)
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-sko-01', 'tm-pm-erik'),
+  ('a-sko-01', 'tm-pm-brian'),
+  ('a-sko-02', 'tm-pm-brian'),
+  ('a-sko-02', 'tm-pm-erik'),
+  ('a-sko-02', 'tm-pm-lindsay'),
+  ('a-sko-03', 'tm-pm-erik'),
+  ('a-sko-03', 'tm-pm-brian'),
+  ('a-sko-04', 'tm-pm-lindsay'),
+  ('a-sko-04', 'tm-pm-michelle'),
+  ('a-sko-05', 'tm-pm-brian'),
+  ('a-sko-05', 'tm-pm-erik'),
+  ('a-sko-06', 'tm-pm-michelle'),
+  ('a-sko-06', 'tm-pm-contractor'),
+  ('a-sko-07', 'tm-pm-brian'),
+  ('a-sko-07', 'tm-pm-erik'),
+  ('a-sko-08', 'tm-pm-lindsay'),
+  ('a-sko-08', 'tm-pm-contractor'),
+  ('a-sko-09', 'tm-pm-erik'),
+  ('a-sko-09', 'tm-pm-brian'),
+  ('a-sko-10', 'tm-pm-michelle'),
+  ('a-sko-10', 'tm-pm-lindsay');
+
+-- Q2 Workload
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-q2-01', 'tm-pm-brian'),
+  ('a-q2-02', 'tm-pm-erik'),
+  ('a-q2-03', 'tm-pm-lindsay'),
+  ('a-q2-04', 'tm-pm-brian'),
+  ('a-q2-05', 'tm-pm-michelle');
+
+-- Right to Win Initiative
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-rtw-01', 'tm-pb-dan'),
+  ('a-rtw-02', 'tm-pb-kristen'),
+  ('a-rtw-03', 'tm-pb-brian'),
+  ('a-rtw-04', 'tm-pb-codi');
+
+-- Displacement GTM
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-gtm-01', 'tm-pb-codi'),
+  ('a-gtm-02', 'tm-pb-dan'),
+  ('a-gtm-03', 'tm-pb-jamie'),
+  ('a-gtm-04', 'tm-pb-scott');
+
+-- Web Site Rebrand
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-reb-01', 'tm-mcf-scott'),
+  ('a-reb-02', 'tm-mcf-paula'),
+  ('a-reb-03', 'tm-mcf-corey'),
+  ('a-reb-04', 'tm-mcf-rick'),
+  ('a-reb-05', 'tm-mcf-dan'),
+  ('a-reb-06', 'tm-mcf-rick'),
+  ('a-reb-07', 'tm-mcf-corey'),
+  ('a-reb-08', 'tm-mcf-scott'),
+  ('a-reb-09', 'tm-mcf-paula'),
+  ('a-reb-10', 'tm-mcf-scott'),
+  ('a-reb-11', 'tm-mcf-paula'),
+  ('a-reb-12', 'tm-mcf-dan'),
+  ('a-reb-13', 'tm-mcf-rick'),
+  ('a-reb-14', 'tm-mcf-scott'),
+  ('a-reb-15', 'tm-mcf-rick');
+````
+
+## File: packages/api/sample_data/09_timeline_access.sql
+````sql
+-- Timeline access: all team members get access to their team's timelines.
+-- Team admins get 'admin' role, team members get 'member' role.
+
+-- Product Marketing timelines
+INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
+  ('tl-pm-q1',  'tm-pm-brian',      'admin'),
+  ('tl-pm-q1',  'tm-pm-lindsay',    'member'),
+  ('tl-pm-q1',  'tm-pm-erik',       'admin'),
+  ('tl-pm-q1',  'tm-pm-michelle',   'member'),
+  ('tl-pm-q1',  'tm-pm-contractor', 'member'),
+  ('tl-pm-sko', 'tm-pm-brian',      'admin'),
+  ('tl-pm-sko', 'tm-pm-lindsay',    'member'),
+  ('tl-pm-sko', 'tm-pm-erik',       'admin'),
+  ('tl-pm-sko', 'tm-pm-michelle',   'member'),
+  ('tl-pm-sko', 'tm-pm-contractor', 'member'),
+  ('tl-pm-q2',  'tm-pm-brian',      'admin'),
+  ('tl-pm-q2',  'tm-pm-lindsay',    'member'),
+  ('tl-pm-q2',  'tm-pm-erik',       'admin'),
+  ('tl-pm-q2',  'tm-pm-michelle',   'member'),
+  ('tl-pm-q2',  'tm-pm-contractor', 'member');
+
+-- P&B Tiger Team timelines
+INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
+  ('tl-pb-rtw', 'tm-pb-brian',   'admin'),
+  ('tl-pb-rtw', 'tm-pb-scott',   'member'),
+  ('tl-pb-rtw', 'tm-pb-codi',    'admin'),
+  ('tl-pb-rtw', 'tm-pb-dan',     'member'),
+  ('tl-pb-rtw', 'tm-pb-kristen', 'member'),
+  ('tl-pb-rtw', 'tm-pb-jamie',   'member'),
+  ('tl-pb-gtm', 'tm-pb-brian',   'admin'),
+  ('tl-pb-gtm', 'tm-pb-scott',   'member'),
+  ('tl-pb-gtm', 'tm-pb-codi',    'admin'),
+  ('tl-pb-gtm', 'tm-pb-dan',     'member'),
+  ('tl-pb-gtm', 'tm-pb-kristen', 'member'),
+  ('tl-pb-gtm', 'tm-pb-jamie',   'member');
+
+-- Marketing Cross Functional timelines
+INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
+  ('tl-mcf-rebrand', 'tm-mcf-brian', 'admin'),
+  ('tl-mcf-rebrand', 'tm-mcf-scott', 'admin'),
+  ('tl-mcf-rebrand', 'tm-mcf-paula', 'admin'),
+  ('tl-mcf-rebrand', 'tm-mcf-corey', 'member'),
+  ('tl-mcf-rebrand', 'tm-mcf-dan',   'member'),
+  ('tl-mcf-rebrand', 'tm-mcf-rick',  'member');
+````
+
+## File: packages/api/sample_data/README.md
+````markdown
+# Sample Data
+
+SQL files that populate the database with realistic test data. Files are numbered to respect FK insertion order.
+
+| File | Contents |
+|---|---|
+| `00_flush.sql` | Deletes all data in FK-safe order |
+| `01_users.sql` | 13 users (2 super admins) |
+| `02_teams.sql` | 3 teams (1 archived) |
+| `03_team_members.sql` | 16 members (1 external participant) |
+| `04_status_templates.sql` | 5 templates + 21 items |
+| `05_timelines.sql` | 6 timelines (1 archived) |
+| `06_statuses.sql` | Live statuses per timeline |
+| `07_activities.sql` | 58 activities |
+| `08_activity_assignments.sql` | Activity → member links |
+| `09_timeline_access.sql` | Timeline → member access |
+
+## Usage
+
+All files concatenated in order form a complete flush-and-reload script.
+
+**SQLite CLI:**
+```bash
+cat sample_data/*.sql | sqlite3 draba.db
+```
+
+**Go test:** See `internal/db/sample_data_test.go`.
+
+## Updating
+
+When a schema migration changes a table that has sample data:
+1. Edit only the affected file (e.g., add a column to `01_users.sql`)
+2. Run `go test ./internal/db/ -run TestSampleDataLoads` to verify
+
+See `docs/SAMPLE_DATA.md` for the full dataset specification and identity rules.
+
+## Credentials
+
+All user passwords: `password`
+````
+
+## File: packages/api/go.mod
+````
+module github.com/I0-1O/draba/packages/api
+
+go 1.24.0
+
+require (
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/gorilla/websocket v1.5.3
+	github.com/jmoiron/sqlx v1.4.0
+	github.com/mattn/go-sqlite3 v1.14.22
+	github.com/oapi-codegen/runtime v1.4.0
+	github.com/stretchr/testify v1.11.1
+	golang.org/x/crypto v0.46.0
+	modernc.org/sqlite v1.34.5
+)
+
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+	modernc.org/libc v1.61.6 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.8.0 // indirect
+)
+````
+
 ## File: packages/shared/CLAUDE.md
 ````markdown
 # packages/shared
@@ -10981,72 +11966,6 @@ export function ConfirmDialog({ variant, icon, title, body, confirmLabel, busy, 
 
 // Re-export color map so callers can reference variant colors for icons.
 export { VARIANT_COLORS }
-````
-
-## File: packages/web/src/components/shared/EmptyState.tsx
-````typescript
-/**
- * EmptyState — centered placeholder for views with no data.
- */
-
-interface EmptyStateProps {
-  icon?: React.ReactNode;
-  message: string;
-  description?: string;
-}
-
-function DrabaIcon() {
-  return (
-    <svg
-      width="120"
-      height="120"
-      viewBox="0 0 536 536"
-      fill="currentColor"
-      style={{ fillRule: 'evenodd', clipRule: 'evenodd' }}
-    >
-      <g transform="matrix(1.754455,0,0,1.754455,-155.155119,-239.401045)">
-        <path d="M132.527,289.267L117.826,289.267C115.02,292.375 110.96,294.329 106.447,294.329C97.987,294.329 91.118,287.46 91.118,278.999C91.118,270.538 97.987,263.669 106.447,263.669C110.96,263.669 115.02,265.623 117.826,268.731L132.527,268.731L132.527,275.454L121.365,275.454C121.634,276.592 121.777,277.779 121.777,278.999C121.777,280.219 121.634,281.406 121.365,282.544L132.527,282.544L132.527,289.267ZM132.527,268.731L132.527,248.571L351.429,248.571L351.429,308.819L181.595,308.819C184.05,311.537 185.546,315.139 185.546,319.087C185.546,323.035 184.05,326.637 181.595,329.355L351.429,329.355L351.429,365.258C351.429,379.823 339.603,391.648 325.038,391.648L158.918,391.648C146.067,391.648 135.35,382.443 133.004,370.273C133.284,370.007 133.553,369.73 133.812,369.443L316.769,369.443C314.314,366.724 312.818,363.123 312.818,359.175C312.818,355.227 314.314,351.625 316.769,348.906L133.812,348.906C133.409,348.46 132.98,348.037 132.527,347.641L132.527,289.267L300.783,289.267C298.328,286.549 296.832,282.947 296.832,278.999C296.832,275.051 298.328,271.449 300.783,268.731L132.527,268.731ZM351.429,308.819L364.552,308.819C367.358,305.711 371.418,303.757 375.93,303.757C384.391,303.757 391.26,310.626 391.26,319.087C391.26,327.548 384.391,334.417 375.93,334.417C371.418,334.417 367.358,332.463 364.552,329.355L351.429,329.355L351.429,322.631L361.013,322.631C360.743,321.494 360.601,320.307 360.601,319.087C360.601,317.867 360.743,316.68 361.013,315.542L351.429,315.542L351.429,308.819ZM133.004,370.273C130.253,372.894 126.53,374.504 122.434,374.504C113.973,374.504 107.104,367.635 107.104,359.175C107.104,350.714 113.973,343.845 122.434,343.845C126.298,343.845 129.83,345.278 132.527,347.641L132.527,365.258C132.527,366.972 132.691,368.649 133.004,370.273ZM132.527,282.544L132.527,275.454L175.669,275.454L175.669,275.623C177.532,275.623 179.045,277.136 179.045,278.999C179.045,280.862 177.532,282.375 175.669,282.375L175.669,282.544L132.527,282.544ZM351.429,315.542L351.429,322.631L306.709,322.631L306.709,322.463C304.845,322.463 303.333,320.95 303.333,319.087C303.333,317.224 304.845,315.711 306.709,315.711L306.709,315.542L351.429,315.542ZM267.724,322.294C265.861,322.294 264.348,320.781 264.348,318.918C264.348,317.055 265.861,315.542 267.724,315.542C269.587,315.542 271.1,317.055 271.1,318.918C271.1,320.781 269.587,322.294 267.724,322.294ZM280.441,322.294C278.578,322.294 277.065,320.781 277.065,318.918C277.065,317.055 278.578,315.542 280.441,315.542C282.304,315.542 283.817,317.055 283.817,318.918C283.817,320.781 282.304,322.294 280.441,322.294ZM293.158,322.463C291.295,322.463 289.782,320.95 289.782,319.087C289.782,317.224 291.295,315.711 293.158,315.711C295.021,315.711 296.534,317.224 296.534,319.087C296.534,320.95 295.021,322.463 293.158,322.463ZM375.93,326.99C380.292,326.99 383.833,323.449 383.833,319.087C383.833,314.725 380.292,311.184 375.93,311.184C371.569,311.184 368.027,314.725 368.027,319.087C368.027,323.449 371.569,326.99 375.93,326.99ZM164.265,334.417C172.726,334.417 179.595,327.548 179.595,319.087C179.595,310.626 172.726,303.757 164.265,303.757C155.804,303.757 148.935,310.626 148.935,319.087C148.935,327.548 155.804,334.417 164.265,334.417ZM164.265,326.99C159.903,326.99 156.362,323.449 156.362,319.087C156.362,314.725 159.903,311.184 164.265,311.184C168.627,311.184 172.168,314.725 172.168,319.087C172.168,323.449 168.627,326.99 164.265,326.99ZM334.099,343.845C325.638,343.845 318.769,350.714 318.769,359.175C318.769,367.635 325.638,374.504 334.099,374.504C342.56,374.504 349.429,367.635 349.429,359.175C349.429,350.714 342.56,343.845 334.099,343.845ZM334.099,351.272C338.461,351.272 342.002,354.813 342.002,359.175C342.002,363.536 338.461,367.078 334.099,367.078C329.737,367.078 326.196,363.536 326.196,359.175C326.196,354.813 329.737,351.272 334.099,351.272ZM318.113,263.669C309.652,263.669 302.783,270.538 302.783,278.999C302.783,287.46 309.652,294.329 318.113,294.329C326.573,294.329 333.442,287.46 333.442,278.999C333.442,270.538 326.573,263.669 318.113,263.669ZM318.113,271.096C322.474,271.096 326.016,274.637 326.016,278.999C326.016,283.361 322.474,286.902 318.113,286.902C313.751,286.902 310.21,283.361 310.21,278.999C310.21,274.637 313.751,271.096 318.113,271.096ZM217.923,355.968C219.786,355.968 221.299,357.48 221.299,359.344C221.299,361.207 219.786,362.719 217.923,362.719C216.06,362.719 214.547,361.207 214.547,359.344C214.547,357.48 216.06,355.968 217.923,355.968ZM205.206,355.799C207.069,355.799 208.582,357.312 208.582,359.175C208.582,361.038 207.069,362.551 205.206,362.551C203.343,362.551 201.83,361.038 201.83,359.175C201.83,357.312 203.343,355.799 205.206,355.799ZM230.64,355.968C232.503,355.968 234.016,357.48 234.016,359.344C234.016,361.207 232.503,362.719 230.64,362.719C228.777,362.719 227.264,361.207 227.264,359.344C227.264,357.48 228.777,355.968 230.64,355.968ZM137.351,355.63L191.655,355.63L191.655,355.799C193.518,355.799 195.031,357.312 195.031,359.175C195.031,361.038 193.518,362.551 191.655,362.551L191.655,362.719L137.351,362.719C137.62,361.581 137.763,360.395 137.763,359.175C137.763,357.955 137.62,356.768 137.351,355.63ZM106.447,271.096C102.086,271.096 98.545,274.637 98.545,278.999C98.545,283.361 102.086,286.902 106.447,286.902C110.809,286.902 114.35,283.361 114.35,278.999C114.35,274.637 110.809,271.096 106.447,271.096ZM122.434,351.272C118.072,351.272 114.531,354.813 114.531,359.175C114.531,363.536 118.072,367.078 122.434,367.078C126.795,367.078 130.336,363.536 130.336,359.175C130.336,354.813 126.795,351.272 122.434,351.272ZM189.22,275.623C191.083,275.623 192.596,277.136 192.596,278.999C192.596,280.862 191.083,282.375 189.22,282.375C187.357,282.375 185.844,280.862 185.844,278.999C185.844,277.136 187.357,275.623 189.22,275.623ZM201.937,275.792C203.8,275.792 205.313,277.305 205.313,279.168C205.313,281.031 203.8,282.544 201.937,282.544C200.074,282.544 198.561,281.031 198.561,279.168C198.561,277.305 200.074,275.792 201.937,275.792ZM214.654,275.792C216.517,275.792 218.03,277.305 218.03,279.168C218.03,281.031 216.517,282.544 214.654,282.544C212.791,282.544 211.278,281.031 211.278,279.168C211.278,277.305 212.791,275.792 214.654,275.792ZM309.166,183.956L325.038,183.956C339.603,183.956 351.429,195.781 351.429,210.347L351.429,240.659L132.527,240.659L132.527,210.347C132.527,195.781 144.353,183.956 158.918,183.956L172.478,183.956L172.478,177.705C172.478,174.072 175.428,171.123 179.061,171.123C182.694,171.123 185.644,174.072 185.644,177.705L185.644,183.956L296,183.956L296,177.705C296,174.072 298.95,171.123 302.583,171.123C306.216,171.123 309.166,174.072 309.166,177.705L309.166,183.956Z" />
-      </g>
-    </svg>
-  );
-}
-
-export default function EmptyState({ icon, message, description }: EmptyStateProps) {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        gap: 12,
-        color: 'var(--muted-foreground)',
-      }}
-    >
-      <div>
-        {icon ?? <DrabaIcon />}
-      </div>
-      <span
-        style={{
-          fontSize: 14,
-          fontFamily: 'var(--font-sans)',
-        }}
-      >
-        {message}
-      </span>
-      {description && (
-        <span
-          style={{
-            fontSize: 13,
-            opacity: 0.7,
-            fontFamily: 'var(--font-sans)',
-          }}
-        >
-          {description}
-        </span>
-      )}
-    </div>
-  );
-}
 ````
 
 ## File: packages/web/src/components/shared/InlineEditableTitle.tsx
@@ -13040,113 +13959,6 @@ export type ApiError = Schemas["ApiError"];
     "vitest": "^4.1.7"
   }
 }
-````
-
-## File: scripts/reset-test-env.sh
-````bash
-#!/usr/bin/env bash
-#
-# Reset the draba test environment to a known clean state.
-# Run on the docker host (epcot.lan) as the `draba-test` user
-# (which must be in the `docker` group). No sudo required.
-#
-# What it does:
-#   1. Stops the `draba` container
-#   2. Wipes the SQLite DB files via a one-off `alpine` container
-#      (so file permissions inside the bind mount don't matter)
-#   3. Starts `draba` — its boot-time migration runner creates the
-#      fresh schema
-#   4. Waits up to 30s for `schema_migrations` to be queryable
-#   5. Stops `draba` again, seeds a bootstrap team + a known invite
-#      token via a one-off `sqlite3` container, then restarts
-#
-# Required env (sourced from $HOME/.draba-test.env at the top):
-#   DRABA_TEST_INVITE_TOKEN  — known token the api-smoke subagent uses
-#   DRABA_TEST_ADMIN_EMAIL   — bootstrap admin (invite issuer) email
-#   DRABA_TEST_INVITE_EMAIL  — email the invite is issued to; the
-#                              smoke test registers as this user
-#                              (default: invitee@local)
-#   DRABA_DB_DIR             — host bind-mount dir holding draba.db
-#   DRABA_CONTAINER          — container name (default: draba)
-#   DRABA_DB_FILENAME        — DB filename inside DRABA_DB_DIR
-#                              (default: draba.db)
-
-set -euo pipefail
-
-ENV_FILE="${HOME}/.draba-test.env"
-if [[ -f "$ENV_FILE" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    set +a
-fi
-
-: "${DRABA_TEST_INVITE_TOKEN:?must be set in ~/.draba-test.env}"
-: "${DRABA_TEST_ADMIN_EMAIL:?must be set in ~/.draba-test.env}"
-: "${DRABA_DB_DIR:?must be set in ~/.draba-test.env}"
-DRABA_CONTAINER="${DRABA_CONTAINER:-draba}"
-DRABA_DB_FILENAME="${DRABA_DB_FILENAME:-draba.db}"
-DRABA_TEST_INVITE_EMAIL="${DRABA_TEST_INVITE_EMAIL:-invitee@local}"
-
-SQLITE_IMG="keinos/sqlite3:latest"
-ALPINE_IMG="alpine:latest"
-
-echo "[1/6] Stopping container '$DRABA_CONTAINER'..."
-docker stop "$DRABA_CONTAINER" >/dev/null
-
-echo "[2/6] Wiping DB files in $DRABA_DB_DIR..."
-docker run --rm -v "$DRABA_DB_DIR:/data" "$ALPINE_IMG" sh -c \
-    "rm -f /data/${DRABA_DB_FILENAME} /data/${DRABA_DB_FILENAME}-shm /data/${DRABA_DB_FILENAME}-wal"
-
-echo "[3/6] Starting container (migrations run on boot)..."
-docker start "$DRABA_CONTAINER" >/dev/null
-
-echo "[4/6] Waiting for migrations to complete..."
-for i in $(seq 1 30); do
-    if docker run --rm -v "$DRABA_DB_DIR:/data:ro" "$SQLITE_IMG" \
-         sqlite3 "/data/${DRABA_DB_FILENAME}" \
-         "SELECT 1 FROM schema_migrations LIMIT 1;" >/dev/null 2>&1; then
-        break
-    fi
-    sleep 1
-    if [[ "$i" -eq 30 ]]; then
-        echo "ERROR: migrations did not complete within 30s" >&2
-        exit 1
-    fi
-done
-
-echo "[5/6] Stopping container to seed exclusively..."
-docker stop "$DRABA_CONTAINER" >/dev/null
-
-ADMIN_ID="bootstrap-admin"
-TEAM_ID="bootstrap-team"
-INVITE_ID="bootstrap-invite"
-EXPIRES=$(date -u -d '+7 days' '+%Y-%m-%d %H:%M:%S')
-
-# DRABA_TEST_ADMIN_PASSWORD_HASH — bcrypt hash of the admin's login password.
-# If not set in ~/.draba-test.env, the admin row is seeded as non-loginable
-# (suitable for CI-only runs where only the invite flow is tested).
-DRABA_TEST_ADMIN_PASSWORD_HASH="${DRABA_TEST_ADMIN_PASSWORD_HASH:-x-not-loginable}"
-
-docker run --rm -i --user 0:0 -v "$DRABA_DB_DIR:/data" "$SQLITE_IMG" \
-    sqlite3 "/data/${DRABA_DB_FILENAME}" <<SQL
-INSERT INTO users (id, email, password_hash, display_name, is_superadmin)
-VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', '${DRABA_TEST_ADMIN_PASSWORD_HASH}', 'Test Bootstrap', 1);
-
-INSERT INTO teams (id, name, slug)
-VALUES ('${TEAM_ID}', 'Test Team', 'test-team');
-
-INSERT INTO team_members (id, team_id, user_id, role)
-VALUES ('bootstrap-admin-member', '${TEAM_ID}', '${ADMIN_ID}', 'admin');
-
-INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at)
-VALUES ('${INVITE_ID}', '${TEAM_ID}', '${DRABA_TEST_INVITE_EMAIL}', '${DRABA_TEST_INVITE_TOKEN}', 'member', '${ADMIN_ID}', '${EXPIRES}');
-SQL
-
-echo "[6/6] Restarting container..."
-docker start "$DRABA_CONTAINER" >/dev/null
-
-echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
 ````
 
 ## File: scripts/seed-find-test-activities.sql
@@ -26464,6 +27276,63 @@ export default function PreferencesPage() {
 }
 ````
 
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/settings': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/statuses': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
+````
+
 ## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
 ````typescript
 /**
@@ -26987,63 +27856,6 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
     </div>
   )
 }
-````
-
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/settings': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/status-templates': { target: apiTarget, changeOrigin: true },
-        '/status-template-items': { target: apiTarget, changeOrigin: true },
-        '/statuses': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
 ````
 
 ## File: packages/api/internal/db/team_repo.go
@@ -39869,7 +40681,7 @@ interface Props {
   onUnarchiveTeam?: (teamId: string) => void;
   /** True when the current user is an admin of the active team. */
   canEditTeam?: boolean;
-  /** Live member list from the API. Falls back to demo data when empty. */
+  /** Live member list from the API. */
   members?: TeamMemberWithUser[];
   /** Called when the user clicks the gear icon on a member row. */
   onEditMember?: (member: TeamMemberWithUser) => void;
@@ -39901,26 +40713,6 @@ function formatDateRange(startDate?: string, endDate?: string): string {
   return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
 }
 
-interface Member {
-  id: string;
-  name: string;
-  initials: string;
-  color: string;
-}
-
-const DEMO_TIMELINES: Timeline[] = [
-  { id: '1', name: 'Q1 2027 Roadmap',            color: '#1A97A2', icon: null, startDate: '2027-01-01', endDate: '2027-03-31' },
-  { id: '2', name: 'New Logo GTM',                color: '#6366F1', icon: null, startDate: '2026-12-01', endDate: '2027-01-15' },
-  { id: '3', name: 'Q4 2026 Roadmap',             color: '#F17B2B', icon: null, startDate: '2026-10-01', endDate: '2026-12-31' },
-  { id: '4', name: 'Project Pinky and the Brain', color: '#E11D48', icon: null, startDate: '2026-11-15', endDate: '2026-12-20' },
-];
-
-
-const DEMO_MEMBERS: Member[] = [
-  { id: '1', name: 'Lindsay K.', initials: 'LK', color: '#1A97A2' },
-  { id: '2', name: 'John Doe',   initials: 'JD', color: '#6366F1' },
-  { id: '3', name: 'Sarah M.',   initials: 'SM', color: '#F17B2B' },
-];
 
 interface TimelineItemProps {
   timeline: Timeline;
@@ -40221,7 +41013,7 @@ const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', 
 export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
   const { user } = useAuth();
   const currentUserId = (user as { id?: string } | null)?.id;
-  const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
+  const [internalActiveId, setInternalActiveId] = useState('');
   const [teamOpen, setTeamOpen] = useState(true);
   const [activityOpen, setActivityOpen] = useState(true);
   const [connectorsOpen, setConnectorsOpen] = useState(true);
@@ -40230,16 +41022,14 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
   const [membersOpen, setMembersOpen] = useState(true);
   const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
 
-  const timelines: Timeline[] = apiTimelines?.length
-    ? apiTimelines.map((t, i) => ({
-        id: t.id,
-        name: t.name,
-        color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
-        icon: t.icon ?? null,
-        startDate: t.startDate,
-        endDate: t.endDate,
-      }))
-    : DEMO_TIMELINES
+  const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
+    icon: t.icon ?? null,
+    startDate: t.startDate,
+    endDate: t.endDate,
+  }))
 
   const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
     id: t.id,
@@ -40250,7 +41040,7 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
     endDate: t.endDate,
   }))
   const activeId = activeTimelineId ?? internalActiveId
-  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0];
+  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0] ?? null;
 
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
   const dragging = useRef(false);
@@ -40363,18 +41153,20 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
               />
             </div>
             {/* Active timeline — click to expand */}
-            <div
-              title={activeTimeline.name}
-              onClick={onToggle}
-              style={{ cursor: 'pointer' }}
-            >
-              <Badge
-                identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
-                name={activeTimeline.name}
-                shape="square"
-                size={28}
-              />
-            </div>
+            {activeTimeline && (
+              <div
+                title={activeTimeline.name}
+                onClick={onToggle}
+                style={{ cursor: 'pointer' }}
+              >
+                <Badge
+                  identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
+                  name={activeTimeline.name}
+                  shape="square"
+                  size={28}
+                />
+              </div>
+            )}
 
             {/* New activity */}
             <button
@@ -40534,11 +41326,10 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
 
                 {membersOpen && (
                   <div style={{ paddingBottom: 8 }}>
-                    {(apiMembers ?? DEMO_MEMBERS.map(m => ({ id: m.id, teamId: '', userId: null, displayName: m.name, role: 'member', color: m.color, icon: null, joinedAt: '', email: '', avatarUrl: null }))).map(m => {
+                    {(apiMembers ?? []).map(m => {
                       const displayName = (m as TeamMemberWithUser).displayName || m.id;
                       const color = m.color ?? '#8b949e';
                       const icon = (m as TeamMemberWithUser).icon ?? null;
-                      const isReal = Boolean(apiMembers);
                       return (
                         <MemberSidebarRow
                           key={m.id}
@@ -40546,7 +41337,7 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
                           color={color}
                           icon={icon}
                           isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
-                          onEdit={isReal && onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
+                          onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
                             ? () => onEditMember(m as TeamMemberWithUser)
                             : undefined}
                         />
@@ -40781,7 +41572,7 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
                   color: 'rgba(255,255,255,0.22)',
                   letterSpacing: '0.02em',
                 }}>
-                  {activeTimeline.name}
+                  {activeTimeline?.name}
                 </div>
                 {/* Stub: connected Trello board */}
                 <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
