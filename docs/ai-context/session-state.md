@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short._
 
-**Last updated:** 2026-05-28 (Phase 10.4.3 complete — automated checks pass)
+**Last updated:** 2026-05-29 (Phase 10.4.4 spec written — ready to build)
 
 ---
 
@@ -21,7 +21,7 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.4.2 | Activity Schema Normalization | ✅ | ⬜ needs Docker verification |
 | 10.4.3 | UI Consistency — Modals, Sidebar & Toolbar | ✅ | ⬜ needs Docker verification |
 
-Next phase to build: **10.5** — Communications Testing.
+Next phase to build: **10.4.4** — Gantt Interaction & Activity Edit Polish.
 
 ---
 

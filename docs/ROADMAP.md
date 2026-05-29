@@ -43,6 +43,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.1 | [Preference Consumption & Session Handling](#phase-1041--preference-consumption--session-handling) | S–M — 1–2 days | 🔄 |
 | 10.4.2 | [Activity Schema Normalization — Drop team_id](#phase-1042--activity-schema-normalization--drop-team_id) | S — ½–1 day | ✅ |
 | 10.4.3 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1043--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ✅ |
+| 10.4.4 | [Gantt Interaction & Activity Edit Polish](#phase-1044--gantt-interaction--activity-edit-polish) | M — 2–3 days | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
 | 10.7 | [Localization & Language Support](#phase-107--localization--language-support) | L — 3–5 days | ⬜ |
@@ -1075,6 +1076,81 @@ Standardizes visual patterns across the three main modals (Team, Member, Timelin
 - No hardcoded hex colors remain in modal components; all use CSS variables or design-token references
 - Sidebar member rows and timeline rows have consistent hover states and gear icon placement
 - Gantt toolbar buttons are visually consistent with modal footer button patterns
+
+---
+
+### Phase 10.4.4 — Gantt Interaction & Activity Edit Polish
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Refines the Gantt chart's direct-manipulation UX and overhauls the Activity Edit sidebar to match the Activity Create sidebar's layout, adds missing fields, and removes unnecessary UI elements.
+
+**Why now:** The Gantt bar interactions have rough edges (accidental drags, coarse snap, no live feedback to sidebar) and the edit sidebar diverges from the create sidebar in layout and style. Polishing these before Phase 11 (new views) ensures the core interaction patterns are solid before they're replicated.
+
+**Scope:**
+
+*Gantt — resizable activity column:*
+- The label column (`LABEL_COL_W = 240`) becomes user-resizable via a drag handle on its right edge
+- Min: 140px, Max: 400px; header and all rows use the same live width
+- Optionally persist width as a per-timeline user preference
+
+*Gantt — click-to-activate before drag:*
+- First click on a bar **selects** it (existing behavior); only a **selected** bar shows grab/ew-resize cursors and allows drag/resize
+- Unselected bars show `cursor: pointer` — prevents accidental date changes when users just want to inspect an activity
+
+*Gantt — bar drag updates sidebar dates live:*
+- When dragging or resizing a bar, the `ActivityDetailPanel` start/end date inputs update in real-time to reflect the current snapped dates
+- On mouseup, the PATCH fires as today and the panel re-syncs from the API response
+
+*Gantt — finer-grained snap during drag:*
+- Snap one level finer than the active granularity (except day, which stays day):
+  - Day → day (no finer unit)
+  - Week → snap to day
+  - Month → snap to week
+  - Quarter → snap to month
+  - Year → snap to quarter
+- The drag tooltip already shows exact dates; this is primarily a math change in the mousemove handler
+
+*Gantt — "Hide closed" moves to filter preset:*
+- Remove the `hideClosed` checkbox from `GanttToolbar`
+- Add an `'open'` preset to the `FilterDropdown` presets list — "Open only" with description "Hide activities with a closed status"
+- Wire the `'open'` filter into `GanttView`'s `visibleActivities` memo where `hideClosed` currently lives
+
+*Activity Edit Sidebar — layout and field changes:*
+- **Remove** "All day" checkbox — all activities are implicitly all-day; remove state and toggle
+- **Simplify dates** — remove the human-readable date summary line; keep only the two date picker inputs
+- **Move description** — from bottom ("Notes" section) to directly below the date pickers, matching create panel order
+- **Assigned to** — restyle to match the create panel's bordered-card style (colored border + tint when selected) instead of opacity-based toggle buttons
+- **Status dropdown** — replace plain `<select>` with a custom dropdown showing each status's color dot, icon, and name, ordered by position
+- **Remove "Identity" line** — from Classify section (the identity widget in the header is self-evident)
+- **Rename "Details" → "Advanced"**
+- **Add Notes field** — multi-line `<textarea>` at the bottom (above footer/delete); requires adding `notes TEXT` column to activities table (migration 016), OpenAPI schema update, and TS type regeneration
+
+*Schema (migration 016):*
+- Add `notes TEXT` column to `activities` (nullable)
+
+*Final edit panel field order (top to bottom):*
+1. Header — Identity widget + Title
+2. When — Date pickers (start → end)
+3. Description — single-line input
+4. Assigned to — bordered card style
+5. Classify — Status (rich dropdown), Tags (stub)
+6. Advanced — Parent (stub), Progress (stub), Location, URL
+7. Notes — multi-line textarea
+8. Footer — Delete button
+
+**Exit criteria — safe to pause when:**
+- Activity column is resizable by dragging the right edge; width persists during session
+- Bar requires a selection click before drag/resize cursors appear; unselected bars show pointer cursor
+- Dragging a bar updates the sidebar date pickers in real-time
+- Drag snaps at one level finer than the zoom granularity (week→day, month→week, etc.)
+- "Hide closed" checkbox removed from toolbar; "Open only" preset appears in filter dropdown and hides closed-status activities
+- All-day checkbox removed from edit sidebar; date section shows only the pickers
+- Edit sidebar field order matches the spec (description under dates, notes at bottom)
+- Assigned-to section styled like the create panel (bordered cards with color tint)
+- Status dropdown shows color dot + icon + name per option
+- "Identity" line removed from Classify; "Details" section renamed to "Advanced"
+- Notes field (multi-line) added at bottom; backed by new `notes` column on activities
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
 
 ---
 
