@@ -2124,6 +2124,26 @@ INSERT INTO timeline_access (timeline_id, team_member_id, role)
 DROP TABLE tmp_timeline_access;
 ````
 
+## File: packages/api/internal/db/migrations/004_user_preferences.sql
+````sql
+-- User preferences: per-user, optionally scoped to a timeline.
+--
+-- timeline_id uses '' (empty string) as a sentinel for global preferences
+-- so the UNIQUE constraint on (user_id, timeline_id, key) enforces exactly
+-- one value per key globally and one per key per timeline, without relying
+-- on SQLite's NULL-distinct behaviour in UNIQUE constraints.
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+    id          TEXT NOT NULL PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    timeline_id TEXT NOT NULL DEFAULT '',
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    updated_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, timeline_id, key)
+);
+````
+
 ## File: packages/api/internal/db/db.go
 ````go
 // Package db provides the database connection, schema migrations,
@@ -2321,6 +2341,61 @@ func (r *SavedFilterRepo) Delete(id string) error {
 	_, err := r.db.Exec(`DELETE FROM saved_filters WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("deleting saved filter: %w", err)
+	}
+	return nil
+}
+````
+
+## File: packages/api/internal/db/user_preference_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// UserPreferenceRepo is the persistence layer for UserPreference records.
+type UserPreferenceRepo struct {
+	db *sqlx.DB
+}
+
+// NewUserPreferenceRepo returns a UserPreferenceRepo backed by db.
+func NewUserPreferenceRepo(db *sqlx.DB) *UserPreferenceRepo {
+	return &UserPreferenceRepo{db: db}
+}
+
+// List returns all preferences for the given user and timeline scope.
+// Pass "" for timelineID to retrieve global preferences.
+func (r *UserPreferenceRepo) List(userID, timelineID string) ([]*models.UserPreference, error) {
+	prefs := make([]*models.UserPreference, 0)
+	err := r.db.Select(&prefs,
+		`SELECT * FROM user_preferences WHERE user_id = ? AND timeline_id = ? ORDER BY key ASC`,
+		userID, timelineID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing user preferences: %w", err)
+	}
+	return prefs, nil
+}
+
+// Upsert inserts or updates a single preference identified by
+// (user_id, timeline_id, key). On conflict the value and updated_at are
+// replaced; the id column keeps the winning row's original value.
+func (r *UserPreferenceRepo) Upsert(p *models.UserPreference) error {
+	_, err := r.db.Exec(`
+		INSERT INTO user_preferences (id, user_id, timeline_id, key, value, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id, timeline_id, key) DO UPDATE
+		SET value      = excluded.value,
+		    updated_at = excluded.updated_at
+	`, p.ID, p.UserID, p.TimelineID, p.Key, p.Value, p.UpdatedAt.UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("upserting user preference: %w", err)
 	}
 	return nil
 }
@@ -9579,6 +9654,88 @@ type PatchStatusTemplateItemJSONBody struct {
 }
 ````
 
+## File: packages/api/internal/api/user_preference_handler.go
+````go
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+const (
+	maxPrefKeyLen   = 64
+	maxPrefValueLen = 4096
+)
+
+// handleGetPreferences handles GET /users/me/preferences.
+// An optional ?timeline_id= query parameter scopes the results to a timeline;
+// omitting it returns global preferences (timeline_id = “”).
+func (s *Server) handleGetPreferences(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	timelineID := r.URL.Query().Get("timeline_id")
+
+	prefs, err := s.preferences.List(claims.UserID, timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load preferences")
+		return
+	}
+	writeJSON(w, http.StatusOK, prefs)
+}
+
+// handleUpsertPreference handles PUT /users/me/preferences. It creates or
+// updates a single key/value preference for the authenticated user, optionally
+// scoped to a timeline.
+func (s *Server) handleUpsertPreference(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var req UpsertPreferenceJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Key == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "key is required")
+		return
+	}
+	if len(req.Key) > maxPrefKeyLen {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "key must not exceed 64 characters")
+		return
+	}
+	if !json.Valid([]byte(req.Value)) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "value must be valid JSON")
+		return
+	}
+	if len(req.Value) > maxPrefValueLen {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "value must not exceed 4096 bytes")
+		return
+	}
+
+	// nil timelineId is treated as "" (global scope) to satisfy the UNIQUE(user_id, timeline_id, key) constraint without NULL handling.
+	timelineID := ""
+	if req.TimelineId != nil {
+		timelineID = *req.TimelineId
+	}
+
+	pref := &models.UserPreference{
+		ID:         newID(),
+		UserID:     claims.UserID,
+		TimelineID: timelineID,
+		Key:        req.Key,
+		Value:      req.Value,
+		UpdatedAt:  time.Now(),
+	}
+	if err := s.preferences.Upsert(pref); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save preference")
+		return
+	}
+	writeJSON(w, http.StatusOK, pref)
+}
+````
+
 ## File: packages/api/internal/auth/api_token.go
 ````go
 package auth
@@ -9625,26 +9782,6 @@ func HashAPIToken(raw string) string {
 func LooksLikeAPIToken(raw string) bool {
 	return strings.HasPrefix(raw, APITokenPrefix)
 }
-````
-
-## File: packages/api/internal/db/migrations/004_user_preferences.sql
-````sql
--- User preferences: per-user, optionally scoped to a timeline.
---
--- timeline_id uses '' (empty string) as a sentinel for global preferences
--- so the UNIQUE constraint on (user_id, timeline_id, key) enforces exactly
--- one value per key globally and one per key per timeline, without relying
--- on SQLite's NULL-distinct behaviour in UNIQUE constraints.
-
-CREATE TABLE IF NOT EXISTS user_preferences (
-    id          TEXT NOT NULL PRIMARY KEY,
-    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    timeline_id TEXT NOT NULL DEFAULT '',
-    key         TEXT NOT NULL,
-    value       TEXT NOT NULL,
-    updated_at  DATETIME NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (user_id, timeline_id, key)
-);
 ````
 
 ## File: packages/api/internal/db/migrations/006_identity_fields.sql
@@ -10325,61 +10462,6 @@ func (r *PasswordResetTokenRepo) MarkUsed(id string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("marking reset token used: %w", err)
-	}
-	return nil
-}
-````
-
-## File: packages/api/internal/db/user_preference_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// UserPreferenceRepo is the persistence layer for UserPreference records.
-type UserPreferenceRepo struct {
-	db *sqlx.DB
-}
-
-// NewUserPreferenceRepo returns a UserPreferenceRepo backed by db.
-func NewUserPreferenceRepo(db *sqlx.DB) *UserPreferenceRepo {
-	return &UserPreferenceRepo{db: db}
-}
-
-// List returns all preferences for the given user and timeline scope.
-// Pass "" for timelineID to retrieve global preferences.
-func (r *UserPreferenceRepo) List(userID, timelineID string) ([]*models.UserPreference, error) {
-	prefs := make([]*models.UserPreference, 0)
-	err := r.db.Select(&prefs,
-		`SELECT * FROM user_preferences WHERE user_id = ? AND timeline_id = ? ORDER BY key ASC`,
-		userID, timelineID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("listing user preferences: %w", err)
-	}
-	return prefs, nil
-}
-
-// Upsert inserts or updates a single preference identified by
-// (user_id, timeline_id, key). On conflict the value and updated_at are
-// replaced; the id column keeps the winning row's original value.
-func (r *UserPreferenceRepo) Upsert(p *models.UserPreference) error {
-	_, err := r.db.Exec(`
-		INSERT INTO user_preferences (id, user_id, timeline_id, key, value, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(user_id, timeline_id, key) DO UPDATE
-		SET value      = excluded.value,
-		    updated_at = excluded.updated_at
-	`, p.ID, p.UserID, p.TimelineID, p.Key, p.Value, p.UpdatedAt.UTC().Format(time.RFC3339))
-	if err != nil {
-		return fmt.Errorf("upserting user preference: %w", err)
 	}
 	return nil
 }
@@ -11664,6 +11746,82 @@ describe('formatDate', () => {
     expect(formatDate(dec31, 'MMM D, YYYY')).toBe('Dec 31, 2026')
   })
 })
+````
+
+## File: packages/web/src/hooks/usePreferences.ts
+````typescript
+/**
+ * TanStack Query hooks for user preferences. Preferences are user-private and
+ * optionally scoped to a timeline. Global prefs (theme, selected team/timeline)
+ * use no timeline scope; per-timeline prefs (group_by, sort_by, etc.) pass the
+ * active timeline ID.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+type UserPreference = components['schemas']['UserPreference']
+
+const prefsKey = (timelineId?: string) =>
+  ['users', 'me', 'preferences', timelineId ?? ''] as const
+
+/** Returns all preferences for the given scope (global when timelineId is absent). */
+export function usePreferences(timelineId?: string) {
+  const { getAccessToken, accessToken, initializing } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qs = timelineId ? `?timeline_id=${encodeURIComponent(timelineId)}` : ''
+  return useQuery({
+    queryKey: prefsKey(timelineId),
+    queryFn: () => authFetch<UserPreference[]>(`/users/me/preferences${qs}`),
+    // Don't fire while the session is being restored or when logged out —
+    // this hook is called from ThemeSync which mounts outside ProtectedRoute.
+    enabled: !initializing && !!accessToken,
+  })
+}
+
+interface UpsertInput {
+  key: string
+  value: string
+  timelineId?: string
+}
+
+/** Creates or updates a single preference, then invalidates the relevant list. */
+export function useUpsertPreference() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: UpsertInput) =>
+      authFetch<UserPreference>('/users/me/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (_, { timelineId }) => {
+      qc.invalidateQueries({ queryKey: prefsKey(timelineId) })
+    },
+  })
+}
+
+/**
+ * Convenience: return a typed map of key → value (parsed JSON) for the given
+ * scope. Callers get a stable reference that re-renders only when the query
+ * data changes, avoiding per-key re-renders.
+ */
+export function usePreferenceMap(timelineId?: string): Record<string, unknown> {
+  const { data = [] } = usePreferences(timelineId)
+  const map: Record<string, unknown> = {}
+  for (const pref of data) {
+    try {
+      map[pref.key] = JSON.parse(pref.value)
+    } catch {
+      map[pref.key] = pref.value
+    }
+  }
+  return map
+}
 ````
 
 ## File: packages/web/src/hooks/usePublicSettings.ts
@@ -13654,6 +13812,514 @@ No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `Event
 4. That's it — `/test-phase` will pick it up on the next run.
 ````
 
+## File: packages/api/internal/api/api_types.gen.go
+````go
+// Package api provides primitives to interact with the openapi HTTP API.
+//
+// Code generated by github.com/oapi-codegen/oapi-codegen/v2 version v2.7.0 DO NOT EDIT.
+package api
+
+import (
+	"time"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+)
+
+const (
+	BearerAuthScopes bearerAuthContextKey = "bearerAuth.Scopes"
+)
+
+// Defines values for HealthResponseStatus.
+const (
+	Ok HealthResponseStatus = "ok"
+)
+
+// Valid indicates whether the value is a known member of the HealthResponseStatus enum.
+func (e HealthResponseStatus) Valid() bool {
+	switch e {
+	case Ok:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for InviteRole.
+const (
+	InviteRoleAdmin  InviteRole = "admin"
+	InviteRoleMember InviteRole = "member"
+)
+
+// Valid indicates whether the value is a known member of the InviteRole enum.
+func (e InviteRole) Valid() bool {
+	switch e {
+	case InviteRoleAdmin:
+		return true
+	case InviteRoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TeamMemberRole.
+const (
+	TeamMemberRoleAdmin  TeamMemberRole = "admin"
+	TeamMemberRoleMember TeamMemberRole = "member"
+	TeamMemberRoleOwner  TeamMemberRole = "owner"
+)
+
+// Valid indicates whether the value is a known member of the TeamMemberRole enum.
+func (e TeamMemberRole) Valid() bool {
+	switch e {
+	case TeamMemberRoleAdmin:
+		return true
+	case TeamMemberRoleMember:
+		return true
+	case TeamMemberRoleOwner:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TeamMemberWithUserRole.
+const (
+	TeamMemberWithUserRoleAdmin  TeamMemberWithUserRole = "admin"
+	TeamMemberWithUserRoleMember TeamMemberWithUserRole = "member"
+	TeamMemberWithUserRoleOwner  TeamMemberWithUserRole = "owner"
+)
+
+// Valid indicates whether the value is a known member of the TeamMemberWithUserRole enum.
+func (e TeamMemberWithUserRole) Valid() bool {
+	switch e {
+	case TeamMemberWithUserRoleAdmin:
+		return true
+	case TeamMemberWithUserRoleMember:
+		return true
+	case TeamMemberWithUserRoleOwner:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TimelineVisibility.
+const (
+	TimelineVisibilityPublic     TimelineVisibility = "public"
+	TimelineVisibilityRestricted TimelineVisibility = "restricted"
+)
+
+// Valid indicates whether the value is a known member of the TimelineVisibility enum.
+func (e TimelineVisibility) Valid() bool {
+	switch e {
+	case TimelineVisibilityPublic:
+		return true
+	case TimelineVisibilityRestricted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CreateInviteJSONBodyRole.
+const (
+	CreateInviteJSONBodyRoleAdmin  CreateInviteJSONBodyRole = "admin"
+	CreateInviteJSONBodyRoleMember CreateInviteJSONBodyRole = "member"
+)
+
+// Valid indicates whether the value is a known member of the CreateInviteJSONBodyRole enum.
+func (e CreateInviteJSONBodyRole) Valid() bool {
+	switch e {
+	case CreateInviteJSONBodyRoleAdmin:
+		return true
+	case CreateInviteJSONBodyRoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CreateTimelineJSONBodyVisibility.
+const (
+	CreateTimelineJSONBodyVisibilityPublic     CreateTimelineJSONBodyVisibility = "public"
+	CreateTimelineJSONBodyVisibilityRestricted CreateTimelineJSONBodyVisibility = "restricted"
+)
+
+// Valid indicates whether the value is a known member of the CreateTimelineJSONBodyVisibility enum.
+func (e CreateTimelineJSONBodyVisibility) Valid() bool {
+	switch e {
+	case CreateTimelineJSONBodyVisibilityPublic:
+		return true
+	case CreateTimelineJSONBodyVisibilityRestricted:
+		return true
+	default:
+		return false
+	}
+}
+
+// ApiError defines model for ApiError.
+type ApiError struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// AuthResponse defines model for AuthResponse.
+type AuthResponse struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	User         User   `json:"user"`
+}
+
+// Activity defines model for Activity.
+type Activity struct {
+	AllDay           bool       `json:"allDay"`
+	ArchivedAt       *time.Time `json:"archivedAt,omitempty"`
+	CaldavUid        *string    `json:"caldavUid,omitempty"`
+	Color            *string    `json:"color,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	CreatedBy        string     `json:"createdBy"`
+	Description      *string    `json:"description,omitempty"`
+	EndAt            time.Time  `json:"endAt"`
+	GoogleEventId    *string    `json:"googleEventId,omitempty"`
+	Icon             *string    `json:"icon,omitempty"`
+	Id               string     `json:"id"`
+	Location         *string    `json:"location,omitempty"`
+	ParentActivityId *string    `json:"parentActivityId,omitempty"`
+	PercentComplete  *int       `json:"percentComplete,omitempty"`
+	Rrule            *string    `json:"rrule,omitempty"`
+	StartAt          time.Time  `json:"startAt"`
+	StatusId         *string    `json:"statusId,omitempty"`
+	TeamId           string     `json:"teamId"`
+	Title            string     `json:"title"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+	Url              *string    `json:"url,omitempty"`
+}
+
+// HealthResponse defines model for HealthResponse.
+type HealthResponse struct {
+	Status HealthResponseStatus `json:"status"`
+}
+
+// HealthResponseStatus defines model for HealthResponse.Status.
+type HealthResponseStatus string
+
+// Invite defines model for Invite.
+type Invite struct {
+	AcceptedAt *time.Time `json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	Email      string     `json:"email"`
+	ExpiresAt  time.Time  `json:"expiresAt"`
+	Id         string     `json:"id"`
+	InvitedBy  string     `json:"invitedBy"`
+	Role       InviteRole `json:"role"`
+	TeamId     string     `json:"teamId"`
+	Token      string     `json:"token"`
+}
+
+// InviteRole defines model for Invite.Role.
+type InviteRole string
+
+// RefreshResponse defines model for RefreshResponse.
+type RefreshResponse struct {
+	AccessToken string `json:"accessToken"`
+}
+
+// UserPreference defines model for UserPreference.
+type UserPreference struct {
+	Id         string    `json:"id"`
+	UserId     string    `json:"userId"`
+	TimelineId string    `json:"timelineId,omitempty"`
+	Key        string    `json:"key"`
+	Value      string    `json:"value"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+// UpsertPreferenceJSONBody defines parameters for UpsertPreference.
+type UpsertPreferenceJSONBody struct {
+	// Key Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
+	Key string `json:"key"`
+
+	// Value JSON-encoded preference value.
+	Value string `json:"value"`
+
+	// TimelineId Optional timeline scope. Omit or pass "" for a global preference.
+	TimelineId *string `json:"timelineId,omitempty"`
+}
+
+// UpsertPreferenceJSONRequestBody defines body for UpsertPreference for application/json ContentType.
+type UpsertPreferenceJSONRequestBody UpsertPreferenceJSONBody
+
+// SavedFilter defines model for SavedFilter.
+type SavedFilter struct {
+	CreatedAt time.Time `json:"createdAt"`
+
+	// Definition Opaque JSON filter spec (validated client-side).
+	Definition string    `json:"definition"`
+	Id         string    `json:"id"`
+	Name       string    `json:"name"`
+	TeamId     string    `json:"teamId"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	UserId     string    `json:"userId"`
+}
+
+// Team defines model for Team.
+type Team struct {
+	ArchivedAt  *time.Time `json:"archivedAt,omitempty"`
+	Color       *string    `json:"color,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	Description *string    `json:"description,omitempty"`
+	Icon        *string    `json:"icon,omitempty"`
+	Id          string     `json:"id"`
+	Name        string     `json:"name"`
+	Notes       *string    `json:"notes,omitempty"`
+	Slug        string     `json:"slug"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+}
+
+// TeamMember defines model for TeamMember.
+type TeamMember struct {
+	Color    *string        `json:"color,omitempty"`
+	JoinedAt time.Time      `json:"joinedAt"`
+	Role     TeamMemberRole `json:"role"`
+	TeamId   string         `json:"teamId"`
+	UserId   string         `json:"userId"`
+}
+
+// TeamMemberRole defines model for TeamMember.Role.
+type TeamMemberRole string
+
+// TeamMemberWithUser defines model for TeamMemberWithUser.
+type TeamMemberWithUser struct {
+	AvatarUrl   *string                `json:"avatarUrl,omitempty"`
+	Color       *string                `json:"color,omitempty"`
+	DisplayName string                 `json:"displayName"`
+	Email       openapi_types.Email    `json:"email"`
+	JoinedAt    time.Time              `json:"joinedAt"`
+	Role        TeamMemberWithUserRole `json:"role"`
+	TeamId      string                 `json:"teamId"`
+	UserId      string                 `json:"userId"`
+}
+
+// TeamMemberWithUserRole defines model for TeamMemberWithUser.Role.
+type TeamMemberWithUserRole string
+
+// Timeline defines model for Timeline.
+type Timeline struct {
+	ArchivedAt *time.Time         `json:"archivedAt,omitempty"`
+	CreatedAt  time.Time          `json:"createdAt"`
+	CreatedBy  string             `json:"createdBy"`
+	EndDate    openapi_types.Date `json:"endDate"`
+	IcalToken  string             `json:"icalToken"`
+	Id         string             `json:"id"`
+	Name       string             `json:"name"`
+	ShareToken string             `json:"shareToken"`
+	StartDate  openapi_types.Date `json:"startDate"`
+	TeamId     string             `json:"teamId"`
+	UpdatedAt  time.Time          `json:"updatedAt"`
+	Visibility TimelineVisibility `json:"visibility"`
+}
+
+// TimelineVisibility defines model for Timeline.Visibility.
+type TimelineVisibility string
+
+// User defines model for User.
+type User struct {
+	AvatarUrl   *string             `json:"avatarUrl,omitempty"`
+	CreatedAt   time.Time           `json:"createdAt"`
+	DisplayName string              `json:"displayName"`
+	Email       openapi_types.Email `json:"email"`
+	Id          string              `json:"id"`
+	UpdatedAt   time.Time           `json:"updatedAt"`
+}
+
+// ActivityId defines model for activityId.
+type ActivityId = string
+
+// SavedFilterId defines model for savedFilterId.
+type SavedFilterId = string
+
+// ShareToken defines model for shareToken.
+type ShareToken = string
+
+// TeamId defines model for teamId.
+type TeamId = string
+
+// TimelineId defines model for timelineId.
+type TimelineId = string
+
+// BadRequest defines model for BadRequest.
+type BadRequest = ApiError
+
+// Forbidden defines model for Forbidden.
+type Forbidden = ApiError
+
+// InternalError defines model for InternalError.
+type InternalError = ApiError
+
+// NotFound defines model for NotFound.
+type NotFound = ApiError
+
+// PaymentRequired defines model for PaymentRequired.
+type PaymentRequired = ApiError
+
+// Unauthorized defines model for Unauthorized.
+type Unauthorized = ApiError
+
+// bearerAuthContextKey is the context key for bearerAuth security scheme
+type bearerAuthContextKey string
+
+// LoginJSONBody defines parameters for Login.
+type LoginJSONBody struct {
+	Email    openapi_types.Email `json:"email"`
+	Password string              `json:"password"`
+}
+
+// RefreshTokenJSONBody defines parameters for RefreshToken.
+type RefreshTokenJSONBody struct {
+	RefreshToken string `json:"refreshToken"`
+}
+
+// RegisterJSONBody defines parameters for Register.
+type RegisterJSONBody struct {
+	DisplayName string              `json:"displayName"`
+	Email       openapi_types.Email `json:"email"`
+	InviteToken *string             `json:"inviteToken,omitempty"`
+	Password    string              `json:"password"`
+}
+
+// UpdateActivityJSONBody defines parameters for UpdateActivity.
+type UpdateActivityJSONBody struct {
+	AllDay           *bool      `json:"allDay,omitempty"`
+	Color            *string    `json:"color,omitempty"`
+	Description      *string    `json:"description,omitempty"`
+	EndAt            *time.Time `json:"endAt,omitempty"`
+	Icon             *string    `json:"icon,omitempty"`
+	Location         *string    `json:"location,omitempty"`
+	ParentActivityId *string    `json:"parentActivityId,omitempty"`
+	PercentComplete  *int       `json:"percentComplete,omitempty"`
+	Rrule            *string    `json:"rrule,omitempty"`
+	StartAt          *time.Time `json:"startAt,omitempty"`
+	StatusId         *string    `json:"statusId,omitempty"`
+	Title            *string    `json:"title,omitempty"`
+	Url              *string    `json:"url,omitempty"`
+}
+
+// UpdateSavedFilterJSONBody defines parameters for UpdateSavedFilter.
+type UpdateSavedFilterJSONBody struct {
+	Definition *string `json:"definition,omitempty"`
+	Name       *string `json:"name,omitempty"`
+}
+
+// CreateTeamJSONBody defines parameters for CreateTeam.
+type CreateTeamJSONBody struct {
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// UpdateTeamJSONBody defines parameters for UpdateTeam.
+type UpdateTeamJSONBody struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// ListActivitiesParams defines parameters for ListActivities.
+type ListActivitiesParams struct {
+	// From Only return activities where startAt >= from (RFC 3339).
+	From *time.Time `form:"from,omitempty" json:"from,omitempty"`
+
+	// To Only return activities where startAt <= to (RFC 3339).
+	To *time.Time `form:"to,omitempty" json:"to,omitempty"`
+}
+
+// CreateActivityJSONBody defines parameters for CreateActivity.
+type CreateActivityJSONBody struct {
+	AllDay            *bool     `json:"allDay,omitempty"`
+	AssignedMemberIds *[]string `json:"assignedMemberIds,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	Description       *string   `json:"description,omitempty"`
+	EndAt             time.Time `json:"endAt"`
+	Icon              *string   `json:"icon,omitempty"`
+	Location          *string   `json:"location,omitempty"`
+	ParentActivityId  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	Rrule             *string   `json:"rrule,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	StatusId          *string   `json:"statusId,omitempty"`
+	Title             string    `json:"title"`
+	Url               *string   `json:"url,omitempty"`
+}
+
+// CreateInviteJSONBody defines parameters for CreateInvite.
+type CreateInviteJSONBody struct {
+	// Email If provided, the invite is scoped to this email address.
+	Email *openapi_types.Email      `json:"email,omitempty"`
+	Role  *CreateInviteJSONBodyRole `json:"role,omitempty"`
+}
+
+// CreateInviteJSONBodyRole defines parameters for CreateInvite.
+type CreateInviteJSONBodyRole string
+
+// CreateSavedFilterJSONBody defines parameters for CreateSavedFilter.
+type CreateSavedFilterJSONBody struct {
+	// Definition Opaque JSON filter spec (validated client-side).
+	Definition string `json:"definition"`
+	Name       string `json:"name"`
+}
+
+// CreateTimelineJSONBody defines parameters for CreateTimeline.
+type CreateTimelineJSONBody struct {
+	EndDate    openapi_types.Date                `json:"endDate"`
+	Name       string                            `json:"name"`
+	StartDate  openapi_types.Date                `json:"startDate"`
+	Visibility *CreateTimelineJSONBodyVisibility `json:"visibility,omitempty"`
+}
+
+// CreateTimelineJSONBodyVisibility defines parameters for CreateTimeline.
+type CreateTimelineJSONBodyVisibility string
+
+// LoginJSONRequestBody defines body for Login for application/json ContentType.
+type LoginJSONRequestBody LoginJSONBody
+
+// RefreshTokenJSONRequestBody defines body for RefreshToken for application/json ContentType.
+type RefreshTokenJSONRequestBody RefreshTokenJSONBody
+
+// RegisterJSONRequestBody defines body for Register for application/json ContentType.
+type RegisterJSONRequestBody RegisterJSONBody
+
+// UpdateActivityJSONRequestBody defines body for UpdateActivity for application/json ContentType.
+type UpdateActivityJSONRequestBody UpdateActivityJSONBody
+
+// UpdateSavedFilterJSONRequestBody defines body for UpdateSavedFilter for application/json ContentType.
+type UpdateSavedFilterJSONRequestBody UpdateSavedFilterJSONBody
+
+// CreateTeamJSONRequestBody defines body for CreateTeam for application/json ContentType.
+type CreateTeamJSONRequestBody CreateTeamJSONBody
+
+// UpdateTeamJSONRequestBody defines body for UpdateTeam for application/json ContentType.
+type UpdateTeamJSONRequestBody UpdateTeamJSONBody
+
+// CreateActivityJSONRequestBody defines body for CreateActivity for application/json ContentType.
+type CreateActivityJSONRequestBody CreateActivityJSONBody
+
+// CreateInviteJSONRequestBody defines body for CreateInvite for application/json ContentType.
+type CreateInviteJSONRequestBody CreateInviteJSONBody
+
+// CreateSavedFilterJSONRequestBody defines body for CreateSavedFilter for application/json ContentType.
+type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
+
+// CreateTimelineJSONRequestBody defines body for CreateTimeline for application/json ContentType.
+type CreateTimelineJSONRequestBody CreateTimelineJSONBody
+````
+
 ## File: packages/api/internal/api/middleware.go
 ````go
 package api
@@ -14541,88 +15207,6 @@ type DeleteStatusJSONBody struct {
 // GrantTimelineAccessJSONBody is the request body for PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
 type GrantTimelineAccessJSONBody struct {
 	Role string `json:"role"`
-}
-````
-
-## File: packages/api/internal/api/user_preference_handler.go
-````go
-package api
-
-import (
-	"encoding/json"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-const (
-	maxPrefKeyLen   = 64
-	maxPrefValueLen = 4096
-)
-
-// handleGetPreferences handles GET /users/me/preferences.
-// An optional ?timeline_id= query parameter scopes the results to a timeline;
-// omitting it returns global preferences (timeline_id = “”).
-func (s *Server) handleGetPreferences(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	timelineID := r.URL.Query().Get("timeline_id")
-
-	prefs, err := s.preferences.List(claims.UserID, timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load preferences")
-		return
-	}
-	writeJSON(w, http.StatusOK, prefs)
-}
-
-// handleUpsertPreference handles PUT /users/me/preferences. It creates or
-// updates a single key/value preference for the authenticated user, optionally
-// scoped to a timeline.
-func (s *Server) handleUpsertPreference(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	var req UpsertPreferenceJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Key == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "key is required")
-		return
-	}
-	if len(req.Key) > maxPrefKeyLen {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "key must not exceed 64 characters")
-		return
-	}
-	if !json.Valid([]byte(req.Value)) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "value must be valid JSON")
-		return
-	}
-	if len(req.Value) > maxPrefValueLen {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "value must not exceed 4096 bytes")
-		return
-	}
-
-	// nil timelineId is treated as "" (global scope) to satisfy the UNIQUE(user_id, timeline_id, key) constraint without NULL handling.
-	timelineID := ""
-	if req.TimelineId != nil {
-		timelineID = *req.TimelineId
-	}
-
-	pref := &models.UserPreference{
-		ID:         newID(),
-		UserID:     claims.UserID,
-		TimelineID: timelineID,
-		Key:        req.Key,
-		Value:      req.Value,
-		UpdatedAt:  time.Now(),
-	}
-	if err := s.preferences.Upsert(pref); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save preference")
-		return
-	}
-	writeJSON(w, http.StatusOK, pref)
 }
 ````
 
@@ -16070,82 +16654,6 @@ export function useFormatDate(): (date: Date) => string {
   const prefMap = usePreferenceMap()
   const fmt = (prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY'
   return useCallback((date: Date) => formatDate(date, fmt), [fmt])
-}
-````
-
-## File: packages/web/src/hooks/usePreferences.ts
-````typescript
-/**
- * TanStack Query hooks for user preferences. Preferences are user-private and
- * optionally scoped to a timeline. Global prefs (theme, selected team/timeline)
- * use no timeline scope; per-timeline prefs (group_by, sort_by, etc.) pass the
- * active timeline ID.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-
-type UserPreference = components['schemas']['UserPreference']
-
-const prefsKey = (timelineId?: string) =>
-  ['users', 'me', 'preferences', timelineId ?? ''] as const
-
-/** Returns all preferences for the given scope (global when timelineId is absent). */
-export function usePreferences(timelineId?: string) {
-  const { getAccessToken, accessToken, initializing } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qs = timelineId ? `?timeline_id=${encodeURIComponent(timelineId)}` : ''
-  return useQuery({
-    queryKey: prefsKey(timelineId),
-    queryFn: () => authFetch<UserPreference[]>(`/users/me/preferences${qs}`),
-    // Don't fire while the session is being restored or when logged out —
-    // this hook is called from ThemeSync which mounts outside ProtectedRoute.
-    enabled: !initializing && !!accessToken,
-  })
-}
-
-interface UpsertInput {
-  key: string
-  value: string
-  timelineId?: string
-}
-
-/** Creates or updates a single preference, then invalidates the relevant list. */
-export function useUpsertPreference() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (input: UpsertInput) =>
-      authFetch<UserPreference>('/users/me/preferences', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      }),
-    onSuccess: (_, { timelineId }) => {
-      qc.invalidateQueries({ queryKey: prefsKey(timelineId) })
-    },
-  })
-}
-
-/**
- * Convenience: return a typed map of key → value (parsed JSON) for the given
- * scope. Callers get a stable reference that re-renders only when the query
- * data changes, avoiding per-key re-renders.
- */
-export function usePreferenceMap(timelineId?: string): Record<string, unknown> {
-  const { data = [] } = usePreferences(timelineId)
-  const map: Record<string, unknown> = {}
-  for (const pref of data) {
-    try {
-      map[pref.key] = JSON.parse(pref.value)
-    } catch {
-      map[pref.key] = pref.value
-    }
-  }
-  return map
 }
 ````
 
@@ -17600,514 +18108,6 @@ jobs:
         with:
           commit_message: "chore: update automated AI repomap [skip ci]"
           file_pattern: docs/ai-context/repomap.md
-````
-
-## File: packages/api/internal/api/api_types.gen.go
-````go
-// Package api provides primitives to interact with the openapi HTTP API.
-//
-// Code generated by github.com/oapi-codegen/oapi-codegen/v2 version v2.7.0 DO NOT EDIT.
-package api
-
-import (
-	"time"
-
-	openapi_types "github.com/oapi-codegen/runtime/types"
-)
-
-const (
-	BearerAuthScopes bearerAuthContextKey = "bearerAuth.Scopes"
-)
-
-// Defines values for HealthResponseStatus.
-const (
-	Ok HealthResponseStatus = "ok"
-)
-
-// Valid indicates whether the value is a known member of the HealthResponseStatus enum.
-func (e HealthResponseStatus) Valid() bool {
-	switch e {
-	case Ok:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for InviteRole.
-const (
-	InviteRoleAdmin  InviteRole = "admin"
-	InviteRoleMember InviteRole = "member"
-)
-
-// Valid indicates whether the value is a known member of the InviteRole enum.
-func (e InviteRole) Valid() bool {
-	switch e {
-	case InviteRoleAdmin:
-		return true
-	case InviteRoleMember:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TeamMemberRole.
-const (
-	TeamMemberRoleAdmin  TeamMemberRole = "admin"
-	TeamMemberRoleMember TeamMemberRole = "member"
-	TeamMemberRoleOwner  TeamMemberRole = "owner"
-)
-
-// Valid indicates whether the value is a known member of the TeamMemberRole enum.
-func (e TeamMemberRole) Valid() bool {
-	switch e {
-	case TeamMemberRoleAdmin:
-		return true
-	case TeamMemberRoleMember:
-		return true
-	case TeamMemberRoleOwner:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TeamMemberWithUserRole.
-const (
-	TeamMemberWithUserRoleAdmin  TeamMemberWithUserRole = "admin"
-	TeamMemberWithUserRoleMember TeamMemberWithUserRole = "member"
-	TeamMemberWithUserRoleOwner  TeamMemberWithUserRole = "owner"
-)
-
-// Valid indicates whether the value is a known member of the TeamMemberWithUserRole enum.
-func (e TeamMemberWithUserRole) Valid() bool {
-	switch e {
-	case TeamMemberWithUserRoleAdmin:
-		return true
-	case TeamMemberWithUserRoleMember:
-		return true
-	case TeamMemberWithUserRoleOwner:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TimelineVisibility.
-const (
-	TimelineVisibilityPublic     TimelineVisibility = "public"
-	TimelineVisibilityRestricted TimelineVisibility = "restricted"
-)
-
-// Valid indicates whether the value is a known member of the TimelineVisibility enum.
-func (e TimelineVisibility) Valid() bool {
-	switch e {
-	case TimelineVisibilityPublic:
-		return true
-	case TimelineVisibilityRestricted:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for CreateInviteJSONBodyRole.
-const (
-	CreateInviteJSONBodyRoleAdmin  CreateInviteJSONBodyRole = "admin"
-	CreateInviteJSONBodyRoleMember CreateInviteJSONBodyRole = "member"
-)
-
-// Valid indicates whether the value is a known member of the CreateInviteJSONBodyRole enum.
-func (e CreateInviteJSONBodyRole) Valid() bool {
-	switch e {
-	case CreateInviteJSONBodyRoleAdmin:
-		return true
-	case CreateInviteJSONBodyRoleMember:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for CreateTimelineJSONBodyVisibility.
-const (
-	CreateTimelineJSONBodyVisibilityPublic     CreateTimelineJSONBodyVisibility = "public"
-	CreateTimelineJSONBodyVisibilityRestricted CreateTimelineJSONBodyVisibility = "restricted"
-)
-
-// Valid indicates whether the value is a known member of the CreateTimelineJSONBodyVisibility enum.
-func (e CreateTimelineJSONBodyVisibility) Valid() bool {
-	switch e {
-	case CreateTimelineJSONBodyVisibilityPublic:
-		return true
-	case CreateTimelineJSONBodyVisibilityRestricted:
-		return true
-	default:
-		return false
-	}
-}
-
-// ApiError defines model for ApiError.
-type ApiError struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-// AuthResponse defines model for AuthResponse.
-type AuthResponse struct {
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-	User         User   `json:"user"`
-}
-
-// Activity defines model for Activity.
-type Activity struct {
-	AllDay           bool       `json:"allDay"`
-	ArchivedAt       *time.Time `json:"archivedAt,omitempty"`
-	CaldavUid        *string    `json:"caldavUid,omitempty"`
-	Color            *string    `json:"color,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	CreatedBy        string     `json:"createdBy"`
-	Description      *string    `json:"description,omitempty"`
-	EndAt            time.Time  `json:"endAt"`
-	GoogleEventId    *string    `json:"googleEventId,omitempty"`
-	Icon             *string    `json:"icon,omitempty"`
-	Id               string     `json:"id"`
-	Location         *string    `json:"location,omitempty"`
-	ParentActivityId *string    `json:"parentActivityId,omitempty"`
-	PercentComplete  *int       `json:"percentComplete,omitempty"`
-	Rrule            *string    `json:"rrule,omitempty"`
-	StartAt          time.Time  `json:"startAt"`
-	StatusId         *string    `json:"statusId,omitempty"`
-	TeamId           string     `json:"teamId"`
-	Title            string     `json:"title"`
-	UpdatedAt        time.Time  `json:"updatedAt"`
-	Url              *string    `json:"url,omitempty"`
-}
-
-// HealthResponse defines model for HealthResponse.
-type HealthResponse struct {
-	Status HealthResponseStatus `json:"status"`
-}
-
-// HealthResponseStatus defines model for HealthResponse.Status.
-type HealthResponseStatus string
-
-// Invite defines model for Invite.
-type Invite struct {
-	AcceptedAt *time.Time `json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	Email      string     `json:"email"`
-	ExpiresAt  time.Time  `json:"expiresAt"`
-	Id         string     `json:"id"`
-	InvitedBy  string     `json:"invitedBy"`
-	Role       InviteRole `json:"role"`
-	TeamId     string     `json:"teamId"`
-	Token      string     `json:"token"`
-}
-
-// InviteRole defines model for Invite.Role.
-type InviteRole string
-
-// RefreshResponse defines model for RefreshResponse.
-type RefreshResponse struct {
-	AccessToken string `json:"accessToken"`
-}
-
-// UserPreference defines model for UserPreference.
-type UserPreference struct {
-	Id         string    `json:"id"`
-	UserId     string    `json:"userId"`
-	TimelineId string    `json:"timelineId,omitempty"`
-	Key        string    `json:"key"`
-	Value      string    `json:"value"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-}
-
-// UpsertPreferenceJSONBody defines parameters for UpsertPreference.
-type UpsertPreferenceJSONBody struct {
-	// Key Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
-	Key string `json:"key"`
-
-	// Value JSON-encoded preference value.
-	Value string `json:"value"`
-
-	// TimelineId Optional timeline scope. Omit or pass "" for a global preference.
-	TimelineId *string `json:"timelineId,omitempty"`
-}
-
-// UpsertPreferenceJSONRequestBody defines body for UpsertPreference for application/json ContentType.
-type UpsertPreferenceJSONRequestBody UpsertPreferenceJSONBody
-
-// SavedFilter defines model for SavedFilter.
-type SavedFilter struct {
-	CreatedAt time.Time `json:"createdAt"`
-
-	// Definition Opaque JSON filter spec (validated client-side).
-	Definition string    `json:"definition"`
-	Id         string    `json:"id"`
-	Name       string    `json:"name"`
-	TeamId     string    `json:"teamId"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	UserId     string    `json:"userId"`
-}
-
-// Team defines model for Team.
-type Team struct {
-	ArchivedAt  *time.Time `json:"archivedAt,omitempty"`
-	Color       *string    `json:"color,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	Description *string    `json:"description,omitempty"`
-	Icon        *string    `json:"icon,omitempty"`
-	Id          string     `json:"id"`
-	Name        string     `json:"name"`
-	Notes       *string    `json:"notes,omitempty"`
-	Slug        string     `json:"slug"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
-}
-
-// TeamMember defines model for TeamMember.
-type TeamMember struct {
-	Color    *string        `json:"color,omitempty"`
-	JoinedAt time.Time      `json:"joinedAt"`
-	Role     TeamMemberRole `json:"role"`
-	TeamId   string         `json:"teamId"`
-	UserId   string         `json:"userId"`
-}
-
-// TeamMemberRole defines model for TeamMember.Role.
-type TeamMemberRole string
-
-// TeamMemberWithUser defines model for TeamMemberWithUser.
-type TeamMemberWithUser struct {
-	AvatarUrl   *string                `json:"avatarUrl,omitempty"`
-	Color       *string                `json:"color,omitempty"`
-	DisplayName string                 `json:"displayName"`
-	Email       openapi_types.Email    `json:"email"`
-	JoinedAt    time.Time              `json:"joinedAt"`
-	Role        TeamMemberWithUserRole `json:"role"`
-	TeamId      string                 `json:"teamId"`
-	UserId      string                 `json:"userId"`
-}
-
-// TeamMemberWithUserRole defines model for TeamMemberWithUser.Role.
-type TeamMemberWithUserRole string
-
-// Timeline defines model for Timeline.
-type Timeline struct {
-	ArchivedAt *time.Time         `json:"archivedAt,omitempty"`
-	CreatedAt  time.Time          `json:"createdAt"`
-	CreatedBy  string             `json:"createdBy"`
-	EndDate    openapi_types.Date `json:"endDate"`
-	IcalToken  string             `json:"icalToken"`
-	Id         string             `json:"id"`
-	Name       string             `json:"name"`
-	ShareToken string             `json:"shareToken"`
-	StartDate  openapi_types.Date `json:"startDate"`
-	TeamId     string             `json:"teamId"`
-	UpdatedAt  time.Time          `json:"updatedAt"`
-	Visibility TimelineVisibility `json:"visibility"`
-}
-
-// TimelineVisibility defines model for Timeline.Visibility.
-type TimelineVisibility string
-
-// User defines model for User.
-type User struct {
-	AvatarUrl   *string             `json:"avatarUrl,omitempty"`
-	CreatedAt   time.Time           `json:"createdAt"`
-	DisplayName string              `json:"displayName"`
-	Email       openapi_types.Email `json:"email"`
-	Id          string              `json:"id"`
-	UpdatedAt   time.Time           `json:"updatedAt"`
-}
-
-// ActivityId defines model for activityId.
-type ActivityId = string
-
-// SavedFilterId defines model for savedFilterId.
-type SavedFilterId = string
-
-// ShareToken defines model for shareToken.
-type ShareToken = string
-
-// TeamId defines model for teamId.
-type TeamId = string
-
-// TimelineId defines model for timelineId.
-type TimelineId = string
-
-// BadRequest defines model for BadRequest.
-type BadRequest = ApiError
-
-// Forbidden defines model for Forbidden.
-type Forbidden = ApiError
-
-// InternalError defines model for InternalError.
-type InternalError = ApiError
-
-// NotFound defines model for NotFound.
-type NotFound = ApiError
-
-// PaymentRequired defines model for PaymentRequired.
-type PaymentRequired = ApiError
-
-// Unauthorized defines model for Unauthorized.
-type Unauthorized = ApiError
-
-// bearerAuthContextKey is the context key for bearerAuth security scheme
-type bearerAuthContextKey string
-
-// LoginJSONBody defines parameters for Login.
-type LoginJSONBody struct {
-	Email    openapi_types.Email `json:"email"`
-	Password string              `json:"password"`
-}
-
-// RefreshTokenJSONBody defines parameters for RefreshToken.
-type RefreshTokenJSONBody struct {
-	RefreshToken string `json:"refreshToken"`
-}
-
-// RegisterJSONBody defines parameters for Register.
-type RegisterJSONBody struct {
-	DisplayName string              `json:"displayName"`
-	Email       openapi_types.Email `json:"email"`
-	InviteToken *string             `json:"inviteToken,omitempty"`
-	Password    string              `json:"password"`
-}
-
-// UpdateActivityJSONBody defines parameters for UpdateActivity.
-type UpdateActivityJSONBody struct {
-	AllDay           *bool      `json:"allDay,omitempty"`
-	Color            *string    `json:"color,omitempty"`
-	Description      *string    `json:"description,omitempty"`
-	EndAt            *time.Time `json:"endAt,omitempty"`
-	Icon             *string    `json:"icon,omitempty"`
-	Location         *string    `json:"location,omitempty"`
-	ParentActivityId *string    `json:"parentActivityId,omitempty"`
-	PercentComplete  *int       `json:"percentComplete,omitempty"`
-	Rrule            *string    `json:"rrule,omitempty"`
-	StartAt          *time.Time `json:"startAt,omitempty"`
-	StatusId         *string    `json:"statusId,omitempty"`
-	Title            *string    `json:"title,omitempty"`
-	Url              *string    `json:"url,omitempty"`
-}
-
-// UpdateSavedFilterJSONBody defines parameters for UpdateSavedFilter.
-type UpdateSavedFilterJSONBody struct {
-	Definition *string `json:"definition,omitempty"`
-	Name       *string `json:"name,omitempty"`
-}
-
-// CreateTeamJSONBody defines parameters for CreateTeam.
-type CreateTeamJSONBody struct {
-	Name        string  `json:"name"`
-	Description *string `json:"description,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// UpdateTeamJSONBody defines parameters for UpdateTeam.
-type UpdateTeamJSONBody struct {
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// ListActivitiesParams defines parameters for ListActivities.
-type ListActivitiesParams struct {
-	// From Only return activities where startAt >= from (RFC 3339).
-	From *time.Time `form:"from,omitempty" json:"from,omitempty"`
-
-	// To Only return activities where startAt <= to (RFC 3339).
-	To *time.Time `form:"to,omitempty" json:"to,omitempty"`
-}
-
-// CreateActivityJSONBody defines parameters for CreateActivity.
-type CreateActivityJSONBody struct {
-	AllDay            *bool     `json:"allDay,omitempty"`
-	AssignedMemberIds *[]string `json:"assignedMemberIds,omitempty"`
-	Color             *string   `json:"color,omitempty"`
-	Description       *string   `json:"description,omitempty"`
-	EndAt             time.Time `json:"endAt"`
-	Icon              *string   `json:"icon,omitempty"`
-	Location          *string   `json:"location,omitempty"`
-	ParentActivityId  *string   `json:"parentActivityId,omitempty"`
-	PercentComplete   *int      `json:"percentComplete,omitempty"`
-	Rrule             *string   `json:"rrule,omitempty"`
-	StartAt           time.Time `json:"startAt"`
-	StatusId          *string   `json:"statusId,omitempty"`
-	Title             string    `json:"title"`
-	Url               *string   `json:"url,omitempty"`
-}
-
-// CreateInviteJSONBody defines parameters for CreateInvite.
-type CreateInviteJSONBody struct {
-	// Email If provided, the invite is scoped to this email address.
-	Email *openapi_types.Email      `json:"email,omitempty"`
-	Role  *CreateInviteJSONBodyRole `json:"role,omitempty"`
-}
-
-// CreateInviteJSONBodyRole defines parameters for CreateInvite.
-type CreateInviteJSONBodyRole string
-
-// CreateSavedFilterJSONBody defines parameters for CreateSavedFilter.
-type CreateSavedFilterJSONBody struct {
-	// Definition Opaque JSON filter spec (validated client-side).
-	Definition string `json:"definition"`
-	Name       string `json:"name"`
-}
-
-// CreateTimelineJSONBody defines parameters for CreateTimeline.
-type CreateTimelineJSONBody struct {
-	EndDate    openapi_types.Date                `json:"endDate"`
-	Name       string                            `json:"name"`
-	StartDate  openapi_types.Date                `json:"startDate"`
-	Visibility *CreateTimelineJSONBodyVisibility `json:"visibility,omitempty"`
-}
-
-// CreateTimelineJSONBodyVisibility defines parameters for CreateTimeline.
-type CreateTimelineJSONBodyVisibility string
-
-// LoginJSONRequestBody defines body for Login for application/json ContentType.
-type LoginJSONRequestBody LoginJSONBody
-
-// RefreshTokenJSONRequestBody defines body for RefreshToken for application/json ContentType.
-type RefreshTokenJSONRequestBody RefreshTokenJSONBody
-
-// RegisterJSONRequestBody defines body for Register for application/json ContentType.
-type RegisterJSONRequestBody RegisterJSONBody
-
-// UpdateActivityJSONRequestBody defines body for UpdateActivity for application/json ContentType.
-type UpdateActivityJSONRequestBody UpdateActivityJSONBody
-
-// UpdateSavedFilterJSONRequestBody defines body for UpdateSavedFilter for application/json ContentType.
-type UpdateSavedFilterJSONRequestBody UpdateSavedFilterJSONBody
-
-// CreateTeamJSONRequestBody defines body for CreateTeam for application/json ContentType.
-type CreateTeamJSONRequestBody CreateTeamJSONBody
-
-// UpdateTeamJSONRequestBody defines body for UpdateTeam for application/json ContentType.
-type UpdateTeamJSONRequestBody UpdateTeamJSONBody
-
-// CreateActivityJSONRequestBody defines body for CreateActivity for application/json ContentType.
-type CreateActivityJSONRequestBody CreateActivityJSONBody
-
-// CreateInviteJSONRequestBody defines body for CreateInvite for application/json ContentType.
-type CreateInviteJSONRequestBody CreateInviteJSONBody
-
-// CreateSavedFilterJSONRequestBody defines body for CreateSavedFilter for application/json ContentType.
-type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
-
-// CreateTimelineJSONRequestBody defines body for CreateTimeline for application/json ContentType.
-type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
 ## File: packages/api/internal/api/auth_handler.go
@@ -23022,620 +23022,6 @@ export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props
 }
 ````
 
-## File: packages/web/src/components/TimelineModal.tsx
-````typescript
-/**
- * TimelineModal — create / edit a timeline.
- *
- * Modes:
- *  - "new":  name, identity, date range, description, notes; template picker seeds statuses
- *  - "edit": same fields; plus Statuses tab (add/edit/delete live statuses)
- */
-
-import { useState } from 'react'
-import { X, Plus, Trash2, Check, Archive, RotateCcw } from 'lucide-react'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import {
-  useCreateTimeline,
-  useUpdateTimeline,
-  useDeleteTimeline,
-  useArchiveTimeline,
-} from '@/hooks/useTeamActivities'
-import {
-  useTimelineStatuses,
-  useCreateTimelineStatus,
-  useUpdateTimelineStatus,
-  useDeleteTimelineStatus,
-} from '@/hooks/useStatusTemplates'
-import { useStatusTemplates } from '@/hooks/useStatusTemplates'
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-import type { components } from '@draba/shared'
-
-type Timeline = components['schemas']['Timeline']
-type Status = components['schemas']['Status']
-
-// ── Prop types ────────────────────────────────────────────────────────────────
-
-interface Props {
-  mode: 'new' | 'edit'
-  teamId: string
-  timeline?: Timeline
-  canAdmin?: boolean
-  onClose: () => void
-  onCreated?: (timeline: Timeline) => void
-  onUnarchive?: (timelineId: string) => void
-}
-
-type Tab = 'settings' | 'statuses'
-
-// ── Inline styles ─────────────────────────────────────────────────────────────
-
-const OVERLAY: React.CSSProperties = {
-  position: 'fixed', inset: 0,
-  background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(2px)',
-  zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
-}
-
-const PANEL: React.CSSProperties = {
-  background: 'var(--card)', border: '1px solid var(--border)',
-  borderRadius: 12, width: 560, maxWidth: '95vw',
-  maxHeight: '90vh', display: 'flex', flexDirection: 'column',
-  boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-}
-
-const HEADER: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: 12,
-  padding: '18px 20px 14px', borderBottom: '1px solid var(--border)',
-  flexShrink: 0,
-}
-
-const TAB_BAR: React.CSSProperties = {
-  display: 'flex', gap: 2, padding: '0 20px',
-  borderBottom: '1px solid var(--border)', flexShrink: 0,
-}
-
-const CONTENT: React.CSSProperties = {
-  flex: 1, overflowY: 'auto', padding: '20px',
-}
-
-const FOOTER: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-  padding: '14px 20px', borderTop: '1px solid var(--border)', flexShrink: 0,
-}
-
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)',
-  textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6,
-}
-
-const INPUT: React.CSSProperties = {
-  width: '100%', boxSizing: 'border-box',
-  fontSize: 13, color: 'var(--foreground)',
-  border: '1px solid var(--border)', borderRadius: 6,
-  padding: '7px 10px', background: 'var(--background)',
-  outline: 'none',
-}
-
-const TEXTAREA: React.CSSProperties = {
-  ...INPUT,
-  resize: 'vertical' as const,
-  minHeight: 68,
-  fontFamily: 'var(--font-sans)',
-  lineHeight: 1.5,
-}
-
-const archiveBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
-  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
-  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-}
-
-const restoreBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
-  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
-  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-}
-
-function tabStyle(active: boolean): React.CSSProperties {
-  return {
-    padding: '8px 14px', fontSize: 12, fontWeight: 500,
-    border: 'none', background: 'none', cursor: 'pointer',
-    borderBottom: active ? '2px solid var(--primary)' : '2px solid transparent',
-    color: active ? 'var(--foreground)' : 'var(--muted-foreground)',
-    fontFamily: 'var(--font-sans)',
-  }
-}
-
-// ── Status row (edit mode) ────────────────────────────────────────────────────
-
-interface StatusRowProps {
-  status: Status
-  canDelete: boolean
-  teamId: string
-  timelineId: string
-  allStatuses: Status[]
-}
-
-function StatusRow({ status, canDelete, teamId, timelineId, allStatuses }: StatusRowProps) {
-  const [editing, setEditing] = useState(false)
-  const [name, setName] = useState(status.name)
-  const [identity, setIdentity] = useState<Identity>({ color: status.color, icon: status.icon ?? '' })
-  const [isClosed, setIsClosed] = useState(status.isClosed)
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [replacementId, setReplacementId] = useState('')
-  const update = useUpdateTimelineStatus(teamId, timelineId)
-  const del = useDeleteTimelineStatus(teamId, timelineId)
-
-  function save() {
-    update.mutate(
-      { id: status.id, name: name.trim() || status.name, color: identity.color, icon: identity.icon || null, isClosed },
-      { onSuccess: () => setEditing(false) },
-    )
-  }
-
-  function doDelete() {
-    del.mutate(
-      { id: status.id, replacementStatusId: replacementId || undefined },
-      { onSuccess: () => setShowDeleteConfirm(false) },
-    )
-  }
-
-  if (showDeleteConfirm) {
-    const others = allStatuses.filter(s => s.id !== status.id)
-    return (
-      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: 12, marginBottom: 6 }}>
-        <div style={{ fontSize: 12, color: 'var(--foreground)', marginBottom: 8 }}>
-          Delete <strong>{status.name}</strong>? Activities using this status will be reassigned.
-        </div>
-        {others.length > 0 && (
-          <div style={{ marginBottom: 8 }}>
-            <label style={{ ...FIELD_LABEL }}>Move activities to</label>
-            <select
-              value={replacementId}
-              onChange={e => setReplacementId(e.target.value)}
-              style={{ ...INPUT, fontSize: 12 }}
-            >
-              <option value="">— No status —</option>
-              {others.map(s => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
-          </div>
-        )}
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => setShowDeleteConfirm(false)} style={{ fontSize: 12, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 5, background: 'none', cursor: 'pointer', color: 'var(--foreground)' }}>Cancel</button>
-          <button onClick={doDelete} style={{ fontSize: 12, padding: '4px 10px', border: 'none', borderRadius: 5, background: 'var(--destructive)', color: 'white', cursor: 'pointer' }}>Delete</button>
-        </div>
-      </div>
-    )
-  }
-
-  if (editing) {
-    return (
-      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginBottom: 4, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <IdentityWidget
-            identity={{ color: identity.color, icon: identity.icon ?? '' }}
-            name={name || status.name}
-            onChange={setIdentity}
-            shape="square"
-          />
-          <input
-            autoFocus
-            value={name}
-            onChange={e => setName(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
-            style={{ ...INPUT, flex: 1 }}
-          />
-          <button onClick={save} disabled={update.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4 }}>
-            <Check width={14} height={14} />
-          </button>
-          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-            <X width={14} height={14} />
-          </button>
-        </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
-          <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
-          Closed status (marks this status as completed/done)
-        </label>
-      </div>
-    )
-  }
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
-      <Badge identity={{ color: status.color, icon: status.icon ?? '__none__' }} name={status.name} shape="square" size={18} />
-      <span style={{ fontSize: 13, flex: 1, cursor: 'pointer', color: 'var(--foreground)' }} onClick={() => setEditing(true)}>
-        {status.name}
-      </span>
-      {status.isClosed && (
-        <span style={{ fontSize: 10, padding: '1px 6px', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--muted-foreground)' }}>closed</span>
-      )}
-      <button onClick={() => setEditing(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, opacity: 0.5 }}>
-        ✎
-      </button>
-      {canDelete && (
-        <button onClick={() => setShowDeleteConfirm(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-          <Trash2 width={13} height={13} />
-        </button>
-      )}
-    </div>
-  )
-}
-
-// ── Add-status form ───────────────────────────────────────────────────────────
-
-interface AddStatusFormProps {
-  teamId: string
-  timelineId: string
-  primaryColor: string
-}
-
-function AddStatusForm({ teamId, timelineId, primaryColor }: AddStatusFormProps) {
-  const [expanding, setExpanding] = useState(false)
-  const [name, setName] = useState('')
-  const [identity, setIdentity] = useState<Identity>({ color: primaryColor, icon: '' })
-  const [isClosed, setIsClosed] = useState(false)
-  const createStatus = useCreateTimelineStatus(teamId, timelineId)
-
-  function handleAdd() {
-    if (!name.trim()) return
-    createStatus.mutate(
-      { name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
-      {
-        onSuccess: () => {
-          setName('')
-          setIdentity({ color: primaryColor, icon: '' })
-          setIsClosed(false)
-          setExpanding(false)
-        },
-      },
-    )
-  }
-
-  function handleCancel() {
-    setExpanding(false)
-    setName('')
-    setIdentity({ color: primaryColor, icon: '' })
-    setIsClosed(false)
-  }
-
-  if (!expanding) {
-    return (
-      <button
-        onClick={() => setExpanding(true)}
-        style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', fontSize: 12, padding: '4px 2px', fontFamily: 'var(--font-sans)' }}
-      >
-        <Plus width={13} height={13} /> Add status
-      </button>
-    )
-  }
-
-  return (
-    <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <IdentityWidget identity={identity} name={name || 'New status'} shape="square" onChange={setIdentity} />
-        <input
-          autoFocus
-          value={name}
-          onChange={e => setName(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') handleCancel() }}
-          placeholder="Status name…"
-          style={{ ...INPUT, flex: 1 }}
-        />
-        <button onClick={handleAdd} disabled={!name.trim() || createStatus.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4, display: 'flex' }}>
-          <Check width={14} height={14} />
-        </button>
-        <button onClick={handleCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-          <X width={14} height={14} />
-        </button>
-      </div>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
-        <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
-        Closed status (marks this status as completed/done)
-      </label>
-    </div>
-  )
-}
-
-// ── Main modal ────────────────────────────────────────────────────────────────
-
-export default function TimelineModal({ mode, teamId, timeline, canAdmin = false, onClose, onCreated, onUnarchive }: Props) {
-  const [activeTab, setActiveTab] = useState<Tab>('settings')
-  const [name, setName] = useState(timeline?.name ?? '')
-  const [description, setDescription] = useState(timeline?.description ?? '')
-  const [notes, setNotes] = useState(timeline?.notes ?? '')
-  const [startDate, setStartDate] = useState(timeline?.startDate ?? '')
-  const [endDate, setEndDate] = useState(timeline?.endDate ?? '')
-  const [identity, setIdentity] = useState<Identity>({ color: timeline?.color ?? '#1A97A2', icon: timeline?.icon ?? '' })
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false)
-
-  const createTimeline = useCreateTimeline(teamId)
-  const updateTimeline = useUpdateTimeline(teamId)
-  const deleteTimeline = useDeleteTimeline(teamId)
-  const archiveTimeline = useArchiveTimeline(teamId)
-
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timeline?.id ?? '')
-  const { data: templates = [] } = useStatusTemplates(teamId)
-
-  const timelineColor = resolveColorHex(identity.color) ?? identity.color ?? '#1A97A2'
-
-  function handleSave() {
-    if (!name.trim()) { setError('Name is required'); return }
-    if (!startDate || !endDate) { setError('Start and end dates are required'); return }
-    if (endDate < startDate) { setError('End date must not be before start date'); return }
-    setSaving(true)
-    setError('')
-
-    if (mode === 'new') {
-      createTimeline.mutate(
-        {
-          name: name.trim(),
-          startDate,
-          endDate,
-          color: identity.color || null,
-          icon: identity.icon || null,
-          description: description.trim() || null,
-          notes: notes.trim() || null,
-          templateId: selectedTemplateId || null,
-        },
-        {
-          onSuccess: (tl) => { setSaving(false); onCreated?.(tl); onClose() },
-          onError: () => { setSaving(false); setError('Failed to create timeline') },
-        },
-      )
-    } else if (timeline) {
-      updateTimeline.mutate(
-        {
-          timelineId: timeline.id,
-          patch: {
-            name: name.trim(),
-            startDate,
-            endDate,
-            color: identity.color || null,
-            icon: identity.icon || null,
-            description: description.trim() || null,
-            notes: notes.trim() || null,
-          },
-        },
-        {
-          onSuccess: () => { setSaving(false); onClose() },
-          onError: () => { setSaving(false); setError('Failed to save timeline') },
-        },
-      )
-    }
-  }
-
-  return (
-    <div style={OVERLAY}>
-      <div style={PANEL} onClick={e => e.stopPropagation()}>
-        {/* Header — identity widget + editable name */}
-        <div style={HEADER}>
-          <IdentityWidget
-            identity={identity}
-            name={name || (mode === 'new' ? 'New timeline' : timeline?.name ?? '')}
-            onChange={setIdentity}
-            shape="square"
-          />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4 }}>
-              {mode === 'new' ? 'NEW TIMELINE' : 'EDIT TIMELINE'}
-            </div>
-            <InlineEditableTitle
-              value={name}
-              onChange={v => { setName(v); setError('') }}
-              placeholder="Timeline name"
-              autoFocus={mode === 'new'}
-            />
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-            <X width={18} height={18} />
-          </button>
-        </div>
-
-        {/* Tab bar — Statuses tab only in edit mode */}
-        <div style={TAB_BAR}>
-          <button style={tabStyle(activeTab === 'settings')} onClick={() => setActiveTab('settings')}>Settings</button>
-          {mode === 'edit' && (
-            <button style={tabStyle(activeTab === 'statuses')} onClick={() => setActiveTab('statuses')}>
-              Statuses {statuses.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({statuses.length})</span>}
-            </button>
-          )}
-        </div>
-
-        {/* Content */}
-        <div style={CONTENT}>
-          {/* Archive confirmation — replaces tab content */}
-          {showArchiveConfirm && timeline ? (
-            <ConfirmDialog
-              variant="amber"
-              icon={<Archive size={22} color="#F59E0B" />}
-              title="Archive timeline?"
-              body={`${timeline.name} will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.`}
-              confirmLabel="Archive timeline"
-              busy={archiveTimeline.isPending}
-              onCancel={() => setShowArchiveConfirm(false)}
-              onConfirm={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
-            />
-          ) : showDeleteConfirm && timeline ? (
-            <ConfirmDialog
-              variant="red"
-              icon={<Trash2 size={22} color="#EF4444" />}
-              title="Delete timeline?"
-              body={`This permanently deletes ${timeline.name} and all its statuses. Activities are not deleted — they remain in the team.`}
-              confirmLabel="Delete timeline"
-              busy={deleteTimeline.isPending}
-              onCancel={() => setShowDeleteConfirm(false)}
-              onConfirm={() => deleteTimeline.mutate(timeline.id, { onSuccess: onClose })}
-            />
-          ) : activeTab === 'settings' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-              {/* Date range */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <div>
-                  <div style={FIELD_LABEL}>Start date *</div>
-                  <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={INPUT} />
-                </div>
-                <div>
-                  <div style={FIELD_LABEL}>End date *</div>
-                  <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={INPUT} />
-                </div>
-              </div>
-
-              {/* Description */}
-              <div>
-                <div style={FIELD_LABEL}>Description</div>
-                <textarea
-                  value={description}
-                  onChange={e => setDescription(e.target.value)}
-                  placeholder="Short description of this timeline's purpose…"
-                  style={TEXTAREA}
-                />
-              </div>
-
-              {/* Notes */}
-              <div>
-                <div style={FIELD_LABEL}>Notes</div>
-                <textarea
-                  value={notes}
-                  onChange={e => setNotes(e.target.value)}
-                  placeholder="Internal notes, links, references…"
-                  style={TEXTAREA}
-                />
-              </div>
-
-              {/* Template picker (create mode only) */}
-              {mode === 'new' && templates.length > 0 && (
-                <div>
-                  <div style={FIELD_LABEL}>Status template</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {templates.map(tpl => {
-                      const isSelected = selectedTemplateId === tpl.id || (!selectedTemplateId && tpl === templates[0])
-                      return (
-                        <div
-                          key={tpl.id}
-                          onClick={() => setSelectedTemplateId(tpl.id)}
-                          style={{
-                            border: `1px solid ${isSelected ? timelineColor + '88' : 'var(--border)'}`,
-                            borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
-                            background: isSelected ? timelineColor + '11' : 'var(--muted)',
-                            transition: 'all 0.1s',
-                          }}
-                        >
-                          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--foreground)' }}>{tpl.name}</div>
-                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                            {tpl.items.map(item => (
-                              <span key={item.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: item.color + '22', border: `1px solid ${item.color}66`, color: item.color }}>
-                                {item.name}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Archived banner */}
-              {mode === 'edit' && timeline?.archivedAt && (
-                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 6, padding: '8px 12px' }}>
-                  This timeline is archived. It is hidden from the active list.
-                </div>
-              )}
-
-              {error && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, padding: '8px 12px' }}>
-                  {error}
-                </div>
-              )}
-            </div>
-          ) : (
-            activeTab === 'statuses' && timeline && (
-              <div>
-                <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
-                  Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
-                </div>
-
-                <div style={{ marginBottom: 4 }}>
-                  {statuses.map(s => (
-                    <StatusRow
-                      key={s.id}
-                      status={s}
-                      canDelete={statuses.length > 1}
-                      teamId={teamId}
-                      timelineId={timeline.id}
-                      allStatuses={statuses}
-                    />
-                  ))}
-                </div>
-
-                <AddStatusForm teamId={teamId} timelineId={timeline.id} primaryColor={timelineColor} />
-              </div>
-            )
-          )}
-        </div>
-
-        {/* Footer — hidden when a confirm dialog is showing */}
-        {!showArchiveConfirm && !showDeleteConfirm && (
-          <div style={FOOTER}>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {mode === 'edit' && timeline && canAdmin && !timeline.archivedAt && (
-                <button onClick={() => setShowArchiveConfirm(true)} style={archiveBtnStyle}>
-                  <Archive size={13} />
-                  Archive
-                </button>
-              )}
-              {mode === 'edit' && timeline && canAdmin && timeline.archivedAt && onUnarchive && (
-                <button onClick={() => onUnarchive(timeline.id)} style={restoreBtnStyle}>
-                  <RotateCcw size={13} />
-                  Restore
-                </button>
-              )}
-              {mode === 'edit' && timeline && canAdmin && (
-                <button
-                  onClick={() => setShowDeleteConfirm(true)}
-                  style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                >
-                  Delete
-                </button>
-              )}
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                onClick={onClose}
-                style={{ fontSize: 13, padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', color: 'var(--muted-foreground)' }}
-              >
-                Cancel
-              </button>
-              {activeTab === 'settings' && (
-                <button
-                  onClick={handleSave}
-                  disabled={saving}
-                  style={{ fontSize: 13, fontWeight: 600, padding: '8px 18px', border: 'none', borderRadius: 7, background: timelineColor, color: 'white', cursor: saving ? 'wait' : 'pointer', fontFamily: 'var(--font-sans)' }}
-                >
-                  {saving ? 'Saving…' : mode === 'new' ? 'Create timeline' : 'Save changes'}
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/hooks/useSettings.ts
 ````typescript
 /**
@@ -24248,6 +23634,152 @@ export default function App() {
       </BrowserRouter>
     </QueryClientProvider>
   )
+}
+````
+
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 ````
 
@@ -25121,294 +24653,615 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
-## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
+## File: packages/web/src/components/TimelineModal.tsx
 ````typescript
 /**
- * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
+ * TimelineModal — create / edit a timeline.
  *
- * Defaults come from the drag selection: start/end date and the lane member.
- * Submits via POST /timelines/:id/activities.
+ * Modes:
+ *  - "new":  name, identity, date range, description, notes; template picker seeds statuses
+ *  - "edit": same fields; plus Statuses tab (add/edit/delete live statuses)
  */
 
-import { useState, useEffect } from 'react'
-import { X, ArrowRight, Loader2 } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
+import { useState } from 'react'
+import { X, Plus, Trash2, Check, Archive, RotateCcw } from 'lucide-react'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
 import type { Identity } from '@/components/identity/identity-constants'
-import { useCreateActivity } from '@/hooks/useTeamActivities'
-import type { Member } from '@/types'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import {
+  useCreateTimeline,
+  useUpdateTimeline,
+  useDeleteTimeline,
+  useArchiveTimeline,
+} from '@/hooks/useTeamActivities'
+import {
+  useTimelineStatuses,
+  useCreateTimelineStatus,
+  useUpdateTimelineStatus,
+  useDeleteTimelineStatus,
+} from '@/hooks/useStatusTemplates'
+import { useStatusTemplates } from '@/hooks/useStatusTemplates'
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import type { components } from '@draba/shared'
 
-const PANEL_WIDTH = 300
+type Timeline = components['schemas']['Timeline']
+type Status = components['schemas']['Status']
+
+// ── Prop types ────────────────────────────────────────────────────────────────
 
 interface Props {
-  open: boolean
+  mode: 'new' | 'edit'
+  teamId: string
+  timeline?: Timeline
+  canAdmin?: boolean
+  onClose: () => void
+  onCreated?: (timeline: Timeline) => void
+  onUnarchive?: (timelineId: string) => void
+}
+
+type Tab = 'settings' | 'statuses'
+
+// ── Inline styles ─────────────────────────────────────────────────────────────
+
+const OVERLAY: React.CSSProperties = {
+  position: 'fixed', inset: 0,
+  background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(2px)',
+  zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
+}
+
+const PANEL: React.CSSProperties = {
+  background: 'var(--card)', border: '1px solid var(--border)',
+  borderRadius: 12, width: 560, maxWidth: '95vw',
+  maxHeight: '90vh', display: 'flex', flexDirection: 'column',
+  boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+}
+
+const HEADER: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 12,
+  padding: '18px 20px 14px', borderBottom: '1px solid var(--border)',
+  flexShrink: 0,
+}
+
+const TAB_BAR: React.CSSProperties = {
+  display: 'flex', gap: 2, padding: '0 20px',
+  borderBottom: '1px solid var(--border)', flexShrink: 0,
+}
+
+const CONTENT: React.CSSProperties = {
+  flex: 1, overflowY: 'auto', padding: '20px',
+}
+
+const FOOTER: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+  padding: '14px 20px', borderTop: '1px solid var(--border)', flexShrink: 0,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)',
+  textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6,
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%', boxSizing: 'border-box',
+  fontSize: 13, color: 'var(--foreground)',
+  border: '1px solid var(--border)', borderRadius: 6,
+  padding: '7px 10px', background: 'var(--background)',
+  outline: 'none',
+}
+
+const TEXTAREA: React.CSSProperties = {
+  ...INPUT,
+  resize: 'vertical' as const,
+  minHeight: 68,
+  fontFamily: 'var(--font-sans)',
+  lineHeight: 1.5,
+}
+
+const archiveBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
+  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
+  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+}
+
+const restoreBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
+  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
+  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+}
+
+function tabStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: '8px 14px', fontSize: 12, fontWeight: 500,
+    border: 'none', background: 'none', cursor: 'pointer',
+    borderBottom: active ? '2px solid var(--primary)' : '2px solid transparent',
+    color: active ? 'var(--foreground)' : 'var(--muted-foreground)',
+    fontFamily: 'var(--font-sans)',
+  }
+}
+
+// ── Status row (edit mode) ────────────────────────────────────────────────────
+
+interface StatusRowProps {
+  status: Status
+  canDelete: boolean
   teamId: string
   timelineId: string
-  members: Member[]
-  defaultStart: string
-  defaultEnd: string
-  defaultMemberId?: string | null
-  onClose: () => void
+  allStatuses: Status[]
 }
 
-const LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 4,
-}
+function StatusRow({ status, canDelete, teamId, timelineId, allStatuses }: StatusRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(status.name)
+  const [identity, setIdentity] = useState<Identity>({ color: status.color, icon: status.icon ?? '' })
+  const [isClosed, setIsClosed] = useState(status.isClosed)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [replacementId, setReplacementId] = useState('')
+  const update = useUpdateTimelineStatus(teamId, timelineId)
+  const del = useDeleteTimelineStatus(teamId, timelineId)
 
-export default function ActivityCreatePanel({
-  open,
-  teamId,
-  timelineId,
-  members,
-  defaultStart,
-  defaultEnd,
-  defaultMemberId,
-  onClose,
-}: Props) {
-  const createMutation = useCreateActivity(teamId, timelineId)
-
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [startDate, setStartDate] = useState(defaultStart)
-  const [endDate, setEndDate] = useState(defaultEnd)
-  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
-  const [assignedIds, setAssignedIds] = useState<string[]>(
-    defaultMemberId ? [defaultMemberId] : [],
-  )
-
-  // Reset all fields to defaults each time the panel opens so re-opening
-  // the panel always shows a blank form rather than the previous session's data.
-  useEffect(() => {
-    if (!open) return
-    setTitle('')
-    setDescription('')
-    setStartDate(defaultStart)
-    setEndDate(defaultEnd)
-    setIdentity({ color: '#288C9B', icon: '__none__' })
-    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
-  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const creating = createMutation.isPending
-  const titleTrimmed = title.trim()
-
-  function toggleAssignee(memberId: string) {
-    setAssignedIds(prev =>
-      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
+  function save() {
+    update.mutate(
+      { id: status.id, name: name.trim() || status.name, color: identity.color, icon: identity.icon || null, isClosed },
+      { onSuccess: () => setEditing(false) },
     )
   }
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!titleTrimmed) return
-    createMutation.mutate(
-      {
-        title: titleTrimmed,
-        startAt: `${startDate}T00:00:00Z`,
-        endAt: `${endDate}T00:00:00Z`,
-        description: description.trim() || null,
-        color: identity.color,
-        icon: identity.icon,
-        assignedMemberIds: assignedIds,
-      },
-      { onSuccess: onClose },
+  function doDelete() {
+    del.mutate(
+      { id: status.id, replacementStatusId: replacementId || undefined },
+      { onSuccess: () => setShowDeleteConfirm(false) },
+    )
+  }
+
+  if (showDeleteConfirm) {
+    const others = allStatuses.filter(s => s.id !== status.id)
+    return (
+      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: 12, marginBottom: 6 }}>
+        <div style={{ fontSize: 12, color: 'var(--foreground)', marginBottom: 8 }}>
+          Delete <strong>{status.name}</strong>? Activities using this status will be reassigned.
+        </div>
+        {others.length > 0 && (
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ ...FIELD_LABEL }}>Move activities to</label>
+            <select
+              value={replacementId}
+              onChange={e => setReplacementId(e.target.value)}
+              style={{ ...INPUT, fontSize: 12 }}
+            >
+              <option value="">— No status —</option>
+              {others.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setShowDeleteConfirm(false)} style={{ fontSize: 12, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 5, background: 'none', cursor: 'pointer', color: 'var(--foreground)' }}>Cancel</button>
+          <button onClick={doDelete} style={{ fontSize: 12, padding: '4px 10px', border: 'none', borderRadius: 5, background: 'var(--destructive)', color: 'white', cursor: 'pointer' }}>Delete</button>
+        </div>
+      </div>
+    )
+  }
+
+  if (editing) {
+    return (
+      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginBottom: 4, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <IdentityWidget
+            identity={{ color: identity.color, icon: identity.icon ?? '' }}
+            name={name || status.name}
+            onChange={setIdentity}
+            shape="square"
+          />
+          <input
+            autoFocus
+            value={name}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
+            style={{ ...INPUT, flex: 1 }}
+          />
+          <button onClick={save} disabled={update.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4 }}>
+            <Check width={14} height={14} />
+          </button>
+          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+            <X width={14} height={14} />
+          </button>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+          <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
+          Closed status (marks this status as completed/done)
+        </label>
+      </div>
     )
   }
 
   return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '0 12px',
-          height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)',
-          flexShrink: 0,
-        }}
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
+      <Badge identity={{ color: status.color, icon: status.icon ?? '__none__' }} name={status.name} shape="square" size={18} />
+      <span style={{ fontSize: 13, flex: 1, cursor: 'pointer', color: 'var(--foreground)' }} onClick={() => setEditing(true)}>
+        {status.name}
+      </span>
+      {status.isClosed && (
+        <span style={{ fontSize: 10, padding: '1px 6px', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--muted-foreground)' }}>closed</span>
+      )}
+      <button onClick={() => setEditing(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, opacity: 0.5 }}>
+        ✎
+      </button>
+      {canDelete && (
+        <button onClick={() => setShowDeleteConfirm(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+          <Trash2 width={13} height={13} />
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Add-status form ───────────────────────────────────────────────────────────
+
+interface AddStatusFormProps {
+  teamId: string
+  timelineId: string
+  primaryColor: string
+}
+
+function AddStatusForm({ teamId, timelineId, primaryColor }: AddStatusFormProps) {
+  const [expanding, setExpanding] = useState(false)
+  const [name, setName] = useState('')
+  const [identity, setIdentity] = useState<Identity>({ color: primaryColor, icon: '' })
+  const [isClosed, setIsClosed] = useState(false)
+  const createStatus = useCreateTimelineStatus(teamId, timelineId)
+
+  function handleAdd() {
+    if (!name.trim()) return
+    createStatus.mutate(
+      { name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
+      {
+        onSuccess: () => {
+          setName('')
+          setIdentity({ color: primaryColor, icon: '' })
+          setIsClosed(false)
+          setExpanding(false)
+        },
+      },
+    )
+  }
+
+  function handleCancel() {
+    setExpanding(false)
+    setName('')
+    setIdentity({ color: primaryColor, icon: '' })
+    setIsClosed(false)
+  }
+
+  if (!expanding) {
+    return (
+      <button
+        onClick={() => setExpanding(true)}
+        style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', fontSize: 12, padding: '4px 2px', fontFamily: 'var(--font-sans)' }}
       >
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
-        <button
-          onClick={onClose}
-          style={{
-            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: 'pointer', color: 'var(--muted-foreground)',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-        >
-          <X size={14} strokeWidth={2} />
+        <Plus width={13} height={13} /> Add status
+      </button>
+    )
+  }
+
+  return (
+    <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <IdentityWidget identity={identity} name={name || 'New status'} shape="square" onChange={setIdentity} />
+        <input
+          autoFocus
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') handleCancel() }}
+          placeholder="Status name…"
+          style={{ ...INPUT, flex: 1 }}
+        />
+        <button onClick={handleAdd} disabled={!name.trim() || createStatus.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4, display: 'flex' }}>
+          <Check width={14} height={14} />
+        </button>
+        <button onClick={handleCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+          <X width={14} height={14} />
         </button>
       </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+        <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
+        Closed status (marks this status as completed/done)
+      </label>
+    </div>
+  )
+}
 
-      {/* Form */}
-      <form onSubmit={handleSubmit} style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+// ── Main modal ────────────────────────────────────────────────────────────────
 
-        {/* Title */}
-        <div>
-          <div style={LABEL}>Title <span style={{ color: 'var(--destructive)' }}>*</span></div>
-          <input
-            autoFocus
-            value={title}
-            onChange={e => setTitle(e.target.value)}
-            placeholder="Activity title…"
-            style={{
-              width: '100%', boxSizing: 'border-box',
-              fontSize: 13, fontWeight: 600, color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-              padding: '6px 8px', outline: 'none', background: 'var(--background)',
-              fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-          />
-        </div>
+export default function TimelineModal({ mode, teamId, timeline, canAdmin = false, onClose, onCreated, onUnarchive }: Props) {
+  const [activeTab, setActiveTab] = useState<Tab>('settings')
+  const [name, setName] = useState(timeline?.name ?? '')
+  const [description, setDescription] = useState(timeline?.description ?? '')
+  const [notes, setNotes] = useState(timeline?.notes ?? '')
+  const [startDate, setStartDate] = useState(timeline?.startDate ?? '')
+  const [endDate, setEndDate] = useState(timeline?.endDate ?? '')
+  const [identity, setIdentity] = useState<Identity>({ color: timeline?.color ?? '#1A97A2', icon: timeline?.icon ?? '' })
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false)
 
-        {/* Description */}
-        <div>
-          <div style={LABEL}>Description</div>
-          <textarea
-            value={description}
-            rows={3}
-            onChange={e => setDescription(e.target.value)}
-            placeholder="Optional description…"
-            style={{
-              width: '100%', boxSizing: 'border-box',
-              fontSize: 12, color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-              padding: '6px 8px', outline: 'none', background: 'var(--background)',
-              resize: 'vertical', lineHeight: 1.5, fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-          />
-        </div>
+  const createTimeline = useCreateTimeline(teamId)
+  const updateTimeline = useUpdateTimeline(teamId)
+  const deleteTimeline = useDeleteTimeline(teamId)
+  const archiveTimeline = useArchiveTimeline(teamId)
 
-        {/* Date range */}
-        <div>
-          <div style={LABEL}>Date range</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type="date"
-              value={startDate}
-              onChange={e => {
-                setStartDate(e.target.value)
-                if (e.target.value > endDate) setEndDate(e.target.value)
-              }}
-              style={{
-                flex: 1, fontSize: 12, color: 'var(--foreground)',
-                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-                padding: '6px 8px', outline: 'none', background: 'var(--background)',
-                fontFamily: 'var(--font-sans)', cursor: 'pointer',
-              }}
-            />
-            <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-            <input
-              type="date"
-              value={endDate}
-              min={startDate}
-              onChange={e => setEndDate(e.target.value)}
-              style={{
-                flex: 1, fontSize: 12, color: 'var(--foreground)',
-                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-                padding: '6px 8px', outline: 'none', background: 'var(--background)',
-                fontFamily: 'var(--font-sans)', cursor: 'pointer',
-              }}
-            />
-          </div>
-        </div>
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timeline?.id ?? '')
+  const { data: templates = [] } = useStatusTemplates(teamId)
 
-        {/* Identity (color + icon) */}
-        <div>
-          <div style={LABEL}>Identity</div>
+  const timelineColor = resolveColorHex(identity.color) ?? identity.color ?? '#1A97A2'
+
+  function handleSave() {
+    if (!name.trim()) { setError('Name is required'); return }
+    if (!startDate || !endDate) { setError('Start and end dates are required'); return }
+    if (endDate < startDate) { setError('End date must not be before start date'); return }
+    setSaving(true)
+    setError('')
+
+    if (mode === 'new') {
+      createTimeline.mutate(
+        {
+          name: name.trim(),
+          startDate,
+          endDate,
+          color: identity.color || null,
+          icon: identity.icon || null,
+          description: description.trim() || null,
+          notes: notes.trim() || null,
+          templateId: selectedTemplateId || null,
+        },
+        {
+          onSuccess: (tl) => { setSaving(false); onCreated?.(tl); onClose() },
+          onError: () => { setSaving(false); setError('Failed to create timeline') },
+        },
+      )
+    } else if (timeline) {
+      updateTimeline.mutate(
+        {
+          timelineId: timeline.id,
+          patch: {
+            name: name.trim(),
+            startDate,
+            endDate,
+            color: identity.color || null,
+            icon: identity.icon || null,
+            description: description.trim() || null,
+            notes: notes.trim() || null,
+          },
+        },
+        {
+          onSuccess: () => { setSaving(false); onClose() },
+          onError: () => { setSaving(false); setError('Failed to save timeline') },
+        },
+      )
+    }
+  }
+
+  return (
+    <div style={OVERLAY}>
+      <div style={PANEL} onClick={e => e.stopPropagation()}>
+        {/* Header — identity widget + editable name */}
+        <div style={HEADER}>
           <IdentityWidget
             identity={identity}
-            name={title || 'New Activity'}
-            shape="square"
+            name={name || (mode === 'new' ? 'New timeline' : timeline?.name ?? '')}
             onChange={setIdentity}
+            shape="square"
           />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>
+              {mode === 'new' ? 'New Timeline' : 'Edit Timeline'}
+            </div>
+            <InlineEditableTitle
+              value={name}
+              onChange={v => { setName(v); setError('') }}
+              placeholder="Timeline name"
+              autoFocus={mode === 'new'}
+            />
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+            <X width={18} height={18} />
+          </button>
         </div>
 
-        {/* Assignees */}
-        {members.length > 0 && (
-          <div>
-            <div style={LABEL}>Assignees</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {members.map(m => {
-                const assigned = assignedIds.includes(m.id)
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => toggleAssignee(m.id)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '5px 8px',
-                      border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
-                      borderRadius: 'var(--radius-md)',
-                      background: assigned ? `${m.color}18` : 'var(--background)',
-                      cursor: 'pointer', textAlign: 'left',
-                      transition: 'background 0.1s, border-color 0.1s',
-                    }}
-                  >
-                    <MemberAvatar member={m} size={18} />
-                    <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                    {assigned && (
-                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                    )}
-                  </button>
-                )
-              })}
+        {/* Tab bar — Statuses tab only in edit mode */}
+        <div style={TAB_BAR}>
+          <button style={tabStyle(activeTab === 'settings')} onClick={() => setActiveTab('settings')}>Settings</button>
+          {mode === 'edit' && (
+            <button style={tabStyle(activeTab === 'statuses')} onClick={() => setActiveTab('statuses')}>
+              Statuses {statuses.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({statuses.length})</span>}
+            </button>
+          )}
+        </div>
+
+        {/* Content */}
+        <div style={CONTENT}>
+          {/* Archive confirmation — replaces tab content */}
+          {showArchiveConfirm && timeline ? (
+            <ConfirmDialog
+              variant="amber"
+              icon={<Archive size={22} color="#F59E0B" />}
+              title="Archive timeline?"
+              body={`${timeline.name} will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.`}
+              confirmLabel="Archive"
+              busy={archiveTimeline.isPending}
+              onCancel={() => setShowArchiveConfirm(false)}
+              onConfirm={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
+            />
+          ) : showDeleteConfirm && timeline ? (
+            <ConfirmDialog
+              variant="red"
+              icon={<Trash2 size={22} color="#EF4444" />}
+              title="Delete timeline?"
+              body={`This permanently deletes ${timeline.name} and all its statuses. Activities are not deleted — they remain in the team.`}
+              confirmLabel="Delete timeline"
+              busy={deleteTimeline.isPending}
+              onCancel={() => setShowDeleteConfirm(false)}
+              onConfirm={() => deleteTimeline.mutate(timeline.id, { onSuccess: onClose })}
+            />
+          ) : activeTab === 'settings' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {/* Date range */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div>
+                  <div style={FIELD_LABEL}>Start date *</div>
+                  <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={INPUT} />
+                </div>
+                <div>
+                  <div style={FIELD_LABEL}>End date *</div>
+                  <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={INPUT} />
+                </div>
+              </div>
+
+              {/* Description */}
+              <div>
+                <div style={FIELD_LABEL}>Description</div>
+                <input
+                  value={description}
+                  onChange={e => setDescription(e.target.value)}
+                  placeholder="Short description of this timeline's purpose…"
+                  style={INPUT}
+                />
+              </div>
+
+              {/* Notes */}
+              <div>
+                <div style={FIELD_LABEL}>Notes</div>
+                <textarea
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  placeholder="Internal notes, links, references…"
+                  style={TEXTAREA}
+                />
+              </div>
+
+              {/* Template picker (create mode only) */}
+              {mode === 'new' && templates.length > 0 && (
+                <div>
+                  <div style={FIELD_LABEL}>Status template</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {templates.map(tpl => {
+                      const isSelected = selectedTemplateId === tpl.id || (!selectedTemplateId && tpl === templates[0])
+                      return (
+                        <div
+                          key={tpl.id}
+                          onClick={() => setSelectedTemplateId(tpl.id)}
+                          style={{
+                            border: `1px solid ${isSelected ? timelineColor + '88' : 'var(--border)'}`,
+                            borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
+                            background: isSelected ? timelineColor + '11' : 'var(--muted)',
+                            transition: 'all 0.1s',
+                          }}
+                        >
+                          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--foreground)' }}>{tpl.name}</div>
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            {tpl.items.map(item => (
+                              <span key={item.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: item.color + '22', border: `1px solid ${item.color}66`, color: item.color }}>
+                                {item.name}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Archived banner */}
+              {mode === 'edit' && timeline?.archivedAt && (
+                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 6, padding: '8px 12px' }}>
+                  This timeline is archived. It is hidden from the active list.
+                </div>
+              )}
+
+              {error && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, padding: '8px 12px' }}>
+                  {error}
+                </div>
+              )}
+            </div>
+          ) : (
+            activeTab === 'statuses' && timeline && (
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
+                  Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
+                </div>
+
+                <div style={{ marginBottom: 4 }}>
+                  {statuses.map(s => (
+                    <StatusRow
+                      key={s.id}
+                      status={s}
+                      canDelete={statuses.length > 1}
+                      teamId={teamId}
+                      timelineId={timeline.id}
+                      allStatuses={statuses}
+                    />
+                  ))}
+                </div>
+
+                <AddStatusForm teamId={teamId} timelineId={timeline.id} primaryColor={timelineColor} />
+              </div>
+            )
+          )}
+        </div>
+
+        {/* Footer — hidden when a confirm dialog is showing */}
+        {!showArchiveConfirm && !showDeleteConfirm && (
+          <div style={FOOTER}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {mode === 'edit' && timeline && canAdmin && !timeline.archivedAt && (
+                <button onClick={() => setShowArchiveConfirm(true)} style={archiveBtnStyle}>
+                  <Archive size={13} />
+                  Archive
+                </button>
+              )}
+              {mode === 'edit' && timeline && canAdmin && timeline.archivedAt && onUnarchive && (
+                <button onClick={() => onUnarchive(timeline.id)} style={restoreBtnStyle}>
+                  <RotateCcw size={13} />
+                  Restore
+                </button>
+              )}
+              {mode === 'edit' && timeline && canAdmin && (
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={onClose}
+                style={{ fontSize: 13, padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', color: 'var(--muted-foreground)' }}
+              >
+                Cancel
+              </button>
+              {activeTab === 'settings' && (
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  style={{ fontSize: 13, fontWeight: 600, padding: '8px 18px', border: 'none', borderRadius: 7, background: timelineColor, color: 'white', cursor: saving ? 'wait' : 'pointer', fontFamily: 'var(--font-sans)' }}
+                >
+                  {saving ? 'Saving…' : mode === 'new' ? 'Create timeline' : 'Save changes'}
+                </button>
+              )}
             </div>
           </div>
         )}
-
-        {/* Spacer pushes submit to bottom */}
-        <div style={{ flex: 1 }} />
-      </form>
-
-      {/* Footer */}
-      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-        <button
-          type="submit"
-          form=""
-          onClick={handleSubmit}
-          disabled={!titleTrimmed || creating}
-          style={{
-            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
-            borderRadius: 'var(--radius-md)', border: 'none',
-            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
-            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
-            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
-            fontFamily: 'var(--font-sans)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            transition: 'background 0.1s',
-          }}
-        >
-          {creating && <Loader2 size={13} className="animate-spin" />}
-          Create activity
-        </button>
       </div>
-    </div>
     </div>
   )
 }
@@ -26137,149 +25990,477 @@ export default function SettingsPage() {
 }
 ````
 
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
+## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
+````typescript
+/**
+ * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
+ *
+ * Defaults come from the drag selection: start/end date and the lane member.
+ * Submits via POST /timelines/:id/activities.
+ */
 
-import (
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
+import { useState, useEffect } from 'react'
+import { X, ArrowRight, Loader2 } from 'lucide-react'
+import MemberAvatar from '@/components/MemberAvatar'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useCreateActivity } from '@/hooks/useTeamActivities'
+import type { Member } from '@/types'
 
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
+const PANEL_WIDTH = 300
 
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
+interface Props {
+  open: boolean
+  teamId: string
+  timelineId: string
+  members: Member[]
+  defaultStart: string
+  defaultEnd: string
+  defaultMemberId?: string | null
+  onClose: () => void
 }
 
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+const LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.07em',
+  marginBottom: 4,
 }
 
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+export default function ActivityCreatePanel({
+  open,
+  teamId,
+  timelineId,
+  members,
+  defaultStart,
+  defaultEnd,
+  defaultMemberId,
+  onClose,
+}: Props) {
+  const createMutation = useCreateActivity(teamId, timelineId)
+
+  const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
+  const [startDate, setStartDate] = useState(defaultStart)
+  const [endDate, setEndDate] = useState(defaultEnd)
+  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
+  const [assignedIds, setAssignedIds] = useState<string[]>(
+    defaultMemberId ? [defaultMemberId] : [],
+  )
+
+  // Reset all fields to defaults each time the panel opens so re-opening
+  // the panel always shows a blank form rather than the previous session's data.
+  useEffect(() => {
+    if (!open) return
+    setTitle('')
+    setDescription('')
+    setStartDate(defaultStart)
+    setEndDate(defaultEnd)
+    setIdentity({ color: '#288C9B', icon: '__none__' })
+    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const creating = createMutation.isPending
+  const titleTrimmed = title.trim()
+
+  function toggleAssignee(memberId: string) {
+    setAssignedIds(prev =>
+      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
+    )
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!titleTrimmed) return
+    createMutation.mutate(
+      {
+        title: titleTrimmed,
+        startAt: `${startDate}T00:00:00Z`,
+        endAt: `${endDate}T00:00:00Z`,
+        description: description.trim() || null,
+        color: identity.color,
+        icon: identity.icon,
+        assignedMemberIds: assignedIds,
+      },
+      { onSuccess: onClose },
+    )
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Header */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 12px',
+          height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
+        <button
+          onClick={onClose}
+          style={{
+            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', color: 'var(--muted-foreground)',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+        >
+          <X size={14} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* Form */}
+      <form onSubmit={handleSubmit} style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+        {/* Identity + Title — mirrors the modal header pattern: badge on left, editable name on right */}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <div style={{ marginTop: 2, flexShrink: 0 }}>
+            <IdentityWidget
+              identity={identity}
+              name={title || 'New Activity'}
+              shape="square"
+              onChange={setIdentity}
+            />
+          </div>
+          <input
+            autoFocus
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            placeholder="Activity title…"
+            style={{
+              flex: 1, fontSize: 13, fontWeight: 600,
+              color: 'var(--foreground)', border: '1px solid transparent',
+              borderRadius: 'var(--radius-md)', padding: '5px 6px',
+              outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
+            }}
+            onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
+            onBlur={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
+          />
+        </div>
+
+        {/* Date range */}
+        <div>
+          <div style={LABEL}>Date range</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="date"
+              value={startDate}
+              onChange={e => {
+                setStartDate(e.target.value)
+                if (e.target.value > endDate) setEndDate(e.target.value)
+              }}
+              style={{
+                flex: 1, fontSize: 12, color: 'var(--foreground)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                padding: '6px 8px', outline: 'none', background: 'var(--background)',
+                fontFamily: 'var(--font-sans)', cursor: 'pointer',
+              }}
+            />
+            <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
+            <input
+              type="date"
+              value={endDate}
+              min={startDate}
+              onChange={e => setEndDate(e.target.value)}
+              style={{
+                flex: 1, fontSize: 12, color: 'var(--foreground)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                padding: '6px 8px', outline: 'none', background: 'var(--background)',
+                fontFamily: 'var(--font-sans)', cursor: 'pointer',
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Description */}
+        <div>
+          <div style={LABEL}>Description</div>
+          <input
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            placeholder="Optional description…"
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              fontSize: 12, color: 'var(--foreground)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+              padding: '6px 8px', outline: 'none', background: 'var(--background)',
+              fontFamily: 'var(--font-sans)',
+            }}
+            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+          />
+        </div>
+
+        {/* Assignees */}
+        {members.length > 0 && (
+          <div>
+            <div style={LABEL}>Assignees</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {members.map(m => {
+                const assigned = assignedIds.includes(m.id)
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => toggleAssignee(m.id)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '5px 8px',
+                      border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
+                      borderRadius: 'var(--radius-md)',
+                      background: assigned ? `${m.color}18` : 'var(--background)',
+                      cursor: 'pointer', textAlign: 'left',
+                      transition: 'background 0.1s, border-color 0.1s',
+                    }}
+                  >
+                    <MemberAvatar member={m} size={18} />
+                    <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
+                    {assigned && (
+                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Spacer pushes submit to bottom */}
+        <div style={{ flex: 1 }} />
+      </form>
+
+      {/* Footer */}
+      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+        <button
+          type="submit"
+          form=""
+          onClick={handleSubmit}
+          disabled={!titleTrimmed || creating}
+          style={{
+            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
+            borderRadius: 'var(--radius-md)', border: 'none',
+            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
+            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
+            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
+            fontFamily: 'var(--font-sans)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            transition: 'background 0.1s',
+          }}
+        >
+          {creating && <Loader2 size={13} className="animate-spin" />}
+          Create activity
+        </button>
+      </div>
+    </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
+ */
+
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
+
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
+
+const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
+
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+  const { theme: currentTheme, applyTheme } = useDarkMode()
+
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+    const savedTheme = prefMap['theme'] as string | undefined
+    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
+  }, [JSON.stringify(prefMap)])
+
+  function handleThemeChange(t: 'light' | 'dark') {
+    setTheme(t)
+    applyTheme(t)
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
+        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
+        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
+        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Personal appearance and regional settings.
+      </p>
+
+      {/* Regional */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Regional
+        </h3>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Language</Label>
+          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Date format</Label>
+          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Appearance */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Appearance
+        </h3>
+        <div className="flex flex-col gap-1.5 mb-2">
+          <Label>Theme</Label>
+          <div className="flex gap-2">
+            {(['light', 'dark'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  theme === t
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground m-0">
+            Applies immediately. Persisted server-side so it syncs across devices.
+          </p>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
+    </div>
+  )
 }
 ````
 
@@ -26737,17 +26918,13 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
           {/* ── NOTES ── */}
           <div style={{ marginBottom: 8 }}>
             <div style={SEC_LABEL}>Notes</div>
-            <textarea
+            <input
               value={description}
-              rows={3}
               onChange={e => setDescription(e.target.value)}
-              onBlur={handleDescriptionBlur}
+              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
               placeholder="Add notes…"
-              style={{
-                ...INPUT, resize: 'vertical', lineHeight: 1.5, padding: '6px 8px',
-              }}
+              style={{ ...INPUT, padding: '6px 8px' }}
               onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-              onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
             />
           </div>
 
@@ -26807,193 +26984,6 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
 
         </>)}
       </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
- */
-
-import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
-
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
-
-const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
-
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-  const { theme: currentTheme, applyTheme } = useDarkMode()
-
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-    const savedTheme = prefMap['theme'] as string | undefined
-    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
-  }, [JSON.stringify(prefMap)])
-
-  function handleThemeChange(t: 'light' | 'dark') {
-    setTheme(t)
-    applyTheme(t)
-  }
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await Promise.all([
-        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
-        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
-        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
-        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
-      ])
-      setFeedback({ type: 'success', msg: 'Preferences saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Personal appearance and regional settings.
-      </p>
-
-      {/* Regional */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Regional
-        </h3>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Language</Label>
-          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Timezone</Label>
-          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Date format</Label>
-          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Appearance */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Appearance
-        </h3>
-        <div className="flex flex-col gap-1.5 mb-2">
-          <Label>Theme</Label>
-          <div className="flex gap-2">
-            {(['light', 'dark'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  theme === t
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground m-0">
-            Applies immediately. Persisted server-side so it syncs across devices.
-          </p>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <Button onClick={handleSave} disabled={upsert.isPending}>
-        {upsert.isPending ? 'Saving…' : 'Save preferences'}
-      </Button>
     </div>
   )
 }
@@ -27508,437 +27498,6 @@ func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
 		return nil, fmt.Errorf("getting team by invite link: %w", err)
 	}
 	return &t, nil
-}
-````
-
-## File: packages/web/src/components/MemberModal.tsx
-````typescript
-/**
- * MemberModal — view and edit a team member's profile, identity, and role.
- *
- * Shows computed stats (timelines, activities by date status) and exposes
- * superadmin actions (promote, inactivate, delete) when the viewer is a
- * superadmin. Password reset is present but shows "SMTP not configured"
- * until Phase 14.
- */
-
-import { useState } from 'react'
-import { createPortal } from 'react-dom'
-import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users, ShieldOff } from 'lucide-react'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import type { Identity } from '@/components/identity/identity-constants'
-import { Badge } from '@/components/identity/Badge'
-import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
-import { useAuth } from '@/contexts/AuthContext'
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-import type { components } from '@draba/shared'
-
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-interface Props {
-  teamId: string
-  memberId: string
-  /** Whether the current viewer is a team admin. */
-  isAdmin: boolean
-  /** Whether the current viewer is a superadmin. */
-  isSuperadmin: boolean
-  onClose: () => void
-}
-
-// ── Small shared styles ───────────────────────────────────────────────────────
-
-const chipStyle = (color: string): React.CSSProperties => ({
-  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-  padding: '10px 16px', borderRadius: 8, flex: 1,
-  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
-  background: `${color}0a`, textAlign: 'center', minWidth: 0,
-})
-
-const cancelBtn: React.CSSProperties = {
-  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
-  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
-
-export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
-  const { user: currentUser } = useAuth()
-  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
-  const updateMember = useUpdateMember(teamId)
-  const promoteUser = usePromoteUser()
-  const archiveUser = useArchiveUser()
-  const unarchiveUser = useUnarchiveUser()
-  const deleteUser = useDeleteUser()
-  const revokeUser = useRevokeUser()
-
-  const [identity, setIdentity] = useState<Identity | null>(null)
-  const [displayName, setDisplayName] = useState<string | null>(null)
-  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | 'revoke' | null>(null)
-  const [revokeResult, setRevokeResult] = useState<{ membershipsInactivated: number; membershipsRemoved: number } | null>(null)
-
-  if (isLoading || isError || !detail) {
-    return createPortal(
-      <div
-        onClick={e => { if (e.target === e.currentTarget) onClose() }}
-        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-      >
-        <div style={{ width: 560, height: 300, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
-          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-            <X size={18} />
-          </button>
-          {isError ? (
-            <>
-              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
-              <button onClick={onClose} style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>Dismiss</button>
-            </>
-          ) : (
-            <span style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</span>
-          )}
-        </div>
-      </div>,
-      document.body,
-    )
-  }
-
-  const effectiveIdentity: Identity = identity ?? {
-    color: detail.color ?? '#1A97A2',
-    icon: detail.icon ?? '__name_words__',
-  }
-  const effectiveName = displayName ?? detail.displayName
-
-  const isParticipant = !detail.userId
-  const isInactivated = Boolean(detail.archivedAt)
-  const stats = detail.stats
-  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
-
-  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending || revokeUser.isPending
-
-  // detail is guaranteed non-null here (early return above handles loading/undefined).
-  // Non-null assertions in callbacks are safe because they only fire when the
-  // rendered modal is interactive, which requires detail to be loaded.
-  function handleSave() {
-    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
-    if (displayName !== null) patch.displayName = displayName
-    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
-    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
-  }
-
-  function handlePromote() {
-    if (!detail!.userId) return
-    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
-  }
-
-  function handleInactivate() {
-    if (!detail!.userId) return
-    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  function handleReactivate() {
-    if (!detail!.userId) return
-    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
-  }
-
-  function handleRevoke() {
-    if (!detail!.userId) return
-    revokeUser.mutate(detail!.userId, {
-      onSuccess: (result) => {
-        setConfirm(null)
-        setRevokeResult({ membershipsInactivated: result.membershipsInactivated, membershipsRemoved: result.membershipsRemoved })
-        // Close the modal after a short delay so the user can see the summary.
-        setTimeout(onClose, 2000)
-      },
-    })
-  }
-
-  function handleDelete() {
-    if (!detail!.userId) return
-    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  const memberColor = effectiveIdentity.color
-
-  return createPortal(
-    <div
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-    >
-      <div style={{ width: 560, maxHeight: '90vh', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-        {/* Confirm overlays */}
-        {confirm === 'promote' && (
-          <ConfirmDialog
-            variant="indigo"
-            icon={<Shield size={22} color="#6366F1" />}
-            title="Promote to Super Admin?"
-            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
-            confirmLabel="Promote"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handlePromote}
-          />
-        )}
-        {confirm === 'inactivate' && (
-          <ConfirmDialog
-            variant="amber"
-            icon={<Archive size={22} color="#F59E0B" />}
-            title={`Inactivate ${effectiveName}?`}
-            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
-            confirmLabel="Inactivate"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleInactivate}
-          />
-        )}
-        {confirm === 'delete' && (
-          <ConfirmDialog
-            variant="red"
-            icon={<Trash2 size={22} color="#EF4444" />}
-            title={`Delete ${effectiveName}?`}
-            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
-            confirmLabel="Delete permanently"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleDelete}
-          />
-        )}
-        {confirm === 'revoke' && (
-          <ConfirmDialog
-            variant="red"
-            icon={<ShieldOff size={22} color="#EF4444" />}
-            title={`Revoke all access for ${effectiveName}?`}
-            body="This will: (1) deactivate the account — the user cannot log in anywhere; (2) inactivate all team memberships that have activity history; (3) permanently remove memberships with no activity history. Activity data is always preserved."
-            confirmLabel="Revoke all access"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleRevoke}
-          />
-        )}
-
-        {confirm === null && (
-          <>
-            {/* Header */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-              <div style={{ flexShrink: 0 }}>
-                <IdentityWidget
-                  identity={effectiveIdentity}
-                  name={effectiveName}
-                  shape="circle"
-                  onChange={setIdentity}
-                />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, color: 'var(--muted-foreground)', fontWeight: 600, letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 3 }}>
-                  {isParticipant ? 'Participant' : 'Team Member'}
-                  {isInactivated && ' · Inactive'}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  {(isAdmin || currentUser?.id === detail.userId) ? (
-                    <InlineEditableTitle
-                      value={displayName ?? detail.displayName}
-                      onChange={setDisplayName}
-                    />
-                  ) : (
-                    <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{effectiveName}</span>
-                  )}
-                  {isParticipant && (
-                    <span style={{ fontSize: 11, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
-                  )}
-                </div>
-              </div>
-              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex', flexShrink: 0 }}>
-                <X size={18} />
-              </button>
-            </div>
-
-            {/* Scrollable body */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-
-              {/* Email */}
-              {!isParticipant && (
-                <div style={{ marginBottom: 20 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
-                  <div style={{ fontSize: 13, color: 'var(--muted-foreground)', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {detail.email}
-                  </div>
-                </div>
-              )}
-
-              {/* Timeline stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Timelines
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Active</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Activity stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Activities
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Past due</span>
-                  </div>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Running</span>
-                  </div>
-                  <div style={chipStyle('#3B82F6')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Upcoming</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Teams list */}
-              {detail.teams.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Teams ({detail.teams.length})
-                  </label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    {detail.teams.map((tm: TeamMemberWithUser) => (
-                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--muted)', borderRadius: 7 }}>
-                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
-                        <span style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{tm.teamId}</span>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : 'var(--muted-foreground)', background: tm.role === 'admin' ? 'rgba(26,151,162,0.12)' : 'var(--muted)', border: `1px solid ${tm.role === 'admin' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`, borderRadius: 99, padding: '1px 8px' }}>
-                          {tm.role}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Joined date */}
-              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: 'var(--muted)', borderRadius: 6, fontSize: 12, color: 'var(--muted-foreground)' }}>
-                  <Clock size={12} />
-                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
-                </div>
-              </div>
-
-              {/* Account section — non-participant only */}
-              {!isParticipant && isAdmin && (
-                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
-                  <button
-                    style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'var(--font-sans)' }}
-                    title="SMTP is not configured"
-                    disabled
-                  >
-                    Reset password — SMTP not configured
-                  </button>
-                </div>
-              )}
-
-              {/* Superadmin actions */}
-              {isSuperadmin && !isParticipant && (
-                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
-                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Super Admin Actions
-                  </label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                    {!isInactivated && (
-                      <button
-                        onClick={() => setConfirm('promote')}
-                        style={{ fontSize: 12, color: '#6366F1', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Shield size={13} />
-                        Promote to Super Admin
-                      </button>
-                    )}
-                    {isInactivated ? (
-                      <button
-                        onClick={handleReactivate}
-                        disabled={busy}
-                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', opacity: busy ? 0.6 : 1 }}
-                      >
-                        Reactivate account
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setConfirm('inactivate')}
-                        style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Archive size={13} />
-                        Inactivate
-                      </button>
-                    )}
-                    {detail.deletable && (
-                      <button
-                        onClick={() => setConfirm('delete')}
-                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Trash2 size={13} />
-                        Delete
-                      </button>
-                    )}
-                    {/* Hidden once the account itself is deactivated — membership-level
-                        inactivation alone still leaves the account active on other teams */}
-                    {!detail.userArchivedAt && (
-                      <button
-                        onClick={() => setConfirm('revoke')}
-                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <ShieldOff size={13} />
-                        Revoke all access
-                      </button>
-                    )}
-                  </div>
-                  {activeActivityCount > 0 && (
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 8 }}>
-                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
-                    </div>
-                  )}
-                  {revokeResult && (
-                    <div style={{ fontSize: 12, color: 'var(--foreground)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
-                      Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Footer */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-              <button onClick={onClose} style={cancelBtn}>Cancel</button>
-              {(isAdmin || currentUser?.id === detail.userId) && (
-                <button
-                  onClick={handleSave}
-                  disabled={busy}
-                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'var(--font-sans)' }}
-                >
-                  {busy ? 'Saving…' : 'Save changes'}
-                </button>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-    </div>,
-    document.body,
-  )
 }
 ````
 
@@ -29525,749 +29084,434 @@ func flatten[T any](s []*T) []T {
 }
 ````
 
-## File: packages/web/src/components/TeamModal.tsx
+## File: packages/web/src/components/MemberModal.tsx
 ````typescript
 /**
- * TeamModal — create / edit a team in a portal-rendered modal.
+ * MemberModal — view and edit a team member's profile, identity, and role.
  *
- * The Members tab is fully functional after Phase 10.1.2. The Settings tab
- * handles team identity and metadata. Identity and name live in the modal
- * header so they remain visible while the user scrolls the tab body.
+ * Shows computed stats (timelines, activities by date status) and exposes
+ * superadmin actions (promote, inactivate, delete) when the viewer is a
+ * superadmin. Password reset is present but shows "SMTP not configured"
+ * until Phase 14.
  */
 
-import { useState, useEffect, useRef } from 'react';
-import { createPortal } from 'react-dom';
-import { X, Archive, Mail, Link2, Copy, Check, Plus, Minus, RefreshCw, UserMinus, RotateCcw } from 'lucide-react';
-import { ApiError } from '@/lib/api';
-import { IdentityWidget } from '@/components/identity/IdentityWidget';
-import { Badge } from '@/components/identity/Badge';
-import type { Identity } from '@/components/identity/identity-constants';
-import { IDENTITY_COLORS } from '@/components/identity/identity-constants';
-import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities';
-import StatusTemplatesTab from '@/components/StatusTemplatesTab';
-import { useAuth } from '@/contexts/AuthContext';
-import {
-  useTeamInvites, useRevokeInvite,
-  useTeamInviteLink, useCreateInviteLink, useRevokeInviteLink,
-  useAddMember, useDeleteMember, useArchiveMember, useUnarchiveMember,
-  useCreateParticipant, useUpdateMember, useUserSearch,
-} from '@/hooks/useMemberManagement';
-import RoleDropdown, { type MemberRole } from '@/components/RoleDropdown';
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle';
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
-import type { components } from '@draba/shared';
+import { useState } from 'react'
+import { createPortal } from 'react-dom'
+import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users, ShieldOff } from 'lucide-react'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
+import { Badge } from '@/components/identity/Badge'
+import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
+import { useAuth } from '@/contexts/AuthContext'
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import type { components } from '@draba/shared'
 
-type Team = components['schemas']['Team'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
 
 interface Props {
-  mode: 'new' | 'edit';
-  team?: Team;
-  onClose: () => void;
-  /** Called with the newly created team immediately after server confirmation. */
-  onTeamCreated?: (team: Team) => void;
-  /** Whether the current user is a team admin. */
-  isAdmin?: boolean;
+  teamId: string
+  memberId: string
+  /** Whether the current viewer is a team admin. */
+  isAdmin: boolean
+  /** Whether the current viewer is a superadmin. */
+  isSuperadmin: boolean
+  onClose: () => void
 }
 
-type Tab = 'settings' | 'members' | 'statuses';
+// ── Small shared styles ───────────────────────────────────────────────────────
 
-const DEFAULT_COLOR = IDENTITY_COLORS[0].hex;
-const DEFAULT_ICON = '__name_1__';
+const chipStyle = (color: string): React.CSSProperties => ({
+  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+  padding: '10px 16px', borderRadius: 8, flex: 1,
+  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
+  background: `${color}0a`, textAlign: 'center', minWidth: 0,
+})
 
-function resolveIdentity(team?: Team): Identity {
-  return {
-    color: team?.color ?? DEFAULT_COLOR,
-    icon: team?.icon ?? DEFAULT_ICON,
-  };
-}
-
-// ── Shared button styles ────────────────────────────────────────────────────
-
-const cancelBtnStyle: React.CSSProperties = {
+const cancelBtn: React.CSSProperties = {
   background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
   fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
-};
+}
 
-const inputStyle: React.CSSProperties = {
-  background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 7,
-  padding: '8px 12px', color: 'var(--foreground)', fontSize: 13,
-  width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-sans)',
-};
+// ── Main component ────────────────────────────────────────────────────────────
 
-const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px',
-  textTransform: 'uppercase', marginBottom: 6, display: 'block',
-};
+export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
+  const { user: currentUser } = useAuth()
+  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
+  const updateMember = useUpdateMember(teamId)
+  const promoteUser = usePromoteUser()
+  const archiveUser = useArchiveUser()
+  const unarchiveUser = useUnarchiveUser()
+  const deleteUser = useDeleteUser()
+  const revokeUser = useRevokeUser()
 
-const archiveBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
-  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
-  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-};
+  const [identity, setIdentity] = useState<Identity | null>(null)
+  const [displayName, setDisplayName] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | 'revoke' | null>(null)
+  const [revokeResult, setRevokeResult] = useState<{ membershipsInactivated: number; membershipsRemoved: number } | null>(null)
 
-const restoreBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
-  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
-  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-};
+  if (isLoading || isError || !detail) {
+    return createPortal(
+      <div
+        onClick={e => { if (e.target === e.currentTarget) onClose() }}
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+      >
+        <div style={{ width: 560, height: 300, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
+          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+            <X size={18} />
+          </button>
+          {isError ? (
+            <>
+              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
+              <button onClick={onClose} style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>Dismiss</button>
+            </>
+          ) : (
+            <span style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</span>
+          )}
+        </div>
+      </div>,
+      document.body,
+    )
+  }
 
-// ── Main component ──────────────────────────────────────────────────────────
+  const effectiveIdentity: Identity = identity ?? {
+    color: detail.color ?? '#1A97A2',
+    icon: detail.icon ?? '__name_words__',
+  }
+  const effectiveName = displayName ?? detail.displayName
 
-export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin = true }: Props) {
-  const { user } = useAuth()
-  const currentUserId = (user as { id?: string } | null)?.id ?? ''
-  const [tab, setTab] = useState<Tab>('settings');
-  const [teamSaved, setTeamSaved] = useState(mode === 'edit');
-  const [showBanner, setShowBanner] = useState(false);
-  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
-  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isParticipant = !detail.userId
+  const isInactivated = Boolean(detail.archivedAt)
+  const stats = detail.stats
+  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
 
-  const [identity, setIdentity] = useState<Identity>(resolveIdentity(team));
-  const [name, setName] = useState(team?.name ?? '');
-  const [description, setDescription] = useState(team?.description ?? '');
-  const [notes, setNotes] = useState(team?.notes ?? '');
+  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending || revokeUser.isPending
 
-  const [savedTeamId, setSavedTeamId] = useState(team?.id ?? '');
-
-  const createTeam = useCreateTeam();
-  const updateTeam = useUpdateTeam();
-  const archiveTeam = useArchiveTeam();
-  const unarchiveTeam = useUnarchiveTeam();
-
-  // Members tab state — only loaded when the team exists.
-  const activeTeamId = savedTeamId || team?.id || '';
-  const { data: members = [] } = useTeamMembers(activeTeamId);
-  const { data: invites = [] } = useTeamInvites(activeTeamId);
-  const { data: inviteLink } = useTeamInviteLink(activeTeamId);
-  const addMember = useAddMember(activeTeamId);
-  const deleteMember = useDeleteMember(activeTeamId);
-  const archiveMember = useArchiveMember(activeTeamId);
-  const unarchiveMember = useUnarchiveMember(activeTeamId);
-  const createParticipant = useCreateParticipant(activeTeamId);
-  const updateMember = useUpdateMember(activeTeamId);
-  const revokeInvite = useRevokeInvite(activeTeamId);
-  const createInviteLink = useCreateInviteLink(activeTeamId);
-  const revokeInviteLink = useRevokeInviteLink(activeTeamId);
-
-  const [searchQ, setSearchQ] = useState('');
-  const [showParticipantForm, setShowParticipantForm] = useState(false);
-  // Maps memberId → assignmentCount when a 409 MEMBER_HAS_ASSIGNMENTS is returned.
-  const [removeErrors, setRemoveErrors] = useState<Record<string, number>>({});
-  const [participantName, setParticipantName] = useState('');
-  const [participantIdentity, setParticipantIdentity] = useState<Identity>({ color: IDENTITY_COLORS[3].hex, icon: '__name_1__' });
-  const [copyLinkLabel, setCopyLinkLabel] = useState<'copy' | 'copied'>('copy');
-  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const { data: searchResults = [] } = useUserSearch(searchQ);
-
-  const isArchived = Boolean(team?.archivedAt);
-  const busy = createTeam.isPending || updateTeam.isPending || archiveTeam.isPending || unarchiveTeam.isPending;
-
-  useEffect(() => {
-    return () => { if (bannerTimer.current) clearTimeout(bannerTimer.current); };
-  }, []);
-
-  // Stale 409 errors belong to a specific member row; clear them when the
-  // search changes because the member list may reorder or filter differently.
-  useEffect(() => {
-    setRemoveErrors({});
-  }, [searchQ]);
-
-  useEffect(() => {
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
-    }
-    document.addEventListener('keydown', handleKey);
-    return () => document.removeEventListener('keydown', handleKey);
-  }, [onClose]);
-
+  // detail is guaranteed non-null here (early return above handles loading/undefined).
+  // Non-null assertions in callbacks are safe because they only fire when the
+  // rendered modal is interactive, which requires detail to be loaded.
   function handleSave() {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-
-    const patch = {
-      name: trimmed,
-      description: description.trim() || null,
-      notes: notes.trim() || null,
-      color: identity.color,
-      icon: identity.icon,
-    };
-
-    if (mode === 'new' && !teamSaved) {
-      createTeam.mutate(patch, {
-        onSuccess: (created) => {
-          setSavedTeamId(created.id);
-          setTeamSaved(true);
-          setShowBanner(true);
-          onTeamCreated?.(created);
-          bannerTimer.current = setTimeout(() => setShowBanner(false), 3000);
-        },
-      });
-    } else {
-      const tid = savedTeamId || team?.id;
-      if (!tid) return;
-      updateTeam.mutate({ teamId: tid, patch }, { onSuccess: () => { /* noop */ } });
-    }
+    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
+    if (displayName !== null) patch.displayName = displayName
+    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
+    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
   }
 
-  function handleArchive() {
-    const tid = savedTeamId || team?.id;
-    if (!tid) return;
-    archiveTeam.mutate(tid, { onSuccess: onClose });
+  function handlePromote() {
+    if (!detail!.userId) return
+    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
   }
 
-  function handleRestore() {
-    const tid = savedTeamId || team?.id;
-    if (!tid) return;
-    unarchiveTeam.mutate(tid, { onSuccess: onClose });
+  function handleInactivate() {
+    if (!detail!.userId) return
+    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
   }
 
-  const teamColor = identity.color;
-  const isNew = mode === 'new';
-  const primaryLabel = teamSaved ? 'Save changes' : 'Create team';
-  const membersLocked = !teamSaved;
+  function handleReactivate() {
+    if (!detail!.userId) return
+    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
+  }
+
+  function handleRevoke() {
+    if (!detail!.userId) return
+    revokeUser.mutate(detail!.userId, {
+      onSuccess: (result) => {
+        setConfirm(null)
+        setRevokeResult({ membershipsInactivated: result.membershipsInactivated, membershipsRemoved: result.membershipsRemoved })
+        // Close the modal after a short delay so the user can see the summary.
+        setTimeout(onClose, 2000)
+      },
+    })
+  }
+
+  function handleDelete() {
+    if (!detail!.userId) return
+    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+  }
+
+  const memberColor = effectiveIdentity.color
 
   return createPortal(
     <div
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        zIndex: 1000,
-      }}
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
     >
-      <div
-        style={{
-          width: 580, maxHeight: '90vh', background: 'var(--card)',
-          border: '1px solid var(--border)', borderRadius: 14,
-          boxShadow: '0 24px 64px rgba(0,0,0,.6)',
-          display: 'flex', flexDirection: 'column', overflow: 'hidden',
-        }}
-      >
-        {/* Header — identity widget + editable name */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 12,
-          padding: '16px 20px', borderBottom: '1px solid var(--border)',
-        }}>
-          <IdentityWidget identity={identity} name={name} shape="square" onChange={setIdentity} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.6px', textTransform: 'uppercase', marginBottom: 3 }}>
-              {isNew ? 'New team' : 'Edit team'}
-            </div>
-            <InlineEditableTitle
-              value={name}
-              onChange={setName}
-              placeholder="Team name…"
-              autoFocus={mode === 'new'}
-              onKeyDown={e => { if (e.key === 'Escape') onClose(); }}
-            />
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-            <X size={18} />
-          </button>
-        </div>
+      <div style={{ width: 560, maxHeight: '90vh', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-        {/* Saved banner */}
-        {showBanner && (
-          <div style={{
-            padding: '8px 20px',
-            background: `${teamColor}18`,
-            borderBottom: `1px solid ${teamColor}44`,
-            display: 'flex', alignItems: 'center', gap: 8,
-          }}>
-            <span style={{ fontSize: 14, color: teamColor }}>✓</span>
-            <span style={{ fontSize: 12, color: teamColor }}>Team created — you can now add members.</span>
-          </div>
+        {/* Confirm overlays */}
+        {confirm === 'promote' && (
+          <ConfirmDialog
+            variant="indigo"
+            icon={<Shield size={22} color="#6366F1" />}
+            title="Promote to Super Admin?"
+            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
+            confirmLabel="Promote"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handlePromote}
+          />
+        )}
+        {confirm === 'inactivate' && (
+          <ConfirmDialog
+            variant="amber"
+            icon={<Archive size={22} color="#F59E0B" />}
+            title={`Inactivate ${effectiveName}?`}
+            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
+            confirmLabel="Inactivate"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleInactivate}
+          />
+        )}
+        {confirm === 'delete' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<Trash2 size={22} color="#EF4444" />}
+            title={`Delete ${effectiveName}?`}
+            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
+            confirmLabel="Delete permanently"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleDelete}
+          />
+        )}
+        {confirm === 'revoke' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<ShieldOff size={22} color="#EF4444" />}
+            title={`Revoke all access for ${effectiveName}?`}
+            body="This will: (1) deactivate the account — the user cannot log in anywhere; (2) inactivate all team memberships that have activity history; (3) permanently remove memberships with no activity history. Activity data is always preserved."
+            confirmLabel="Revoke all access"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleRevoke}
+          />
         )}
 
-        {/* Tab bar */}
-        <div style={{ display: 'flex', padding: '0 20px', borderBottom: '1px solid var(--border)' }}>
-          {(['settings', 'members', 'statuses'] as Tab[]).map(t => {
-            const isActive = tab === t;
-            const locked = (t === 'members' || t === 'statuses') && membersLocked;
-            return (
-              <div key={t} style={{ position: 'relative' }}>
-                <button
-                  onClick={() => !locked && setTab(t)}
-                  title={locked ? 'Save the team first to add members' : undefined}
-                  style={{
-                    padding: '10px 14px', fontSize: 13, fontWeight: 500, background: 'none', border: 'none',
-                    borderBottom: `2px solid ${isActive ? teamColor : 'transparent'}`,
-                    color: isActive ? 'var(--foreground)' : 'var(--muted-foreground)',
-                    cursor: locked ? 'not-allowed' : 'pointer',
-                    opacity: locked ? 0.45 : 1,
-                    marginBottom: -1, fontFamily: 'var(--font-sans)',
-                    display: 'flex', alignItems: 'center', gap: 6,
-                    textTransform: 'capitalize',
-                  }}
-                >
-                  {t === 'statuses' ? 'Status Templates' : t}
-                  {t === 'members' && teamSaved && (
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'var(--muted)', borderRadius: 99, padding: '1px 6px' }}>
-                      {members.length}
-                    </span>
-                  )}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          {showArchiveConfirm ? (
-            <ConfirmDialog
-              variant="amber"
-              icon={<Archive size={22} color="#F59E0B" />}
-              title={`Archive "${name || 'this team'}"?`}
-              body="The team will be hidden from active views. All timelines and activities will be preserved and the team can be restored from the Archived section at any time."
-              confirmLabel="Archive team"
-              busy={archiveTeam.isPending}
-              onCancel={() => setShowArchiveConfirm(false)}
-              onConfirm={handleArchive}
-            />
-          ) : tab === 'settings' ? (
-            <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
-              {/* Description */}
-              <div>
-                <label style={labelStyle}>Description</label>
-                <input
-                  autoFocus={mode === 'edit'}
-                  value={description}
-                  onChange={e => setDescription(e.target.value)}
-                  placeholder="Short description of this team…"
-                  style={inputStyle}
+        {confirm === null && (
+          <>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              <div style={{ flexShrink: 0 }}>
+                <IdentityWidget
+                  identity={effectiveIdentity}
+                  name={effectiveName}
+                  shape="circle"
+                  onChange={setIdentity}
                 />
               </div>
-
-              {/* Notes */}
-              <div>
-                <label style={labelStyle}>Notes</label>
-                <textarea
-                  value={notes}
-                  onChange={e => setNotes(e.target.value)}
-                  placeholder="Internal notes, context, links…"
-                  rows={4}
-                  style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5 }}
-                />
-              </div>
-
-              {createTeam.isError && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
-                  Something went wrong — refer to logs for details.
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
+                  {isParticipant ? 'Participant' : 'Team Member'}
+                  {isInactivated && ' · Inactive'}
                 </div>
-              )}
-              {updateTeam.isError && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
-                  Something went wrong — refer to logs for details.
-                </div>
-              )}
-            </div>
-          ) : tab === 'statuses' ? (
-            <StatusTemplatesTab
-              teamId={activeTeamId}
-              isAdmin={isAdmin}
-              teamColor={teamColor}
-            />
-          ) : (
-            // Members tab
-            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-              {/* Search / add input */}
-              {isAdmin && (
-                <div>
-                  <label style={labelStyle}>Add member or invite by email</label>
-                  <div style={{ position: 'relative' }}>
-                    <input
-                      value={searchQ}
-                      onChange={e => setSearchQ(e.target.value)}
-                      placeholder="Search by name or email…"
-                      style={{ ...inputStyle, paddingRight: 36 }}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  {(isAdmin || currentUser?.id === detail.userId) ? (
+                    <InlineEditableTitle
+                      value={displayName ?? detail.displayName}
+                      onChange={setDisplayName}
                     />
-                    {searchQ && (
-                      <button
-                        onClick={() => setSearchQ('')}
-                        style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex', padding: 2 }}
-                      >
-                        <X size={14} />
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Search results */}
-                  {searchQ.length >= 2 && (
-                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
-                      {searchResults.length === 0 ? (
-                        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No users found for "{searchQ}"</span>
-                          <button
-                            onClick={() => {
-                              // Trigger email invite
-                              const email = searchQ.includes('@') ? searchQ : null;
-                              if (!email) return;
-                              fetch(`/teams/${activeTeamId}/invites`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('accessToken') ?? ''}` },
-                                body: JSON.stringify({ email }),
-                              }).then(() => setSearchQ(''));
-                            }}
-                            style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                          >
-                            <Mail size={11} style={{ display: 'inline', marginRight: 4 }} />
-                            Invite
-                          </button>
-                        </div>
-                      ) : (
-                        searchResults.map(u => {
-                          const alreadyMember = members.some(m => m.userId === u.id);
-                          return (
-                            <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: '1px solid var(--border)' }}>
-                              <Badge identity={{ color: '#8b949e', icon: '__name_1__' }} name={u.displayName} shape="circle" size={22} />
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontSize: 13, color: 'var(--foreground)' }}>{u.displayName}</div>
-                                <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{u.email}</div>
-                              </div>
-                              {alreadyMember ? (
-                                <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>Already added</span>
-                              ) : (
-                                <button
-                                  onClick={() => addMember.mutate({ userId: u.id }, { onSuccess: () => setSearchQ('') })}
-                                  style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4 }}
-                                >
-                                  <Plus size={11} />
-                                  Add
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Participant creation form */}
-              {isAdmin && (
-                <div>
-                  {!showParticipantForm ? (
-                    <button
-                      onClick={() => setShowParticipantForm(true)}
-                      style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                    >
-                      <Plus size={12} />
-                      Add participant (no login)
-                    </button>
                   ) : (
-                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, padding: 14 }}>
-                      <label style={labelStyle}>New participant</label>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <IdentityWidget
-                          identity={participantIdentity}
-                          name={participantName}
-                          shape="circle"
-                          onChange={setParticipantIdentity}
-                        />
-                        <input
-                          value={participantName}
-                          onChange={e => setParticipantName(e.target.value)}
-                          placeholder="Display name (required)…"
-                          style={{ ...inputStyle, flex: 1 }}
-                          autoFocus
-                        />
-                        <button
-                          onClick={() => {
-                            if (!participantName.trim()) return;
-                            createParticipant.mutate({
-                              name: participantName.trim(),
-                              color: participantIdentity.color,
-                              icon: participantIdentity.icon,
-                            }, {
-                              onSuccess: () => { setParticipantName(''); setShowParticipantForm(false); },
-                            });
-                          }}
-                          disabled={!participantName.trim() || createParticipant.isPending}
-                          style={{ background: '#F59E0B', color: '#000', fontWeight: 600, fontSize: 12, padding: '7px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0, opacity: !participantName.trim() ? 0.5 : 1 }}
-                        >
-                          Create
-                        </button>
-                        <button onClick={() => setShowParticipantForm(false)} style={{ ...cancelBtnStyle, padding: '7px 10px' }}>
-                          <X size={14} />
-                        </button>
-                      </div>
-                    </div>
+                    <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{effectiveName}</span>
+                  )}
+                  {isParticipant && (
+                    <span style={{ fontSize: 11, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
                   )}
                 </div>
-              )}
+              </div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex', flexShrink: 0 }}>
+                <X size={18} />
+              </button>
+            </div>
 
-              {/* Role-change error banner */}
-              {updateMember.isError && (
-                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 7, padding: '7px 12px' }}>
-                  {(updateMember.error as { message?: string })?.message ?? 'Could not update role.'}
+            {/* Scrollable body */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+
+              {/* Email */}
+              {!isParticipant && (
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
+                  <div style={{ fontSize: 13, color: 'var(--muted-foreground)', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {detail.email}
+                  </div>
                 </div>
               )}
 
-              {/* Member list */}
-              <div>
-                <label style={labelStyle}>Members ({members.length})</label>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {members.map((m: TeamMemberWithUser) => {
-                    const isParticipant = !m.userId;
-                    const isInactive = Boolean(m.archivedAt);
-                    const memberRole: MemberRole = isParticipant ? 'participant' : (m.role as MemberRole);
-                    const removeError = removeErrors[m.id];
-                    return (
-                      <div key={m.id}>
-                        <div
-                          style={{
-                            display: 'flex', alignItems: 'center', gap: 10,
-                            padding: '7px 10px', borderRadius: 7,
-                            background: isInactive ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)',
-                            opacity: isInactive ? 0.5 : 1,
-                          }}
-                        >
-                          <div style={{ flexShrink: 0, border: isParticipant ? '1.5px dashed var(--muted-foreground)' : 'none', borderRadius: '50%' }}>
-                            <Badge
-                              identity={{ color: m.color ?? '#8b949e', icon: m.icon ?? '__name_words__' }}
-                              name={m.displayName}
-                              shape="circle"
-                              size={24}
-                            />
-                          </div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                              <span style={{ fontSize: 13, color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.displayName}</span>
-                              {isParticipant && <span style={{ fontSize: 10, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '0px 5px', flexShrink: 0 }}>No login</span>}
-                            </div>
-                            {!isParticipant && <div style={{ fontSize: 11, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>}
-                          </div>
-                          {isAdmin && (
-                            <RoleDropdown
-                              value={memberRole}
-                              onChange={role => {
-                                if (isParticipant || role === 'participant') return;
-                                updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
-                              }}
-                              disabled={isParticipant || m.userId === currentUserId}
-                              hideParticipant={!isParticipant}
-                            />
-                          )}
-                          {isAdmin && (
-                            <div style={{ display: 'flex', gap: 4 }}>
-                              {isInactive ? (
-                                <button
-                                  title="Reactivate member"
-                                  onClick={() => unarchiveMember.mutate(m.id)}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
-                                  onMouseEnter={e => (e.currentTarget.style.color = '#1A97A2')}
-                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
-                                >
-                                  <RefreshCw size={13} />
-                                </button>
-                              ) : (
-                                <button
-                                  title="Inactivate member"
-                                  onClick={() => archiveMember.mutate(m.id)}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
-                                  onMouseEnter={e => (e.currentTarget.style.color = '#F59E0B')}
-                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
-                                >
-                                  <UserMinus size={13} />
-                                </button>
-                              )}
-                              <button
-                                title="Remove from team"
-                                onClick={() => {
-                                  setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; });
-                                  deleteMember.mutate(m.id, {
-                                    onError: (err) => {
-                                      if (err instanceof ApiError && err.code === 'MEMBER_HAS_ASSIGNMENTS') {
-                                        const count = (err.data?.assignmentCount as number) ?? 0;
-                                        setRemoveErrors(prev => ({ ...prev, [m.id]: count }));
-                                      }
-                                    },
-                                  });
-                                }}
-                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
-                                onMouseEnter={e => (e.currentTarget.style.color = '#EF4444')}
-                                onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
-                              >
-                                <Minus size={13} />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                        {removeError !== undefined && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#F59E0B', padding: '4px 10px 4px 44px' }}>
-                            <span>{removeError} assignment{removeError === 1 ? '' : 's'} — can't remove.</span>
-                            <button
-                              onClick={() => {
-                                archiveMember.mutate(m.id, {
-                                  onSuccess: () => setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; }),
-                                });
-                              }}
-                              style={{ fontSize: 12, color: '#F59E0B', background: 'none', border: '1px solid rgba(245,158,11,0.4)', borderRadius: 5, padding: '2px 8px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                            >
-                              Inactivate instead
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+              {/* Timeline stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Timelines
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Active</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
+                  </div>
                 </div>
               </div>
 
-              {/* Pending invitations */}
-              {isAdmin && invites.length > 0 && (
-                <div>
-                  <label style={labelStyle}>Pending invitations ({invites.length})</label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    {invites.map(inv => (
-                      <div key={inv.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)' }}>
-                        <div style={{ width: 24, height: 24, borderRadius: '50%', border: '1.5px dashed var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                          <Mail size={11} color="var(--muted-foreground)" />
-                        </div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.email}</div>
-                          <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
-                            Sent {new Date(inv.createdAt).toLocaleDateString()} · expires {new Date(inv.expiresAt).toLocaleDateString()}
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => revokeInvite.mutate(inv.id)}
-                          style={{ fontSize: 11, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                        >
-                          Revoke
-                        </button>
+              {/* Activity stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Activities
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Past due</span>
+                  </div>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Running</span>
+                  </div>
+                  <div style={chipStyle('#3B82F6')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Upcoming</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Teams list */}
+              {detail.teams.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Teams ({detail.teams.length})
+                  </label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {detail.teams.map((tm: TeamMemberWithUser) => (
+                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--muted)', borderRadius: 7 }}>
+                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
+                        <span style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{tm.teamId}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : 'var(--muted-foreground)', background: tm.role === 'admin' ? 'rgba(26,151,162,0.12)' : 'var(--muted)', border: `1px solid ${tm.role === 'admin' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`, borderRadius: 99, padding: '1px 8px' }}>
+                          {tm.role}
+                        </span>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* Invite link */}
-              {isAdmin && (
-                <div>
-                  <label style={labelStyle}>
-                    <Link2 size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Invite link
+              {/* Joined date */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: 'var(--muted)', borderRadius: 6, fontSize: 12, color: 'var(--muted-foreground)' }}>
+                  <Clock size={12} />
+                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
+                </div>
+              </div>
+
+              {/* Account section — non-participant only */}
+              {!isParticipant && isAdmin && (
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
+                  <button
+                    style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'var(--font-sans)' }}
+                    title="SMTP is not configured"
+                    disabled
+                  >
+                    Reset password — SMTP not configured
+                  </button>
+                </div>
+              )}
+
+              {/* Superadmin actions */}
+              {isSuperadmin && !isParticipant && (
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
+                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Super Admin Actions
                   </label>
-                  {inviteLink?.token ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <input
-                          readOnly
-                          value={`${window.location.origin}/register?token=${inviteLink.token}`}
-                          style={{ ...inputStyle, color: 'var(--muted-foreground)', flex: 1 }}
-                          onClick={e => (e.target as HTMLInputElement).select()}
-                        />
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(`${window.location.origin}/register?token=${inviteLink.token!}`);
-                            setCopyLinkLabel('copied');
-                            if (copyTimer.current) clearTimeout(copyTimer.current);
-                            copyTimer.current = setTimeout(() => setCopyLinkLabel('copy'), 2000);
-                          }}
-                          style={{
-                            background: copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.12)' : 'var(--muted)',
-                            border: `1px solid ${copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`,
-                            color: copyLinkLabel === 'copied' ? '#1A97A2' : 'var(--muted-foreground)',
-                            borderRadius: 7, padding: '0 14px', cursor: 'pointer',
-                            display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontFamily: 'var(--font-sans)',
-                            transition: 'all 0.15s', flexShrink: 0,
-                          }}
-                        >
-                          {copyLinkLabel === 'copied' ? <Check size={12} /> : <Copy size={12} />}
-                          {copyLinkLabel === 'copied' ? 'Copied!' : 'Copy link'}
-                        </button>
-                      </div>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flex: 1, lineHeight: 1.5 }}>
-                          Anyone with this link can join the team as a member.
-                        </span>
-                        <button
-                          onClick={() => createInviteLink.mutate()}
-                          style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
-                        >
-                          <RefreshCw size={11} /> Regenerate
-                        </button>
-                        <button
-                          onClick={() => revokeInviteLink.mutate()}
-                          style={{ fontSize: 11, color: '#EF4444', background: 'none', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
-                        >
-                          Revoke
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No invite link — generate one to share a reusable join URL.</span>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {!isInactivated && (
                       <button
-                        onClick={() => createInviteLink.mutate()}
-                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
+                        onClick={() => setConfirm('promote')}
+                        style={{ fontSize: 12, color: '#6366F1', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
                       >
-                        Generate
+                        <Shield size={13} />
+                        Promote to Super Admin
                       </button>
+                    )}
+                    {isInactivated ? (
+                      <button
+                        onClick={handleReactivate}
+                        disabled={busy}
+                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', opacity: busy ? 0.6 : 1 }}
+                      >
+                        Reactivate account
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setConfirm('inactivate')}
+                        style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Archive size={13} />
+                        Inactivate
+                      </button>
+                    )}
+                    {detail.deletable && (
+                      <button
+                        onClick={() => setConfirm('delete')}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Trash2 size={13} />
+                        Delete
+                      </button>
+                    )}
+                    {/* Hidden once the account itself is deactivated — membership-level
+                        inactivation alone still leaves the account active on other teams */}
+                    {!detail.userArchivedAt && (
+                      <button
+                        onClick={() => setConfirm('revoke')}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <ShieldOff size={13} />
+                        Revoke all access
+                      </button>
+                    )}
+                  </div>
+                  {activeActivityCount > 0 && (
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 8 }}>
+                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
+                    </div>
+                  )}
+                  {revokeResult && (
+                    <div style={{ fontSize: 12, color: 'var(--foreground)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
+                      Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
                     </div>
                   )}
                 </div>
               )}
             </div>
-          )}
-        </div>
 
-        {/* Footer — hidden when archive confirm is showing */}
-        {!showArchiveConfirm && (
-          <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            padding: '12px 20px', borderTop: '1px solid var(--border)',
-          }}>
-            <div>
-              {mode === 'edit' && (
-                isArchived ? (
-                  <button
-                    onClick={handleRestore}
-                    disabled={busy}
-                    style={{ ...restoreBtnStyle, opacity: busy ? 0.6 : 1 }}
-                  >
-                    <RotateCcw size={13} />
-                    Restore team
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => setShowArchiveConfirm(true)}
-                    style={archiveBtnStyle}
-                  >
-                    <Archive size={13} />
-                    Archive team
-                  </button>
-                )
+            {/* Footer */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+              <button onClick={onClose} style={cancelBtn}>Cancel</button>
+              {(isAdmin || currentUser?.id === detail.userId) && (
+                <button
+                  onClick={handleSave}
+                  disabled={busy}
+                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'var(--font-sans)' }}
+                >
+                  {busy ? 'Saving…' : 'Save changes'}
+                </button>
               )}
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={onClose} style={cancelBtnStyle}>Cancel</button>
-              <button
-                onClick={handleSave}
-                disabled={busy || !name.trim()}
-                style={{
-                  background: teamColor, color: '#fff', fontWeight: 600,
-                  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
-                  border: 'none', opacity: (busy || !name.trim()) ? 0.6 : 1,
-                  fontFamily: 'var(--font-sans)',
-                }}
-              >
-                {busy ? 'Saving…' : primaryLabel}
-              </button>
-            </div>
-          </div>
+          </>
         )}
       </div>
     </div>,
     document.body,
-  );
+  )
 }
 ````
 
@@ -30707,6 +29951,752 @@ export default function GanttView({
         onClearFilters={filtersActive ? () => {} : undefined}
       />
     </div>
+  );
+}
+````
+
+## File: packages/web/src/components/TeamModal.tsx
+````typescript
+/**
+ * TeamModal — create / edit a team in a portal-rendered modal.
+ *
+ * The Members tab is fully functional after Phase 10.1.2. The Settings tab
+ * handles team identity and metadata. Identity and name live in the modal
+ * header so they remain visible while the user scrolls the tab body.
+ */
+
+import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { X, Archive, Mail, Link2, Copy, Check, Plus, Minus, RefreshCw, UserMinus, RotateCcw } from 'lucide-react';
+import { ApiError } from '@/lib/api';
+import { IdentityWidget } from '@/components/identity/IdentityWidget';
+import { Badge } from '@/components/identity/Badge';
+import type { Identity } from '@/components/identity/identity-constants';
+import { IDENTITY_COLORS } from '@/components/identity/identity-constants';
+import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities';
+import StatusTemplatesTab from '@/components/StatusTemplatesTab';
+import { useAuth } from '@/contexts/AuthContext';
+import {
+  useTeamInvites, useRevokeInvite,
+  useTeamInviteLink, useCreateInviteLink, useRevokeInviteLink,
+  useAddMember, useDeleteMember, useArchiveMember, useUnarchiveMember,
+  useCreateParticipant, useUpdateMember, useUserSearch,
+} from '@/hooks/useMemberManagement';
+import RoleDropdown, { type MemberRole } from '@/components/RoleDropdown';
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle';
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
+import type { components } from '@draba/shared';
+
+type Team = components['schemas']['Team'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+interface Props {
+  mode: 'new' | 'edit';
+  team?: Team;
+  onClose: () => void;
+  /** Called with the newly created team immediately after server confirmation. */
+  onTeamCreated?: (team: Team) => void;
+  /** Whether the current user is a team admin. */
+  isAdmin?: boolean;
+}
+
+type Tab = 'settings' | 'members' | 'statuses';
+
+const DEFAULT_COLOR = IDENTITY_COLORS[0].hex;
+const DEFAULT_ICON = '__name_1__';
+
+function resolveIdentity(team?: Team): Identity {
+  return {
+    color: team?.color ?? DEFAULT_COLOR,
+    icon: team?.icon ?? DEFAULT_ICON,
+  };
+}
+
+// ── Shared button styles ────────────────────────────────────────────────────
+
+const cancelBtnStyle: React.CSSProperties = {
+  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
+  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
+};
+
+const inputStyle: React.CSSProperties = {
+  background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 7,
+  padding: '8px 12px', color: 'var(--foreground)', fontSize: 13,
+  width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-sans)',
+};
+
+const labelStyle: React.CSSProperties = {
+  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px',
+  textTransform: 'uppercase', marginBottom: 6, display: 'block',
+};
+
+const archiveBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
+  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
+  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+};
+
+const restoreBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
+  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
+  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+};
+
+// ── Main component ──────────────────────────────────────────────────────────
+
+export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin = true }: Props) {
+  const { user } = useAuth()
+  const currentUserId = (user as { id?: string } | null)?.id ?? ''
+  const [tab, setTab] = useState<Tab>('settings');
+  const [teamSaved, setTeamSaved] = useState(mode === 'edit');
+  const [showBanner, setShowBanner] = useState(false);
+  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
+  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [identity, setIdentity] = useState<Identity>(resolveIdentity(team));
+  const [name, setName] = useState(team?.name ?? '');
+  const [description, setDescription] = useState(team?.description ?? '');
+  const [notes, setNotes] = useState(team?.notes ?? '');
+
+  const [savedTeamId, setSavedTeamId] = useState(team?.id ?? '');
+
+  const createTeam = useCreateTeam();
+  const updateTeam = useUpdateTeam();
+  const archiveTeam = useArchiveTeam();
+  const unarchiveTeam = useUnarchiveTeam();
+
+  // Members tab state — only loaded when the team exists.
+  const activeTeamId = savedTeamId || team?.id || '';
+  const { data: members = [] } = useTeamMembers(activeTeamId);
+  const { data: invites = [] } = useTeamInvites(activeTeamId);
+  const { data: inviteLink } = useTeamInviteLink(activeTeamId);
+  const addMember = useAddMember(activeTeamId);
+  const deleteMember = useDeleteMember(activeTeamId);
+  const archiveMember = useArchiveMember(activeTeamId);
+  const unarchiveMember = useUnarchiveMember(activeTeamId);
+  const createParticipant = useCreateParticipant(activeTeamId);
+  const updateMember = useUpdateMember(activeTeamId);
+  const revokeInvite = useRevokeInvite(activeTeamId);
+  const createInviteLink = useCreateInviteLink(activeTeamId);
+  const revokeInviteLink = useRevokeInviteLink(activeTeamId);
+
+  const [searchQ, setSearchQ] = useState('');
+  const [showParticipantForm, setShowParticipantForm] = useState(false);
+  // Maps memberId → assignmentCount when a 409 MEMBER_HAS_ASSIGNMENTS is returned.
+  const [removeErrors, setRemoveErrors] = useState<Record<string, number>>({});
+  const [participantName, setParticipantName] = useState('');
+  const [participantIdentity, setParticipantIdentity] = useState<Identity>({ color: IDENTITY_COLORS[3].hex, icon: '__name_1__' });
+  const [copyLinkLabel, setCopyLinkLabel] = useState<'copy' | 'copied'>('copy');
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const { data: searchResults = [] } = useUserSearch(searchQ);
+
+  const isArchived = Boolean(team?.archivedAt);
+  const busy = createTeam.isPending || updateTeam.isPending || archiveTeam.isPending || unarchiveTeam.isPending;
+
+  useEffect(() => {
+    return () => { if (bannerTimer.current) clearTimeout(bannerTimer.current); };
+  }, []);
+
+  // Stale 409 errors belong to a specific member row; clear them when the
+  // search changes because the member list may reorder or filter differently.
+  useEffect(() => {
+    setRemoveErrors({});
+  }, [searchQ]);
+
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
+  function handleSave() {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    const patch = {
+      name: trimmed,
+      description: description.trim() || null,
+      notes: notes.trim() || null,
+      color: identity.color,
+      icon: identity.icon,
+    };
+
+    if (mode === 'new' && !teamSaved) {
+      createTeam.mutate(patch, {
+        onSuccess: (created) => {
+          setSavedTeamId(created.id);
+          setTeamSaved(true);
+          setShowBanner(true);
+          onTeamCreated?.(created);
+          bannerTimer.current = setTimeout(() => setShowBanner(false), 3000);
+        },
+      });
+    } else {
+      const tid = savedTeamId || team?.id;
+      if (!tid) return;
+      updateTeam.mutate({ teamId: tid, patch }, { onSuccess: () => { /* noop */ } });
+    }
+  }
+
+  function handleArchive() {
+    const tid = savedTeamId || team?.id;
+    if (!tid) return;
+    archiveTeam.mutate(tid, { onSuccess: onClose });
+  }
+
+  function handleRestore() {
+    const tid = savedTeamId || team?.id;
+    if (!tid) return;
+    unarchiveTeam.mutate(tid, { onSuccess: onClose });
+  }
+
+  const teamColor = identity.color;
+  const isNew = mode === 'new';
+  const primaryLabel = teamSaved ? 'Save changes' : 'Create team';
+  const membersLocked = !teamSaved;
+
+  return createPortal(
+    <div
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 1000,
+      }}
+    >
+      <div
+        style={{
+          width: 580, maxHeight: '90vh', background: 'var(--card)',
+          border: '1px solid var(--border)', borderRadius: 14,
+          boxShadow: '0 24px 64px rgba(0,0,0,.6)',
+          display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        }}
+      >
+        {/* Header — identity widget + editable name */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          padding: '16px 20px', borderBottom: '1px solid var(--border)',
+        }}>
+          <IdentityWidget identity={identity} name={name} shape="square" onChange={setIdentity} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
+              {isNew ? 'New Team' : 'Edit Team'}
+            </div>
+            <InlineEditableTitle
+              value={name}
+              onChange={setName}
+              placeholder="Team name…"
+              autoFocus={mode === 'new'}
+              onKeyDown={e => { if (e.key === 'Escape') onClose(); }}
+            />
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Saved banner */}
+        {showBanner && (
+          <div style={{
+            padding: '8px 20px',
+            background: `${teamColor}18`,
+            borderBottom: `1px solid ${teamColor}44`,
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+            <span style={{ fontSize: 14, color: teamColor }}>✓</span>
+            <span style={{ fontSize: 12, color: teamColor }}>Team created — you can now add members.</span>
+          </div>
+        )}
+
+        {/* Tab bar */}
+        <div style={{ display: 'flex', padding: '0 20px', borderBottom: '1px solid var(--border)' }}>
+          {(['settings', 'members', 'statuses'] as Tab[]).map(t => {
+            const isActive = tab === t;
+            const locked = (t === 'members' || t === 'statuses') && membersLocked;
+            return (
+              <div key={t} style={{ position: 'relative' }}>
+                <button
+                  onClick={() => !locked && setTab(t)}
+                  title={locked ? 'Save the team first to add members' : undefined}
+                  style={{
+                    padding: '10px 14px', fontSize: 13, fontWeight: 500, background: 'none', border: 'none',
+                    borderBottom: `2px solid ${isActive ? teamColor : 'transparent'}`,
+                    color: isActive ? 'var(--foreground)' : 'var(--muted-foreground)',
+                    cursor: locked ? 'not-allowed' : 'pointer',
+                    opacity: locked ? 0.45 : 1,
+                    marginBottom: -1, fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    textTransform: 'capitalize',
+                  }}
+                >
+                  {t === 'statuses' ? 'Status Templates' : t}
+                  {t === 'members' && teamSaved && (
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'var(--muted)', borderRadius: 99, padding: '1px 6px' }}>
+                      {members.length}
+                    </span>
+                  )}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {showArchiveConfirm ? (
+            <ConfirmDialog
+              variant="amber"
+              icon={<Archive size={22} color="#F59E0B" />}
+              title={`Archive "${name || 'this team'}"?`}
+              body="The team will be hidden from active views. All timelines and activities will be preserved and the team can be restored from the Archived section at any time."
+              confirmLabel="Archive"
+              busy={archiveTeam.isPending}
+              onCancel={() => setShowArchiveConfirm(false)}
+              onConfirm={handleArchive}
+            />
+          ) : tab === 'settings' ? (
+            <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
+              {/* Description */}
+              <div>
+                <label style={labelStyle}>Description</label>
+                <input
+                  autoFocus={mode === 'edit'}
+                  value={description}
+                  onChange={e => setDescription(e.target.value)}
+                  placeholder="Short description of this team…"
+                  style={inputStyle}
+                />
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label style={labelStyle}>Notes</label>
+                <textarea
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  placeholder="Internal notes, context, links…"
+                  rows={4}
+                  style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5 }}
+                />
+              </div>
+
+              {createTeam.isError && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
+                  Something went wrong — refer to logs for details.
+                </div>
+              )}
+              {updateTeam.isError && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
+                  Something went wrong — refer to logs for details.
+                </div>
+              )}
+            </div>
+          ) : tab === 'statuses' ? (
+            <StatusTemplatesTab
+              teamId={activeTeamId}
+              isAdmin={isAdmin}
+              teamColor={teamColor}
+            />
+          ) : (
+            // Members tab
+            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+              {/* Search / add input */}
+              {isAdmin && (
+                <div>
+                  <label style={labelStyle}>Add member or invite by email</label>
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      value={searchQ}
+                      onChange={e => setSearchQ(e.target.value)}
+                      placeholder="Search by name or email…"
+                      style={{ ...inputStyle, paddingRight: 36 }}
+                    />
+                    {searchQ && (
+                      <button
+                        onClick={() => setSearchQ('')}
+                        style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex', padding: 2 }}
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Search results */}
+                  {searchQ.length >= 2 && (
+                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
+                      {searchResults.length === 0 ? (
+                        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No users found for "{searchQ}"</span>
+                          <button
+                            onClick={() => {
+                              // Trigger email invite
+                              const email = searchQ.includes('@') ? searchQ : null;
+                              if (!email) return;
+                              fetch(`/teams/${activeTeamId}/invites`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('accessToken') ?? ''}` },
+                                body: JSON.stringify({ email }),
+                              }).then(() => setSearchQ(''));
+                            }}
+                            style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                          >
+                            <Mail size={11} style={{ display: 'inline', marginRight: 4 }} />
+                            Invite
+                          </button>
+                        </div>
+                      ) : (
+                        searchResults.map(u => {
+                          const alreadyMember = members.some(m => m.userId === u.id);
+                          return (
+                            <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: '1px solid var(--border)' }}>
+                              <Badge identity={{ color: '#8b949e', icon: '__name_1__' }} name={u.displayName} shape="circle" size={22} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13, color: 'var(--foreground)' }}>{u.displayName}</div>
+                                <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{u.email}</div>
+                              </div>
+                              {alreadyMember ? (
+                                <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>Already added</span>
+                              ) : (
+                                <button
+                                  onClick={() => addMember.mutate({ userId: u.id }, { onSuccess: () => setSearchQ('') })}
+                                  style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4 }}
+                                >
+                                  <Plus size={11} />
+                                  Add
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Participant creation form */}
+              {isAdmin && (
+                <div>
+                  {!showParticipantForm ? (
+                    <button
+                      onClick={() => setShowParticipantForm(true)}
+                      style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                    >
+                      <Plus size={12} />
+                      Add participant (no login)
+                    </button>
+                  ) : (
+                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, padding: 14 }}>
+                      <label style={labelStyle}>New participant</label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <IdentityWidget
+                          identity={participantIdentity}
+                          name={participantName}
+                          shape="circle"
+                          onChange={setParticipantIdentity}
+                        />
+                        <input
+                          value={participantName}
+                          onChange={e => setParticipantName(e.target.value)}
+                          placeholder="Display name (required)…"
+                          style={{ ...inputStyle, flex: 1 }}
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => {
+                            if (!participantName.trim()) return;
+                            createParticipant.mutate({
+                              name: participantName.trim(),
+                              color: participantIdentity.color,
+                              icon: participantIdentity.icon,
+                            }, {
+                              onSuccess: () => { setParticipantName(''); setShowParticipantForm(false); },
+                            });
+                          }}
+                          disabled={!participantName.trim() || createParticipant.isPending}
+                          style={{ background: '#F59E0B', color: '#000', fontWeight: 600, fontSize: 12, padding: '7px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0, opacity: !participantName.trim() ? 0.5 : 1 }}
+                        >
+                          Create
+                        </button>
+                        <button onClick={() => setShowParticipantForm(false)} style={{ ...cancelBtnStyle, padding: '7px 10px' }}>
+                          <X size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Role-change error banner */}
+              {updateMember.isError && (
+                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 7, padding: '7px 12px' }}>
+                  {(updateMember.error as { message?: string })?.message ?? 'Could not update role.'}
+                </div>
+              )}
+
+              {/* Member list */}
+              <div>
+                <label style={labelStyle}>Members ({members.length})</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {members.map((m: TeamMemberWithUser) => {
+                    const isParticipant = !m.userId;
+                    const isInactive = Boolean(m.archivedAt);
+                    const memberRole: MemberRole = isParticipant ? 'participant' : (m.role as MemberRole);
+                    const removeError = removeErrors[m.id];
+                    return (
+                      <div key={m.id}>
+                        <div
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 10,
+                            padding: '7px 10px', borderRadius: 7,
+                            background: isInactive ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)',
+                            opacity: isInactive ? 0.5 : 1,
+                          }}
+                        >
+                          <div style={{ flexShrink: 0, border: isParticipant ? '1.5px dashed var(--muted-foreground)' : 'none', borderRadius: '50%' }}>
+                            <Badge
+                              identity={{ color: m.color ?? '#8b949e', icon: m.icon ?? '__name_words__' }}
+                              name={m.displayName}
+                              shape="circle"
+                              size={24}
+                            />
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ fontSize: 13, color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.displayName}</span>
+                              {isParticipant && <span style={{ fontSize: 10, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '0px 5px', flexShrink: 0 }}>No login</span>}
+                            </div>
+                            {!isParticipant && <div style={{ fontSize: 11, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>}
+                          </div>
+                          {isAdmin && (
+                            <RoleDropdown
+                              value={memberRole}
+                              onChange={role => {
+                                if (isParticipant || role === 'participant') return;
+                                updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
+                              }}
+                              disabled={isParticipant || m.userId === currentUserId}
+                              hideParticipant={!isParticipant}
+                            />
+                          )}
+                          {isAdmin && (
+                            <div style={{ display: 'flex', gap: 4 }}>
+                              {isInactive ? (
+                                <button
+                                  title="Reactivate member"
+                                  onClick={() => unarchiveMember.mutate(m.id)}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
+                                  onMouseEnter={e => (e.currentTarget.style.color = '#1A97A2')}
+                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
+                                >
+                                  <RefreshCw size={13} />
+                                </button>
+                              ) : (
+                                <button
+                                  title="Inactivate member"
+                                  onClick={() => archiveMember.mutate(m.id)}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
+                                  onMouseEnter={e => (e.currentTarget.style.color = '#F59E0B')}
+                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
+                                >
+                                  <UserMinus size={13} />
+                                </button>
+                              )}
+                              <button
+                                title="Remove from team"
+                                onClick={() => {
+                                  setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; });
+                                  deleteMember.mutate(m.id, {
+                                    onError: (err) => {
+                                      if (err instanceof ApiError && err.code === 'MEMBER_HAS_ASSIGNMENTS') {
+                                        const count = (err.data?.assignmentCount as number) ?? 0;
+                                        setRemoveErrors(prev => ({ ...prev, [m.id]: count }));
+                                      }
+                                    },
+                                  });
+                                }}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
+                                onMouseEnter={e => (e.currentTarget.style.color = '#EF4444')}
+                                onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
+                              >
+                                <Minus size={13} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        {removeError !== undefined && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#F59E0B', padding: '4px 10px 4px 44px' }}>
+                            <span>{removeError} assignment{removeError === 1 ? '' : 's'} — can't remove.</span>
+                            <button
+                              onClick={() => {
+                                archiveMember.mutate(m.id, {
+                                  onSuccess: () => setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; }),
+                                });
+                              }}
+                              style={{ fontSize: 12, color: '#F59E0B', background: 'none', border: '1px solid rgba(245,158,11,0.4)', borderRadius: 5, padding: '2px 8px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                            >
+                              Inactivate instead
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Pending invitations */}
+              {isAdmin && invites.length > 0 && (
+                <div>
+                  <label style={labelStyle}>Pending invitations ({invites.length})</label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    {invites.map(inv => (
+                      <div key={inv.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)' }}>
+                        <div style={{ width: 24, height: 24, borderRadius: '50%', border: '1.5px dashed var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          <Mail size={11} color="var(--muted-foreground)" />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.email}</div>
+                          <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
+                            Sent {new Date(inv.createdAt).toLocaleDateString()} · expires {new Date(inv.expiresAt).toLocaleDateString()}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => revokeInvite.mutate(inv.id)}
+                          style={{ fontSize: 11, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Invite link */}
+              {isAdmin && (
+                <div>
+                  <label style={labelStyle}>
+                    <Link2 size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Invite link
+                  </label>
+                  {inviteLink?.token ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <input
+                          readOnly
+                          value={`${window.location.origin}/register?token=${inviteLink.token}`}
+                          style={{ ...inputStyle, color: 'var(--muted-foreground)', flex: 1 }}
+                          onClick={e => (e.target as HTMLInputElement).select()}
+                        />
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(`${window.location.origin}/register?token=${inviteLink.token!}`);
+                            setCopyLinkLabel('copied');
+                            if (copyTimer.current) clearTimeout(copyTimer.current);
+                            copyTimer.current = setTimeout(() => setCopyLinkLabel('copy'), 2000);
+                          }}
+                          style={{
+                            background: copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.12)' : 'var(--muted)',
+                            border: `1px solid ${copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`,
+                            color: copyLinkLabel === 'copied' ? '#1A97A2' : 'var(--muted-foreground)',
+                            borderRadius: 7, padding: '0 14px', cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontFamily: 'var(--font-sans)',
+                            transition: 'all 0.15s', flexShrink: 0,
+                          }}
+                        >
+                          {copyLinkLabel === 'copied' ? <Check size={12} /> : <Copy size={12} />}
+                          {copyLinkLabel === 'copied' ? 'Copied!' : 'Copy link'}
+                        </button>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flex: 1, lineHeight: 1.5 }}>
+                          Anyone with this link can join the team as a member.
+                        </span>
+                        <button
+                          onClick={() => createInviteLink.mutate()}
+                          style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
+                        >
+                          <RefreshCw size={11} /> Regenerate
+                        </button>
+                        <button
+                          onClick={() => revokeInviteLink.mutate()}
+                          style={{ fontSize: 11, color: '#EF4444', background: 'none', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No invite link — generate one to share a reusable join URL.</span>
+                      <button
+                        onClick={() => createInviteLink.mutate()}
+                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
+                      >
+                        Generate
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer — hidden when archive confirm is showing */}
+        {!showArchiveConfirm && (
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '12px 20px', borderTop: '1px solid var(--border)',
+          }}>
+            <div>
+              {mode === 'edit' && (
+                isArchived ? (
+                  <button
+                    onClick={handleRestore}
+                    disabled={busy}
+                    style={{ ...restoreBtnStyle, opacity: busy ? 0.6 : 1 }}
+                  >
+                    <RotateCcw size={13} />
+                    Restore team
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setShowArchiveConfirm(true)}
+                    style={archiveBtnStyle}
+                  >
+                    <Archive size={13} />
+                    Archive
+                  </button>
+                )
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={onClose} style={cancelBtnStyle}>Cancel</button>
+              <button
+                onClick={handleSave}
+                disabled={busy || !name.trim()}
+                style={{
+                  background: teamColor, color: '#fff', fontWeight: 600,
+                  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
+                  border: 'none', opacity: (busy || !name.trim()) ? 0.6 : 1,
+                  fontFamily: 'var(--font-sans)',
+                }}
+              >
+                {busy ? 'Saving…' : primaryLabel}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
   );
 }
 ````
@@ -38342,1037 +38332,6 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
-## File: packages/web/src/components/layout/Sidebar.tsx
-````typescript
-import { useState, useRef, useEffect } from 'react';
-import {
-  ChevronRight,
-  ChevronLeft,
-  ChevronDown,
-  Plus,
-  Settings2,
-  Upload,
-  CalendarPlus,
-  Plug,
-} from 'lucide-react';
-import { Badge } from '@/components/identity/Badge';
-import { useAuth } from '@/contexts/AuthContext';
-import type { components } from '@draba/shared';
-
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-const SIDEBAR_MIN = 220;
-const SIDEBAR_MAX = 360;
-
-interface ApiTeam {
-  id: string;
-  name: string;
-  color?: string | null;
-  icon?: string | null;
-  archivedAt?: string | null;
-}
-
-interface ApiTimeline {
-  id: string;
-  name: string;
-  startDate?: string;
-  endDate?: string;
-  color?: string | null;
-  icon?: string | null;
-  archivedAt?: string | null;
-}
-
-interface Props {
-  collapsed: boolean;
-  onToggle: () => void;
-  onNewActivity?: () => void;
-  apiTimelines?: ApiTimeline[];
-  archivedTimelines?: ApiTimeline[];
-  activeTimelineId?: string;
-  onActiveTimelineChange?: (id: string) => void;
-  onNewTimeline?: () => void;
-  onEditTimeline?: (timelineId: string) => void;
-  // Team management
-  activeTeam?: ApiTeam;
-  /** All non-archived teams. Used to render the switchable team list. */
-  activeTeams?: ApiTeam[];
-  archivedTeams?: ApiTeam[];
-  onNewTeam?: () => void;
-  onEditTeam?: (team: ApiTeam) => void;
-  onSelectTeam?: (teamId: string) => void;
-  onUnarchiveTeam?: (teamId: string) => void;
-  /** True when the current user is an admin of the active team. */
-  canEditTeam?: boolean;
-  /** Live member list from the API. Falls back to demo data when empty. */
-  members?: TeamMemberWithUser[];
-  /** Called when the user clicks the gear icon on a member row. */
-  onEditMember?: (member: TeamMemberWithUser) => void;
-}
-
-const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
-const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8 } as const;
-const ICON_XS = { width: 11, height: 11, strokeWidth: 2 } as const;
-
-interface Timeline {
-  id: string;
-  name: string;
-  color: string;
-  icon: string | null;
-  startDate?: string;
-  endDate?: string;
-}
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-function formatDateRange(startDate?: string, endDate?: string): string {
-  if (!startDate || !endDate) return ''
-  const s = new Date(startDate + 'T00:00:00')
-  const e = new Date(endDate + 'T00:00:00')
-  const diffDays = (e.getTime() - s.getTime()) / 86_400_000
-  if (diffDays < 90) {
-    return `${MONTHS[s.getMonth()]} ${s.getDate()} – ${MONTHS[e.getMonth()]} ${e.getDate()} ${e.getFullYear()}`
-  }
-  return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
-}
-
-interface Member {
-  id: string;
-  name: string;
-  initials: string;
-  color: string;
-}
-
-const DEMO_TIMELINES: Timeline[] = [
-  { id: '1', name: 'Q1 2027 Roadmap',            color: '#1A97A2', icon: null, startDate: '2027-01-01', endDate: '2027-03-31' },
-  { id: '2', name: 'New Logo GTM',                color: '#6366F1', icon: null, startDate: '2026-12-01', endDate: '2027-01-15' },
-  { id: '3', name: 'Q4 2026 Roadmap',             color: '#F17B2B', icon: null, startDate: '2026-10-01', endDate: '2026-12-31' },
-  { id: '4', name: 'Project Pinky and the Brain', color: '#E11D48', icon: null, startDate: '2026-11-15', endDate: '2026-12-20' },
-];
-
-
-const DEMO_MEMBERS: Member[] = [
-  { id: '1', name: 'Lindsay K.', initials: 'LK', color: '#1A97A2' },
-  { id: '2', name: 'John Doe',   initials: 'JD', color: '#6366F1' },
-  { id: '3', name: 'Sarah M.',   initials: 'SM', color: '#F17B2B' },
-];
-
-interface TimelineItemProps {
-  timeline: Timeline;
-  active: boolean;
-  collapsed: boolean;
-  showDate?: boolean;
-  canEdit?: boolean;
-  onClick: () => void;
-  onSettings: () => void;
-}
-
-function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = false, onClick, onSettings }: TimelineItemProps) {
-  const [hovered, setHovered] = useState(false);
-  const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        background: active
-          ? 'rgba(255,255,255,0.10)'
-          : hovered
-          ? 'rgba(255,255,255,0.05)'
-          : 'transparent',
-        borderLeft: active ? `2px solid ${timeline.color}` : '2px solid transparent',
-        transition: 'background 0.12s',
-        cursor: 'pointer',
-        minHeight: 34,
-      }}
-    >
-      <button
-        onClick={onClick}
-        title={collapsed ? timeline.name : undefined}
-        style={{
-          flex: 1,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: collapsed ? '7px 14px' : '6px 8px 6px 16px',
-          background: 'none',
-          border: 'none',
-          color: active ? 'white' : 'rgba(255,255,255,0.65)',
-          fontSize: 13,
-          fontWeight: active ? 600 : 400,
-          cursor: 'pointer',
-          fontFamily: 'var(--font-sans)',
-          textAlign: 'left',
-          minWidth: 0,
-        }}
-      >
-        <Badge
-          identity={{ color: timeline.color, icon: timeline.icon ?? '__none__' }}
-          name={timeline.name}
-          shape="square"
-          size={20}
-        />
-        {!collapsed && (
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {timeline.name}
-            </div>
-            {dateRange && (
-              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {dateRange}
-              </div>
-            )}
-          </div>
-        )}
-      </button>
-
-      {!collapsed && canEdit && (
-        <button
-          onClick={e => { e.stopPropagation(); onSettings(); }}
-          title={`Configure ${timeline.name}`}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 26,
-            height: 26,
-            marginRight: 6,
-            background: 'none',
-            border: 'none',
-            borderRadius: 5,
-            color: 'rgba(255,255,255,0.4)',
-            cursor: 'pointer',
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            flexShrink: 0,
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 {...ICON_SM} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-function ConnectorItem({ name, status, color }: { name: string; status: string; color: string }) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <div
-      style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '6px 6px 6px 16px',
-        cursor: 'pointer',
-        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
-        transition: 'background 0.12s',
-      }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      <div style={{
-        width: 20, height: 20, borderRadius: 4,
-        background: color,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        flexShrink: 0,
-      }}>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
-          <rect x="1" y="1" width="9" height="18" rx="1.5" />
-          <rect x="14" y="1" width="9" height="12" rx="1.5" />
-        </svg>
-      </div>
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {name}
-        </div>
-        <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginTop: 1 }}>
-          {status}
-        </div>
-      </div>
-      <button
-        title={`Configure ${name}`}
-        style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          width: 26, height: 26, marginRight: 0,
-          background: 'none', border: 'none', borderRadius: 5,
-          color: 'rgba(255,255,255,0.4)', cursor: 'pointer',
-          opacity: hovered ? 1 : 0, transition: 'opacity 0.12s',
-          flexShrink: 0,
-        }}
-        onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-        onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-      >
-        <Settings2 {...ICON_SM} />
-      </button>
-    </div>
-  );
-}
-
-// ── TeamRow ──────────────────────────────────────────────────────────────────
-
-interface TeamRowProps {
-  team: ApiTeam;
-  isActive: boolean;
-  canEdit: boolean;
-  onSelect?: () => void;
-  onEdit?: () => void;
-}
-
-function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onClick={() => { if (!isActive) onSelect?.(); }}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        padding: '5px 6px 5px 16px',
-        borderLeft: isActive ? `2px solid ${team.color ?? 'var(--primary)'}` : '2px solid transparent',
-        background: isActive ? 'rgba(255,255,255,0.07)' : hovered ? 'rgba(255,255,255,0.03)' : 'transparent',
-        cursor: isActive ? 'default' : 'pointer',
-        minHeight: 34,
-        transition: 'background 0.12s',
-      }}
-    >
-      <Badge
-        identity={{ color: team.color ?? 'var(--primary)', icon: team.icon ?? '__name_1__' }}
-        name={team.name}
-        shape="square"
-        size={20}
-      />
-      <span style={{
-        fontSize: 13,
-        fontWeight: isActive ? 600 : 400,
-        color: isActive ? 'white' : 'rgba(255,255,255,0.65)',
-        flex: 1,
-        marginLeft: 8,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        minWidth: 0,
-      }}>
-        {team.name}
-      </span>
-      {canEdit && (
-        <button
-          title="Team settings"
-          onClick={e => { e.stopPropagation(); onEdit?.(); }}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 26,
-            height: 26,
-            marginRight: 6,
-            background: 'none',
-            border: 'none',
-            borderRadius: 5,
-            color: 'rgba(255,255,255,0.4)',
-            cursor: 'pointer',
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            flexShrink: 0,
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 {...ICON_SM} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-// ── MemberSidebarRow ──────────────────────────────────────────────────────────
-
-interface MemberSidebarRowProps {
-  displayName: string;
-  color: string;
-  icon?: string | null;
-  isInactive?: boolean;
-  onEdit?: () => void;
-}
-
-function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '4px 6px 4px 16px', cursor: 'default',
-        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
-        opacity: isInactive ? 0.45 : 1,
-      }}
-    >
-      <Badge
-        identity={{ color, icon: icon ?? '__name_words__' }}
-        name={displayName}
-        shape="circle"
-        size={20}
-      />
-      <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-        {displayName}
-      </span>
-      {onEdit && (
-        <button
-          onClick={e => { e.stopPropagation(); onEdit(); }}
-          title={`Edit ${displayName}`}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            width: 22, height: 22, marginRight: 6,
-            background: 'none', border: 'none', borderRadius: 4,
-            color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            pointerEvents: hovered ? 'auto' : 'none',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 width={12} height={12} strokeWidth={1.8} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-// ── Sidebar ───────────────────────────────────────────────────────────────────
-
-/**
- * Left navigation rail: brand, team selector with members, and timeline list.
- * Collapsed/expanded state is driven by the parent.
- */
-const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
-
-export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
-  const { user } = useAuth();
-  const currentUserId = (user as { id?: string } | null)?.id;
-  const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
-  const [teamOpen, setTeamOpen] = useState(true);
-  const [activityOpen, setActivityOpen] = useState(true);
-  const [connectorsOpen, setConnectorsOpen] = useState(true);
-  const [archivedOpen, setArchivedOpen] = useState(false);
-  const [timelinesOpen, setTimelinesOpen] = useState(true);
-  const [membersOpen, setMembersOpen] = useState(true);
-  const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
-
-  const timelines: Timeline[] = apiTimelines?.length
-    ? apiTimelines.map((t, i) => ({
-        id: t.id,
-        name: t.name,
-        color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
-        icon: t.icon ?? null,
-        startDate: t.startDate,
-        endDate: t.endDate,
-      }))
-    : DEMO_TIMELINES
-
-  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
-    id: t.id,
-    name: t.name,
-    color: t.color ?? '#64748B',
-    icon: t.icon ?? null,
-    startDate: t.startDate,
-    endDate: t.endDate,
-  }))
-  const activeId = activeTimelineId ?? internalActiveId
-  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0];
-
-  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
-  const dragging = useRef(false);
-  const startX = useRef(0);
-  const startW = useRef(SIDEBAR_MIN);
-
-  useEffect(() => {
-    function onMouseMove(e: MouseEvent) {
-      if (!dragging.current) return;
-      const delta = e.clientX - startX.current;
-      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
-    }
-    function onMouseUp() {
-      if (!dragging.current) return;
-      dragging.current = false;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    }
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-  }, []);
-
-  function onHandleMouseDown(e: React.MouseEvent) {
-    e.preventDefault();
-    dragging.current = true;
-    startX.current = e.clientX;
-    startW.current = sidebarWidth;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  }
-
-  return (
-    <div
-      style={{
-        position: 'relative',
-        width: collapsed ? 52 : sidebarWidth,
-        flexShrink: 0,
-        background: 'var(--color-charcoal)',
-        color: 'white',
-        display: 'flex',
-        flexDirection: 'column',
-        transition: 'width 0.2s ease',
-        overflow: 'hidden',
-        borderRight: '1px solid rgba(255,255,255,0.06)',
-      }}
-    >
-      {/* Logo + collapse toggle */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: collapsed ? 'center' : 'space-between',
-          padding: collapsed ? '0 13px' : '0 8px 0 16px',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-          height: 'var(--topbar-h)',
-          flexShrink: 0,
-        }}
-      >
-        {!collapsed && (
-          <div
-            onClick={onToggle}
-            style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
-          >
-            <img src="/logo.svg" alt="Draba" style={{ width: 28, height: 28 }} />
-            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
-              draba
-            </span>
-          </div>
-        )}
-        <button
-          onClick={onToggle}
-          style={{
-            background: 'rgba(255,255,255,0.08)',
-            border: 'none',
-            color: 'rgba(255,255,255,0.7)',
-            borderRadius: 6,
-            width: 26,
-            height: 26,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-            flexShrink: 0,
-          }}
-        >
-          {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
-        </button>
-      </div>
-
-      <div style={{ flex: 1, overflowY: 'auto' }}>
-
-        {/* Collapsed: team + timeline icons only */}
-        {collapsed && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
-            {/* Active team badge — click to expand */}
-            <div
-              title={activeTeam?.name ?? 'Team'}
-              onClick={onToggle}
-              style={{ cursor: 'pointer', flexShrink: 0 }}
-            >
-              <Badge
-                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: activeTeam?.icon ?? '__name_1__' }}
-                name={activeTeam?.name ?? ''}
-                shape="square"
-                size={28}
-              />
-            </div>
-            {/* Active timeline — click to expand */}
-            <div
-              title={activeTimeline.name}
-              onClick={onToggle}
-              style={{ cursor: 'pointer' }}
-            >
-              <Badge
-                identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
-                name={activeTimeline.name}
-                shape="square"
-                size={28}
-              />
-            </div>
-
-            {/* New activity */}
-            <button
-              title="New activity"
-              onClick={onNewActivity}
-              style={{
-                width: 28,
-                height: 28,
-                borderRadius: 6,
-                background: 'rgba(255,255,255,0.08)',
-                border: 'none',
-                color: 'rgba(255,255,255,0.6)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                flexShrink: 0,
-              }}
-              onMouseEnter={e => {
-                e.currentTarget.style.background = 'rgba(255,255,255,0.14)'
-                e.currentTarget.style.color = 'white'
-              }}
-              onMouseLeave={e => {
-                e.currentTarget.style.background = 'rgba(255,255,255,0.08)'
-                e.currentTarget.style.color = 'rgba(255,255,255,0.6)'
-              }}
-            >
-              <CalendarPlus width={15} height={15} strokeWidth={1.8} />
-            </button>
-          </div>
-        )}
-
-        {/* Team section */}
-        {!collapsed && (
-          <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-            {/* Section header — collapsible, same pattern as TIMELINE */}
-            <button
-              onClick={() => setTeamOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                padding: '10px 12px 6px 16px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'rgba(255,255,255,0.35)',
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                Team
-              </span>
-              {teamOpen
-                ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                : <ChevronRight width={12} height={12} strokeWidth={2} />}
-            </button>
-
-            {/* Team rows — active team highlighted; others clickable to switch */}
-            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
-              <TeamRow
-                key={t.id}
-                team={t}
-                isActive={t.id === activeTeam?.id}
-                canEdit={canEditTeam}
-                onSelect={() => onSelectTeam?.(t.id)}
-                onEdit={() => onEditTeam?.(t)}
-              />
-            ))}
-            {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
-            {!activeTeams.length && activeTeam && (
-              <TeamRow
-                team={activeTeam}
-                isActive
-                canEdit={canEditTeam}
-                onEdit={() => onEditTeam?.(activeTeam)}
-              />
-            )}
-
-            {/* New team button — only superadmins get onNewTeam passed from the parent */}
-            {teamOpen && onNewTeam && (
-              <button
-                onClick={onNewTeam}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '4px 16px', background: 'none', border: 'none',
-                  color: 'rgba(255,255,255,0.35)', fontSize: 12,
-                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-              >
-                <Plus {...ICON_SM} />
-                New team
-              </button>
-            )}
-
-            {/* Archived teams — collapsible sub-section, shown when team section is open */}
-            {teamOpen && archivedTeams.length > 0 && (
-              <div>
-                <button
-                  onClick={() => setArchivedTeamsOpen(o => !o)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 5,
-                    width: '100%', padding: '4px 8px 4px 16px',
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
-                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-                >
-                  {archivedTeamsOpen
-                    ? <ChevronDown {...ICON_XS} />
-                    : <ChevronRight {...ICON_XS} />}
-                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    Archived ({archivedTeams.length})
-                  </span>
-                </button>
-                {archivedTeamsOpen && archivedTeams.map(t => (
-                  <TeamRow
-                    key={t.id}
-                    team={t}
-                    isActive={false}
-                    canEdit={Boolean(onNewTeam)}
-                    onEdit={() => onEditTeam?.(t)}
-                  />
-                ))}
-              </div>
-            )}
-
-            {/* Members — only when team section is expanded */}
-            {teamOpen && (
-              <>
-                <button
-                  onClick={() => setMembersOpen(o => !o)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    width: '100%',
-                    padding: '6px 8px 4px 16px',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: 'rgba(255,255,255,0.35)',
-                    fontFamily: 'var(--font-sans)',
-                  }}
-                >
-                  {membersOpen
-                    ? <ChevronDown {...ICON_XS} />
-                    : <ChevronRight {...ICON_XS} />}
-                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    Members
-                  </span>
-                </button>
-
-                {membersOpen && (
-                  <div style={{ paddingBottom: 8 }}>
-                    {(apiMembers ?? DEMO_MEMBERS.map(m => ({ id: m.id, teamId: '', userId: null, displayName: m.name, role: 'member', color: m.color, icon: null, joinedAt: '', email: '', avatarUrl: null }))).map(m => {
-                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
-                      const color = m.color ?? '#8b949e';
-                      const icon = (m as TeamMemberWithUser).icon ?? null;
-                      const isReal = Boolean(apiMembers);
-                      return (
-                        <MemberSidebarRow
-                          key={m.id}
-                          displayName={displayName}
-                          color={color}
-                          icon={icon}
-                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
-                          onEdit={isReal && onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
-                            ? () => onEditMember(m as TeamMemberWithUser)
-                            : undefined}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Timelines section */}
-        <div style={{ padding: '8px 0' }}>
-          {!collapsed ? (
-            <button
-              onClick={() => setTimelinesOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                padding: '6px 12px 4px 16px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'rgba(255,255,255,0.35)',
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                Timeline
-              </span>
-              {timelinesOpen
-                ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                : <ChevronRight width={12} height={12} strokeWidth={2} />}
-            </button>
-          ) : (
-            <div style={{ height: 8 }} />
-          )}
-
-          {!collapsed && (timelinesOpen ? (
-            <>
-              {timelines.map(tl => (
-                <TimelineItem
-                  key={tl.id}
-                  timeline={tl}
-                  active={activeId === tl.id}
-                  collapsed={false}
-                  canEdit={canEditTeam}
-                  onClick={() => { setInternalActiveId(tl.id); onActiveTimelineChange?.(tl.id); }}
-                  onSettings={() => onEditTimeline?.(tl.id)}
-                />
-              ))}
-              <button
-                onClick={onNewTimeline}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '6px 16px',
-                  background: 'none',
-                  border: 'none',
-                  color: 'rgba(255,255,255,0.35)',
-                  fontSize: 12,
-                  cursor: onNewTimeline ? 'pointer' : 'default',
-                  width: '100%',
-                  fontFamily: 'var(--font-sans)',
-                  marginTop: 2,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-              >
-                <Plus {...ICON_SM} />
-                New timeline
-              </button>
-
-              {/* Archived sub-section */}
-              {(archivedTimelineItems.length > 0 || apiTimelines?.length) && (
-                <>
-                  <button
-                    onClick={() => setArchivedOpen(o => !o)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 5,
-                      width: '100%', padding: '6px 12px 4px 16px',
-                      background: 'none', border: 'none', cursor: 'pointer',
-                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                      marginTop: 4,
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
-                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-                  >
-                    {archivedOpen
-                      ? <ChevronDown {...ICON_XS} />
-                      : <ChevronRight {...ICON_XS} />}
-                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                      Archived
-                    </span>
-                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
-                  </button>
-
-                  {archivedOpen && (
-                    <div style={{ opacity: 0.6 }}>
-                      {archivedTimelineItems.map(tl => (
-                        <TimelineItem
-                          key={tl.id}
-                          timeline={tl}
-                          active={false}
-                          collapsed={false}
-                          canEdit={canEditTeam}
-                          onClick={() => {}}
-                          onSettings={() => onEditTimeline?.(tl.id)}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          ) : (
-            /* Section collapsed: show just the active timeline */
-            <TimelineItem
-              timeline={activeTimeline}
-              active={true}
-              collapsed={false}
-              showDate={false}
-              onClick={() => setTimelinesOpen(true)}
-              onSettings={() => {}}
-            />
-          ))}
-        </div>
-        {/* Activity section */}
-        {!collapsed && (
-          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-            {/* Header with collapse toggle + quick-add icon */}
-            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
-              <button
-                onClick={() => setActivityOpen(o => !o)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
-                  padding: 0,
-                }}
-              >
-                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Activity
-                </span>
-                {activityOpen
-                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
-              </button>
-              <button
-                title="New activity"
-                onClick={onNewActivity}
-                style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  width: 24, height: 24, borderRadius: 5,
-                  background: 'none', border: 'none',
-                  color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.9)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-              >
-                <CalendarPlus width={14} height={14} strokeWidth={1.8} />
-              </button>
-            </div>
-
-            {/* New activity + Import activities — only when section is expanded */}
-            {activityOpen && (
-              <button
-                onClick={onNewActivity}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '6px 16px', background: 'none', border: 'none',
-                  color: 'rgba(255,255,255,0.6)', fontSize: 12,
-                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.9)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.6)')}
-              >
-                <Plus width={13} height={13} strokeWidth={1.8} />
-                New activity
-              </button>
-            )}
-
-            {activityOpen && (
-              <button
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '6px 16px', background: 'none', border: 'none',
-                  color: 'rgba(255,255,255,0.6)', fontSize: 12,
-                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.9)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.6)')}
-              >
-                <Upload width={13} height={13} strokeWidth={1.8} />
-                Import activities
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Connectors section — contextual to active timeline */}
-        {!collapsed && (
-          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
-              <button
-                onClick={() => setConnectorsOpen(o => !o)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
-                  padding: 0,
-                }}
-              >
-                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Connectors
-                </span>
-                {connectorsOpen
-                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
-              </button>
-            </div>
-
-            {connectorsOpen && (
-              <>
-                <div style={{
-                  padding: '0 16px 4px',
-                  fontSize: 10,
-                  color: 'rgba(255,255,255,0.22)',
-                  letterSpacing: '0.02em',
-                }}>
-                  {activeTimeline.name}
-                </div>
-                {/* Stub: connected Trello board */}
-                <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
-                <button
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 8,
-                    padding: '6px 16px', background: 'none', border: 'none',
-                    color: 'rgba(255,255,255,0.35)', fontSize: 12,
-                    cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-                >
-                  <Plug width={13} height={13} strokeWidth={1.8} />
-                  Add connector
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Resize handle */}
-      {!collapsed && (
-        <div
-          onMouseDown={onHandleMouseDown}
-          style={{
-            position: 'absolute',
-            top: 0,
-            right: 0,
-            width: 5,
-            height: '100%',
-            cursor: 'col-resize',
-            zIndex: 20,
-          }}
-          onMouseEnter={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'var(--primary)')}
-          onMouseLeave={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'transparent')}
-        >
-          <div
-            style={{
-              position: 'absolute',
-              top: 0,
-              right: 0,
-              width: 2,
-              height: '100%',
-              background: 'transparent',
-              transition: 'background 0.15s',
-              pointerEvents: 'none',
-            }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/pages/DashboardPage.tsx
 ````typescript
 /**
@@ -39629,7 +38588,10 @@ function DashboardShell() {
         onActiveTimelineChange={handleTimelineChange}
         onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
         onEditTimeline={id => {
-          const tl = allTimelines.find(t => t.id === id)
+          // timelines (active) is always loaded; allTimelines (?archived=true) may
+          // still be in-flight, so prefer the already-loaded list to avoid opening
+          // the modal with an undefined timeline and blank fields.
+          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
           setEditingTimeline(tl ?? null)
           setTimelineModalMode('edit')
         }}
@@ -40844,6 +39806,1037 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - Notifications (email, push)
 - Recurring event UI (RRULE editing)
 - Kanban drag-to-change-status (v2; v1 Kanban is read-only)
+````
+
+## File: packages/web/src/components/layout/Sidebar.tsx
+````typescript
+import { useState, useRef, useEffect } from 'react';
+import {
+  ChevronRight,
+  ChevronLeft,
+  ChevronDown,
+  Plus,
+  Settings2,
+  Upload,
+  CalendarPlus,
+  Plug,
+} from 'lucide-react';
+import { Badge } from '@/components/identity/Badge';
+import { useAuth } from '@/contexts/AuthContext';
+import type { components } from '@draba/shared';
+
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 360;
+
+interface ApiTeam {
+  id: string;
+  name: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+}
+
+interface ApiTimeline {
+  id: string;
+  name: string;
+  startDate?: string;
+  endDate?: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+}
+
+interface Props {
+  collapsed: boolean;
+  onToggle: () => void;
+  onNewActivity?: () => void;
+  apiTimelines?: ApiTimeline[];
+  archivedTimelines?: ApiTimeline[];
+  activeTimelineId?: string;
+  onActiveTimelineChange?: (id: string) => void;
+  onNewTimeline?: () => void;
+  onEditTimeline?: (timelineId: string) => void;
+  // Team management
+  activeTeam?: ApiTeam;
+  /** All non-archived teams. Used to render the switchable team list. */
+  activeTeams?: ApiTeam[];
+  archivedTeams?: ApiTeam[];
+  onNewTeam?: () => void;
+  onEditTeam?: (team: ApiTeam) => void;
+  onSelectTeam?: (teamId: string) => void;
+  onUnarchiveTeam?: (teamId: string) => void;
+  /** True when the current user is an admin of the active team. */
+  canEditTeam?: boolean;
+  /** Live member list from the API. Falls back to demo data when empty. */
+  members?: TeamMemberWithUser[];
+  /** Called when the user clicks the gear icon on a member row. */
+  onEditMember?: (member: TeamMemberWithUser) => void;
+}
+
+const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
+const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8 } as const;
+const ICON_XS = { width: 11, height: 11, strokeWidth: 2 } as const;
+
+interface Timeline {
+  id: string;
+  name: string;
+  color: string;
+  icon: string | null;
+  startDate?: string;
+  endDate?: string;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function formatDateRange(startDate?: string, endDate?: string): string {
+  if (!startDate || !endDate) return ''
+  const s = new Date(startDate + 'T00:00:00')
+  const e = new Date(endDate + 'T00:00:00')
+  const diffDays = (e.getTime() - s.getTime()) / 86_400_000
+  if (diffDays < 90) {
+    return `${MONTHS[s.getMonth()]} ${s.getDate()} – ${MONTHS[e.getMonth()]} ${e.getDate()} ${e.getFullYear()}`
+  }
+  return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
+}
+
+interface Member {
+  id: string;
+  name: string;
+  initials: string;
+  color: string;
+}
+
+const DEMO_TIMELINES: Timeline[] = [
+  { id: '1', name: 'Q1 2027 Roadmap',            color: '#1A97A2', icon: null, startDate: '2027-01-01', endDate: '2027-03-31' },
+  { id: '2', name: 'New Logo GTM',                color: '#6366F1', icon: null, startDate: '2026-12-01', endDate: '2027-01-15' },
+  { id: '3', name: 'Q4 2026 Roadmap',             color: '#F17B2B', icon: null, startDate: '2026-10-01', endDate: '2026-12-31' },
+  { id: '4', name: 'Project Pinky and the Brain', color: '#E11D48', icon: null, startDate: '2026-11-15', endDate: '2026-12-20' },
+];
+
+
+const DEMO_MEMBERS: Member[] = [
+  { id: '1', name: 'Lindsay K.', initials: 'LK', color: '#1A97A2' },
+  { id: '2', name: 'John Doe',   initials: 'JD', color: '#6366F1' },
+  { id: '3', name: 'Sarah M.',   initials: 'SM', color: '#F17B2B' },
+];
+
+interface TimelineItemProps {
+  timeline: Timeline;
+  active: boolean;
+  collapsed: boolean;
+  showDate?: boolean;
+  canEdit?: boolean;
+  onClick: () => void;
+  onSettings: () => void;
+}
+
+function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = false, onClick, onSettings }: TimelineItemProps) {
+  const [hovered, setHovered] = useState(false);
+  const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        background: active
+          ? 'rgba(255,255,255,0.10)'
+          : hovered
+          ? 'rgba(255,255,255,0.05)'
+          : 'transparent',
+        borderLeft: active ? `2px solid ${timeline.color}` : '2px solid transparent',
+        transition: 'background 0.12s',
+        cursor: 'pointer',
+        minHeight: 34,
+      }}
+    >
+      <button
+        onClick={onClick}
+        title={collapsed ? timeline.name : undefined}
+        style={{
+          flex: 1,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: collapsed ? '7px 14px' : '6px 8px 6px 16px',
+          background: 'none',
+          border: 'none',
+          color: active ? 'white' : 'rgba(255,255,255,0.65)',
+          fontSize: 13,
+          fontWeight: active ? 600 : 400,
+          cursor: 'pointer',
+          fontFamily: 'var(--font-sans)',
+          textAlign: 'left',
+          minWidth: 0,
+        }}
+      >
+        <Badge
+          identity={{ color: timeline.color, icon: timeline.icon ?? '__none__' }}
+          name={timeline.name}
+          shape="square"
+          size={20}
+        />
+        {!collapsed && (
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {timeline.name}
+            </div>
+            {dateRange && (
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {dateRange}
+              </div>
+            )}
+          </div>
+        )}
+      </button>
+
+      {!collapsed && canEdit && (
+        <button
+          onClick={e => { e.stopPropagation(); onSettings(); }}
+          title={`Configure ${timeline.name}`}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            marginRight: 6,
+            background: 'none',
+            border: 'none',
+            borderRadius: 5,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 {...ICON_SM} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ConnectorItem({ name, status, color }: { name: string; status: string; color: string }) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 6px 6px 16px',
+        cursor: 'pointer',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        transition: 'background 0.12s',
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div style={{
+        width: 20, height: 20, borderRadius: 4,
+        background: color,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
+          <rect x="1" y="1" width="9" height="18" rx="1.5" />
+          <rect x="14" y="1" width="9" height="12" rx="1.5" />
+        </svg>
+      </div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {name}
+        </div>
+        <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginTop: 1 }}>
+          {status}
+        </div>
+      </div>
+      <button
+        title={`Configure ${name}`}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          width: 26, height: 26, marginRight: 0,
+          background: 'none', border: 'none', borderRadius: 5,
+          color: 'rgba(255,255,255,0.4)', cursor: 'pointer',
+          opacity: hovered ? 1 : 0, transition: 'opacity 0.12s',
+          flexShrink: 0,
+        }}
+        onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+        onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+      >
+        <Settings2 {...ICON_SM} />
+      </button>
+    </div>
+  );
+}
+
+// ── TeamRow ──────────────────────────────────────────────────────────────────
+
+interface TeamRowProps {
+  team: ApiTeam;
+  isActive: boolean;
+  canEdit: boolean;
+  onSelect?: () => void;
+  onEdit?: () => void;
+}
+
+function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={() => { if (!isActive) onSelect?.(); }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        padding: '5px 6px 5px 16px',
+        borderLeft: isActive ? `2px solid ${team.color ?? 'var(--primary)'}` : '2px solid transparent',
+        background: isActive ? 'rgba(255,255,255,0.07)' : hovered ? 'rgba(255,255,255,0.03)' : 'transparent',
+        cursor: isActive ? 'default' : 'pointer',
+        minHeight: 34,
+        transition: 'background 0.12s',
+      }}
+    >
+      <Badge
+        identity={{ color: team.color ?? 'var(--primary)', icon: team.icon ?? '__name_1__' }}
+        name={team.name}
+        shape="square"
+        size={20}
+      />
+      <span style={{
+        fontSize: 13,
+        fontWeight: isActive ? 600 : 400,
+        color: isActive ? 'white' : 'rgba(255,255,255,0.65)',
+        flex: 1,
+        marginLeft: 8,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        minWidth: 0,
+      }}>
+        {team.name}
+      </span>
+      {canEdit && (
+        <button
+          title="Team settings"
+          onClick={e => { e.stopPropagation(); onEdit?.(); }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            marginRight: 6,
+            background: 'none',
+            border: 'none',
+            borderRadius: 5,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 {...ICON_SM} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── MemberSidebarRow ──────────────────────────────────────────────────────────
+
+interface MemberSidebarRowProps {
+  displayName: string;
+  color: string;
+  icon?: string | null;
+  isInactive?: boolean;
+  onEdit?: () => void;
+}
+
+function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '4px 6px 4px 16px', cursor: 'default',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        opacity: isInactive ? 0.45 : 1,
+      }}
+    >
+      <Badge
+        identity={{ color, icon: icon ?? '__name_words__' }}
+        name={displayName}
+        shape="circle"
+        size={20}
+      />
+      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        {displayName}
+      </span>
+      {onEdit && (
+        <button
+          onClick={e => { e.stopPropagation(); onEdit(); }}
+          title={`Edit ${displayName}`}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 22, height: 22, marginRight: 6,
+            background: 'none', border: 'none', borderRadius: 4,
+            color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            pointerEvents: hovered ? 'auto' : 'none',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 width={12} height={12} strokeWidth={1.8} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
+/**
+ * Left navigation rail: brand, team selector with members, and timeline list.
+ * Collapsed/expanded state is driven by the parent.
+ */
+const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
+
+export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+  const { user } = useAuth();
+  const currentUserId = (user as { id?: string } | null)?.id;
+  const [internalActiveId, setInternalActiveId] = useState(DEMO_TIMELINES[0].id);
+  const [teamOpen, setTeamOpen] = useState(true);
+  const [activityOpen, setActivityOpen] = useState(true);
+  const [connectorsOpen, setConnectorsOpen] = useState(true);
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [timelinesOpen, setTimelinesOpen] = useState(true);
+  const [membersOpen, setMembersOpen] = useState(true);
+  const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
+
+  const timelines: Timeline[] = apiTimelines?.length
+    ? apiTimelines.map((t, i) => ({
+        id: t.id,
+        name: t.name,
+        color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
+        icon: t.icon ?? null,
+        startDate: t.startDate,
+        endDate: t.endDate,
+      }))
+    : DEMO_TIMELINES
+
+  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? '#64748B',
+    icon: t.icon ?? null,
+    startDate: t.startDate,
+    endDate: t.endDate,
+  }))
+  const activeId = activeTimelineId ?? internalActiveId
+  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0];
+
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
+  const dragging = useRef(false);
+  const startX = useRef(0);
+  const startW = useRef(SIDEBAR_MIN);
+
+  useEffect(() => {
+    function onMouseMove(e: MouseEvent) {
+      if (!dragging.current) return;
+      const delta = e.clientX - startX.current;
+      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
+    }
+    function onMouseUp() {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
+
+  function onHandleMouseDown(e: React.MouseEvent) {
+    e.preventDefault();
+    dragging.current = true;
+    startX.current = e.clientX;
+    startW.current = sidebarWidth;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  return (
+    <div
+      style={{
+        position: 'relative',
+        width: collapsed ? 52 : sidebarWidth,
+        flexShrink: 0,
+        background: 'var(--color-charcoal)',
+        color: 'white',
+        display: 'flex',
+        flexDirection: 'column',
+        transition: 'width 0.2s ease',
+        overflow: 'hidden',
+        borderRight: '1px solid rgba(255,255,255,0.06)',
+      }}
+    >
+      {/* Logo + collapse toggle */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'space-between',
+          padding: collapsed ? '0 13px' : '0 8px 0 16px',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
+          height: 'var(--topbar-h)',
+          flexShrink: 0,
+        }}
+      >
+        {!collapsed && (
+          <div
+            onClick={onToggle}
+            style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
+          >
+            <img src="/logo.svg" alt="Draba" style={{ width: 28, height: 28 }} />
+            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
+              draba
+            </span>
+          </div>
+        )}
+        <button
+          onClick={onToggle}
+          style={{
+            background: 'rgba(255,255,255,0.08)',
+            border: 'none',
+            color: 'rgba(255,255,255,0.7)',
+            borderRadius: 6,
+            width: 26,
+            height: 26,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            flexShrink: 0,
+          }}
+        >
+          {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
+        </button>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+
+        {/* Collapsed: team + timeline icons only */}
+        {collapsed && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
+            {/* Active team badge — click to expand */}
+            <div
+              title={activeTeam?.name ?? 'Team'}
+              onClick={onToggle}
+              style={{ cursor: 'pointer', flexShrink: 0 }}
+            >
+              <Badge
+                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: activeTeam?.icon ?? '__name_1__' }}
+                name={activeTeam?.name ?? ''}
+                shape="square"
+                size={28}
+              />
+            </div>
+            {/* Active timeline — click to expand */}
+            <div
+              title={activeTimeline.name}
+              onClick={onToggle}
+              style={{ cursor: 'pointer' }}
+            >
+              <Badge
+                identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
+                name={activeTimeline.name}
+                shape="square"
+                size={28}
+              />
+            </div>
+
+            {/* New activity */}
+            <button
+              title="New activity"
+              onClick={onNewActivity}
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 6,
+                background: 'rgba(255,255,255,0.08)',
+                border: 'none',
+                color: 'rgba(255,255,255,0.6)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.background = 'rgba(255,255,255,0.14)'
+                e.currentTarget.style.color = 'white'
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.background = 'rgba(255,255,255,0.08)'
+                e.currentTarget.style.color = 'rgba(255,255,255,0.6)'
+              }}
+            >
+              <CalendarPlus width={15} height={15} strokeWidth={1.8} />
+            </button>
+          </div>
+        )}
+
+        {/* Team section */}
+        {!collapsed && (
+          <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+            {/* Section header — collapsible, same pattern as TIMELINE */}
+            <button
+              onClick={() => setTeamOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                padding: '10px 12px 6px 16px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'rgba(255,255,255,0.35)',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Team
+              </span>
+              {teamOpen
+                ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                : <ChevronRight width={12} height={12} strokeWidth={2} />}
+            </button>
+
+            {/* Team rows — active team highlighted; others clickable to switch */}
+            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
+              <TeamRow
+                key={t.id}
+                team={t}
+                isActive={t.id === activeTeam?.id}
+                canEdit={canEditTeam}
+                onSelect={() => onSelectTeam?.(t.id)}
+                onEdit={() => onEditTeam?.(t)}
+              />
+            ))}
+            {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
+            {!activeTeams.length && activeTeam && (
+              <TeamRow
+                team={activeTeam}
+                isActive
+                canEdit={canEditTeam}
+                onEdit={() => onEditTeam?.(activeTeam)}
+              />
+            )}
+
+            {/* New team button — only superadmins get onNewTeam passed from the parent */}
+            {teamOpen && onNewTeam && (
+              <button
+                onClick={onNewTeam}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '4px 16px', background: 'none', border: 'none',
+                  color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+              >
+                <Plus {...ICON_SM} />
+                New team
+              </button>
+            )}
+
+            {/* Archived teams — collapsible sub-section, shown when team section is open */}
+            {teamOpen && archivedTeams.length > 0 && (
+              <div>
+                <button
+                  onClick={() => setArchivedTeamsOpen(o => !o)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    width: '100%', padding: '4px 8px 4px 16px',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                >
+                  {archivedTeamsOpen
+                    ? <ChevronDown {...ICON_XS} />
+                    : <ChevronRight {...ICON_XS} />}
+                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Archived ({archivedTeams.length})
+                  </span>
+                </button>
+                {archivedTeamsOpen && archivedTeams.map(t => (
+                  <TeamRow
+                    key={t.id}
+                    team={t}
+                    isActive={false}
+                    canEdit={Boolean(onNewTeam)}
+                    onEdit={() => onEditTeam?.(t)}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Members — only when team section is expanded */}
+            {teamOpen && (
+              <>
+                <button
+                  onClick={() => setMembersOpen(o => !o)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    width: '100%',
+                    padding: '6px 8px 4px 16px',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: 'rgba(255,255,255,0.35)',
+                    fontFamily: 'var(--font-sans)',
+                  }}
+                >
+                  {membersOpen
+                    ? <ChevronDown {...ICON_XS} />
+                    : <ChevronRight {...ICON_XS} />}
+                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Members
+                  </span>
+                </button>
+
+                {membersOpen && (
+                  <div style={{ paddingBottom: 8 }}>
+                    {(apiMembers ?? DEMO_MEMBERS.map(m => ({ id: m.id, teamId: '', userId: null, displayName: m.name, role: 'member', color: m.color, icon: null, joinedAt: '', email: '', avatarUrl: null }))).map(m => {
+                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
+                      const color = m.color ?? '#8b949e';
+                      const icon = (m as TeamMemberWithUser).icon ?? null;
+                      const isReal = Boolean(apiMembers);
+                      return (
+                        <MemberSidebarRow
+                          key={m.id}
+                          displayName={displayName}
+                          color={color}
+                          icon={icon}
+                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
+                          onEdit={isReal && onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
+                            ? () => onEditMember(m as TeamMemberWithUser)
+                            : undefined}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Timelines section */}
+        <div style={{ padding: '8px 0' }}>
+          {!collapsed ? (
+            <button
+              onClick={() => setTimelinesOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                padding: '6px 12px 4px 16px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'rgba(255,255,255,0.35)',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Timeline
+              </span>
+              {timelinesOpen
+                ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                : <ChevronRight width={12} height={12} strokeWidth={2} />}
+            </button>
+          ) : (
+            <div style={{ height: 8 }} />
+          )}
+
+          {!collapsed && (timelinesOpen ? (
+            <>
+              {timelines.map(tl => (
+                <TimelineItem
+                  key={tl.id}
+                  timeline={tl}
+                  active={activeId === tl.id}
+                  collapsed={false}
+                  canEdit={canEditTeam}
+                  onClick={() => { setInternalActiveId(tl.id); onActiveTimelineChange?.(tl.id); }}
+                  onSettings={() => onEditTimeline?.(tl.id)}
+                />
+              ))}
+              <button
+                onClick={onNewTimeline}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 16px',
+                  background: 'none',
+                  border: 'none',
+                  color: 'rgba(255,255,255,0.35)',
+                  fontSize: 12,
+                  cursor: onNewTimeline ? 'pointer' : 'default',
+                  width: '100%',
+                  fontFamily: 'var(--font-sans)',
+                  marginTop: 2,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+              >
+                <Plus {...ICON_SM} />
+                New timeline
+              </button>
+
+              {/* Archived sub-section */}
+              {archivedTimelineItems.length > 0 && (
+                <>
+                  <button
+                    onClick={() => setArchivedOpen(o => !o)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 5,
+                      width: '100%', padding: '6px 12px 4px 16px',
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                      marginTop: 4,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                  >
+                    {archivedOpen
+                      ? <ChevronDown {...ICON_XS} />
+                      : <ChevronRight {...ICON_XS} />}
+                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                      Archived
+                    </span>
+                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
+                  </button>
+
+                  {archivedOpen && (
+                    <div style={{ opacity: 0.6 }}>
+                      {archivedTimelineItems.map(tl => (
+                        <TimelineItem
+                          key={tl.id}
+                          timeline={tl}
+                          active={false}
+                          collapsed={false}
+                          canEdit={canEditTeam}
+                          onClick={() => {}}
+                          onSettings={() => onEditTimeline?.(tl.id)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          ) : (
+            /* Section collapsed: show just the active timeline */
+            <TimelineItem
+              timeline={activeTimeline}
+              active={true}
+              collapsed={false}
+              showDate={false}
+              onClick={() => setTimelinesOpen(true)}
+              onSettings={() => {}}
+            />
+          ))}
+        </div>
+        {/* Activity section */}
+        {!collapsed && (
+          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+            {/* Header with collapse toggle + quick-add icon */}
+            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
+              <button
+                onClick={() => setActivityOpen(o => !o)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
+                  padding: 0,
+                }}
+              >
+                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  Activity
+                </span>
+                {activityOpen
+                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
+              </button>
+              <button
+                title="New activity"
+                onClick={onNewActivity}
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  width: 24, height: 24, borderRadius: 5,
+                  background: 'none', border: 'none',
+                  color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.9)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+              >
+                <CalendarPlus width={14} height={14} strokeWidth={1.8} />
+              </button>
+            </div>
+
+            {/* New activity + Import activities — only when section is expanded */}
+            {activityOpen && (
+              <button
+                onClick={onNewActivity}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '6px 16px', background: 'none', border: 'none',
+                  color: 'rgba(255,255,255,0.6)', fontSize: 12,
+                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.9)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.6)')}
+              >
+                <Plus width={13} height={13} strokeWidth={1.8} />
+                New activity
+              </button>
+            )}
+
+            {activityOpen && (
+              <button
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '6px 16px', background: 'none', border: 'none',
+                  color: 'rgba(255,255,255,0.6)', fontSize: 12,
+                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.9)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.6)')}
+              >
+                <Upload width={13} height={13} strokeWidth={1.8} />
+                Import activities
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Connectors section — contextual to active timeline */}
+        {!collapsed && (
+          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
+              <button
+                onClick={() => setConnectorsOpen(o => !o)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
+                  padding: 0,
+                }}
+              >
+                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  Connectors
+                </span>
+                {connectorsOpen
+                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
+              </button>
+            </div>
+
+            {connectorsOpen && (
+              <>
+                <div style={{
+                  padding: '0 16px 4px',
+                  fontSize: 10,
+                  color: 'rgba(255,255,255,0.22)',
+                  letterSpacing: '0.02em',
+                }}>
+                  {activeTimeline.name}
+                </div>
+                {/* Stub: connected Trello board */}
+                <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
+                <button
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '6px 16px', background: 'none', border: 'none',
+                    color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                    cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+                >
+                  <Plug width={13} height={13} strokeWidth={1.8} />
+                  Add connector
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Resize handle */}
+      {!collapsed && (
+        <div
+          onMouseDown={onHandleMouseDown}
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            width: 5,
+            height: '100%',
+            cursor: 'col-resize',
+            zIndex: 20,
+          }}
+          onMouseEnter={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'var(--primary)')}
+          onMouseLeave={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'transparent')}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              width: 2,
+              height: '100%',
+              background: 'transparent',
+              transition: 'background 0.15s',
+              pointerEvents: 'none',
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
 ````
 
 ## File: docs/ROADMAP.md
