@@ -372,7 +372,7 @@ function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit
         shape="circle"
         size={20}
       />
-      <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
         {displayName}
       </span>
       {onEdit && (
@@ -813,7 +813,7 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
               </button>
 
               {/* Archived sub-section */}
-              {(archivedTimelineItems.length > 0 || apiTimelines?.length) && (
+              {archivedTimelineItems.length > 0 && (
                 <>
                   <button
                     onClick={() => setArchivedOpen(o => !o)}

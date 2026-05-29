@@ -224,8 +224,8 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
         }}>
           <IdentityWidget identity={identity} name={name} shape="square" onChange={setIdentity} />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.6px', textTransform: 'uppercase', marginBottom: 3 }}>
-              {isNew ? 'New team' : 'Edit team'}
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
+              {isNew ? 'New Team' : 'Edit Team'}
             </div>
             <InlineEditableTitle
               value={name}
@@ -294,7 +294,7 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
               icon={<Archive size={22} color="#F59E0B" />}
               title={`Archive "${name || 'this team'}"?`}
               body="The team will be hidden from active views. All timelines and activities will be preserved and the team can be restored from the Archived section at any time."
-              confirmLabel="Archive team"
+              confirmLabel="Archive"
               busy={archiveTeam.isPending}
               onCancel={() => setShowArchiveConfirm(false)}
               onConfirm={handleArchive}
@@ -713,7 +713,7 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
                     style={archiveBtnStyle}
                   >
                     <Archive size={13} />
-                    Archive team
+                    Archive
                   </button>
                 )
               )}

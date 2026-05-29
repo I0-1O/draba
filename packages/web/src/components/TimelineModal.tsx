@@ -402,8 +402,8 @@ export default function TimelineModal({ mode, teamId, timeline, canAdmin = false
             shape="square"
           />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4 }}>
-              {mode === 'new' ? 'NEW TIMELINE' : 'EDIT TIMELINE'}
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>
+              {mode === 'new' ? 'New Timeline' : 'Edit Timeline'}
             </div>
             <InlineEditableTitle
               value={name}
@@ -436,7 +436,7 @@ export default function TimelineModal({ mode, teamId, timeline, canAdmin = false
               icon={<Archive size={22} color="#F59E0B" />}
               title="Archive timeline?"
               body={`${timeline.name} will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.`}
-              confirmLabel="Archive timeline"
+              confirmLabel="Archive"
               busy={archiveTimeline.isPending}
               onCancel={() => setShowArchiveConfirm(false)}
               onConfirm={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
@@ -469,11 +469,11 @@ export default function TimelineModal({ mode, teamId, timeline, canAdmin = false
               {/* Description */}
               <div>
                 <div style={FIELD_LABEL}>Description</div>
-                <textarea
+                <input
                   value={description}
                   onChange={e => setDescription(e.target.value)}
                   placeholder="Short description of this timeline's purpose…"
-                  style={TEXTAREA}
+                  style={INPUT}
                 />
               </div>
 

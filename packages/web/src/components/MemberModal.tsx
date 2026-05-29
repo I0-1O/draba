@@ -213,7 +213,7 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
                 />
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, color: 'var(--muted-foreground)', fontWeight: 600, letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 3 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
                   {isParticipant ? 'Participant' : 'Team Member'}
                   {isInactivated && ' · Inactive'}
                 </div>

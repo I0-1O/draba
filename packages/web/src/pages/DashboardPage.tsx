@@ -252,7 +252,10 @@ function DashboardShell() {
         onActiveTimelineChange={handleTimelineChange}
         onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
         onEditTimeline={id => {
-          const tl = allTimelines.find(t => t.id === id)
+          // timelines (active) is always loaded; allTimelines (?archived=true) may
+          // still be in-flight, so prefer the already-loaded list to avoid opening
+          // the modal with an undefined timeline and blank fields.
+          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
           setEditingTimeline(tl ?? null)
           setTimelineModalMode('edit')
         }}

@@ -138,43 +138,29 @@ export default function ActivityCreatePanel({
       {/* Form */}
       <form onSubmit={handleSubmit} style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
 
-        {/* Title */}
-        <div>
-          <div style={LABEL}>Title <span style={{ color: 'var(--destructive)' }}>*</span></div>
+        {/* Identity + Title — mirrors the modal header pattern: badge on left, editable name on right */}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <div style={{ marginTop: 2, flexShrink: 0 }}>
+            <IdentityWidget
+              identity={identity}
+              name={title || 'New Activity'}
+              shape="square"
+              onChange={setIdentity}
+            />
+          </div>
           <input
             autoFocus
             value={title}
             onChange={e => setTitle(e.target.value)}
             placeholder="Activity title…"
             style={{
-              width: '100%', boxSizing: 'border-box',
-              fontSize: 13, fontWeight: 600, color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-              padding: '6px 8px', outline: 'none', background: 'var(--background)',
-              fontFamily: 'var(--font-sans)',
+              flex: 1, fontSize: 13, fontWeight: 600,
+              color: 'var(--foreground)', border: '1px solid transparent',
+              borderRadius: 'var(--radius-md)', padding: '5px 6px',
+              outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
             }}
-            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-          />
-        </div>
-
-        {/* Description */}
-        <div>
-          <div style={LABEL}>Description</div>
-          <textarea
-            value={description}
-            rows={3}
-            onChange={e => setDescription(e.target.value)}
-            placeholder="Optional description…"
-            style={{
-              width: '100%', boxSizing: 'border-box',
-              fontSize: 12, color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-              padding: '6px 8px', outline: 'none', background: 'var(--background)',
-              resize: 'vertical', lineHeight: 1.5, fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+            onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
+            onBlur={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
           />
         </div>
 
@@ -212,14 +198,22 @@ export default function ActivityCreatePanel({
           </div>
         </div>
 
-        {/* Identity (color + icon) */}
+        {/* Description */}
         <div>
-          <div style={LABEL}>Identity</div>
-          <IdentityWidget
-            identity={identity}
-            name={title || 'New Activity'}
-            shape="square"
-            onChange={setIdentity}
+          <div style={LABEL}>Description</div>
+          <input
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            placeholder="Optional description…"
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              fontSize: 12, color: 'var(--foreground)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+              padding: '6px 8px', outline: 'none', background: 'var(--background)',
+              fontFamily: 'var(--font-sans)',
+            }}
+            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
           />
         </div>
 

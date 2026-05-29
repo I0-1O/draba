@@ -450,17 +450,13 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
           {/* ── NOTES ── */}
           <div style={{ marginBottom: 8 }}>
             <div style={SEC_LABEL}>Notes</div>
-            <textarea
+            <input
               value={description}
-              rows={3}
               onChange={e => setDescription(e.target.value)}
-              onBlur={handleDescriptionBlur}
+              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
               placeholder="Add notes…"
-              style={{
-                ...INPUT, resize: 'vertical', lineHeight: 1.5, padding: '6px 8px',
-              }}
+              style={{ ...INPUT, padding: '6px 8px' }}
               onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-              onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
             />
           </div>
 
