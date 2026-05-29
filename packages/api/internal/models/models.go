@@ -20,6 +20,7 @@ type Activity struct {
 	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
 	Title             string     `db:"title"               json:"title"`
 	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
 	Icon              *string    `db:"icon"                json:"icon,omitempty"`
 	Color             *string    `db:"color"               json:"color,omitempty"`
 	StartAt           time.Time  `db:"start_at"            json:"startAt"`

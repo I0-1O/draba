@@ -22,8 +22,6 @@ interface Props {
   onGranularityChange: (g: TimeGranularity | 'auto') => void;
   colorBy: ColorBy;
   onColorByChange: (c: ColorBy) => void;
-  hideClosed?: boolean;
-  onHideClosedChange?: (v: boolean) => void;
   onExport: () => void;
   onShare?: () => void;
 }
@@ -42,8 +40,6 @@ export default function GanttToolbar({
   onGranularityChange,
   colorBy,
   onColorByChange,
-  hideClosed = false,
-  onHideClosedChange,
   onExport,
   onShare,
 }: Props) {
@@ -199,21 +195,6 @@ export default function GanttToolbar({
         <option value="member">Member</option>
         <option value="status">Status</option>
       </select>
-
-      {onHideClosedChange && (
-        <>
-          <div className={divider} />
-          <label className="flex items-center gap-1.5 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={hideClosed}
-              onChange={e => onHideClosedChange(e.target.checked)}
-              className="w-3 h-3 cursor-pointer accent-primary"
-            />
-            <span className="text-[11px] text-muted-foreground">Hide closed</span>
-          </label>
-        </>
-      )}
 
       <div className="flex-1" />
 

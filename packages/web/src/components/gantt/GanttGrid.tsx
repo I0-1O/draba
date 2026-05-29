@@ -18,15 +18,17 @@
  * the bar in the viewport.
  */
 
-import { useRef, useState, useCallback, useEffect } from 'react';
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import MemberAvatar from '../MemberAvatar';
 import { Badge } from '../identity/Badge';
 import EmptyState from '../shared/EmptyState';
 import type { Member } from '../../types';
-import type { ColumnDef } from './granularity';
+import type { ColumnDef, TimeGranularity } from './granularity';
 import { addDays } from './granularity';
 
-const LABEL_COL_W = 240;
+const DEFAULT_LABEL_COL_W = 240;
+const MIN_LABEL_COL_W = 140;
+const MAX_LABEL_COL_W = 400;
 const HEADER_H = 36;
 const ROW_H = 44;
 const GROUP_H = 30;
@@ -116,6 +118,10 @@ interface Props {
   onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
   /** Called when the user drags a bar edge or body to resize/move it. */
   onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
+  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Resolved granularity — used to compute the finer snap divisor during drag. */
+  resolvedGranularity?: TimeGranularity | 'auto';
   /** Find state from GanttView; absent when the find bar is closed/idle. */
   findState?: FindState;
   /** Called when the user clicks "Clear filters" in the no-matches callout. */
@@ -130,17 +136,41 @@ function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string 
   return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
 }
 
-// ── Date helpers ────────────────────────────────────────────────────────────
+// ── Date helpers (support fractional column positions) ───────────────────────
 
-function colToStartDate(colIdx: number, columns: ColumnDef[]): Date {
-  const i = Math.max(0, Math.min(columns.length - 1, colIdx));
-  return columns[i].start;
+// Maps a fractional column position to a calendar Date by interpolating within
+// the column's day range. Fractional positions enable finer snap granularities.
+function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
+  let remaining = Math.max(0, colFrac);
+  for (const col of columns) {
+    if (remaining <= 1) {
+      return addDays(col.start, Math.round(remaining * col.days));
+    }
+    remaining -= 1;
+  }
+  return columns[columns.length - 1].end;
 }
 
-// endColIdx is exclusive (the column *after* the last occupied one).
-function colToEndDate(endColIdx: number, columns: ColumnDef[]): Date {
-  const i = Math.max(1, Math.min(columns.length, endColIdx));
-  return addDays(columns[i - 1].end, -1);
+function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
+  return colFracToDate(Math.max(0, colFrac), columns);
+}
+
+// endColFrac is exclusive (the fractional col just past the last occupied day).
+function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
+  // The last included date is 1 day before the date at the exclusive end.
+  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
+}
+
+// Number of snap divisions per column based on the active zoom granularity.
+// Higher divisor → finer snap (e.g. week columns snap to day boundaries).
+function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
+  switch (granularity) {
+    case 'week':    return 7;  // snap to day within week
+    case 'month':   return 4;  // snap to week within month
+    case 'quarter': return 3;  // snap to month within quarter
+    case 'year':    return 4;  // snap to quarter within year
+    default:        return 1;  // day or auto → no finer snap
+  }
 }
 
 function formatDragDate(d: Date): string {
@@ -155,10 +185,39 @@ export default function GanttGrid({
   onSelectActivity,
   onLaneDrag,
   onBarDrag,
+  onBarDragProgress,
+  resolvedGranularity,
   findState,
   onClearFilters,
 }: Props) {
-  const totalW = LABEL_COL_W + columns.length * COL_W;
+  // ── Resizable label column ─────────────────────────────────────────────────
+  const [labelColW, setLabelColW] = useState(DEFAULT_LABEL_COL_W);
+
+  const totalW = useMemo(
+    () => labelColW + columns.length * COL_W,
+    [labelColW, columns.length],
+  );
+
+  const labelColWRef = useRef(labelColW);
+  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
+
+  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = labelColWRef.current;
+
+    function onMouseMove(mv: MouseEvent) {
+      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
+      setLabelColW(next);
+    }
+    function onMouseUp() {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, []);
+
   // Integer column index that contains today (for background highlight)
   const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
 
@@ -206,7 +265,7 @@ export default function GanttGrid({
     const viewH = container.clientHeight;
     const viewW = container.clientWidth;
     const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
-    const eventCenterX = LABEL_COL_W + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
+    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
     const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
 
     container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
@@ -262,6 +321,8 @@ export default function GanttGrid({
     zone: BarDragZone,
   ) => {
     if (!onBarDrag) return;
+    // Only allow drag/resize when the bar is already selected.
+    if (ev.id !== selectedActivityId) return;
     e.preventDefault();
     e.stopPropagation(); // prevent lane-drag from firing
 
@@ -273,9 +334,12 @@ export default function GanttGrid({
     const initStartCol = ev.startCol;
     const initEndCol = ev.startCol + ev.span;
     const initMouseX = e.clientX - laneRect.left;
-    // Snap initial positions to integer columns for anchor math.
-    const initSnapStart = Math.round(initStartCol);
-    const initSnapEnd = Math.round(initEndCol);
+    // Snap initial positions using finer step.
+    const div = snapDivisorFor(resolvedGranularity ?? 'auto');
+    const step = 1 / div;
+    const snapInit = (x: number) => Math.round(x / step) * step;
+    const initSnapStart = snapInit(initStartCol);
+    const initSnapEnd = snapInit(initEndCol);
 
     const state: BarDragState = {
       eventId: ev.id,
@@ -285,7 +349,7 @@ export default function GanttGrid({
       initMouseX,
       laneLeft: laneRect.left,
       snapStartCol: initSnapStart,
-      snapEndCol: Math.max(initSnapEnd, initSnapStart + 1),
+      snapEndCol: Math.max(initSnapEnd, initSnapStart + step),
     };
     barDragRef.current = state;
     setBarDrag(state);
@@ -305,19 +369,23 @@ export default function GanttGrid({
 
       const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
       const n = columns.length;
+      // Finer snap: snap one granularity level below the active zoom.
+      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
+      const step = 1 / div;
+      const snap = (x: number) => Math.round(x / step) * step;
 
       let nextStart = s.snapStartCol;
       let nextEnd = s.snapEndCol;
 
       if (s.zone === 'left') {
-        nextStart = Math.max(0, Math.min(Math.round(s.initStartCol + deltaCol), s.snapEndCol - 1));
+        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.snapEndCol - step));
       } else if (s.zone === 'right') {
-        nextEnd = Math.max(s.snapStartCol + 1, Math.min(Math.round(s.initEndCol + deltaCol), n));
+        nextEnd = Math.max(s.snapStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
       } else {
         // body: preserve span, shift both
-        const span = Math.max(1, Math.round(s.initEndCol - s.initStartCol));
-        const shift = Math.round(deltaCol);
-        nextStart = Math.max(0, Math.min(Math.round(s.initStartCol) + shift, n - span));
+        const span = Math.max(step, snap(s.initEndCol - s.initStartCol));
+        const shift = snap(deltaCol);
+        nextStart = Math.max(0, Math.min(snap(s.initStartCol) + shift, n - span));
         nextEnd = nextStart + span;
       }
 
@@ -328,6 +396,7 @@ export default function GanttGrid({
       const sd = colToStartDate(nextStart, columns);
       const ed = colToEndDate(nextEnd, columns);
       setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
+      onBarDragProgress?.(s.eventId, sd, ed);
     }
 
     function onMouseUp() {
@@ -353,7 +422,7 @@ export default function GanttGrid({
     <>
       <div
         style={{
-          width: LABEL_COL_W,
+          width: labelColW,
           flexShrink: 0,
           padding: '0 16px',
           display: 'flex',
@@ -368,9 +437,23 @@ export default function GanttGrid({
           left: 0,
           zIndex: 6,
           background: 'var(--card)',
+          userSelect: 'none',
         }}
       >
         Activity
+        {/* Drag handle — resize the label column */}
+        <div
+          onMouseDown={handleColumnResizeMouseDown}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: 6,
+            cursor: 'col-resize',
+            zIndex: 10,
+          }}
+        />
       </div>
 
       {columns.map((col, i) => {
@@ -500,7 +583,7 @@ export default function GanttGrid({
                 >
                   <div
                     style={{
-                      width: LABEL_COL_W,
+                      width: labelColW,
                       flexShrink: 0,
                       display: 'flex',
                       alignItems: 'center',
@@ -701,9 +784,11 @@ export default function GanttGrid({
                     const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
                     const left = startCol * COL_W + 2;
                     const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
+                    // Only selected bars show grab/move cursors; unselected bars show pointer
+                    // to prevent accidental date changes when the user just wants to inspect.
                     const grabCursor = isDragging
                       ? 'grabbing'
-                      : onBarDrag ? 'grab' : 'pointer';
+                      : (selected && onBarDrag) ? 'grab' : 'pointer';
 
                     // Box shadow: find states take precedence over selection ring.
                     // CSS classes (.find-active-bar, .find-match-bar) provide the
@@ -773,8 +858,8 @@ export default function GanttGrid({
                           userSelect: 'none',
                         }}
                       >
-                        {/* Left resize handle */}
-                        {onBarDrag && (
+                        {/* Left resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
                           <div
                             style={{
                               position: 'absolute',
@@ -788,8 +873,8 @@ export default function GanttGrid({
                           />
                         )}
                         {ev.title}
-                        {/* Right resize handle */}
-                        {onBarDrag && (
+                        {/* Right resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
                           <div
                             style={{
                               position: 'absolute',

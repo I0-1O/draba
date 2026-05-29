@@ -2,6 +2,64 @@
 
 ---
 
+## 2026-05-29 — Phase 10.4.4: Gantt Interaction & Activity Edit Polish
+
+**Goal:** Polish the Gantt's direct-manipulation UX (resizable label column, click-to-activate drag, live sidebar date feedback, finer snap), move "Hide closed" from toolbar to filter preset, and overhaul the Activity Edit sidebar layout.
+
+**Backend:**
+- Migration 016: `ALTER TABLE activities ADD COLUMN notes TEXT` (nullable)
+- `Activity` model: added `Notes *string` field with `db:"notes"` tag
+- `ActivityRepo.Update`: added `notes = :notes` to UPDATE SET
+- `handleUpdateActivity`: added `notes` patch key parsing
+- OpenAPI + TS types: added `notes` to `Activity` schema and PATCH body; regenerated
+
+**Gantt — resizable label column:**
+- `DEFAULT_LABEL_COL_W = 240`, min 140, max 400
+- `labelColW` state in `GanttGrid`; `handleColumnResizeMouseDown` sets up mousemove/mouseup handlers
+- Drag handle div positioned absolutely on the right edge of the sticky header label cell
+- All row label cells use `labelColW` state (was hard-coded `LABEL_COL_W = 240` constant)
+
+**Gantt — click-to-activate before drag:**
+- `handleBarMouseDown` gates on `ev.id !== selectedActivityId` — unselected bars can't be dragged
+- Bar cursor: `grab` only when selected AND `onBarDrag` is provided; `pointer` otherwise
+- Left/right resize handles rendered only when bar is selected (`onBarDrag && selected`)
+
+**Gantt — bar drag updates sidebar dates live:**
+- New `onBarDragProgress` prop on `GanttGrid` and `GanttView`; called during mousemove with current snapped dates
+- `DashboardPage`: `liveDragDates` state; `onBarDragProgress` sets it; `onBarDragEnd` clears it
+- `ActivityDetailPanel`: `liveDragStart`/`liveDragEnd` props; displayed in date inputs when set (read-only during drag, don't trigger saves)
+
+**Gantt — finer-grained snap during drag:**
+- `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4
+- `colFracToDate` interpolates fractional column positions for accurate date mapping
+- Drag math uses `Math.round(x / step) * step` with `step = 1/divisor`
+- `resolvedGranularity` prop passed from GanttView to GanttGrid
+- `colToStartDate`/`colToEndDate` updated to handle fractional column positions
+
+**Gantt — "Hide closed" moves to filter preset:**
+- Removed `hideClosed` checkbox and related props from `GanttToolbar`; removed `hideClosed` state from `DashboardPage`
+- Added `'open'` to `ActiveFilter` preset type in `FilterContext`
+- `FilterDropdown`: added "Open only" preset with subtitle "Hide activities with a closed status"
+- `GanttView`: reads `activeFilter.id === 'open'` instead of `hideClosed` prop to filter closed-status activities
+
+**Activity Edit Sidebar — overhaul:**
+- Removed "All day" checkbox (allDay state, handler, and toggle)
+- Removed human-readable date summary line (was `{formatDate(startDate)} – {formatDate(endDate)}`)
+- Description field moved directly below date pickers (was at the bottom under "Notes")
+- "Assigned to" section: opacity-toggle buttons → bordered card style with color border + tint when selected (matches create panel)
+- Status picker: plain `<select>` → `StatusDropdown` component with color dot, name, and CLOSED badge
+- Removed "Identity" row from Classify section
+- Renamed "Details" section → "Advanced"
+- Added Notes multi-line `<textarea>` (resizable) at bottom, backed by new `activities.notes` column
+- `liveDragStart`/`liveDragEnd` props: override date inputs display during bar drag without triggering saves
+
+**Tests:**
+- `TestMigrate_016_ActivityNotes`: verifies `activities.notes` column exists after migration
+
+**All automated checks pass:** `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean.
+
+---
+
 ## 2026-05-28 — Phase 10.4.3: UI Consistency — Modals, Sidebar & Toolbar
 
 **Goal:** Standardize visual patterns across TeamModal, MemberModal, and TimelineModal — three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.

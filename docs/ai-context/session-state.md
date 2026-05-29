@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short._
 
-**Last updated:** 2026-05-29 (Phase 10.4.4 spec written — ready to build)
+**Last updated:** 2026-05-29 (Phase 10.4.4 built — all automated checks pass)
 
 ---
 
@@ -20,8 +20,44 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.4.1 | Preference Consumption & Session Handling | ✅ | ⬜ needs Docker verification |
 | 10.4.2 | Activity Schema Normalization | ✅ | ⬜ needs Docker verification |
 | 10.4.3 | UI Consistency — Modals, Sidebar & Toolbar | ✅ | ⬜ needs Docker verification |
+| 10.4.4 | Gantt Interaction & Activity Edit Polish | ✅ | ⬜ needs Docker verification |
 
-Next phase to build: **10.4.4** — Gantt Interaction & Activity Edit Polish.
+Next phase to build: **10.5** — Communications Testing.
+
+---
+
+## Phase 10.4.4 — Gantt Interaction & Activity Edit Polish (2026-05-29 — not yet Docker-verified)
+
+**Backend:**
+- Migration 016: `activities.notes TEXT` nullable column added
+- `Activity` model + `ActivityRepo.Update` + `handleUpdateActivity` all handle `notes`
+- OpenAPI `Activity` schema and PATCH body include `notes`; TS types regenerated
+
+**Gantt — resizable label column:**
+- `labelColW` state in GanttGrid (default 240, min 140, max 400); drag handle on right edge of header
+- All label cells use live `labelColW` value
+
+**Gantt — click-to-activate before drag:**
+- Bar drag/resize only fires when `ev.id === selectedActivityId`; resize handles visible only on selected bars
+- Unselected bars show `cursor: pointer`; selected bars show `cursor: grab` / `ew-resize`
+
+**Gantt — live sidebar dates during drag:**
+- `onBarDragProgress(activityId, newStart, newEnd)` fires in mousemove; `onBarDragEnd()` fires on mouseup
+- DashboardPage stores `liveDragDates`; ActivityDetailPanel shows them in date inputs without triggering saves
+
+**Gantt — finer-grained snap:**
+- `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4
+- `colFracToDate` maps fractional column positions to Dates; `colToStartDate`/`colToEndDate` updated
+- `resolvedGranularity` prop threaded from GanttView → GanttGrid
+
+**"Hide closed" → Filter preset:**
+- `hideClosed` checkbox removed from GanttToolbar; `hideClosed` state removed from DashboardPage
+- `FilterDropdown`: new "Open only" preset; `FilterContext` PresetId includes `'open'`
+- GanttView reads `activeFilter.id === 'open'` for closed-status filtering
+
+**ActivityDetailPanel overhaul:**
+- Removed: allDay checkbox, date summary line, Identity row in Classify, old Notes/description layout
+- Added: description directly under dates; bordered-card assignees; `StatusDropdown` with color dot; "Advanced" section; Notes textarea; `liveDragStart`/`liveDragEnd` props
 
 ---
 
@@ -288,6 +324,22 @@ These were found during manual testing of 10.1.2 and fixed 2026-05-25:
 - **repomap.md usage:** Use Grep on it for targeted symbol lookups; do not read it wholesale (1.3 MB, exceeds Read tool limit).
 
 ---
+
+## Manual Verification Checklist for 10.4.4 (against epcot.lan:8081)
+
+- [ ] Drag label column right edge → width changes live (min 140, max 400); other rows resize too
+- [ ] Click unselected bar → selects it (no drag happens); click selected bar drag handle → drag works
+- [ ] Drag bar at week zoom → tooltip shows day-level dates; snap is to individual days not weeks
+- [ ] Drag bar at month zoom → tooltip shows week-level dates
+- [ ] Select "Open only" in Filter dropdown → closed-status activities disappear from Gantt; switch to "All activities" → restored
+- [ ] Open activity edit panel → no allDay checkbox, no date summary line above pickers
+- [ ] Description field appears directly under date pickers
+- [ ] Assigned to rows have colored border + tint when selected (matches create panel)
+- [ ] Status dropdown shows color dot + name; opens with "— No status —" option at top; CLOSED badge on closed statuses
+- [ ] No "Identity" row in Classify section; "Details" renamed to "Advanced"
+- [ ] Notes textarea at bottom; type and blur → value persists across panel close/reopen
+- [ ] Drag a bar → date inputs in edit panel update live; release → dates sync to server value
+- [ ] `PRAGMA foreign_key_check` on activities table after migration returns no rows
 
 ## Manual Verification Checklist for 10.1.4 (against epcot.lan:8081)
 

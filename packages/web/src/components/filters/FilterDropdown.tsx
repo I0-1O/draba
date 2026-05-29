@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import {
-  Layers, Clock, User, AlertCircle, UserX,
+  Layers, Clock, User, AlertCircle, UserX, CheckCircle,
   ChevronDown, Plus, Check, Settings2,
 } from 'lucide-react'
 import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
@@ -22,7 +22,7 @@ interface Props {
 
 // ── Preset definitions ───────────────────────────────────────────────────────
 
-type PresetId = 'all' | 'upcoming' | 'my' | 'overdue' | 'noassign'
+type PresetId = 'all' | 'upcoming' | 'my' | 'overdue' | 'noassign' | 'open'
 
 interface Preset {
   id: PresetId
@@ -34,11 +34,12 @@ interface Preset {
 const ICON_PRESET = { size: 14, strokeWidth: 1.8 } as const
 
 const PRESETS: Preset[] = [
-  { id: 'all',      label: 'All activities',  icon: <Layers     {...ICON_PRESET} /> },
-  { id: 'upcoming', label: 'Upcoming',         icon: <Clock      {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
-  { id: 'my',       label: 'My events',        icon: <User       {...ICON_PRESET} /> },
+  { id: 'all',      label: 'All activities',  icon: <Layers      {...ICON_PRESET} /> },
+  { id: 'open',     label: 'Open only',       icon: <CheckCircle {...ICON_PRESET} />, subtitle: 'Hide activities with a closed status' },
+  { id: 'upcoming', label: 'Upcoming',         icon: <Clock       {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
+  { id: 'my',       label: 'My events',        icon: <User        {...ICON_PRESET} /> },
   { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
-  { id: 'noassign', label: 'No assignee',      icon: <UserX      {...ICON_PRESET} /> },
+  { id: 'noassign', label: 'No assignee',      icon: <UserX       {...ICON_PRESET} /> },
 ]
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

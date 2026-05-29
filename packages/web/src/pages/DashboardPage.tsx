@@ -63,6 +63,7 @@ function DashboardShell() {
   const [ganttMembers, setGanttMembers] = useState<Member[]>([])
   const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
   const [filterEditorOpen, setFilterEditorOpen] = useState(false)
+  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
   // Gantt toolbar state
   const [groupBy, setGroupBy] = useState<GroupBy>('none')
   const [sortBy, setSortBy] = useState<SortBy>('startDate')
@@ -122,9 +123,6 @@ function DashboardShell() {
   // Timeline modal state
   const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
   const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
-
-  // Hide-closed-statuses toggle (GanttToolbar → GanttView filter)
-  const [hideClosed, setHideClosed] = useState(false)
 
   // Fetch all teams including archived for the sidebar's archived section.
   const { data: allTeams = [] } = useMyTeams(true)
@@ -361,8 +359,6 @@ function DashboardShell() {
             onGranularityChange={setGranularity}
             colorBy={colorBy}
             onColorByChange={setColorBy}
-            hideClosed={hideClosed}
-            onHideClosedChange={activeTimelineStatuses.some(s => s.isClosed) ? setHideClosed : undefined}
             onExport={() => {}}
             onShare={() => {}}
           />
@@ -380,7 +376,6 @@ function DashboardShell() {
               sortBy={sortBy}
               granularity={granularity}
               colorBy={colorBy}
-              hideClosed={hideClosed}
               closedStatusIds={new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))}
               selectedActivityId={selectedActivityId}
               onSelectActivity={(id) => {
@@ -392,6 +387,14 @@ function DashboardShell() {
                 setCreateDefaults(null)
                 if (activity) setFilterEditorOpen(false)
               }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
               onMembersLoaded={setGanttMembers}
             />
           ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
@@ -415,7 +418,9 @@ function DashboardShell() {
         members={ganttMembers}
         teamId={teamId}
         timelineId={activeTimelineId ?? ''}
-        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null) }}
+        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
+        liveDragStart={liveDragDates?.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
+        liveDragEnd={liveDragDates?.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
       />
 
       {/* Activity create panel — slides in from New Activity button or future drag */}

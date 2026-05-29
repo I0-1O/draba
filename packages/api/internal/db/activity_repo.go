@@ -59,6 +59,7 @@ func (r *ActivityRepo) Update(activity *models.Activity) error {
 		UPDATE activities SET
 			title              = :title,
 			description        = :description,
+			notes              = :notes,
 			icon               = :icon,
 			color              = :color,
 			start_at           = :start_at,

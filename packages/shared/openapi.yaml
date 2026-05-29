@@ -302,6 +302,9 @@ components:
         description:
           type: string
           nullable: true
+        notes:
+          type: string
+          nullable: true
         icon:
           type: string
           nullable: true
@@ -2089,6 +2092,9 @@ paths:
                   type: string
                   minLength: 1
                 description:
+                  type: string
+                  nullable: true
+                notes:
                   type: string
                   nullable: true
                 icon:

@@ -200,6 +200,12 @@ func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if v, ok := patch["notes"]; ok {
+		if err := json.Unmarshal(v, &activity.Notes); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
+			return
+		}
+	}
 	if v, ok := patch["icon"]; ok {
 		if err := json.Unmarshal(v, &activity.Icon); err != nil {
 			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")

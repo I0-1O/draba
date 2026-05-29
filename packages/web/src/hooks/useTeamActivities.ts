@@ -183,6 +183,7 @@ interface UpdateActivityInput {
   patch: {
     title?: string
     description?: string | null
+    notes?: string | null
     startAt?: string
     endAt?: string
     allDay?: boolean

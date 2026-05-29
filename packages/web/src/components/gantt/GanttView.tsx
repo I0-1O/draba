@@ -45,14 +45,16 @@ interface Props {
   sortBy: SortBy;
   granularity: TimeGranularity | 'auto';
   colorBy: ColorBy;
-  /** When true, activities with a closed status are hidden. */
-  hideClosed?: boolean;
-  /** Set of status IDs that are marked is_closed. Used with hideClosed. */
+  /** Set of status IDs that are marked is_closed. Used when the 'open' filter preset is active. */
   closedStatusIds?: Set<string>;
   selectedActivityId?: string | null;
   onSelectActivity?: (id: string | null) => void;
   /** Called when the user drags on an empty lane to create an activity. */
   onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag completes (before the PATCH fires). */
+  onBarDragEnd?: () => void;
   /** Called once members are loaded, so the parent can access them for panels. */
   onMembersLoaded?: (members: Member[]) => void;
   /** Called when an activity is selected — passes the full API activity object. */
@@ -243,11 +245,12 @@ export default function GanttView({
   sortBy,
   granularity,
   colorBy,
-  hideClosed = false,
   closedStatusIds,
   selectedActivityId = null,
   onSelectActivity = () => {},
   onLaneDrag,
+  onBarDragProgress,
+  onBarDragEnd,
   onMembersLoaded,
   onSelectApiActivity,
 }: Props) {
@@ -334,10 +337,12 @@ export default function GanttView({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [members]);
 
+  const hideClosedActive = activeFilter.kind === 'preset' && activeFilter.id === 'open'
   const visibleActivities = useMemo(() => {
-    if (!hideClosed || !closedStatusIds?.size) return apiActivities
+    if (!hideClosedActive || !closedStatusIds?.size) return apiActivities
     return apiActivities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-  }, [apiActivities, hideClosed, closedStatusIds])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiActivities, hideClosedActive, closedStatusIds])
 
   const rows: GanttRow[] = useMemo(() => {
     const richActivities = visibleActivities
@@ -395,6 +400,7 @@ export default function GanttView({
   // ── Bar drag ─────────────────────────────────────────────────────────────
 
   const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    onBarDragEnd?.();
     updateActivity.mutate({
       activityId,
       patch: {
@@ -402,7 +408,7 @@ export default function GanttView({
         endAt: newEndDate.toISOString(),
       },
     });
-  }, [updateActivity]);
+  }, [updateActivity, onBarDragEnd]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (isLoading) {
     return (
@@ -429,6 +435,8 @@ export default function GanttView({
         }}
         onLaneDrag={onLaneDrag}
         onBarDrag={handleBarDrag}
+        onBarDragProgress={onBarDragProgress}
+        resolvedGranularity={resolvedGranularity}
         onClearFilters={filtersActive ? () => {} : undefined}
       />
     </div>

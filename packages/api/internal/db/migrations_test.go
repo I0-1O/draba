@@ -200,6 +200,18 @@ func TestMigrate_015_NormalizesActivities(t *testing.T) {
 	assert.True(t, foundCascade, "activities.timeline_id FK should exist")
 }
 
+// TestMigrate_016_ActivityNotes verifies that migration 016 adds the notes column to activities.
+func TestMigrate_016_ActivityNotes(t *testing.T) {
+	database, err := db.Open(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Migrate(database))
+
+	var count int
+	require.NoError(t, database.Get(&count,
+		`SELECT COUNT(*) FROM pragma_table_info('activities') WHERE name = 'notes'`))
+	assert.Equal(t, 1, count, "activities.notes column should exist after migration 016")
+}
+
 // TestMigrate_006_007_ColorConversion verifies the two-step color conversion:
 // migration 006 maps legacy hex values to palette name IDs, and migration 007
 // maps those name IDs back to canonical hex values. The net effect is that

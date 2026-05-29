@@ -1,17 +1,25 @@
 /**
  * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
  *
- * Fields: icon (stub), title, dates + allDay, assigned to (member rows),
- * status (stub), tags (stub), color, parent activity (stub), % complete (stub),
- * location, url, description. All functional fields save on change/blur via
- * PATCH /activities/:id.
+ * Field order (top to bottom):
+ *   1. Header — Identity widget + Title
+ *   2. When — Date pickers (start → end)
+ *   3. Description — single-line input
+ *   4. Assigned to — bordered card style (matches create panel)
+ *   5. Classify — Status (rich dropdown with color dot + icon + name), Tags (stub)
+ *   6. Advanced — Parent (stub), Progress (stub), Location, URL
+ *   7. Notes — multi-line textarea
+ *   8. Footer — Delete button
+ *
+ * All functional fields save on change/blur via PATCH /activities/:id.
+ * liveDragStart / liveDragEnd display live dates during bar drag without triggering saves.
  */
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { X, Trash2, ArrowRight, Loader2, Tag, ChevronDown } from 'lucide-react'
-import { useFormatDate } from '@/hooks/useFormatDate'
 import MemberAvatar from '@/components/MemberAvatar'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { resolveColorHex } from '@/components/identity/identity-constants'
 import type { Identity } from '@/components/identity/identity-constants'
 import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
 import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
@@ -19,6 +27,7 @@ import type { components } from '@draba/shared'
 import type { Member } from '@/types'
 
 type ApiActivity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
 
 const PANEL_WIDTH = 300
 
@@ -29,6 +38,10 @@ interface Props {
   teamId: string
   timelineId: string
   onClose: () => void
+  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragStart?: string
+  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragEnd?: string
 }
 
 // ── Small helpers ─────────────────────────────────────────────────────────────
@@ -86,19 +99,153 @@ const INPUT: React.CSSProperties = {
   fontFamily: 'var(--font-sans)',
 }
 
+// ── Rich status dropdown ──────────────────────────────────────────────────────
+
+interface StatusDropdownProps {
+  statuses: Status[]
+  value: string | null | undefined
+  onChange: (id: string | null) => void
+}
+
+function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  const selected = statuses.find(s => s.id === value) ?? null
+
+  return (
+    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 8px',
+          border: '1px solid var(--border)',
+          borderRadius: 6,
+          background: 'var(--background)',
+          color: 'var(--foreground)',
+          cursor: 'pointer',
+          fontSize: 12,
+          fontFamily: 'var(--font-sans)',
+          textAlign: 'left',
+        }}
+      >
+        {selected ? (
+          <>
+            <div
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: resolveColorHex(selected.color) ?? selected.color,
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected.name}
+            </span>
+          </>
+        ) : (
+          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
+        )}
+        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            right: 0,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
+            zIndex: 100,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            onClick={() => { onChange(null); setOpen(false) }}
+            style={{
+              padding: '6px 10px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              fontStyle: 'italic',
+              cursor: 'pointer',
+              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            — No status —
+          </div>
+          {statuses.map(s => (
+            <div
+              key={s.id}
+              onClick={() => { onChange(s.id); setOpen(false) }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 10px',
+                fontSize: 12,
+                cursor: 'pointer',
+                background: s.id === value ? 'var(--muted)' : 'transparent',
+                fontWeight: s.id === value ? 600 : 400,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
+            >
+              <div
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: resolveColorHex(s.color) ?? s.color,
+                  flexShrink: 0,
+                }}
+              />
+              <span style={{ flex: 1 }}>{s.name}</span>
+              {s.isClosed && (
+                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
+                  CLOSED
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function ActivityDetailPanel({ event, open, members, teamId, timelineId, onClose }: Props) {
+export default function ActivityDetailPanel({
+  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
+}: Props) {
   const updateMutation = useUpdateActivity(timelineId)
   const deleteMutation = useDeleteActivity(timelineId)
-  const formatDate = useFormatDate()
   const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
 
   const [title, setTitle] = useState(event?.title ?? '')
   const [description, setDescription] = useState(event?.description ?? '')
+  const [notes, setNotes] = useState(event?.notes ?? '')
   const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
   const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
-  const [allDay, setAllDay] = useState(event?.allDay ?? false)
   const [identity, setIdentity] = useState<Identity>({
     color: event?.color ?? '#288C9B',
     icon: event?.icon ?? '__none__',
@@ -113,9 +260,9 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
     if (!event) return
     setTitle(event.title)
     setDescription(event.description ?? '')
+    setNotes(event.notes ?? '')
     setStartDate(toDateInput(event.startAt))
     setEndDate(toDateInput(event.endAt))
-    setAllDay(event.allDay)
     setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
     setAssignedIds(event.assignedMemberIds ?? [])
     setLocation(event.location ?? '')
@@ -125,6 +272,10 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
 
   const saving = updateMutation.isPending
   const deleting = deleteMutation.isPending
+
+  // Display dates: live drag overrides take precedence while dragging.
+  const displayStart = liveDragStart ?? startDate
+  const displayEnd = liveDragEnd ?? endDate
 
   function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
     if (!event) return
@@ -137,6 +288,10 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
 
   function handleDescriptionBlur() {
     if (description !== (event?.description ?? '')) save({ description: description || null })
+  }
+
+  function handleNotesBlur() {
+    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
   }
 
   function handleLocationBlur() {
@@ -155,12 +310,6 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
   function handleEndDateChange(val: string) {
     setEndDate(val)
     if (val && val >= startDate) save({ endAt: toISODate(val) })
-  }
-
-  function handleAllDayToggle() {
-    const next = !allDay
-    setAllDay(next)
-    save({ allDay: next })
   }
 
   function handleIdentityChange(next: Identity) {
@@ -224,7 +373,7 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
         {/* ── Scrollable body ── */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
 
-          {/* Identity widget + Title */}
+          {/* 1. Identity widget + Title */}
           <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
             <div style={{ marginTop: 2, flexShrink: 0 }}>
               <IdentityWidget
@@ -234,7 +383,6 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
                 onChange={handleIdentityChange}
               />
             </div>
-            {/* Title */}
             <input
               value={title}
               onChange={e => setTitle(e.target.value)}
@@ -252,18 +400,12 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
 
           <div style={DIVIDER} />
 
-          {/* ── WHEN ── */}
+          {/* 2. When — date pickers only (no allDay checkbox, no date summary) */}
           <div style={{ marginBottom: 12 }}>
             <div style={SEC_LABEL}>When</div>
-            {/* Human-readable date summary respecting the user's date_format preference */}
-            {startDate && endDate && (
-              <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginBottom: 6 }}>
-                {formatDate(new Date(startDate))} – {formatDate(new Date(endDate))}
-              </div>
-            )}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <input
-                type="date" value={startDate}
+                type="date" value={displayStart}
                 onChange={e => handleStartDateChange(e.target.value)}
                 style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
                 onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
@@ -271,29 +413,37 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
               />
               <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
               <input
-                type="date" value={endDate} min={startDate}
+                type="date" value={displayEnd} min={startDate}
                 onChange={e => handleEndDateChange(e.target.value)}
                 style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
                 onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
                 onBlur={e => (e.target.style.borderColor = 'var(--border)')}
               />
             </div>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-              <input
-                type="checkbox" checked={allDay} onChange={handleAllDayToggle}
-                style={{ width: 13, height: 13, cursor: 'pointer', accentColor: 'var(--primary)' }}
-              />
-              <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>All day</span>
-            </label>
           </div>
 
           <div style={DIVIDER} />
 
-          {/* ── ASSIGNED TO ── */}
+          {/* 3. Description — below dates, matching create panel */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Description</div>
+            <input
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
+              placeholder="Optional description…"
+              style={{ ...INPUT, padding: '6px 8px' }}
+              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            />
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 4. Assigned to — bordered card style matching create panel */}
           {members.length > 0 && (
             <div style={{ marginBottom: 12 }}>
               <div style={SEC_LABEL}>Assigned to</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {members.map(m => {
                   const assigned = assignedIds.includes(m.id)
                   return (
@@ -302,16 +452,15 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
                       onClick={() => toggleAssignee(m.id)}
                       style={{
                         display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '5px 6px',
-                        border: 'none', borderRadius: 'var(--radius-md)',
-                        background: 'none', cursor: 'pointer', textAlign: 'left',
-                        opacity: assigned ? 1 : 0.45,
-                        transition: 'opacity 0.1s, background 0.1s',
+                        padding: '5px 8px',
+                        border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
+                        borderRadius: 'var(--radius-md)',
+                        background: assigned ? `${m.color}18` : 'var(--background)',
+                        cursor: 'pointer', textAlign: 'left',
+                        transition: 'background 0.1s, border-color 0.1s',
                       }}
-                      onMouseEnter={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.opacity = '1' }}
-                      onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.opacity = assigned ? '1' : '0.45' }}
                     >
-                      <MemberAvatar member={m} size={20} />
+                      <MemberAvatar member={m} size={18} />
                       <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
                       {assigned && (
                         <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
@@ -325,7 +474,7 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
 
           <div style={DIVIDER} />
 
-          {/* ── CLASSIFY ── */}
+          {/* 5. Classify — Status (rich dropdown), Tags (stub) */}
           <div style={{ marginBottom: 12 }}>
             <div style={SEC_LABEL}>Classify</div>
 
@@ -333,22 +482,11 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
               <span style={FIELD_LABEL}>Status</span>
               {statuses.length > 0 ? (
-                <div style={{ flex: 1 }}>
-                  <select
-                    value={event?.statusId ?? ''}
-                    onChange={e => save({ statusId: e.target.value || null } as Parameters<typeof save>[0])}
-                    style={{
-                      fontSize: 12, padding: '3px 8px', border: '1px solid var(--border)',
-                      borderRadius: 6, background: 'var(--background)', color: 'var(--foreground)',
-                      cursor: 'pointer', width: '100%',
-                    }}
-                  >
-                    <option value="">— No status —</option>
-                    {statuses.map(s => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                  </select>
-                </div>
+                <StatusDropdown
+                  statuses={statuses}
+                  value={event?.statusId}
+                  onChange={id => save({ statusId: id } as Parameters<typeof save>[0])}
+                />
               ) : (
                 <div style={{ ...STUB_VALUE }}>
                   <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
@@ -357,7 +495,7 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
             </div>
 
             {/* Tags stub */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center' }}>
               <span style={FIELD_LABEL}>Tags</span>
               <div style={{ ...STUB_VALUE }}>
                 <span style={{
@@ -370,21 +508,13 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
                 <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
               </div>
             </div>
-
-            {/* Identity (color + icon) — handled by the widget in the title row above */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>Identity</span>
-              <div style={{ flex: 1, fontSize: 11, color: 'var(--muted-foreground)', opacity: 0.7 }}>
-                Use the icon above to edit
-              </div>
-            </div>
           </div>
 
           <div style={DIVIDER} />
 
-          {/* ── DETAILS ── */}
+          {/* 6. Advanced (was "Details") — Parent, Progress, Location, URL */}
           <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Details</div>
+            <div style={SEC_LABEL}>Advanced</div>
 
             {/* Parent activity stub */}
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
@@ -447,22 +577,29 @@ export default function ActivityDetailPanel({ event, open, members, teamId, time
 
           <div style={DIVIDER} />
 
-          {/* ── NOTES ── */}
+          {/* 7. Notes — multi-line textarea */}
           <div style={{ marginBottom: 8 }}>
             <div style={SEC_LABEL}>Notes</div>
-            <input
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
+            <textarea
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+              onBlur={e => { handleNotesBlur(); e.target.style.borderColor = 'var(--border)' }}
               placeholder="Add notes…"
-              style={{ ...INPUT, padding: '6px 8px' }}
+              rows={4}
+              style={{
+                ...INPUT,
+                padding: '6px 8px',
+                resize: 'vertical',
+                minHeight: 72,
+                lineHeight: 1.5,
+              }}
               onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
             />
           </div>
 
         </div>
 
-        {/* ── Footer ── */}
+        {/* ── Footer — Delete button ── */}
         <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
           {confirmDelete ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
