@@ -11,8 +11,11 @@
 import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
 import FilterDropdown from '@/components/filters/FilterDropdown';
 import FindBar from '@/components/layout/FindBar';
+import { Badge } from '@/components/identity/Badge';
 import { useFind } from '@/contexts/FindContext';
 import { cn } from '@/lib/utils';
+import type { Identity } from '@/components/identity/identity-constants';
+import { DEFAULT_TIMELINE_IDENTITY } from '@/components/identity/identity-constants';
 
 export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
 
@@ -20,6 +23,7 @@ interface Props {
   view: ViewMode;
   teamId?: string;
   timelineName?: string;
+  timelineIdentity?: Identity;
   onViewChange: (view: ViewMode) => void;
   onOpenFilterEditor: () => void;
   rightSlot?: React.ReactNode;
@@ -36,6 +40,7 @@ export default function TopBar({
   view,
   teamId,
   timelineName,
+  timelineIdentity,
   onViewChange,
   onOpenFilterEditor,
   rightSlot,
@@ -67,8 +72,15 @@ export default function TopBar({
         </div>
       </div>
 
-      {/* Center zone: timeline name — truncates with ellipsis when narrow */}
-      <div className="flex-1 min-w-0 flex items-center justify-center px-3">
+      {/* Center zone: timeline identity badge + name */}
+      <div className="flex-1 min-w-0 flex items-center justify-center gap-1.5 px-3">
+        <Badge
+          identity={timelineIdentity ?? DEFAULT_TIMELINE_IDENTITY}
+          name={timelineName ?? ''}
+          shape="square"
+          size={18}
+          className="shrink-0"
+        />
         <span
           title={timelineName}
           className="text-xs font-medium text-muted-foreground truncate select-none"

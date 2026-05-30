@@ -743,6 +743,7 @@ export default function ActivityDetailPanel({
                     aria-label="Percent complete"
                     style={{
                       width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
+                      marginLeft: 'auto',
                       color: 'var(--foreground)', border: '1px solid var(--primary)',
                       borderRadius: 4, padding: '2px 4px', outline: 'none',
                       background: 'var(--background)', fontFamily: 'var(--font-sans)',
@@ -758,6 +759,7 @@ export default function ActivityDetailPanel({
                     style={{
                       fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
                       textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
+                      marginLeft: 'auto',
                       padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
                     }}
                     onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}

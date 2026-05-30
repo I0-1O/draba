@@ -111,8 +111,8 @@ Create a user row for every person referenced below. Each user gets:
 - `icon`: `__name_words__`
 
 Full user list (deduplicated across all teams):
-- Brian Rieb (super admin)
-- Scott Fitzgerald (super admin)
+- Brian R (super admin)
+- Scott F (super admin)
 - Lindsay K.
 - Erik B
 - Michelle T
@@ -238,7 +238,39 @@ Activities should have realistic date ranges (a few days to a few weeks each), s
 
 ---
 
-## Schema reference (current as of migration 015)
+## Tags
+
+Each team has its own tag vocabulary. Tags are team-scoped (`team_id`) and referenced from `activity_tags` via `tag_id`.
+
+### Product Marketing tags
+`urgent`, `design`, `content`, `research`, `launch`, `competitive`, `review`, `blocked`
+
+### P&B Tiger Team tags
+`positioning`, `strategy`, `research`, `competitive`, `enablement`, `executive`
+
+### Marketing Cross Functional tags
+`design`, `seo`, `analytics`, `brand`, `content`, `launch`
+
+A representative subset of activities across all timelines is tagged. Coverage is intentionally partial — not every activity is tagged, mirroring real-world usage.
+
+---
+
+## Activity parent-child relationships
+
+A few natural sub-task pairs are set via `parent_activity_id`:
+
+| Child activity | Parent activity | Rationale |
+|---|---|---|
+| Competitive battlecard refresh (a-q1-02) | Competitive landscape analysis (a-q1-01) | Battlecard updates follow from the research |
+| AR/PR coordination — Q1 launch (a-q1-14) | Product launch checklist — v4.2 (a-q1-06) | PR work is a sub-track of launch prep |
+| Demo environment setup (a-q1-17) | Product launch checklist — v4.2 (a-q1-06) | Demo env is a launch dependency |
+| Sales training session — pricing (a-sko-07) | Objection handling playbook (a-sko-05) | Training draws on the playbook |
+| Product pages rewrite (a-reb-08) | Design system v2 (a-reb-02) | Pages are implemented against the design system |
+| Blog template redesign (a-reb-09) | Design system v2 (a-reb-02) | Same — template uses design system components |
+
+---
+
+## Schema reference (current as of migration 017)
 
 This section summarizes the tables and columns that sample data touches. Regenerate this section if migrations change the schema.
 
@@ -250,13 +282,14 @@ teams (id, name, slug, color, icon, description, notes, archived_at, invite_link
 team_members (id, team_id, user_id, display_name, role, color, icon, joined_at, archived_at)
 timelines (id, team_id, name, start_date, end_date, description, notes, color, icon, share_token, ical_token, created_by, created_at, updated_at, archived_at)
 activities (id, timeline_id, title, description, icon, color, start_at, end_at, all_day, status_id, parent_activity_id, percent_complete, location, url, created_by, created_at, updated_at, archived_at)
+tags (id, team_id, name, color, created_by, created_at)
 ```
 
 ### Junction / child tables
 
 ```
 activity_assignments (activity_id, team_member_id)
-activity_tags (activity_id, tag)
+activity_tags (activity_id, tag_id)
 timeline_access (timeline_id, team_member_id, role)
 status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
 status_template_items (id, template_id, name, color, icon, is_closed, position)

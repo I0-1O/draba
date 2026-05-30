@@ -133,8 +133,10 @@ function DashboardShell() {
   const activeTeams = allTeams.filter(t => !t.archivedAt)
   const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
 
-  // Explicit team selection state — initialized from global prefs or first active team.
-  const [activeTeamId, setActiveTeamId] = useState<string>('')
+  // Explicit team selection state — null until the global pref is applied so
+  // that timelines (and the timeline init effect) don't fire against the wrong
+  // fallback team before the saved team pref resolves.
+  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
   const teamIdInitialized = useRef(false)
   useEffect(() => {
     if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
@@ -144,7 +146,12 @@ function DashboardShell() {
     setActiveTeamId(exists ? saved : activeTeams[0].id)
   }, [activeTeams, globalPrefsSettled, globalPrefMap])
 
-  const activeTeam = activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0]
+  // Only derive an active team once the pref has been applied (activeTeamId !== null).
+  // The activeTeams[0] fallback here handles the edge case where the saved team
+  // was archived or deleted between sessions.
+  const activeTeam = activeTeamId !== null
+    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? null)
+    : null
   const teamId = activeTeam?.id ?? ''
 
   // Check whether the current user is an admin of the active team.
@@ -155,6 +162,12 @@ function DashboardShell() {
 
   const handleSelectTeam = useCallback((id: string) => {
     setActiveTeamId(id)
+    // Clear the stale timeline selection so the init effect re-fires with the
+    // new team's timeline list. Without this, the old timeline ID leaks into
+    // the new team's API requests and produces 404s.
+    setActiveTimelineId(undefined)
+    prefsAppliedForTimeline.current = null
+    timelineIdInitialized.current = false
   }, [])
 
   const unarchiveTimeline = useUnarchiveTimeline(teamId)
@@ -179,6 +192,10 @@ function DashboardShell() {
   // Derived so they stay in sync after edits without needing separate state.
   const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
   const activeTimelineName = activeTimeline?.name ?? ''
+  const activeTimelineIdentity: Identity = {
+    color: activeTimeline?.color ?? '#288C9B',
+    icon: activeTimeline?.icon ?? '__none__',
+  }
 
   const handleTimelineChange = useCallback((id: string) => {
     prefsAppliedForTimeline.current = null
@@ -292,6 +309,7 @@ function DashboardShell() {
           view={view}
           teamId={teamId}
           timelineName={activeTimelineName}
+          timelineIdentity={activeTimelineIdentity}
           onViewChange={setView}
           onOpenFilterEditor={() => setFilterEditorOpen(true)}
           rightSlot={

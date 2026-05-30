@@ -1691,3 +1691,11 @@ GitHub Actions warned that `actions/checkout`, `setup-go`, `setup-node`, etc. ru
 **Port conflict in homelab**
 Port 8080 was already in use on the host.
 → Mapped container port 8080 to host port 8081 in Portainer. No code changes needed.
+
+---
+
+## 2026-05-30 — /test-phase 10.4.5
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (web-e2e partial — code-verified, no live server; ws-smoke cross-team isolation skipped, covered by unit tests)
+- Smoke target: http://epcot.lan:8081
+- Note: type-sync initially failed (4 tag endpoints missing from openapi.yaml); fixed and committed before logging

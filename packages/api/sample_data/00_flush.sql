@@ -4,6 +4,7 @@
 DELETE FROM activity_assignments;
 DELETE FROM activity_tags;
 DELETE FROM activities;
+DELETE FROM tags;
 DELETE FROM statuses;
 DELETE FROM status_template_items;
 DELETE FROM status_templates;
