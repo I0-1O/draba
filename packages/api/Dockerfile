@@ -26,6 +26,8 @@ RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
 # Source is provided by the docker-compose volume mount, not baked in here —
 # baking it in caused Air to see a spurious "change" on first mount and restart.
 FROM golang:1.25-alpine AS dev
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 RUN go install github.com/air-verse/air@latest
 WORKDIR /app
 COPY packages/api/go.mod packages/api/go.sum ./
@@ -34,11 +36,13 @@ CMD ["air", "-c", ".air.toml"]
 
 # ── Production stage ──
 FROM alpine:3.21 AS prod
-RUN apk add --no-cache ca-certificates \
+RUN apk add --no-cache ca-certificates musl-locales \
     && addgroup -g 1000 draba \
     && adduser -u 1000 -G draba -s /bin/sh -D draba \
     && mkdir -p /data \
     && chown draba:draba /data
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 COPY --from=builder /draba /usr/local/bin/draba
 WORKDIR /data
 USER draba
