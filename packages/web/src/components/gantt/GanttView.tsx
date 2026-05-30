@@ -12,6 +12,7 @@
  */
 
 import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
 import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
 import type { components } from '@draba/shared';
@@ -272,6 +273,7 @@ export default function GanttView({
   labelColW,
   onLabelColWChange,
 }: Props) {
+  const queryClient = useQueryClient();
   const updateActivity = useUpdateActivity(timelineId);
   const today = todayMidnight();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -418,15 +420,28 @@ export default function GanttView({
   // ── Bar drag ─────────────────────────────────────────────────────────────
 
   const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    const patch = {
+      startAt: newStartDate.toISOString(),
+      endAt: newEndDate.toISOString(),
+    };
+
+    // Synchronously update the cache so the bar doesn't flash back to old
+    // position when GanttGrid clears its drag state in the same render cycle.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+    );
+
+    // Push updated activity to the sidebar so it shows new dates immediately
+    // instead of the stale snapshot from when the activity was selected.
+    if (onSelectApiActivity) {
+      const updated = apiActivities.find(a => a.id === activityId);
+      if (updated) onSelectApiActivity({ ...updated, ...patch });
+    }
+
     onBarDragEnd?.();
-    updateActivity.mutate({
-      activityId,
-      patch: {
-        startAt: newStartDate.toISOString(),
-        endAt: newEndDate.toISOString(),
-      },
-    });
-  }, [updateActivity, onBarDragEnd]); // eslint-disable-line react-hooks/exhaustive-deps
+    updateActivity.mutate({ activityId, patch });
+  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
 
   if (isLoading) {
     return (

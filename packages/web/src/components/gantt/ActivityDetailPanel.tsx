@@ -270,6 +270,14 @@ export default function ActivityDetailPanel({
     setConfirmDelete(false)
   }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Sync local date state when the event's dates change (e.g. after a drag commit).
+  const eventStartAt = event?.startAt
+  const eventEndAt = event?.endAt
+  useEffect(() => {
+    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
+    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
+  }, [eventStartAt, eventEndAt])
+
   const saving = updateMutation.isPending
   const deleting = deleteMutation.isPending
 

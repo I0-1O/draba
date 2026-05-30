@@ -234,8 +234,23 @@ export function useUpdateActivity(timelineId: string) {
         method: 'PATCH',
         body: JSON.stringify(patch),
       }),
+    onMutate: async ({ activityId, patch }) => {
+      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
+      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+      )
+      return { snapshot }
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.snapshot) {
+        for (const [key, data] of context.snapshot) {
+          client.setQueryData(key, data)
+        }
+      }
+    },
     onSuccess: (updated) => {
-      // Update the activity in all matching cache entries for the timeline.
       client.setQueriesData<Activity[]>(
         { queryKey: ['timelines', timelineId, 'activities'] },
         (old) => old?.map((a) => (a.id === updated.id ? updated : a)),

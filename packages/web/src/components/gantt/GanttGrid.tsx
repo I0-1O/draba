@@ -143,12 +143,14 @@ function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string 
 // ── Date helpers (support fractional column positions) ───────────────────────
 
 // Maps a fractional column position to a calendar Date by interpolating within
-// the column's day range. Fractional positions enable finer snap granularities.
+// the column's day range. Uses the full period length (start→end) rather than
+// the clamped `days` field so boundary columns still produce correct dates.
 function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
   let remaining = Math.max(0, colFrac);
   for (const col of columns) {
-    if (remaining <= 1) {
-      return addDays(col.start, Math.round(remaining * col.days));
+    if (remaining < 1) {
+      const periodDays = Math.round((col.end.getTime() - col.start.getTime()) / 86_400_000);
+      return addDays(col.start, Math.round(remaining * periodDays));
     }
     remaining -= 1;
   }
@@ -336,13 +338,6 @@ export default function GanttGrid({
     const initStartCol = ev.startCol;
     const initEndCol = ev.startCol + ev.span;
     const initMouseX = e.clientX - laneRect.left;
-    // Snap initial positions using finer step.
-    const div = snapDivisorFor(resolvedGranularity ?? 'auto');
-    const step = 1 / div;
-    const snapInit = (x: number) => Math.round(x / step) * step;
-    const initSnapStart = snapInit(initStartCol);
-    const initSnapEnd = snapInit(initEndCol);
-
     const state: BarDragState = {
       eventId: ev.id,
       zone,
@@ -350,8 +345,8 @@ export default function GanttGrid({
       initEndCol,
       initMouseX,
       laneLeft: laneRect.left,
-      snapStartCol: initSnapStart,
-      snapEndCol: Math.max(initSnapEnd, initSnapStart + step),
+      snapStartCol: initStartCol,
+      snapEndCol: initEndCol,
     };
     barDragRef.current = state;
     setBarDrag(state);
@@ -380,14 +375,16 @@ export default function GanttGrid({
       let nextEnd = s.snapEndCol;
 
       if (s.zone === 'left') {
-        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.snapEndCol - step));
+        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.initEndCol - step));
+        nextEnd = s.initEndCol;
       } else if (s.zone === 'right') {
-        nextEnd = Math.max(s.snapStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
+        nextStart = s.initStartCol;
+        nextEnd = Math.max(s.initStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
       } else {
-        // body: preserve span, shift both
-        const span = Math.max(step, snap(s.initEndCol - s.initStartCol));
+        // body: preserve exact span, shift both by snapped delta
+        const span = s.initEndCol - s.initStartCol;
         const shift = snap(deltaCol);
-        nextStart = Math.max(0, Math.min(snap(s.initStartCol) + shift, n - span));
+        nextStart = Math.max(0, Math.min(s.initStartCol + shift, n - span));
         nextEnd = nextStart + span;
       }
 

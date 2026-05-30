@@ -3,6 +3,8 @@ import {
   ChevronRight,
   ChevronLeft,
   ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Plus,
   Settings2,
   Upload,
@@ -398,6 +400,20 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
   const [membersOpen, setMembersOpen] = useState(true);
   const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
 
+  const allExpanded = teamOpen && timelinesOpen && activityOpen && connectorsOpen && membersOpen;
+  function toggleAllSections() {
+    const next = !allExpanded;
+    setTeamOpen(next);
+    setTimelinesOpen(next);
+    setActivityOpen(next);
+    setConnectorsOpen(next);
+    setMembersOpen(next);
+    if (!next) {
+      setArchivedOpen(false);
+      setArchivedTeamsOpen(false);
+    }
+  }
+
   const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
     id: t.id,
     name: t.name,
@@ -490,24 +506,49 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
             </span>
           </div>
         )}
-        <button
-          onClick={onToggle}
-          style={{
-            background: 'rgba(255,255,255,0.08)',
-            border: 'none',
-            color: 'rgba(255,255,255,0.7)',
-            borderRadius: 6,
-            width: 26,
-            height: 26,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-            flexShrink: 0,
-          }}
-        >
-          {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          {!collapsed && (
+            <button
+              onClick={toggleAllSections}
+              title={allExpanded ? 'Collapse all sections' : 'Expand all sections'}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'rgba(255,255,255,0.45)',
+                borderRadius: 6,
+                width: 26,
+                height: 26,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+            >
+              {allExpanded ? <ChevronsDownUp width={14} height={14} strokeWidth={1.8} /> : <ChevronsUpDown width={14} height={14} strokeWidth={1.8} />}
+            </button>
+          )}
+          <button
+            onClick={onToggle}
+            style={{
+              background: 'rgba(255,255,255,0.08)',
+              border: 'none',
+              color: 'rgba(255,255,255,0.7)',
+              borderRadius: 6,
+              width: 26,
+              height: 26,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
+          </button>
+        </div>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto' }}>
