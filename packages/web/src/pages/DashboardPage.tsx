@@ -419,8 +419,8 @@ function DashboardShell() {
         teamId={teamId}
         timelineId={activeTimelineId ?? ''}
         onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
-        liveDragStart={liveDragDates?.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
-        liveDragEnd={liveDragDates?.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
+        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
+        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
       />
 
       {/* Activity create panel — slides in from New Activity button or future drag */}

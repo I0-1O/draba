@@ -661,7 +661,7 @@ export default function GanttGrid({
                 {/* Sticky label cell */}
                 <div
                   style={{
-                    width: LABEL_COL_W,
+                    width: labelColW,
                     flexShrink: 0,
                     display: 'flex',
                     alignItems: 'center',
