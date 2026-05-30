@@ -44,6 +44,8 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.2 | [Activity Schema Normalization — Drop team_id](#phase-1042--activity-schema-normalization--drop-team_id) | S — ½–1 day | ✅ |
 | 10.4.3 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1043--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ✅ |
 | 10.4.4 | [Gantt Interaction & Activity Edit Polish](#phase-1044--gantt-interaction--activity-edit-polish) | M — 2–3 days | 🔄 |
+| 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ⬜ |
+| 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
 | 10.7 | [Localization & Language Support](#phase-107--localization--language-support) | L — 3–5 days | ⬜ |
@@ -1150,6 +1152,141 @@ Refines the Gantt chart's direct-manipulation UX and overhauls the Activity Edit
 - Status dropdown shows color dot + icon + name per option
 - "Identity" line removed from Classify; "Details" section renamed to "Advanced"
 - Notes field (multi-line) added at bottom; backed by new `notes` column on activities
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 10.4.5 — Activity Tags, Parent & Progress Fields
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Replaces the three "coming soon" stubs in the activity edit panel with fully functional fields: **tags** (team-scoped, normalized), **parent activity** (searchable picker), and **progress** (editable slider). Tags require a new schema and full API; parent and progress already have backend support but need frontend controls.
+
+**Why now:** These fields are prerequisites for Phase 10.4.6 (Filters) — the filter builder needs tags to exist as a filterable dimension, and progress/parent filters need editable values to be meaningful. Shipping stubs into the filter UI would create dead controls.
+
+**Design decisions:**
+- **Tags are normalized.** A team-scoped `tags` table (id, team_id, name, color) + a junction table (`activity_tags` referencing tag IDs) replaces the original simple (activity_id, tag_text) design. This enables colored tag pills, rename-all-at-once, autocomplete from existing tags, and name-based filter matching across timelines.
+- **The original `activity_tags` table** (migration 001, renamed in 005) has **never been wired to any Go code or API** — no repo methods, no handlers, not in OpenAPI. It is safe to DROP and recreate with the new schema. No data migration needed.
+
+**Detailed plan:** [docs/plans/phase-10.4.5.md](plans/phase-10.4.5.md)
+
+**Scope summary:**
+
+*Schema (migration 017):*
+- New `tags` table: `id TEXT PK`, `team_id TEXT FK`, `name TEXT NOT NULL`, `color TEXT`, `created_by TEXT FK`, `created_at DATETIME`; unique on `(team_id, name)`
+- Rebuild `activity_tags`: drop old (activity_id, tag text) table, create new (activity_id FK, tag_id FK) with cascade deletes
+
+*API — tag CRUD:*
+- `GET /teams/{id}/tags` — list team tags (any member)
+- `POST /teams/{id}/tags` — create tag (any member; sets `created_by` from JWT)
+- `PATCH /tags/{id}` — update name/color (any member)
+- `DELETE /tags/{id}` — delete tag (any member; cascades from activity_tags)
+
+*API — activity tag wiring:*
+- `Activity` model gains `TagIDs []string` field (same `db:"-"` pattern as `AssignedMemberIDs`)
+- `ActivityRepo` gains `SetTags` / `GetTags` methods (same transaction pattern as `SetAssignments` / `GetAssignments`)
+- `ListByTimeline` batch-populates `TagIDs` on returned activities (same JOIN pattern as `AssignedMemberIDs`)
+- Activity create/update handlers accept `tagIds`; activity list responses include `tagIds`
+
+*Web — tags:*
+- `useTags.ts` hook — CRUD following `useSavedFilters.ts` pattern
+- `TagInput.tsx` component — combobox with colored pills, autocomplete from team tags, "Create tag" option for on-the-fly creation
+- Replaces stub in `ActivityDetailPanel` and added to `ActivityCreatePanel`
+
+*Web — parent picker:*
+- Backend already handles `parentActivityId` in create/update — no API changes needed
+- Replace stub in `ActivityDetailPanel` with searchable combobox of activities in same timeline
+- Exclude self and descendants to prevent cycles
+- Save on select; null to clear
+
+*Web — progress:*
+- Backend already handles `percentComplete` in create/update — no API changes needed
+- Replace read-only progress bar stub with range slider (0–100)
+- Save on mouse-up
+- Optional: Gantt bar partial-fill indicator (darker overlay at `percentComplete%` width)
+
+*Sample data:*
+- `sample_data/10_tags.sql` — 5–8 tags per team + activity_tags associations
+
+**Exit criteria — safe to pause when:**
+- Tag CRUD API works end-to-end; activities carry `tagIds` in create/update/list responses
+- Tag combobox in detail + create panels; create-on-the-fly produces a new team tag and associates it
+- Parent picker: searchable dropdown within same timeline, replaces stub; cycles prevented
+- Progress slider: editable 0–100 range, saves on change, replaces stub
+- Sample data includes tags and activity-tag associations
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 10.4.6 — Filter Implementation
+**Status:** ⬜ | **Effort:** M–L (3–4 days)
+
+Makes the filter system fully operational. Today only the "Open only" preset actually filters activities — the other five presets, member filters, and saved filters exist as UI selections but are never evaluated. This phase ships: a filter definition language, a client-side filter engine, a visual filter builder, team-scoped filter promotion, and the "Manage filters" admin experience.
+
+**Depends on:** 10.4.5 (tags must exist for tag-based filtering)
+
+**Design decisions:**
+- **Filters are team-scoped, not timeline-scoped.** Status filter conditions match by **name** (case-insensitive), not by status ID. A filter for "In Progress" works across all timelines that have a status with that name. If a timeline lacks a matching status, the condition simply finds no matches — nothing breaks. Tags and assignees are already team-scoped. This makes filters intuitive and portable.
+- **Filter admin lives inline in the filter dropdown**, not in a separate Team Modal tab. A "Manage filters" link opens a management panel in the existing right sidebar. This keeps the workflow close to where users interact with filters.
+- **Client-side evaluation for v1.** Activities are already fully fetched per-timeline. The filter engine is a pure function that can later move server-side when data volumes warrant it.
+
+**Detailed plan:** [docs/plans/phase-10.4.6.md](plans/phase-10.4.6.md)
+
+**Scope summary:**
+
+*Filter definition schema (stored as JSON in `saved_filters.definition`):*
+- A filter is `{ logic: 'and' | 'or', conditions: FilterCondition[] }`
+- Each condition is `{ field, op, value }` with field-specific operator and value types
+- Supported fields: `status` (name match), `tag` (name match), `assignee` (member ID), `title` (string), `progress` (number), `hasParent` (boolean), `startDate` / `endDate` (date)
+- Operators vary by type: equals, not_equals, contains, in, not_in, gt, lt, is_empty, is_not_empty, before, after, between, is_true, is_false
+
+*Schema (migration 018):*
+- `ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0`
+
+*API — team filter support:*
+- `SavedFilter` model gains `IsTeamFilter bool`
+- `ListByTeamUser` returns user's own filters + all team filters (`WHERE team_id = ? AND (user_id = ? OR is_team_filter = 1)`)
+- `PATCH /saved_filters/{id}` accepts `isTeamFilter` (admin-only to set `true`)
+- Admins can delete team filters they don't own
+
+*Web — filter engine (`lib/filterEngine.ts`):*
+- Pure function: `matchesFilter(activity, filterDef, context) → boolean`
+- Resolves status name from `statusId` using timeline's status list (case-insensitive comparison)
+- Resolves tag names from `tagIds` using team's tag list
+- Evaluates conditions, combines with AND/OR
+
+*Web — unified filter application:*
+- `applyActiveFilter(activities, activeFilter, context)` — single function handling all filter kinds
+- Replaces the current GanttView open-only filtering (lines 358–363) with full evaluation
+- Makes all 6 presets actually work: all, open (uses isClosed flag), upcoming (7-day window), my (assigned to current user), overdue (past end + not closed), noassign (empty assignees)
+- Member filter kind: filters by selected member's assignments
+- Saved filter kind: parses definition JSON, evaluates via filter engine
+
+*Web — filter builder (`components/filters/FilterEditor.tsx`):*
+- Replaces "coming soon" in the RightSidebar
+- Filter name input, AND/OR toggle, condition rows with + / − buttons, Save / Delete footer
+- `FilterConditionRow.tsx`: field dropdown → operator dropdown → contextual value input (status: multi-select from deduped names across timelines; tag: multi-select from team tags; assignee: multi-select from members; dates: date picker; etc.)
+
+*Web — team filters & management:*
+- `FilterDropdown.tsx`: "Team filters" section shows filters where `isTeamFilter === true`; replaces current stub
+- "Manage filters" link at bottom of dropdown opens `FilterManagePanel.tsx` in the right sidebar
+- Management panel: lists user's filters + team filters; edit/delete buttons; admins see "Promote to team" on user filters
+
+*Forward compatibility:*
+- Shared views (Phase 13) will reference saved filters by ID — the `saved_filters` table and team-scoping design support this
+- Exports (Phase 14) will accept a filter ID to scope exported data
+- New activity fields added in future phases should be added to the `FilterCondition` union and the filter engine
+
+**Exit criteria — safe to pause when:**
+- All 6 preset filters actually filter activities (not just "Open only")
+- Member filter kind filters by assignee
+- Filter builder UI: add/remove conditions, pick field/op/value for all supported fields, AND/OR toggle
+- Save/load/edit/delete custom filters works end-to-end
+- Status conditions match by name (case-insensitive) across timelines
+- Tag conditions match by tag name
+- Team filter flag works: admins can promote a user filter to a team filter
+- Team filters visible to all team members in the filter dropdown
+- "Manage filters" panel accessible from dropdown; shows all filters with admin actions
+- Filter engine has comprehensive unit tests (each field type, each operator, AND/OR logic, edge cases)
 - `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
 
 ---

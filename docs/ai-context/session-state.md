@@ -21,8 +21,11 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.4.2 | Activity Schema Normalization | ✅ | ⬜ needs Docker verification |
 | 10.4.3 | UI Consistency — Modals, Sidebar & Toolbar | ✅ | ⬜ needs Docker verification |
 | 10.4.4 | Gantt Interaction & Activity Edit Polish | ✅ | ⬜ needs Docker verification |
+| 10.4.5 | Activity Tags, Parent & Progress Fields | ⬜ | ⬜ |
+| 10.4.6 | Filter Implementation | ⬜ | ⬜ |
 
-Next phase to build: **10.5** — Communications Testing.
+Next phase to build: **10.4.5** — Activity Tags, Parent & Progress Fields.
+Detailed plans: [docs/plans/phase-10.4.5.md](../plans/phase-10.4.5.md), [docs/plans/phase-10.4.6.md](../plans/phase-10.4.6.md).
 
 ---
 
