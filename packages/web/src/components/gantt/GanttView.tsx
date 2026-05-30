@@ -59,6 +59,10 @@ interface Props {
   onMembersLoaded?: (members: Member[]) => void;
   /** Called when an activity is selected — passes the full API activity object. */
   onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
+  labelColW?: number;
+  /** Called when the user drags the label column resize handle. */
+  onLabelColWChange?: (w: number) => void;
 }
 
 /** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
@@ -236,6 +240,18 @@ function buildRows(
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
+/**
+ * Returns only the activities whose status is not in closedStatusIds.
+ * Extracted as a named export so the 'open' filter preset logic can be
+ * unit-tested without mounting the full component.
+ */
+export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
+  activities: T[],
+  closedStatusIds: Set<string>,
+): T[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
 export default function GanttView({
   teamId,
   timelineId,
@@ -253,6 +269,8 @@ export default function GanttView({
   onBarDragEnd,
   onMembersLoaded,
   onSelectApiActivity,
+  labelColW,
+  onLabelColWChange,
 }: Props) {
   const updateActivity = useUpdateActivity(timelineId);
   const today = todayMidnight();
@@ -340,7 +358,7 @@ export default function GanttView({
   const hideClosedActive = activeFilter.kind === 'preset' && activeFilter.id === 'open'
   const visibleActivities = useMemo(() => {
     if (!hideClosedActive || !closedStatusIds?.size) return apiActivities
-    return apiActivities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+    return filterOpenActivities(apiActivities, closedStatusIds)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiActivities, hideClosedActive, closedStatusIds])
 
@@ -438,6 +456,8 @@ export default function GanttView({
         onBarDragProgress={onBarDragProgress}
         resolvedGranularity={resolvedGranularity}
         onClearFilters={filtersActive ? () => {} : undefined}
+        labelColW={labelColW}
+        onLabelColWChange={onLabelColWChange}
       />
     </div>
   );

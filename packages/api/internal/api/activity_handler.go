@@ -66,6 +66,7 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 		TimelineID:       timelineID,
 		Title:            req.Title,
 		Description:      req.Description,
+		Notes:            req.Notes,
 		Icon:             req.Icon,
 		Color:            req.Color,
 		StartAt:          req.StartAt,

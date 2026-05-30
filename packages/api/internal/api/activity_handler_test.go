@@ -269,6 +269,61 @@ func TestDeleteActivity_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+func TestCreateActivity_WithNotes(t *testing.T) {
+	srv, token, teamID, timelineID := activityTestSetup(t)
+
+	// Notes are stored on create and returned in the response.
+	body := map[string]any{
+		"title":   "Annotated Activity",
+		"startAt": "2026-06-01T09:00:00Z",
+		"endAt":   "2026-06-01T17:00:00Z",
+		"notes":   "Remember to update the deck before this starts.",
+	}
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID), body, token))
+
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+	assert.Equal(t, "Remember to update the deck before this starts.", created["notes"])
+}
+
+func TestUpdateActivity_Notes(t *testing.T) {
+	srv, token, teamID, timelineID := activityTestSetup(t)
+
+	// Create an activity without notes.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID),
+		map[string]any{
+			"title":   "Original",
+			"startAt": "2026-06-01T09:00:00Z",
+			"endAt":   "2026-06-01T17:00:00Z",
+		}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+	activityID := created["id"].(string)
+	assert.Nil(t, created["notes"], "notes should be nil on creation when not supplied")
+
+	// Patch in a notes value.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPatch, fmt.Sprintf("/activities/%s", activityID),
+		map[string]any{"notes": "Added later."}, token))
+	require.Equal(t, http.StatusOK, w2.Code)
+	var updated map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&updated))
+	assert.Equal(t, "Added later.", updated["notes"])
+
+	// Clear notes with an explicit null.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPatch, fmt.Sprintf("/activities/%s", activityID),
+		map[string]any{"notes": nil}, token))
+	require.Equal(t, http.StatusOK, w3.Code)
+	var cleared map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&cleared))
+	assert.Nil(t, cleared["notes"], "notes should be nil after clearing")
+}
+
 // activityTestSetupWithBus is like activityTestSetup but also returns the bus
 // so tests can assert that activity mutations publish the correct messages.
 func activityTestSetupWithBus(t *testing.T) (srv http.Handler, aliceToken, teamID, timelineID string, bus *events.Bus) {

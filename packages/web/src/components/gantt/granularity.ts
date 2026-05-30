@@ -197,6 +197,20 @@ export function positionInColumns(
   return { startCol, span };
 }
 
+// ── Snap divisor ────────────────────────────────────────────────────────────
+
+// Number of snap divisions per column at the given zoom granularity.
+// Higher divisor → finer snap (e.g. week columns snap to individual days).
+export function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
+  switch (granularity) {
+    case 'week':    return 7;  // snap to day within week
+    case 'month':   return 4;  // snap to week within month
+    case 'quarter': return 3;  // snap to month within quarter
+    case 'year':    return 4;  // snap to quarter within year
+    default:        return 1;  // day or auto → no finer snap
+  }
+}
+
 // ── Today position ──────────────────────────────────────────────────────────
 
 export function todayColumnPosition(columns: ColumnDef[]): number {

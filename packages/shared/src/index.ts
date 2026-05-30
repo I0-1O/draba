@@ -2585,6 +2585,7 @@ export interface operations {
                 "application/json": {
                     title: string;
                     description?: string | null;
+                    notes?: string | null;
                     icon?: string | null;
                     color?: string | null;
                     /** Format: date-time */

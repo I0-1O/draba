@@ -60,6 +60,14 @@
 
 ---
 
+## 2026-05-29 — /test-phase 10.4.4
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 skip (ws-smoke — websocat/wscat not installed on dev box; heartbeat covered by unit tests)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-05-28 — Phase 10.4.3: UI Consistency — Modals, Sidebar & Toolbar
 
 **Goal:** Standardize visual patterns across TeamModal, MemberModal, and TimelineModal — three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.

@@ -433,6 +433,7 @@ type CreateActivityJSONBody struct {
 	EndAt             time.Time `json:"endAt"`
 	Icon              *string   `json:"icon,omitempty"`
 	Location          *string   `json:"location,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
 	ParentActivityId  *string   `json:"parentActivityId,omitempty"`
 	PercentComplete   *int      `json:"percentComplete,omitempty"`
 	Rrule             *string   `json:"rrule,omitempty"`

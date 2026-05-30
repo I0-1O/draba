@@ -10,6 +10,7 @@ import Sidebar from '@/components/layout/Sidebar'
 import TopBar, { type ViewMode } from '@/components/layout/TopBar'
 import RightSidebar from '@/components/layout/RightSidebar'
 import GanttView from '@/components/gantt/GanttView'
+import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
 import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
 import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
 import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
@@ -57,6 +58,9 @@ function DashboardShell() {
   const { setFindBarOpen } = useFind()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [view, setView] = useState<ViewMode>('gantt')
+  // Gantt label-column width — held here so it survives switching to another
+  // view and back (GanttView unmounts on view change, which would reset it).
+  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
   const [profileOpen, setProfileOpen] = useState(false)
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
   const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
@@ -239,6 +243,13 @@ function DashboardShell() {
     upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
   }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Reset label column width when the user switches timelines so each timeline
+  // starts fresh. Switching between views on the same timeline preserves width
+  // because the state lives here rather than inside the unmounting GanttView.
+  useEffect(() => {
+    setGanttLabelColW(DEFAULT_LABEL_COL_W)
+  }, [activeTimelineId])
+
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
       <Sidebar
@@ -396,6 +407,8 @@ function DashboardShell() {
               }}
               onBarDragEnd={() => setLiveDragDates(null)}
               onMembersLoaded={setGanttMembers}
+              labelColW={ganttLabelColW}
+              onLabelColWChange={setGanttLabelColW}
             />
           ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>

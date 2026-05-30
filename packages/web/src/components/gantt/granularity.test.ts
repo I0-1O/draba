@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { generateColumns } from './granularity'
+import { generateColumns, snapDivisorFor } from './granularity'
 
 // ── generateColumns — weekStart option ───────────────────────────────────────
 
@@ -54,5 +54,33 @@ describe('generateColumns — locale', () => {
     const defaultCols = generateColumns(JAN1, JAN31, 'month')
     const usCols      = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
     expect(defaultCols[0].label).toBe(usCols[0].label)
+  })
+})
+
+// ── snapDivisorFor ────────────────────────────────────────────────────────────
+
+describe('snapDivisorFor', () => {
+  it('week → 7 (snap to day within week)', () => {
+    expect(snapDivisorFor('week')).toBe(7)
+  })
+
+  it('month → 4 (snap to week within month)', () => {
+    expect(snapDivisorFor('month')).toBe(4)
+  })
+
+  it('quarter → 3 (snap to month within quarter)', () => {
+    expect(snapDivisorFor('quarter')).toBe(3)
+  })
+
+  it('year → 4 (snap to quarter within year)', () => {
+    expect(snapDivisorFor('year')).toBe(4)
+  })
+
+  it('day → 1 (no finer snap at day granularity)', () => {
+    expect(snapDivisorFor('day')).toBe(1)
+  })
+
+  it('auto → 1 (no finer snap for auto)', () => {
+    expect(snapDivisorFor('auto')).toBe(1)
   })
 })

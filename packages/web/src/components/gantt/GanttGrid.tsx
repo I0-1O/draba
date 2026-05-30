@@ -24,9 +24,9 @@ import { Badge } from '../identity/Badge';
 import EmptyState from '../shared/EmptyState';
 import type { Member } from '../../types';
 import type { ColumnDef, TimeGranularity } from './granularity';
-import { addDays } from './granularity';
+import { addDays, snapDivisorFor } from './granularity';
 
-const DEFAULT_LABEL_COL_W = 240;
+export const DEFAULT_LABEL_COL_W = 240;
 const MIN_LABEL_COL_W = 140;
 const MAX_LABEL_COL_W = 400;
 const HEADER_H = 36;
@@ -126,6 +126,10 @@ interface Props {
   findState?: FindState;
   /** Called when the user clicks "Clear filters" in the no-matches callout. */
   onClearFilters?: () => void;
+  /** Current label column width in px — lifts state to the parent so it survives view switches. */
+  labelColW?: number;
+  /** Called when the user drags the column resize handle. */
+  onLabelColWChange?: (w: number) => void;
 }
 
 // ── Bar drag helpers ─────────────────────────────────────────────────────────
@@ -161,17 +165,6 @@ function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
   return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
 }
 
-// Number of snap divisions per column based on the active zoom granularity.
-// Higher divisor → finer snap (e.g. week columns snap to day boundaries).
-function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
-  switch (granularity) {
-    case 'week':    return 7;  // snap to day within week
-    case 'month':   return 4;  // snap to week within month
-    case 'quarter': return 3;  // snap to month within quarter
-    case 'year':    return 4;  // snap to quarter within year
-    default:        return 1;  // day or auto → no finer snap
-  }
-}
 
 function formatDragDate(d: Date): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -189,9 +182,16 @@ export default function GanttGrid({
   resolvedGranularity,
   findState,
   onClearFilters,
+  labelColW: labelColWProp,
+  onLabelColWChange,
 }: Props) {
   // ── Resizable label column ─────────────────────────────────────────────────
-  const [labelColW, setLabelColW] = useState(DEFAULT_LABEL_COL_W);
+  // When the parent passes labelColW + onLabelColWChange the column is
+  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
+  // When neither is provided we fall back to internal state.
+  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
+  const labelColW = labelColWProp ?? internalLabelColW;
+  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
 
   const totalW = useMemo(
     () => labelColW + columns.length * COL_W,
@@ -216,6 +216,8 @@ export default function GanttGrid({
     }
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
+  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Integer column index that contains today (for background highlight)
