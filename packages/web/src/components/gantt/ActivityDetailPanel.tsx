@@ -16,13 +16,15 @@
  */
 
 import { useState, useEffect, useRef } from 'react'
-import { X, Trash2, ArrowRight, Loader2, Tag, ChevronDown } from 'lucide-react'
+import { X, Trash2, ArrowRight, Loader2, ChevronDown } from 'lucide-react'
 import MemberAvatar from '@/components/MemberAvatar'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import { resolveColorHex } from '@/components/identity/identity-constants'
 import type { Identity } from '@/components/identity/identity-constants'
-import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
+import { useUpdateActivity, useDeleteActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
 import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useTags } from '@/hooks/useTags'
+import TagInput from '@/components/TagInput'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
 
@@ -240,6 +242,8 @@ export default function ActivityDetailPanel({
   const updateMutation = useUpdateActivity(timelineId)
   const deleteMutation = useDeleteActivity(timelineId)
   const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
+  const { data: teamTags = [] } = useTags(teamId)
+  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
 
   const [title, setTitle] = useState(event?.title ?? '')
   const [description, setDescription] = useState(event?.description ?? '')
@@ -251,8 +255,10 @@ export default function ActivityDetailPanel({
     icon: event?.icon ?? '__none__',
   })
   const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
+  const [tagIds, setTagIds] = useState<string[]>((event?.tagIds as string[] | undefined) ?? [])
   const [location, setLocation] = useState(event?.location ?? '')
   const [url, setUrl] = useState(event?.url ?? '')
+  const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   // Re-sync when the selected activity changes.
@@ -265,8 +271,10 @@ export default function ActivityDetailPanel({
     setEndDate(toDateInput(event.endAt))
     setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
     setAssignedIds(event.assignedMemberIds ?? [])
+    setTagIds((event.tagIds as string[] | undefined) ?? [])
     setLocation(event.location ?? '')
     setUrl(event.url ?? '')
+    setProgressValue(event.percentComplete ?? 0)
     setConfirmDelete(false)
   }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -331,6 +339,26 @@ export default function ActivityDetailPanel({
       : [...assignedIds, memberId]
     setAssignedIds(next)
     save({ assignedMemberIds: next })
+  }
+
+  function handleTagsChange(ids: string[]) {
+    setTagIds(ids)
+    save({ tagIds: ids } as Parameters<typeof save>[0])
+  }
+
+  function handleParentChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    const val = e.target.value || null
+    save({ parentActivityId: val } as Parameters<typeof save>[0])
+  }
+
+  function handleProgressChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setProgressValue(Number(e.target.value))
+  }
+
+  function handleProgressCommit(e: React.ChangeEvent<HTMLInputElement>) {
+    const val = Number(e.target.value)
+    setProgressValue(val)
+    save({ percentComplete: val } as Parameters<typeof save>[0])
   }
 
   function handleDelete() {
@@ -502,19 +530,15 @@ export default function ActivityDetailPanel({
               )}
             </div>
 
-            {/* Tags stub */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>Tags</span>
-              <div style={{ ...STUB_VALUE }}>
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 100,
-                  border: '1px dashed var(--border)', lineHeight: 1.5,
-                  display: 'flex', alignItems: 'center', gap: 3,
-                }}>
-                  <Tag size={9} strokeWidth={2} /> Add tag
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
-              </div>
+            {/* Tags */}
+            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+              <span style={{ ...FIELD_LABEL, paddingTop: 5 }}>Tags</span>
+              <TagInput
+                teamId={teamId}
+                tags={teamTags}
+                selectedTagIds={tagIds}
+                onChange={handleTagsChange}
+              />
             </div>
           </div>
 
@@ -524,33 +548,46 @@ export default function ActivityDetailPanel({
           <div style={{ marginBottom: 12 }}>
             <div style={SEC_LABEL}>Advanced</div>
 
-            {/* Parent activity stub */}
+            {/* Parent activity picker */}
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
               <span style={FIELD_LABEL}>Parent</span>
-              <div style={{ ...STUB_VALUE }}>
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 4,
-                  border: '1px solid var(--border)', lineHeight: 1.5,
-                  display: 'flex', alignItems: 'center', gap: 3,
-                }}>
-                  None <ChevronDown size={10} strokeWidth={2} />
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
-              </div>
+              <select
+                value={event.parentActivityId ?? ''}
+                onChange={handleParentChange}
+                style={{
+                  flex: 1, fontSize: 12, color: 'var(--foreground)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                  padding: '4px 6px', outline: 'none', background: 'var(--background)',
+                  fontFamily: 'var(--font-sans)', cursor: 'pointer',
+                }}
+              >
+                <option value="">— None —</option>
+                {allActivities
+                  .filter(a => a.id !== event.id)
+                  .map(a => (
+                    <option key={a.id} value={a.id}>{a.title}</option>
+                  ))}
+              </select>
             </div>
 
-            {/* % Complete stub */}
+            {/* % Complete slider */}
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
               <span style={FIELD_LABEL}>Progress</span>
-              <div style={{ ...STUB_VALUE }}>
-                <div style={{
-                  flex: 1, height: 4, background: 'var(--border)',
-                  borderRadius: 2, overflow: 'hidden', maxWidth: 80,
-                }}>
-                  <div style={{ width: `${event.percentComplete ?? 0}%`, height: '100%', background: 'var(--primary)', borderRadius: 2 }} />
-                </div>
-                <span style={{ fontSize: 11, marginLeft: 5 }}>{event.percentComplete ?? 0}%</span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={progressValue}
+                  onChange={handleProgressChange}
+                  onMouseUp={handleProgressCommit as unknown as React.MouseEventHandler}
+                  onTouchEnd={handleProgressCommit as unknown as React.TouchEventHandler}
+                  style={{ flex: 1, cursor: 'pointer', accentColor: 'var(--primary)' }}
+                />
+                <span style={{ fontSize: 11, color: 'var(--muted-foreground)', minWidth: 30, textAlign: 'right' }}>
+                  {progressValue}%
+                </span>
               </div>
             </div>
 

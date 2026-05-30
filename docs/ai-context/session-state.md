@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short._
 
-**Last updated:** 2026-05-29 (Phase 10.4.4 built — all automated checks pass)
+**Last updated:** 2026-05-30 (Phase 10.4.5 built — all automated checks pass)
 
 ---
 
@@ -21,11 +21,44 @@ _Updated after each significant work session. Read this first to orient — it i
 | 10.4.2 | Activity Schema Normalization | ✅ | ⬜ needs Docker verification |
 | 10.4.3 | UI Consistency — Modals, Sidebar & Toolbar | ✅ | ⬜ needs Docker verification |
 | 10.4.4 | Gantt Interaction & Activity Edit Polish | ✅ | ⬜ needs Docker verification |
-| 10.4.5 | Activity Tags, Parent & Progress Fields | ⬜ | ⬜ |
+| 10.4.5 | Activity Tags, Parent & Progress Fields | ✅ | ⬜ needs Docker verification |
 | 10.4.6 | Filter Implementation | ⬜ | ⬜ |
 
-Next phase to build: **10.4.5** — Activity Tags, Parent & Progress Fields.
-Detailed plans: [docs/plans/phase-10.4.5.md](../plans/phase-10.4.5.md), [docs/plans/phase-10.4.6.md](../plans/phase-10.4.6.md).
+Next phase to build: **10.4.6** — Filter Implementation.
+Detailed plan: [docs/plans/phase-10.4.6.md](../plans/phase-10.4.6.md).
+
+---
+
+## Phase 10.4.5 — Activity Tags, Parent & Progress Fields (2026-05-30 — not yet Docker-verified)
+
+**Backend:**
+- Migration 017: `tags` table (team-scoped, unique name per team) + rebuilt `activity_tags` (normalized FK junction replacing old text-junction table)
+- `Tag` model in `models.go`; `TagIDs []string` added to `Activity` (same `db:"-"` pattern as `AssignedMemberIDs`)
+- `TagRepo`: Create, GetByID, ListByTeam, Update, Delete
+- `ActivityRepo.SetTags` / `GetTags` — transaction pattern matching `SetAssignments`
+- `ActivityRepo.ListByTimeline`: batch-populates `TagIDs` via `sqlx.In` (same JOIN pattern as `AssignedMemberIDs`)
+- `tag_handler.go`: GET/POST `/teams/{id}/tags`, PATCH/DELETE `/tags/{id}` — any team member can create/edit/delete
+- `activity_handler.go`: `handleCreateActivity` and `handleUpdateActivity` accept `tagIds`
+- `isUniqueConstraintError` helper added to `helpers.go`
+- Server wired: `tags *db.TagRepo` field, tag routes registered, `main.go` instantiates `db.NewTagRepo(database)`
+
+**OpenAPI + types:**
+- `Tag` schema added; `tagIds` added to `Activity` schema and create/update request bodies
+- TypeScript types regenerated
+
+**Frontend:**
+- `useTags.ts`: CRUD hooks (`useTags`, `useCreateTag`, `useUpdateTag`, `useDeleteTag`)
+- `TagInput.tsx`: combobox with colored pill badges, autocomplete from team tags, "Create X" option for on-the-fly creation
+- `ActivityDetailPanel`: Tags stub → `TagInput`; Parent stub → native `<select>` from same-timeline activities; Progress stub → `<input type="range">` (saves on mouseup)
+- `ActivityCreatePanel`: `TagInput` added below Assignees; `tagIds` in create mutation payload
+- `GanttGrid`: progress fill overlay on bars (darker shade at `percentComplete%` width from left)
+- `vite.config.ts`: `/tags` proxy added
+- `sample_data/10_tags.sql`: 8 tags + activity_tag associations for Product Marketing sample team
+
+**Tests:**
+- `tag_repo_test.go`: CRUD, unique constraint, SetTags/GetTags, ListByTimeline TagIDs population
+- `tag_handler_test.go`: create/list/update/delete, 409 duplicate, 404 not found, 403 non-member
+- All 11 test files that call `NewServer` updated to include `db.NewTagRepo(database)` parameter
 
 ---
 

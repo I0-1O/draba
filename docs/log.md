@@ -2,6 +2,46 @@
 
 ---
 
+## 2026-05-30 — Phase 10.4.5: Activity Tags, Parent & Progress Fields
+
+**Goal:** Replace the three "coming soon" stubs in the activity edit panel with fully functional fields. Tags are normalized (team-scoped `tags` table + FK junction). Parent and progress already had backend support; this phase adds the UI controls and a Gantt bar progress indicator.
+
+**Backend:**
+- Migration 017: `tags` table (id, team_id, name, color, created_by, created_at; UNIQUE on team_id+name); rebuilt `activity_tags` as normalized FK junction (dropped old text-junction table from migration 001)
+- `models.Tag` struct; `Activity.TagIDs []string` field with `db:"-"` tag (same pattern as `AssignedMemberIDs`)
+- `TagRepo` in `internal/db/tag_repo.go`: Create, GetByID, ListByTeam (ORDER BY name), Update, Delete
+- `ActivityRepo.SetTags` / `GetTags`: transaction DELETE+INSERT pattern matching `SetAssignments`/`GetAssignments`
+- `ActivityRepo.ListByTimeline`: now also batch-populates `TagIDs` via `sqlx.In` (same two-query JOIN pattern as `AssignedMemberIDs`)
+- `tag_handler.go`: GET/POST `/teams/{id}/tags`, PATCH/DELETE `/tags/{id}` — any team member can create/edit/delete; 409 on duplicate name
+- `activity_handler.go`: `handleCreateActivity` and `handleUpdateActivity` accept `tagIds`; `setActivityArchive` populates `TagIDs` on response
+- `isUniqueConstraintError` helper in `helpers.go`: checks for "UNIQUE constraint failed" in error message
+- Server: `tags *db.TagRepo` field; 4 tag routes registered; `main.go` instantiates `db.NewTagRepo(database)` and passes to `NewServer`
+
+**OpenAPI + types:**
+- `Tag` schema added with all fields; `tagIds: array<string>` added to `Activity` schema and both create/update request bodies
+- TypeScript types regenerated via `pnpm --filter shared generate`
+- `CreateActivityJSONBody` in `api_types.gen.go` updated to include `TagIds *[]string`
+
+**Frontend:**
+- `hooks/useTags.ts`: `useTags`, `useCreateTag`, `useUpdateTag`, `useDeleteTag` — follow `useSavedFilters.ts` patterns; cache key `['teams', teamId, 'tags']`
+- `components/TagInput.tsx`: combobox with colored pill badges (color from identity palette), autocomplete filtered by typed text, "Create 'X'" option at bottom when no exact match; auto-selects new tags on creation
+- `ActivityDetailPanel.tsx`: Tags stub → `TagInput`; Parent stub → native `<select>` populated from `useTimelineActivities` (excludes self); Progress stub → `<input type="range" min=0 max=100 step=5>` that saves on mouseup; `tagIds`, `progressValue` state added; `handleTagsChange`, `handleParentChange`, `handleProgressChange`/`Commit` handlers added; imports updated
+- `ActivityCreatePanel.tsx`: `TagInput` added below Assignees section; `tagIds` state (reset on panel open); `tagIds` included in create mutation payload; `CreateActivityInput` type extended
+- `GanttGrid.tsx`: progress fill overlay inside bars — semi-transparent darker div spanning `percentComplete%` width from left, `pointerEvents: none`
+- `vite.config.ts`: `/tags` proxy entry added
+- `hooks/useTeamActivities.ts`: `CreateActivityInput` and `UpdateActivityInput` types extended to include `tagIds`, `parentActivityId`, `percentComplete`
+
+**Sample data:**
+- `sample_data/10_tags.sql`: 8 tags (urgent, design, content, research, launch, competitive, review, blocked) for Product Marketing team; 13 activity_tag associations across Q1 and SKO activities
+
+**Tests:**
+- `internal/db/tag_repo_test.go` (new): 7 tests — create+list (alphabetical order), getByID, update, delete, unique constraint error, SetTags/GetTags, ListByTimeline TagIDs population
+- `internal/api/tag_handler_test.go` (new): 7 tests — create+list, 409 duplicate, 400 missing name, update, 404 not found, delete, 403 non-member
+- All 11 `NewServer` call sites in test files updated to pass the new `*db.TagRepo` parameter
+- `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` clean
+
+---
+
 ## 2026-05-29 — Phase 10.4.4: Gantt Interaction & Activity Edit Polish
 
 **Goal:** Polish the Gantt's direct-manipulation UX (resizable label column, click-to-activate drag, live sidebar date feedback, finer snap), move "Hide closed" from toolbar to filter preset, and overhaul the Activity Edit sidebar layout.

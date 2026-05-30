@@ -176,6 +176,9 @@ interface CreateActivityInput {
   color?: string | null
   icon?: string | null
   assignedMemberIds?: string[]
+  tagIds?: string[]
+  parentActivityId?: string | null
+  percentComplete?: number | null
 }
 
 interface UpdateActivityInput {
@@ -192,7 +195,10 @@ interface UpdateActivityInput {
     location?: string | null
     url?: string | null
     statusId?: string | null
+    parentActivityId?: string | null
+    percentComplete?: number | null
     assignedMemberIds?: string[]
+    tagIds?: string[]
   }
 }
 

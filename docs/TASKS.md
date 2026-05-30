@@ -877,6 +877,59 @@ Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sideb
 
 ---
 
+### Activity Tags, Parent & Progress Fields (Phase 10.4.5)
+Replaces the three "coming soon" stubs in the activity edit panel with functional fields. Tags are normalized (team-scoped `tags` table). Parent and progress already had backend support; this phase adds the UI.
+
+**Schema (migration 017):**
+- [x] Create `tags` table: `id, team_id, name, color, created_by, created_at`; UNIQUE(team_id, name) — 2026-05-30
+- [x] Rebuild `activity_tags`: drop old text-junction table, create normalized FK junction — 2026-05-30
+
+**Go API:**
+- [x] `Tag` model added to `models.go` — 2026-05-30
+- [x] `Activity.TagIDs []string` field added (same `db:"-"` pattern as `AssignedMemberIDs`) — 2026-05-30
+- [x] `TagRepo`: `Create`, `GetByID`, `ListByTeam`, `Update`, `Delete` — 2026-05-30
+- [x] `ActivityRepo.SetTags` / `GetTags` — transaction pattern matching `SetAssignments` — 2026-05-30
+- [x] `ActivityRepo.ListByTimeline`: batch-populates `TagIDs` via `sqlx.In` (same as `AssignedMemberIDs`) — 2026-05-30
+- [x] `tag_handler.go`: `GET /teams/{id}/tags`, `POST /teams/{id}/tags`, `PATCH /tags/{id}`, `DELETE /tags/{id}` — 2026-05-30
+- [x] `activity_handler.go`: `handleCreateActivity` and `handleUpdateActivity` accept `tagIds`; `setActivityArchive` populates `TagIDs` on response — 2026-05-30
+- [x] `isUniqueConstraintError` helper added to `helpers.go` — 2026-05-30
+- [x] `server.go`: `tags *db.TagRepo` field; tag routes registered — 2026-05-30
+- [x] `main.go`: `db.NewTagRepo(database)` instantiated and passed to `NewServer` — 2026-05-30
+
+**OpenAPI + types:**
+- [x] `Tag` schema added to `openapi.yaml` — 2026-05-30
+- [x] `tagIds` added to `Activity` schema and create/update request bodies — 2026-05-30
+- [x] Regenerated TypeScript types — 2026-05-30
+
+**Frontend:**
+- [x] `useTags.ts`: `useTags`, `useCreateTag`, `useUpdateTag`, `useDeleteTag` hooks — 2026-05-30
+- [x] `TagInput.tsx`: combobox with colored pills, autocomplete, create-on-the-fly — 2026-05-30
+- [x] `ActivityDetailPanel`: Tags stub → `TagInput`; Parent stub → `<select>` from same-timeline activities; Progress stub → `<input type="range">`; tagIds/parentActivityId/percentComplete in state and save calls — 2026-05-30
+- [x] `ActivityCreatePanel`: `TagInput` added (below Assignees); `tagIds` in create mutation — 2026-05-30
+- [x] `GanttGrid`: progress fill overlay on bars (darker shade at `percentComplete%` width) — 2026-05-30
+- [x] `vite.config.ts`: `/tags` proxy added — 2026-05-30
+
+**Sample data:**
+- [x] `sample_data/10_tags.sql`: 8 tags for Product Marketing team + activity_tag associations — 2026-05-30
+
+**Tests:**
+- [x] `tag_repo_test.go`: CRUD, unique constraint, SetTags/GetTags, ListByTimeline TagIDs population — 2026-05-30
+- [x] `tag_handler_test.go`: create/list/update/delete happy paths, 409 duplicate, 404 not found, 403 non-member — 2026-05-30
+- [x] All existing test files updated to pass `db.NewTagRepo(database)` to `NewServer` — 2026-05-30
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-30
+- [x] `go test ./...` passes — 2026-05-30
+- [x] `pnpm --filter web lint` clean — 2026-05-30
+- [ ] Manual: create a tag in the activity detail panel; it appears in team tag list for future activities
+- [ ] Manual: tag autocomplete shows existing team tags; typing a new name offers "Create" option
+- [ ] Manual: tagged activity shows tag pills in the detail panel; pills persist across panel close/reopen
+- [ ] Manual: set parent activity; verify it persists across reload
+- [ ] Manual: drag the progress slider; Gantt bar shows progress fill; value persists
+- [ ] Manual: create activity with tags from the create panel; tags appear in detail panel
+
+---
+
 ### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
 Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
 

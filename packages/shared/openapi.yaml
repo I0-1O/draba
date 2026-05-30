@@ -364,6 +364,30 @@ components:
           items:
             type: string
           description: IDs of team_members assigned to this activity (from activity_assignments).
+        tagIds:
+          type: array
+          items:
+            type: string
+          description: IDs of tags associated with this activity (from activity_tags).
+
+    Tag:
+      type: object
+      required: [id, teamId, name, createdBy, createdAt]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          nullable: true
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
 
     Timeline:
       type: object
@@ -2009,6 +2033,11 @@ paths:
                   items:
                     type: string
                   description: IDs of team_members to assign. Replaces all existing assignments.
+                tagIds:
+                  type: array
+                  items:
+                    type: string
+                  description: IDs of tags to associate. Replaces all existing tag associations.
       responses:
         "201":
           description: Activity created.
@@ -2139,6 +2168,11 @@ paths:
                   items:
                     type: string
                   description: IDs of team_members to assign. Replaces all existing assignments.
+                tagIds:
+                  type: array
+                  items:
+                    type: string
+                  description: IDs of tags to associate. Replaces all existing tag associations.
       responses:
         "200":
           description: Updated activity.

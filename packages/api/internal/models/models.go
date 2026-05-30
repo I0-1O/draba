@@ -39,6 +39,7 @@ type Activity struct {
 	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
 	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
 	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
 }
 
 // TeamMemberWithUser joins a TeamMember row with its associated User so
@@ -286,6 +287,18 @@ type TimelineAccessEntry struct {
 	Color        *string `db:"color"          json:"color,omitempty"`
 	Icon         *string `db:"icon"           json:"icon,omitempty"`
 	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
 }
 
 // Invite is a single-use token that grants an email address the right to

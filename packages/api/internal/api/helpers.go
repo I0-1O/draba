@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // writeJSON sends v as a JSON response with the given status. Encoder
@@ -34,6 +35,13 @@ func newID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// isUniqueConstraintError reports whether err came from a UNIQUE constraint
+// violation in SQLite. The driver surfaces these as plain errors whose message
+// contains "UNIQUE constraint failed".
+func isUniqueConstraintError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 // newToken returns a 64-character hex token derived from 32 random bytes

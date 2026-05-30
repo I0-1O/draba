@@ -1188,6 +1188,17 @@ export interface components {
             archivedAt?: string | null;
             /** @description IDs of team_members assigned to this activity (from activity_assignments). */
             assignedMemberIds?: string[];
+            /** @description IDs of tags associated with this activity (from activity_tags). */
+            tagIds?: string[];
+        };
+        Tag: {
+            id: string;
+            teamId: string;
+            name: string;
+            color?: string | null;
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
         };
         Timeline: {
             id: string;
@@ -2602,6 +2613,8 @@ export interface operations {
                     rrule?: string | null;
                     /** @description IDs of team_members to assign. Replaces all existing assignments. */
                     assignedMemberIds?: string[];
+                    /** @description IDs of tags to associate. Replaces all existing tag associations. */
+                    tagIds?: string[];
                 };
             };
         };
@@ -2677,6 +2690,8 @@ export interface operations {
                     rrule?: string | null;
                     /** @description IDs of team_members to assign. Replaces all existing assignments. */
                     assignedMemberIds?: string[];
+                    /** @description IDs of tags to associate. Replaces all existing tag associations. */
+                    tagIds?: string[];
                 };
             };
         };

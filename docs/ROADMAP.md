@@ -44,7 +44,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.2 | [Activity Schema Normalization — Drop team_id](#phase-1042--activity-schema-normalization--drop-team_id) | S — ½–1 day | ✅ |
 | 10.4.3 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1043--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ✅ |
 | 10.4.4 | [Gantt Interaction & Activity Edit Polish](#phase-1044--gantt-interaction--activity-edit-polish) | M — 2–3 days | 🔄 |
-| 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ⬜ |
+| 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | ⬜ |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
@@ -1157,7 +1157,7 @@ Refines the Gantt chart's direct-manipulation UX and overhauls the Activity Edit
 ---
 
 ### Phase 10.4.5 — Activity Tags, Parent & Progress Fields
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** ✅ Done — 2026-05-30 | **Effort:** M (2–3 days)
 
 Replaces the three "coming soon" stubs in the activity edit panel with fully functional fields: **tags** (team-scoped, normalized), **parent activity** (searchable picker), and **progress** (editable slider). Tags require a new schema and full API; parent and progress already have backend support but need frontend controls.
 

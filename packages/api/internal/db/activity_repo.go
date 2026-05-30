@@ -149,6 +149,53 @@ func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
 	return ids, nil
 }
 
+// SetTags replaces all activity_tags for an activity with the provided tag
+// IDs. An empty slice removes all tag associations.
+func (r *ActivityRepo) SetTags(activityID string, tagIDs []string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning tag transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`DELETE FROM activity_tags WHERE activity_id = ?`, activityID); err != nil {
+		return fmt.Errorf("clearing activity tags: %w", err)
+	}
+
+	for _, tagID := range tagIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
+			activityID, tagID,
+		); err != nil {
+			return fmt.Errorf("inserting activity tag: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing activity tags: %w", err)
+	}
+	return nil
+}
+
+// GetTags returns the tag IDs associated with an activity.
+func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT tag_id FROM activity_tags WHERE activity_id = ?`, activityID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity tags: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
 // ListByTimeline returns activities for a specific timeline. When
 // includeArchived is false archived rows are excluded. When from or to are
 // non-nil they bound the query by start_at.
@@ -178,12 +225,13 @@ func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, in
 		return acts, nil
 	}
 
-	// Initialise AssignedMemberIDs to an empty slice so the JSON field is
-	// always an array (never null) even when an activity has no assignments.
+	// Initialise AssignedMemberIDs and TagIDs to empty slices so JSON fields are
+	// always arrays (never null) even when an activity has no assignments or tags.
 	ids := make([]string, len(acts))
 	byID := make(map[string]*models.Activity, len(acts))
 	for i, a := range acts {
 		a.AssignedMemberIDs = []string{}
+		a.TagIDs = []string{}
 		ids[i] = a.ID
 		byID[a.ID] = a
 	}
@@ -208,6 +256,29 @@ func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, in
 	for _, a := range assignments {
 		if act, ok := byID[a.ActivityID]; ok {
 			act.AssignedMemberIDs = append(act.AssignedMemberIDs, a.TeamMemberID)
+		}
+	}
+
+	tagQuery, tagArgs, err := sqlx.In(
+		`SELECT activity_id, tag_id FROM activity_tags WHERE activity_id IN (?)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building tags query: %w", err)
+	}
+	tagQuery = r.db.Rebind(tagQuery)
+
+	type activityTag struct {
+		ActivityID string `db:"activity_id"`
+		TagID      string `db:"tag_id"`
+	}
+	var actTags []activityTag
+	if err := r.db.Select(&actTags, tagQuery, tagArgs...); err != nil {
+		return nil, fmt.Errorf("listing activity tags: %w", err)
+	}
+	for _, at := range actTags {
+		if act, ok := byID[at.ActivityID]; ok {
+			act.TagIDs = append(act.TagIDs, at.TagID)
 		}
 	}
 

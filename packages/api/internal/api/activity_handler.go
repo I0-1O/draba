@@ -97,6 +97,16 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 		activity.AssignedMemberIDs = []string{}
 	}
 
+	if req.TagIds != nil {
+		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *req.TagIds
+	} else {
+		activity.TagIDs = []string{}
+	}
+
 	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
 	writeJSON(w, http.StatusCreated, activity)
 }
@@ -284,6 +294,16 @@ func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
 		newAssignees = &ids
 	}
 
+	var newTagIDs *[]string
+	if v, ok := patch["tagIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
+			return
+		}
+		newTagIDs = &ids
+	}
+
 	if activity.Title == "" {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
 		return
@@ -313,6 +333,21 @@ func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		activity.AssignedMemberIDs = existing
+	}
+
+	if newTagIDs != nil {
+		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *newTagIDs
+	} else {
+		existing, err := s.activities.GetTags(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
+			return
+		}
+		activity.TagIDs = existing
 	}
 
 	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
@@ -373,11 +408,16 @@ func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, arch
 	activity.ArchivedAt = at
 	activity.UpdatedAt = time.Now().UTC()
 
-	// Re-populate assignments for a stable response shape.
+	// Re-populate assignments and tags for a stable response shape.
 	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
 		activity.AssignedMemberIDs = ids
 	} else {
 		activity.AssignedMemberIDs = []string{}
+	}
+	if ids, err := s.activities.GetTags(activity.ID); err == nil {
+		activity.TagIDs = ids
+	} else {
+		activity.TagIDs = []string{}
 	}
 
 	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})

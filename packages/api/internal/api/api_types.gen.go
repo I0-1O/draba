@@ -428,6 +428,7 @@ type ListActivitiesParams struct {
 type CreateActivityJSONBody struct {
 	AllDay            *bool     `json:"allDay,omitempty"`
 	AssignedMemberIds *[]string `json:"assignedMemberIds,omitempty"`
+	TagIds            *[]string `json:"tagIds,omitempty"`
 	Color             *string   `json:"color,omitempty"`
 	Description       *string   `json:"description,omitempty"`
 	EndAt             time.Time `json:"endAt"`

@@ -11,6 +11,8 @@ import MemberAvatar from '@/components/MemberAvatar'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import type { Identity } from '@/components/identity/identity-constants'
 import { useCreateActivity } from '@/hooks/useTeamActivities'
+import { useTags } from '@/hooks/useTags'
+import TagInput from '@/components/TagInput'
 import type { Member } from '@/types'
 
 const PANEL_WIDTH = 300
@@ -46,6 +48,7 @@ export default function ActivityCreatePanel({
   onClose,
 }: Props) {
   const createMutation = useCreateActivity(teamId, timelineId)
+  const { data: teamTags = [] } = useTags(teamId)
 
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -55,6 +58,7 @@ export default function ActivityCreatePanel({
   const [assignedIds, setAssignedIds] = useState<string[]>(
     defaultMemberId ? [defaultMemberId] : [],
   )
+  const [tagIds, setTagIds] = useState<string[]>([])
 
   // Reset all fields to defaults each time the panel opens so re-opening
   // the panel always shows a blank form rather than the previous session's data.
@@ -66,6 +70,7 @@ export default function ActivityCreatePanel({
     setEndDate(defaultEnd)
     setIdentity({ color: '#288C9B', icon: '__none__' })
     setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
+    setTagIds([])
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const creating = createMutation.isPending
@@ -89,6 +94,7 @@ export default function ActivityCreatePanel({
         color: identity.color,
         icon: identity.icon,
         assignedMemberIds: assignedIds,
+        tagIds,
       },
       { onSuccess: onClose },
     )
@@ -250,6 +256,17 @@ export default function ActivityCreatePanel({
             </div>
           </div>
         )}
+
+        {/* Tags */}
+        <div>
+          <div style={LABEL}>Tags</div>
+          <TagInput
+            teamId={teamId}
+            tags={teamTags}
+            selectedTagIds={tagIds}
+            onChange={setTagIds}
+          />
+        </div>
 
         {/* Spacer pushes submit to bottom */}
         <div style={{ flex: 1 }} />

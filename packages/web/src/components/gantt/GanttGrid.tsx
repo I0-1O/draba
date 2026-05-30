@@ -857,6 +857,21 @@ export default function GanttGrid({
                           userSelect: 'none',
                         }}
                       >
+                        {/* Progress fill overlay — subtle darker shade showing % complete */}
+                        {(ev.percentComplete ?? 0) > 0 && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: `${ev.percentComplete}%`,
+                              background: 'rgba(0,0,0,0.18)',
+                              borderRadius: 5,
+                              pointerEvents: 'none',
+                            }}
+                          />
+                        )}
                         {/* Left resize handle — only shown on selected bars */}
                         {onBarDrag && selected && (
                           <div

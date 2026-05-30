@@ -50,6 +50,7 @@ type Server struct {
 	instanceSets   *db.InstanceSettingsRepo
 	passwordTokens *db.PasswordResetTokenRepo
 	statuses       *db.StatusRepo
+	tags           *db.TagRepo
 	mailer         *mailer.Mailer
 	tokens         *auth.TokenService
 	tier           tier.Tier
@@ -72,6 +73,7 @@ func NewServer(
 	instanceSetsRepo *db.InstanceSettingsRepo,
 	passwordTokensRepo *db.PasswordResetTokenRepo,
 	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
 	m *mailer.Mailer,
 	tokens *auth.TokenService,
 	t tier.Tier,
@@ -90,6 +92,7 @@ func NewServer(
 		instanceSets:   instanceSetsRepo,
 		passwordTokens: passwordTokensRepo,
 		statuses:       statusesRepo,
+		tags:           tagsRepo,
 		mailer:         m,
 		tokens:         tokens,
 		tier:           t,
@@ -179,6 +182,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
 	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
 	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
 
 	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
 	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
