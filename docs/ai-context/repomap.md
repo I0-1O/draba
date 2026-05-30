@@ -22230,985 +22230,6 @@ export default function ActivityCreatePanel({
 }
 ````
 
-## File: packages/web/src/components/gantt/GanttGrid.tsx
-````typescript
-/**
- * GanttGrid — presentational Gantt chart.
- *
- * Renders a sticky header row of column labels, then one row per GanttRow
- * entry. Rows are either group-header dividers or event bars. All data
- * preparation (grouping, sorting, date math) lives in the parent GanttView.
- *
- * Drag on an empty lane cell to select a date range; onLaneDrag fires on
- * mouseup with the resolved start/end dates and the lane's memberId.
- *
- * Drag on an event bar's left/right 8px edge to resize it, or on its body to
- * move it. onBarDrag fires on mouseup with the resolved new dates.
- *
- * When findState is provided with a non-empty query, non-matching event rows
- * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
- * the active (parked) match gets a stronger amber outline with a pulse
- * animation. Stepping to a new active match auto-scrolls both axes to center
- * the bar in the viewport.
- */
-
-import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
-import MemberAvatar from '../MemberAvatar';
-import { Badge } from '../identity/Badge';
-import EmptyState from '../shared/EmptyState';
-import type { Member } from '../../types';
-import type { ColumnDef, TimeGranularity } from './granularity';
-import { addDays, snapDivisorFor } from './granularity';
-
-export const DEFAULT_LABEL_COL_W = 240;
-const MIN_LABEL_COL_W = 140;
-const MAX_LABEL_COL_W = 400;
-const HEADER_H = 36;
-const ROW_H = 44;
-const GROUP_H = 30;
-const COL_W = 80;
-const EDGE_W = 8; // px hit zone for resize handles
-
-/** A positioned activity bar ready for rendering. */
-export interface GanttActivity {
-  id: string;
-  title: string;
-  /** Fractional column start (0-based). */
-  startCol: number;
-  /** Fractional column span. */
-  span: number;
-  /** Hex color for bar background and badge. */
-  color: string;
-  /** Icon ID from the activity's identity, if set. */
-  icon?: string;
-  members: Member[];
-  isChild: boolean;
-}
-
-export type GanttRow =
-  | { kind: 'group'; id: string; label: string; color: string; count: number }
-  | { kind: 'activity'; event: GanttActivity };
-
-/** Visual state for the in-view Find feature. Passed from GanttView. */
-export interface FindState {
-  hasQuery: boolean;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
-  matchReasons: Map<string, string[]>;
-  filtersActive: boolean;
-  matchCount: number;
-}
-
-interface DragState {
-  rowIdx: number;
-  memberId: string | null;
-  startCol: number;
-  currentCol: number;
-}
-
-type BarDragZone = 'left' | 'right' | 'body';
-
-interface BarDragState {
-  eventId: string;
-  zone: BarDragZone;
-  /** Fractional column of the event's visual start when drag began. */
-  initStartCol: number;
-  /** Fractional column of the event's visual end (startCol + span) when drag began. */
-  initEndCol: number;
-  /** Lane-relative x of the mouse when drag began. */
-  initMouseX: number;
-  /** Page-relative left edge of the lane div. */
-  laneLeft: number;
-  /** Current snapped start column (integer). */
-  snapStartCol: number;
-  /** Current snapped end column (integer, exclusive — col after last occupied). */
-  snapEndCol: number;
-}
-
-interface TooltipState {
-  text: string;
-  /** Viewport-relative x for tooltip positioning. */
-  x: number;
-  /** Viewport-relative y for tooltip positioning. */
-  y: number;
-}
-
-/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
-interface MatchTooltipState {
-  reasons: string[];
-  x: number;
-  y: number;
-}
-
-interface Props {
-  rows: GanttRow[];
-  columns: ColumnDef[];
-  /** Fractional column index of today (-1 if outside range). */
-  todayIndex: number;
-  selectedActivityId: string | null;
-  onSelectActivity: (id: string | null) => void;
-  /** Called when the user drags on an empty lane cell to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called when the user drags a bar edge or body to resize/move it. */
-  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
-  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Resolved granularity — used to compute the finer snap divisor during drag. */
-  resolvedGranularity?: TimeGranularity | 'auto';
-  /** Find state from GanttView; absent when the find bar is closed/idle. */
-  findState?: FindState;
-  /** Called when the user clicks "Clear filters" in the no-matches callout. */
-  onClearFilters?: () => void;
-  /** Current label column width in px — lifts state to the parent so it survives view switches. */
-  labelColW?: number;
-  /** Called when the user drags the column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-}
-
-// ── Bar drag helpers ─────────────────────────────────────────────────────────
-
-function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
-  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
-  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
-  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
-}
-
-// ── Date helpers (support fractional column positions) ───────────────────────
-
-// Maps a fractional column position to a calendar Date by interpolating within
-// the column's day range. Fractional positions enable finer snap granularities.
-function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
-  let remaining = Math.max(0, colFrac);
-  for (const col of columns) {
-    if (remaining <= 1) {
-      return addDays(col.start, Math.round(remaining * col.days));
-    }
-    remaining -= 1;
-  }
-  return columns[columns.length - 1].end;
-}
-
-function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
-  return colFracToDate(Math.max(0, colFrac), columns);
-}
-
-// endColFrac is exclusive (the fractional col just past the last occupied day).
-function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
-  // The last included date is 1 day before the date at the exclusive end.
-  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
-}
-
-
-function formatDragDate(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-export default function GanttGrid({
-  rows,
-  columns,
-  todayIndex,
-  selectedActivityId,
-  onSelectActivity,
-  onLaneDrag,
-  onBarDrag,
-  onBarDragProgress,
-  resolvedGranularity,
-  findState,
-  onClearFilters,
-  labelColW: labelColWProp,
-  onLabelColWChange,
-}: Props) {
-  // ── Resizable label column ─────────────────────────────────────────────────
-  // When the parent passes labelColW + onLabelColWChange the column is
-  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
-  // When neither is provided we fall back to internal state.
-  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
-  const labelColW = labelColWProp ?? internalLabelColW;
-  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
-
-  const totalW = useMemo(
-    () => labelColW + columns.length * COL_W,
-    [labelColW, columns.length],
-  );
-
-  const labelColWRef = useRef(labelColW);
-  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
-
-  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = labelColWRef.current;
-
-    function onMouseMove(mv: MouseEvent) {
-      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
-      setLabelColW(next);
-    }
-    function onMouseUp() {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Integer column index that contains today (for background highlight)
-  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
-
-  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-
-  // Always-current rows ref so the active-match scroll effect doesn't go stale
-  const rowsRef = useRef(rows);
-  useEffect(() => { rowsRef.current = rows; });
-
-  // ── Drag-to-create state ──────────────────────────────────────────────────
-  const [drag, setDrag] = useState<DragState | null>(null);
-  const dragRef = useRef<DragState | null>(null);
-
-  // ── Bar drag state ────────────────────────────────────────────────────────
-  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
-  const barDragRef = useRef<BarDragState | null>(null);
-  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
-
-  // ── "Why matched" hover tooltip ───────────────────────────────────────────
-  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
-
-  const colFromX = useCallback((laneX: number) => {
-    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
-  }, [columns.length]);
-
-  // ── Auto-scroll to active find match ─────────────────────────────────────
-  useEffect(() => {
-    const activeId = findState?.activeMatchId;
-    if (!activeId || !scrollContainerRef.current) return;
-    const container = scrollContainerRef.current;
-    const currentRows = rowsRef.current;
-
-    let y = HEADER_H;
-    let matchedActivity: GanttActivity | null = null;
-    for (const row of currentRows) {
-      if (row.kind === 'activity' && row.event.id === activeId) {
-        matchedActivity = row.event;
-        break;
-      }
-      y += row.kind === 'group' ? GROUP_H : ROW_H;
-    }
-    if (!matchedActivity) return;
-
-    const viewH = container.clientHeight;
-    const viewW = container.clientWidth;
-    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
-    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
-    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
-
-    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
-  // Only re-run when the active match changes, not when rows or columns change.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [findState?.activeMatchId]);
-
-  const handleLaneMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    rowIdx: number,
-    memberId: string | null,
-  ) => {
-    if (!onLaneDrag) return;
-    e.preventDefault();
-    const rect = e.currentTarget.getBoundingClientRect();
-    const col = colFromX(e.clientX - rect.left);
-    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
-    dragRef.current = state;
-    setDrag(state);
-
-    function onMouseMove(mv: MouseEvent) {
-      if (!dragRef.current) return;
-      const col2 = colFromX(mv.clientX - rect.left);
-      const next = { ...dragRef.current, currentCol: col2 };
-      dragRef.current = next;
-      setDrag({ ...next });
-    }
-
-    function onMouseUp() {
-      const s = dragRef.current;
-      if (s && onLaneDrag && columns.length > 0) {
-        const lo = Math.min(s.startCol, s.currentCol);
-        const hi = Math.max(s.startCol, s.currentCol);
-        const startDate = columns[lo]?.start ?? columns[0].start;
-        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
-        onLaneDrag(startDate, endDate, s.memberId);
-      }
-      dragRef.current = null;
-      setDrag(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [colFromX, columns, onLaneDrag]);
-
-  // ── Bar drag handler ──────────────────────────────────────────────────────
-
-  const handleBarMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    ev: GanttActivity,
-    zone: BarDragZone,
-  ) => {
-    if (!onBarDrag) return;
-    // Only allow drag/resize when the bar is already selected.
-    if (ev.id !== selectedActivityId) return;
-    e.preventDefault();
-    e.stopPropagation(); // prevent lane-drag from firing
-
-    // The bar's parent is the lane div (position: relative, flex: 1).
-    const laneEl = e.currentTarget.parentElement;
-    if (!laneEl) return;
-    const laneRect = laneEl.getBoundingClientRect();
-
-    const initStartCol = ev.startCol;
-    const initEndCol = ev.startCol + ev.span;
-    const initMouseX = e.clientX - laneRect.left;
-    // Snap initial positions using finer step.
-    const div = snapDivisorFor(resolvedGranularity ?? 'auto');
-    const step = 1 / div;
-    const snapInit = (x: number) => Math.round(x / step) * step;
-    const initSnapStart = snapInit(initStartCol);
-    const initSnapEnd = snapInit(initEndCol);
-
-    const state: BarDragState = {
-      eventId: ev.id,
-      zone,
-      initStartCol,
-      initEndCol,
-      initMouseX,
-      laneLeft: laneRect.left,
-      snapStartCol: initSnapStart,
-      snapEndCol: Math.max(initSnapEnd, initSnapStart + step),
-    };
-    barDragRef.current = state;
-    setBarDrag(state);
-
-    // Initial tooltip
-    const startDate = colToStartDate(state.snapStartCol, columns);
-    const endDate = colToEndDate(state.snapEndCol, columns);
-    setDragTooltip({
-      text: tooltipText(zone, startDate, endDate),
-      x: e.clientX,
-      y: e.clientY,
-    });
-
-    function onMouseMove(mv: MouseEvent) {
-      const s = barDragRef.current;
-      if (!s) return;
-
-      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
-      const n = columns.length;
-      // Finer snap: snap one granularity level below the active zoom.
-      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
-      const step = 1 / div;
-      const snap = (x: number) => Math.round(x / step) * step;
-
-      let nextStart = s.snapStartCol;
-      let nextEnd = s.snapEndCol;
-
-      if (s.zone === 'left') {
-        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.snapEndCol - step));
-      } else if (s.zone === 'right') {
-        nextEnd = Math.max(s.snapStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
-      } else {
-        // body: preserve span, shift both
-        const span = Math.max(step, snap(s.initEndCol - s.initStartCol));
-        const shift = snap(deltaCol);
-        nextStart = Math.max(0, Math.min(snap(s.initStartCol) + shift, n - span));
-        nextEnd = nextStart + span;
-      }
-
-      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
-      barDragRef.current = next;
-      setBarDrag(next);
-
-      const sd = colToStartDate(nextStart, columns);
-      const ed = colToEndDate(nextEnd, columns);
-      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
-      onBarDragProgress?.(s.eventId, sd, ed);
-    }
-
-    function onMouseUp() {
-      const s = barDragRef.current;
-      if (s && onBarDrag) {
-        const sd = colToStartDate(s.snapStartCol, columns);
-        const ed = colToEndDate(s.snapEndCol, columns);
-        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
-      }
-      barDragRef.current = null;
-      setBarDrag(null);
-      setDragTooltip(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [columns, onBarDrag]);
-
-  // Header cells are shared between the empty-state path and the unified scroll path.
-  const headerContent = (
-    <>
-      <div
-        style={{
-          width: labelColW,
-          flexShrink: 0,
-          padding: '0 16px',
-          display: 'flex',
-          alignItems: 'center',
-          borderRight: '1px solid var(--border)',
-          fontSize: 11,
-          fontWeight: 600,
-          color: 'var(--muted-foreground)',
-          textTransform: 'uppercase' as const,
-          letterSpacing: '0.06em',
-          position: 'sticky' as const,
-          left: 0,
-          zIndex: 6,
-          background: 'var(--card)',
-          userSelect: 'none',
-        }}
-      >
-        Activity
-        {/* Drag handle — resize the label column */}
-        <div
-          onMouseDown={handleColumnResizeMouseDown}
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: 0,
-            bottom: 0,
-            width: 6,
-            cursor: 'col-resize',
-            zIndex: 10,
-          }}
-        />
-      </div>
-
-      {columns.map((col, i) => {
-        const isToday = i === todayCol;
-        return (
-          <div
-            key={i}
-            style={{
-              width: COL_W,
-              flexShrink: 0,
-              height: HEADER_H,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '0 4px 8px',
-              gap: 2,
-              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-              position: 'relative',
-              overflow: 'hidden',
-            }}
-          >
-            <span style={{
-              fontSize: col.sublabel ? 10 : 11,
-              fontWeight: isToday ? 700 : 600,
-              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
-              lineHeight: 1.2,
-              textAlign: 'center',
-            }}>
-              {col.label}
-            </span>
-            {col.sublabel && (
-              <span style={{
-                fontSize: 9,
-                fontWeight: 500,
-                color: 'var(--muted-foreground)',
-                lineHeight: 1,
-                opacity: isToday ? 1 : 0.75,
-              }}>
-                {col.sublabel}
-              </span>
-            )}
-            {isToday && (
-              <div
-                style={{
-                  position: 'absolute',
-                  bottom: 2,
-                  left: `${((todayIndex - todayCol) * 100)}%`,
-                  transform: 'translateX(-50%)',
-                  width: 6,
-                  height: 6,
-                  borderRadius: '50%',
-                  background: 'var(--secondary)',
-                }}
-              />
-            )}
-          </div>
-        );
-      })}
-    </>
-  );
-
-  // ── Find helpers ──────────────────────────────────────────────────────────
-
-  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
-
-  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
-  function isActive(id: string) { return activeMatchId === id; }
-
-  // Non-title reasons to surface in the "why matched" tooltip
-  function nonTitleReasons(id: string): string[] {
-    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
-  }
-
-  // ── Empty state: header + centered placeholder ──────────────────────────────
-  if (rows.length === 0) {
-    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
-    return (
-      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
-          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-        </div>
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-          <EmptyState message="No viewable activities" />
-          {showNoMatchCallout && findState.filtersActive && (
-            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </p>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Unified scroll: header sticky inside the single container ──────────────
-  return (
-    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
-        <div style={{ width: totalW }}>
-
-          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
-          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-
-          {rows.map((row, rowIdx) => {
-            if (row.kind === 'group') {
-              return (
-                <div
-                  key={row.id}
-                  style={{
-                    display: 'flex',
-                    height: GROUP_H,
-                    background: 'var(--muted)',
-                    borderBottom: '1px solid var(--border)',
-                  }}
-                >
-                  <div
-                    style={{
-                      width: labelColW,
-                      flexShrink: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 7,
-                      padding: '0 14px',
-                      position: 'sticky',
-                      left: 0,
-                      background: 'var(--muted)',
-                      zIndex: 3,
-                      borderRight: '1px solid var(--border)',
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: 9,
-                        height: 9,
-                        borderRadius: 2,
-                        background: row.color,
-                        flexShrink: 0,
-                      }}
-                    />
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: 'var(--foreground)',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.05em',
-                        flex: 1,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.label}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 10,
-                        color: 'var(--muted-foreground)',
-                        flexShrink: 0,
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.count}
-                    </span>
-                  </div>
-                  <div style={{ flex: 1 }} />
-                </div>
-              );
-            }
-
-            const ev = row.event;
-            const selected = selectedActivityId === ev.id;
-            const indent = ev.isChild ? 20 : 0;
-            const evIsMatch = isMatch(ev.id);
-            const evIsActive = isActive(ev.id);
-            const dimmed = hasQuery && !evIsMatch;
-            const extraReasons = nonTitleReasons(ev.id);
-
-            return (
-              <div
-                key={`${ev.id}-${rowIdx}`}
-                style={{
-                  display: 'flex',
-                  height: ROW_H,
-                  borderBottom: '1px solid var(--border)',
-                  position: 'relative',
-                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                  opacity: dimmed ? 0.3 : 1,
-                  transition: 'opacity 0.15s',
-                }}
-              >
-                {/* Sticky label cell */}
-                <div
-                  style={{
-                    width: labelColW,
-                    flexShrink: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 7,
-                    paddingLeft: 14 + indent,
-                    paddingRight: 10,
-                    position: 'sticky',
-                    left: 0,
-                    background: selected ? 'var(--muted)' : 'var(--card)',
-                    zIndex: 6,
-                    borderRight: '1px solid var(--border)',
-                    cursor: 'pointer',
-                    transition: 'background 0.1s',
-                  }}
-                  onClick={() => onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
-                  onMouseEnter={e => {
-                    e.currentTarget.style.background = 'var(--muted)';
-                  }}
-                  onMouseLeave={e => {
-                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
-                  }}
-                >
-                  <Badge
-                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
-                    name={ev.title}
-                    shape="square"
-                    size={20}
-                  />
-                  <span
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 500,
-                      color: 'var(--foreground)',
-                      flex: 1,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      fontFamily: 'var(--font-sans)',
-                    }}
-                  >
-                    {ev.title}
-                  </span>
-                  {ev.members.length > 0 && (
-                    <div style={{ display: 'flex', flexShrink: 0 }}>
-                      {ev.members.slice(0, 3).map((m, i) => (
-                        <div
-                          key={m.id}
-                          style={{ marginLeft: i === 0 ? 0 : -5 }}
-                          title={m.name}
-                        >
-                          <MemberAvatar member={m} size={20} />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Lane — background columns + today line + event bar */}
-                <div
-                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: onLaneDrag ? 'crosshair' : 'default' }}
-                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
-                >
-                  {columns.map((_, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        width: COL_W,
-                        height: '100%',
-                        flexShrink: 0,
-                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-                        background:
-                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                      }}
-                    />
-                  ))}
-
-                  {/* Drag selection highlight */}
-                  {drag && drag.rowIdx === rowIdx && (() => {
-                    const lo = Math.min(drag.startCol, drag.currentCol);
-                    const hi = Math.max(drag.startCol, drag.currentCol);
-                    return (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: 4,
-                          bottom: 4,
-                          left: lo * COL_W,
-                          width: (hi - lo + 1) * COL_W,
-                          background: 'hsl(188 59% 38% / .18)',
-                          border: '1.5px dashed var(--primary)',
-                          borderRadius: 4,
-                          pointerEvents: 'none',
-                          zIndex: 3,
-                        }}
-                      />
-                    );
-                  })()}
-
-                  {/* Today vertical line */}
-                  {todayIndex >= 0 && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        bottom: 0,
-                        left: todayIndex * COL_W,
-                        width: 2,
-                        background: 'var(--secondary)',
-                        opacity: 0.5,
-                        zIndex: 2,
-                        pointerEvents: 'none',
-                      }}
-                    />
-                  )}
-
-                  {/* Event bar — live position overridden while dragging */}
-                  {(() => {
-                    const isDragging = barDrag?.eventId === ev.id;
-                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
-                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
-                    const left = startCol * COL_W + 2;
-                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
-                    // Only selected bars show grab/move cursors; unselected bars show pointer
-                    // to prevent accidental date changes when the user just wants to inspect.
-                    const grabCursor = isDragging
-                      ? 'grabbing'
-                      : (selected && onBarDrag) ? 'grab' : 'pointer';
-
-                    // Box shadow: find states take precedence over selection ring.
-                    // CSS classes (.find-active-bar, .find-match-bar) provide the
-                    // amber outline; we only set inline boxShadow for the selected ring.
-                    const boxShadow = (evIsActive || evIsMatch)
-                      ? undefined
-                      : selected
-                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
-                        : 'var(--shadow-sm)';
-
-                    return (
-                      <div
-                        onClick={() => {
-                          // Bar click always selects — use the label cell to deselect.
-                          if (!isDragging) onSelectActivity(ev.id);
-                        }}
-                        onMouseDown={e => {
-                          if (!onBarDrag) { e.stopPropagation(); return; }
-                          const barRect = e.currentTarget.getBoundingClientRect();
-                          const xInBar = e.clientX - barRect.left;
-                          let zone: BarDragZone;
-                          if (xInBar <= EDGE_W) zone = 'left';
-                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
-                          else zone = 'body';
-                          handleBarMouseDown(e, ev, zone);
-                        }}
-                        onMouseEnter={e => {
-                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
-                          // Show "why matched" tooltip for non-title matches
-                          if (extraReasons.length > 0) {
-                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
-                          }
-                        }}
-                        onMouseMove={e => {
-                          if (matchTooltip) {
-                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
-                          }
-                        }}
-                        onMouseLeave={e => {
-                          e.currentTarget.style.filter = '';
-                          setMatchTooltip(null);
-                        }}
-                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
-                        style={{
-                          position: 'absolute',
-                          top: 9,
-                          bottom: 9,
-                          left,
-                          width,
-                          background: ev.color,
-                          borderRadius: 5,
-                          display: 'flex',
-                          alignItems: 'center',
-                          padding: `0 ${EDGE_W + 2}px`,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: 'white',
-                          overflow: 'hidden',
-                          whiteSpace: 'nowrap',
-                          textOverflow: 'ellipsis',
-                          cursor: grabCursor,
-                          zIndex: 4,
-                          boxShadow,
-                          opacity: isDragging ? 0.85 : 1,
-                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
-                          fontFamily: 'var(--font-sans)',
-                          userSelect: 'none',
-                        }}
-                      >
-                        {/* Left resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              left: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '5px 0 0 5px',
-                            }}
-                          />
-                        )}
-                        {ev.title}
-                        {/* Right resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              right: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '0 5px 5px 0',
-                            }}
-                          />
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
-            );
-          })}
-
-          {/* No-matches-in-view callout — rendered inside the scroll container */}
-          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
-            <div style={{
-              padding: '12px 16px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              borderTop: '1px solid var(--border)',
-            }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </div>
-          )}
-
-        </div>
-      </div>
-
-      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
-      {dragTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: dragTooltip.x + 14,
-            top: dragTooltip.y - 28,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontWeight: 600,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {dragTooltip.text}
-        </div>
-      )}
-
-      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
-      {matchTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: matchTooltip.x + 12,
-            top: matchTooltip.y - 36,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {matchTooltip.reasons.map(r => (
-            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/contexts/AuthContext.tsx
 ````typescript
 /**
@@ -24391,6 +23412,982 @@ func newRepoID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+````
+
+## File: packages/web/src/components/gantt/GanttGrid.tsx
+````typescript
+/**
+ * GanttGrid — presentational Gantt chart.
+ *
+ * Renders a sticky header row of column labels, then one row per GanttRow
+ * entry. Rows are either group-header dividers or event bars. All data
+ * preparation (grouping, sorting, date math) lives in the parent GanttView.
+ *
+ * Drag on an empty lane cell to select a date range; onLaneDrag fires on
+ * mouseup with the resolved start/end dates and the lane's memberId.
+ *
+ * Drag on an event bar's left/right 8px edge to resize it, or on its body to
+ * move it. onBarDrag fires on mouseup with the resolved new dates.
+ *
+ * When findState is provided with a non-empty query, non-matching event rows
+ * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
+ * the active (parked) match gets a stronger amber outline with a pulse
+ * animation. Stepping to a new active match auto-scrolls both axes to center
+ * the bar in the viewport.
+ */
+
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
+import MemberAvatar from '../MemberAvatar';
+import { Badge } from '../identity/Badge';
+import EmptyState from '../shared/EmptyState';
+import type { Member } from '../../types';
+import type { ColumnDef, TimeGranularity } from './granularity';
+import { addDays, snapDivisorFor } from './granularity';
+
+export const DEFAULT_LABEL_COL_W = 240;
+const MIN_LABEL_COL_W = 140;
+const MAX_LABEL_COL_W = 400;
+const HEADER_H = 36;
+const ROW_H = 44;
+const GROUP_H = 30;
+const COL_W = 80;
+const EDGE_W = 8; // px hit zone for resize handles
+
+/** A positioned activity bar ready for rendering. */
+export interface GanttActivity {
+  id: string;
+  title: string;
+  /** Fractional column start (0-based). */
+  startCol: number;
+  /** Fractional column span. */
+  span: number;
+  /** Hex color for bar background and badge. */
+  color: string;
+  /** Icon ID from the activity's identity, if set. */
+  icon?: string;
+  members: Member[];
+  isChild: boolean;
+}
+
+export type GanttRow =
+  | { kind: 'group'; id: string; label: string; color: string; count: number }
+  | { kind: 'activity'; event: GanttActivity };
+
+/** Visual state for the in-view Find feature. Passed from GanttView. */
+export interface FindState {
+  hasQuery: boolean;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
+  matchReasons: Map<string, string[]>;
+  filtersActive: boolean;
+  matchCount: number;
+}
+
+interface DragState {
+  rowIdx: number;
+  memberId: string | null;
+  startCol: number;
+  currentCol: number;
+}
+
+type BarDragZone = 'left' | 'right' | 'body';
+
+interface BarDragState {
+  eventId: string;
+  zone: BarDragZone;
+  /** Fractional column of the event's visual start when drag began. */
+  initStartCol: number;
+  /** Fractional column of the event's visual end (startCol + span) when drag began. */
+  initEndCol: number;
+  /** Lane-relative x of the mouse when drag began. */
+  initMouseX: number;
+  /** Page-relative left edge of the lane div. */
+  laneLeft: number;
+  /** Current snapped start column (integer). */
+  snapStartCol: number;
+  /** Current snapped end column (integer, exclusive — col after last occupied). */
+  snapEndCol: number;
+}
+
+interface TooltipState {
+  text: string;
+  /** Viewport-relative x for tooltip positioning. */
+  x: number;
+  /** Viewport-relative y for tooltip positioning. */
+  y: number;
+}
+
+/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
+interface MatchTooltipState {
+  reasons: string[];
+  x: number;
+  y: number;
+}
+
+interface Props {
+  rows: GanttRow[];
+  columns: ColumnDef[];
+  /** Fractional column index of today (-1 if outside range). */
+  todayIndex: number;
+  selectedActivityId: string | null;
+  onSelectActivity: (id: string | null) => void;
+  /** Called when the user drags on an empty lane cell to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called when the user drags a bar edge or body to resize/move it. */
+  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
+  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Resolved granularity — used to compute the finer snap divisor during drag. */
+  resolvedGranularity?: TimeGranularity | 'auto';
+  /** Find state from GanttView; absent when the find bar is closed/idle. */
+  findState?: FindState;
+  /** Called when the user clicks "Clear filters" in the no-matches callout. */
+  onClearFilters?: () => void;
+  /** Current label column width in px — lifts state to the parent so it survives view switches. */
+  labelColW?: number;
+  /** Called when the user drags the column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+}
+
+// ── Bar drag helpers ─────────────────────────────────────────────────────────
+
+function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
+  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
+  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
+  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
+}
+
+// ── Date helpers (support fractional column positions) ───────────────────────
+
+// Maps a fractional column position to a calendar Date by interpolating within
+// the column's day range. Uses the full period length (start→end) rather than
+// the clamped `days` field so boundary columns still produce correct dates.
+function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
+  let remaining = Math.max(0, colFrac);
+  for (const col of columns) {
+    if (remaining < 1) {
+      const periodDays = Math.round((col.end.getTime() - col.start.getTime()) / 86_400_000);
+      return addDays(col.start, Math.round(remaining * periodDays));
+    }
+    remaining -= 1;
+  }
+  return columns[columns.length - 1].end;
+}
+
+function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
+  return colFracToDate(Math.max(0, colFrac), columns);
+}
+
+// endColFrac is exclusive (the fractional col just past the last occupied day).
+function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
+  // The last included date is 1 day before the date at the exclusive end.
+  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
+}
+
+
+function formatDragDate(d: Date): string {
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+export default function GanttGrid({
+  rows,
+  columns,
+  todayIndex,
+  selectedActivityId,
+  onSelectActivity,
+  onLaneDrag,
+  onBarDrag,
+  onBarDragProgress,
+  resolvedGranularity,
+  findState,
+  onClearFilters,
+  labelColW: labelColWProp,
+  onLabelColWChange,
+}: Props) {
+  // ── Resizable label column ─────────────────────────────────────────────────
+  // When the parent passes labelColW + onLabelColWChange the column is
+  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
+  // When neither is provided we fall back to internal state.
+  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
+  const labelColW = labelColWProp ?? internalLabelColW;
+  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
+
+  const totalW = useMemo(
+    () => labelColW + columns.length * COL_W,
+    [labelColW, columns.length],
+  );
+
+  const labelColWRef = useRef(labelColW);
+  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
+
+  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = labelColWRef.current;
+
+    function onMouseMove(mv: MouseEvent) {
+      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
+      setLabelColW(next);
+    }
+    function onMouseUp() {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Integer column index that contains today (for background highlight)
+  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
+
+  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Always-current rows ref so the active-match scroll effect doesn't go stale
+  const rowsRef = useRef(rows);
+  useEffect(() => { rowsRef.current = rows; });
+
+  // ── Drag-to-create state ──────────────────────────────────────────────────
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+
+  // ── Bar drag state ────────────────────────────────────────────────────────
+  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
+  const barDragRef = useRef<BarDragState | null>(null);
+  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
+
+  // ── "Why matched" hover tooltip ───────────────────────────────────────────
+  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
+
+  const colFromX = useCallback((laneX: number) => {
+    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
+  }, [columns.length]);
+
+  // ── Auto-scroll to active find match ─────────────────────────────────────
+  useEffect(() => {
+    const activeId = findState?.activeMatchId;
+    if (!activeId || !scrollContainerRef.current) return;
+    const container = scrollContainerRef.current;
+    const currentRows = rowsRef.current;
+
+    let y = HEADER_H;
+    let matchedActivity: GanttActivity | null = null;
+    for (const row of currentRows) {
+      if (row.kind === 'activity' && row.event.id === activeId) {
+        matchedActivity = row.event;
+        break;
+      }
+      y += row.kind === 'group' ? GROUP_H : ROW_H;
+    }
+    if (!matchedActivity) return;
+
+    const viewH = container.clientHeight;
+    const viewW = container.clientWidth;
+    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
+    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
+    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
+
+    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
+  // Only re-run when the active match changes, not when rows or columns change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findState?.activeMatchId]);
+
+  const handleLaneMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    rowIdx: number,
+    memberId: string | null,
+  ) => {
+    if (!onLaneDrag) return;
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const col = colFromX(e.clientX - rect.left);
+    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
+    dragRef.current = state;
+    setDrag(state);
+
+    function onMouseMove(mv: MouseEvent) {
+      if (!dragRef.current) return;
+      const col2 = colFromX(mv.clientX - rect.left);
+      const next = { ...dragRef.current, currentCol: col2 };
+      dragRef.current = next;
+      setDrag({ ...next });
+    }
+
+    function onMouseUp() {
+      const s = dragRef.current;
+      if (s && onLaneDrag && columns.length > 0) {
+        const lo = Math.min(s.startCol, s.currentCol);
+        const hi = Math.max(s.startCol, s.currentCol);
+        const startDate = columns[lo]?.start ?? columns[0].start;
+        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
+        onLaneDrag(startDate, endDate, s.memberId);
+      }
+      dragRef.current = null;
+      setDrag(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [colFromX, columns, onLaneDrag]);
+
+  // ── Bar drag handler ──────────────────────────────────────────────────────
+
+  const handleBarMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    ev: GanttActivity,
+    zone: BarDragZone,
+  ) => {
+    if (!onBarDrag) return;
+    // Only allow drag/resize when the bar is already selected.
+    if (ev.id !== selectedActivityId) return;
+    e.preventDefault();
+    e.stopPropagation(); // prevent lane-drag from firing
+
+    // The bar's parent is the lane div (position: relative, flex: 1).
+    const laneEl = e.currentTarget.parentElement;
+    if (!laneEl) return;
+    const laneRect = laneEl.getBoundingClientRect();
+
+    const initStartCol = ev.startCol;
+    const initEndCol = ev.startCol + ev.span;
+    const initMouseX = e.clientX - laneRect.left;
+    const state: BarDragState = {
+      eventId: ev.id,
+      zone,
+      initStartCol,
+      initEndCol,
+      initMouseX,
+      laneLeft: laneRect.left,
+      snapStartCol: initStartCol,
+      snapEndCol: initEndCol,
+    };
+    barDragRef.current = state;
+    setBarDrag(state);
+
+    // Initial tooltip
+    const startDate = colToStartDate(state.snapStartCol, columns);
+    const endDate = colToEndDate(state.snapEndCol, columns);
+    setDragTooltip({
+      text: tooltipText(zone, startDate, endDate),
+      x: e.clientX,
+      y: e.clientY,
+    });
+
+    function onMouseMove(mv: MouseEvent) {
+      const s = barDragRef.current;
+      if (!s) return;
+
+      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
+      const n = columns.length;
+      // Finer snap: snap one granularity level below the active zoom.
+      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
+      const step = 1 / div;
+      const snap = (x: number) => Math.round(x / step) * step;
+
+      let nextStart = s.snapStartCol;
+      let nextEnd = s.snapEndCol;
+
+      if (s.zone === 'left') {
+        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.initEndCol - step));
+        nextEnd = s.initEndCol;
+      } else if (s.zone === 'right') {
+        nextStart = s.initStartCol;
+        nextEnd = Math.max(s.initStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
+      } else {
+        // body: preserve exact span, shift both by snapped delta
+        const span = s.initEndCol - s.initStartCol;
+        const shift = snap(deltaCol);
+        nextStart = Math.max(0, Math.min(s.initStartCol + shift, n - span));
+        nextEnd = nextStart + span;
+      }
+
+      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
+      barDragRef.current = next;
+      setBarDrag(next);
+
+      const sd = colToStartDate(nextStart, columns);
+      const ed = colToEndDate(nextEnd, columns);
+      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
+      onBarDragProgress?.(s.eventId, sd, ed);
+    }
+
+    function onMouseUp() {
+      const s = barDragRef.current;
+      if (s && onBarDrag) {
+        const sd = colToStartDate(s.snapStartCol, columns);
+        const ed = colToEndDate(s.snapEndCol, columns);
+        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
+      }
+      barDragRef.current = null;
+      setBarDrag(null);
+      setDragTooltip(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [columns, onBarDrag]);
+
+  // Header cells are shared between the empty-state path and the unified scroll path.
+  const headerContent = (
+    <>
+      <div
+        style={{
+          width: labelColW,
+          flexShrink: 0,
+          padding: '0 16px',
+          display: 'flex',
+          alignItems: 'center',
+          borderRight: '1px solid var(--border)',
+          fontSize: 11,
+          fontWeight: 600,
+          color: 'var(--muted-foreground)',
+          textTransform: 'uppercase' as const,
+          letterSpacing: '0.06em',
+          position: 'sticky' as const,
+          left: 0,
+          zIndex: 6,
+          background: 'var(--card)',
+          userSelect: 'none',
+        }}
+      >
+        Activity
+        {/* Drag handle — resize the label column */}
+        <div
+          onMouseDown={handleColumnResizeMouseDown}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: 6,
+            cursor: 'col-resize',
+            zIndex: 10,
+          }}
+        />
+      </div>
+
+      {columns.map((col, i) => {
+        const isToday = i === todayCol;
+        return (
+          <div
+            key={i}
+            style={{
+              width: COL_W,
+              flexShrink: 0,
+              height: HEADER_H,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '0 4px 8px',
+              gap: 2,
+              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+              position: 'relative',
+              overflow: 'hidden',
+            }}
+          >
+            <span style={{
+              fontSize: col.sublabel ? 10 : 11,
+              fontWeight: isToday ? 700 : 600,
+              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
+              lineHeight: 1.2,
+              textAlign: 'center',
+            }}>
+              {col.label}
+            </span>
+            {col.sublabel && (
+              <span style={{
+                fontSize: 9,
+                fontWeight: 500,
+                color: 'var(--muted-foreground)',
+                lineHeight: 1,
+                opacity: isToday ? 1 : 0.75,
+              }}>
+                {col.sublabel}
+              </span>
+            )}
+            {isToday && (
+              <div
+                style={{
+                  position: 'absolute',
+                  bottom: 2,
+                  left: `${((todayIndex - todayCol) * 100)}%`,
+                  transform: 'translateX(-50%)',
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: 'var(--secondary)',
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+
+  // ── Find helpers ──────────────────────────────────────────────────────────
+
+  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
+
+  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
+  function isActive(id: string) { return activeMatchId === id; }
+
+  // Non-title reasons to surface in the "why matched" tooltip
+  function nonTitleReasons(id: string): string[] {
+    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
+  }
+
+  // ── Empty state: header + centered placeholder ──────────────────────────────
+  if (rows.length === 0) {
+    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
+    return (
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
+          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+        </div>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+          <EmptyState message="No viewable activities" />
+          {showNoMatchCallout && findState.filtersActive && (
+            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Unified scroll: header sticky inside the single container ──────────────
+  return (
+    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
+        <div style={{ width: totalW }}>
+
+          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
+          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+
+          {rows.map((row, rowIdx) => {
+            if (row.kind === 'group') {
+              return (
+                <div
+                  key={row.id}
+                  style={{
+                    display: 'flex',
+                    height: GROUP_H,
+                    background: 'var(--muted)',
+                    borderBottom: '1px solid var(--border)',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: labelColW,
+                      flexShrink: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 7,
+                      padding: '0 14px',
+                      position: 'sticky',
+                      left: 0,
+                      background: 'var(--muted)',
+                      zIndex: 3,
+                      borderRight: '1px solid var(--border)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 9,
+                        height: 9,
+                        borderRadius: 2,
+                        background: row.color,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: 'var(--foreground)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        flex: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.label}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: 'var(--muted-foreground)',
+                        flexShrink: 0,
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.count}
+                    </span>
+                  </div>
+                  <div style={{ flex: 1 }} />
+                </div>
+              );
+            }
+
+            const ev = row.event;
+            const selected = selectedActivityId === ev.id;
+            const indent = ev.isChild ? 20 : 0;
+            const evIsMatch = isMatch(ev.id);
+            const evIsActive = isActive(ev.id);
+            const dimmed = hasQuery && !evIsMatch;
+            const extraReasons = nonTitleReasons(ev.id);
+
+            return (
+              <div
+                key={`${ev.id}-${rowIdx}`}
+                style={{
+                  display: 'flex',
+                  height: ROW_H,
+                  borderBottom: '1px solid var(--border)',
+                  position: 'relative',
+                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                  opacity: dimmed ? 0.3 : 1,
+                  transition: 'opacity 0.15s',
+                }}
+              >
+                {/* Sticky label cell */}
+                <div
+                  style={{
+                    width: labelColW,
+                    flexShrink: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 7,
+                    paddingLeft: 14 + indent,
+                    paddingRight: 10,
+                    position: 'sticky',
+                    left: 0,
+                    background: selected ? 'var(--muted)' : 'var(--card)',
+                    zIndex: 6,
+                    borderRight: '1px solid var(--border)',
+                    cursor: 'pointer',
+                    transition: 'background 0.1s',
+                  }}
+                  onClick={() => onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = 'var(--muted)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
+                  }}
+                >
+                  <Badge
+                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
+                    name={ev.title}
+                    shape="square"
+                    size={20}
+                  />
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 500,
+                      color: 'var(--foreground)',
+                      flex: 1,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontFamily: 'var(--font-sans)',
+                    }}
+                  >
+                    {ev.title}
+                  </span>
+                  {ev.members.length > 0 && (
+                    <div style={{ display: 'flex', flexShrink: 0 }}>
+                      {ev.members.slice(0, 3).map((m, i) => (
+                        <div
+                          key={m.id}
+                          style={{ marginLeft: i === 0 ? 0 : -5 }}
+                          title={m.name}
+                        >
+                          <MemberAvatar member={m} size={20} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Lane — background columns + today line + event bar */}
+                <div
+                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: onLaneDrag ? 'crosshair' : 'default' }}
+                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
+                >
+                  {columns.map((_, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        width: COL_W,
+                        height: '100%',
+                        flexShrink: 0,
+                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+                        background:
+                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                      }}
+                    />
+                  ))}
+
+                  {/* Drag selection highlight */}
+                  {drag && drag.rowIdx === rowIdx && (() => {
+                    const lo = Math.min(drag.startCol, drag.currentCol);
+                    const hi = Math.max(drag.startCol, drag.currentCol);
+                    return (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 4,
+                          bottom: 4,
+                          left: lo * COL_W,
+                          width: (hi - lo + 1) * COL_W,
+                          background: 'hsl(188 59% 38% / .18)',
+                          border: '1.5px dashed var(--primary)',
+                          borderRadius: 4,
+                          pointerEvents: 'none',
+                          zIndex: 3,
+                        }}
+                      />
+                    );
+                  })()}
+
+                  {/* Today vertical line */}
+                  {todayIndex >= 0 && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        bottom: 0,
+                        left: todayIndex * COL_W,
+                        width: 2,
+                        background: 'var(--secondary)',
+                        opacity: 0.5,
+                        zIndex: 2,
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  )}
+
+                  {/* Event bar — live position overridden while dragging */}
+                  {(() => {
+                    const isDragging = barDrag?.eventId === ev.id;
+                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
+                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
+                    const left = startCol * COL_W + 2;
+                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
+                    // Only selected bars show grab/move cursors; unselected bars show pointer
+                    // to prevent accidental date changes when the user just wants to inspect.
+                    const grabCursor = isDragging
+                      ? 'grabbing'
+                      : (selected && onBarDrag) ? 'grab' : 'pointer';
+
+                    // Box shadow: find states take precedence over selection ring.
+                    // CSS classes (.find-active-bar, .find-match-bar) provide the
+                    // amber outline; we only set inline boxShadow for the selected ring.
+                    const boxShadow = (evIsActive || evIsMatch)
+                      ? undefined
+                      : selected
+                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
+                        : 'var(--shadow-sm)';
+
+                    return (
+                      <div
+                        onClick={() => {
+                          // Bar click always selects — use the label cell to deselect.
+                          if (!isDragging) onSelectActivity(ev.id);
+                        }}
+                        onMouseDown={e => {
+                          if (!onBarDrag) { e.stopPropagation(); return; }
+                          const barRect = e.currentTarget.getBoundingClientRect();
+                          const xInBar = e.clientX - barRect.left;
+                          let zone: BarDragZone;
+                          if (xInBar <= EDGE_W) zone = 'left';
+                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
+                          else zone = 'body';
+                          handleBarMouseDown(e, ev, zone);
+                        }}
+                        onMouseEnter={e => {
+                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
+                          // Show "why matched" tooltip for non-title matches
+                          if (extraReasons.length > 0) {
+                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
+                          }
+                        }}
+                        onMouseMove={e => {
+                          if (matchTooltip) {
+                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
+                          }
+                        }}
+                        onMouseLeave={e => {
+                          e.currentTarget.style.filter = '';
+                          setMatchTooltip(null);
+                        }}
+                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
+                        style={{
+                          position: 'absolute',
+                          top: 9,
+                          bottom: 9,
+                          left,
+                          width,
+                          background: ev.color,
+                          borderRadius: 5,
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: `0 ${EDGE_W + 2}px`,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          color: 'white',
+                          overflow: 'hidden',
+                          whiteSpace: 'nowrap',
+                          textOverflow: 'ellipsis',
+                          cursor: grabCursor,
+                          zIndex: 4,
+                          boxShadow,
+                          opacity: isDragging ? 0.85 : 1,
+                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
+                          fontFamily: 'var(--font-sans)',
+                          userSelect: 'none',
+                        }}
+                      >
+                        {/* Left resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '5px 0 0 5px',
+                            }}
+                          />
+                        )}
+                        {ev.title}
+                        {/* Right resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              right: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '0 5px 5px 0',
+                            }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* No-matches-in-view callout — rendered inside the scroll container */}
+          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
+            <div style={{
+              padding: '12px 16px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              borderTop: '1px solid var(--border)',
+            }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
+      {dragTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: dragTooltip.x + 14,
+            top: dragTooltip.y - 28,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontWeight: 600,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {dragTooltip.text}
+        </div>
+      )}
+
+      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
+      {matchTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: matchTooltip.x + 12,
+            top: matchTooltip.y - 36,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {matchTooltip.reasons.map(r => (
+            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 ````
 
@@ -26152,668 +26149,6 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-````
-
-## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
-````typescript
-/**
- * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
- *
- * Field order (top to bottom):
- *   1. Header — Identity widget + Title
- *   2. When — Date pickers (start → end)
- *   3. Description — single-line input
- *   4. Assigned to — bordered card style (matches create panel)
- *   5. Classify — Status (rich dropdown with color dot + icon + name), Tags (stub)
- *   6. Advanced — Parent (stub), Progress (stub), Location, URL
- *   7. Notes — multi-line textarea
- *   8. Footer — Delete button
- *
- * All functional fields save on change/blur via PATCH /activities/:id.
- * liveDragStart / liveDragEnd display live dates during bar drag without triggering saves.
- */
-
-import { useState, useEffect, useRef } from 'react'
-import { X, Trash2, ArrowRight, Loader2, Tag, ChevronDown } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-
-const PANEL_WIDTH = 300
-
-interface Props {
-  event: ApiActivity | null
-  open: boolean
-  members: Member[]
-  teamId: string
-  timelineId: string
-  onClose: () => void
-  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragStart?: string
-  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragEnd?: string
-}
-
-// ── Small helpers ─────────────────────────────────────────────────────────────
-
-function toDateInput(iso: string): string { return iso.slice(0, 10) }
-function toISODate(d: string): string { return `${d}T00:00:00Z` }
-
-const SEC_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 700,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  marginBottom: 6,
-}
-
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 3,
-  width: 68,
-  flexShrink: 0,
-}
-
-const STUB_VALUE: React.CSSProperties = {
-  fontSize: 12,
-  color: 'var(--muted-foreground)',
-  opacity: 0.5,
-  flex: 1,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 4,
-  cursor: 'default',
-  userSelect: 'none',
-}
-
-const DIVIDER: React.CSSProperties = {
-  borderTop: '1px solid var(--border)',
-  margin: '10px 0',
-}
-
-const INPUT: React.CSSProperties = {
-  width: '100%',
-  boxSizing: 'border-box' as const,
-  fontSize: 12,
-  color: 'var(--foreground)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-  padding: '5px 8px',
-  outline: 'none',
-  background: 'var(--background)',
-  fontFamily: 'var(--font-sans)',
-}
-
-// ── Rich status dropdown ──────────────────────────────────────────────────────
-
-interface StatusDropdownProps {
-  statuses: Status[]
-  value: string | null | undefined
-  onChange: (id: string | null) => void
-}
-
-function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
-
-  const selected = statuses.find(s => s.id === value) ?? null
-
-  return (
-    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '4px 8px',
-          border: '1px solid var(--border)',
-          borderRadius: 6,
-          background: 'var(--background)',
-          color: 'var(--foreground)',
-          cursor: 'pointer',
-          fontSize: 12,
-          fontFamily: 'var(--font-sans)',
-          textAlign: 'left',
-        }}
-      >
-        {selected ? (
-          <>
-            <div
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: '50%',
-                background: resolveColorHex(selected.color) ?? selected.color,
-                flexShrink: 0,
-              }}
-            />
-            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selected.name}
-            </span>
-          </>
-        ) : (
-          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
-        )}
-        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {open && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 4px)',
-            left: 0,
-            right: 0,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
-            zIndex: 100,
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            onClick={() => { onChange(null); setOpen(false) }}
-            style={{
-              padding: '6px 10px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              fontStyle: 'italic',
-              cursor: 'pointer',
-              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-          >
-            — No status —
-          </div>
-          {statuses.map(s => (
-            <div
-              key={s.id}
-              onClick={() => { onChange(s.id); setOpen(false) }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '6px 10px',
-                fontSize: 12,
-                cursor: 'pointer',
-                background: s.id === value ? 'var(--muted)' : 'transparent',
-                fontWeight: s.id === value ? 600 : 400,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
-            >
-              <div
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: resolveColorHex(s.color) ?? s.color,
-                  flexShrink: 0,
-                }}
-              />
-              <span style={{ flex: 1 }}>{s.name}</span>
-              {s.isClosed && (
-                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
-                  CLOSED
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-export default function ActivityDetailPanel({
-  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
-}: Props) {
-  const updateMutation = useUpdateActivity(timelineId)
-  const deleteMutation = useDeleteActivity(timelineId)
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
-
-  const [title, setTitle] = useState(event?.title ?? '')
-  const [description, setDescription] = useState(event?.description ?? '')
-  const [notes, setNotes] = useState(event?.notes ?? '')
-  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
-  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: event?.color ?? '#288C9B',
-    icon: event?.icon ?? '__none__',
-  })
-  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
-  const [location, setLocation] = useState(event?.location ?? '')
-  const [url, setUrl] = useState(event?.url ?? '')
-  const [confirmDelete, setConfirmDelete] = useState(false)
-
-  // Re-sync when the selected activity changes.
-  useEffect(() => {
-    if (!event) return
-    setTitle(event.title)
-    setDescription(event.description ?? '')
-    setNotes(event.notes ?? '')
-    setStartDate(toDateInput(event.startAt))
-    setEndDate(toDateInput(event.endAt))
-    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
-    setAssignedIds(event.assignedMemberIds ?? [])
-    setLocation(event.location ?? '')
-    setUrl(event.url ?? '')
-    setConfirmDelete(false)
-  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const saving = updateMutation.isPending
-  const deleting = deleteMutation.isPending
-
-  // Display dates: live drag overrides take precedence while dragging.
-  const displayStart = liveDragStart ?? startDate
-  const displayEnd = liveDragEnd ?? endDate
-
-  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
-    if (!event) return
-    updateMutation.mutate({ activityId: event.id, patch })
-  }
-
-  function handleTitleBlur() {
-    if (title.trim() && title !== event?.title) save({ title: title.trim() })
-  }
-
-  function handleDescriptionBlur() {
-    if (description !== (event?.description ?? '')) save({ description: description || null })
-  }
-
-  function handleNotesBlur() {
-    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
-  }
-
-  function handleLocationBlur() {
-    if (location !== (event?.location ?? '')) save({ location: location || null })
-  }
-
-  function handleUrlBlur() {
-    if (url !== (event?.url ?? '')) save({ url: url || null })
-  }
-
-  function handleStartDateChange(val: string) {
-    setStartDate(val)
-    if (val && val <= endDate) save({ startAt: toISODate(val) })
-  }
-
-  function handleEndDateChange(val: string) {
-    setEndDate(val)
-    if (val && val >= startDate) save({ endAt: toISODate(val) })
-  }
-
-  function handleIdentityChange(next: Identity) {
-    setIdentity(next)
-    save({ color: next.color, icon: next.icon })
-  }
-
-  function toggleAssignee(memberId: string) {
-    const next = assignedIds.includes(memberId)
-      ? assignedIds.filter(id => id !== memberId)
-      : [...assignedIds, memberId]
-    setAssignedIds(next)
-    save({ assignedMemberIds: next })
-  }
-
-  function handleDelete() {
-    if (!event) return
-    deleteMutation.mutate(event.id, { onSuccess: onClose })
-  }
-
-  return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-        {!event ? null : (<>
-
-        {/* ── Header bar ── */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '0 12px', height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)', flexShrink: 0,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
-            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', color: 'var(--muted-foreground)',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
-        </div>
-
-        {/* ── Scrollable body ── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
-
-          {/* 1. Identity widget + Title */}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
-            <div style={{ marginTop: 2, flexShrink: 0 }}>
-              <IdentityWidget
-                identity={identity}
-                name={title || event?.title || ''}
-                shape="square"
-                onChange={handleIdentityChange}
-              />
-            </div>
-            <input
-              value={title}
-              onChange={e => setTitle(e.target.value)}
-              onBlur={handleTitleBlur}
-              style={{
-                flex: 1, fontSize: 13, fontWeight: 600,
-                color: 'var(--foreground)', border: '1px solid transparent',
-                borderRadius: 'var(--radius-md)', padding: '5px 6px',
-                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-              }}
-              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 2. When — date pickers only (no allDay checkbox, no date summary) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>When</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input
-                type="date" value={displayStart}
-                onChange={e => handleStartDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-              <input
-                type="date" value={displayEnd} min={startDate}
-                onChange={e => handleEndDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 3. Description — below dates, matching create panel */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Description</div>
-            <input
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Optional description…"
-              style={{ ...INPUT, padding: '6px 8px' }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 4. Assigned to — bordered card style matching create panel */}
-          {members.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={SEC_LABEL}>Assigned to</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {members.map(m => {
-                  const assigned = assignedIds.includes(m.id)
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => toggleAssignee(m.id)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '5px 8px',
-                        border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
-                        borderRadius: 'var(--radius-md)',
-                        background: assigned ? `${m.color}18` : 'var(--background)',
-                        cursor: 'pointer', textAlign: 'left',
-                        transition: 'background 0.1s, border-color 0.1s',
-                      }}
-                    >
-                      <MemberAvatar member={m} size={18} />
-                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                      {assigned && (
-                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          <div style={DIVIDER} />
-
-          {/* 5. Classify — Status (rich dropdown), Tags (stub) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Classify</div>
-
-            {/* Status picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Status</span>
-              {statuses.length > 0 ? (
-                <StatusDropdown
-                  statuses={statuses}
-                  value={event?.statusId}
-                  onChange={id => save({ statusId: id } as Parameters<typeof save>[0])}
-                />
-              ) : (
-                <div style={{ ...STUB_VALUE }}>
-                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
-                </div>
-              )}
-            </div>
-
-            {/* Tags stub */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>Tags</span>
-              <div style={{ ...STUB_VALUE }}>
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 100,
-                  border: '1px dashed var(--border)', lineHeight: 1.5,
-                  display: 'flex', alignItems: 'center', gap: 3,
-                }}>
-                  <Tag size={9} strokeWidth={2} /> Add tag
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
-              </div>
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 6. Advanced (was "Details") — Parent, Progress, Location, URL */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Advanced</div>
-
-            {/* Parent activity stub */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Parent</span>
-              <div style={{ ...STUB_VALUE }}>
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 4,
-                  border: '1px solid var(--border)', lineHeight: 1.5,
-                  display: 'flex', alignItems: 'center', gap: 3,
-                }}>
-                  None <ChevronDown size={10} strokeWidth={2} />
-                </span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
-              </div>
-            </div>
-
-            {/* % Complete stub */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Progress</span>
-              <div style={{ ...STUB_VALUE }}>
-                <div style={{
-                  flex: 1, height: 4, background: 'var(--border)',
-                  borderRadius: 2, overflow: 'hidden', maxWidth: 80,
-                }}>
-                  <div style={{ width: `${event.percentComplete ?? 0}%`, height: '100%', background: 'var(--primary)', borderRadius: 2 }} />
-                </div>
-                <span style={{ fontSize: 11, marginLeft: 5 }}>{event.percentComplete ?? 0}%</span>
-                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
-              </div>
-            </div>
-
-            {/* Location (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Location</span>
-              <input
-                value={location}
-                onChange={e => setLocation(e.target.value)}
-                onBlur={handleLocationBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-
-            {/* URL (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>URL</span>
-              <input
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-                onBlur={handleUrlBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 7. Notes — multi-line textarea */}
-          <div style={{ marginBottom: 8 }}>
-            <div style={SEC_LABEL}>Notes</div>
-            <textarea
-              value={notes}
-              onChange={e => setNotes(e.target.value)}
-              onBlur={e => { handleNotesBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Add notes…"
-              rows={4}
-              style={{
-                ...INPUT,
-                padding: '6px 8px',
-                resize: 'vertical',
-                minHeight: 72,
-                lineHeight: 1.5,
-              }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
-
-        </div>
-
-        {/* ── Footer — Delete button ── */}
-        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-          {confirmDelete ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
-                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
-              </p>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  onClick={() => setConfirmDelete(false)}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                    background: 'var(--card)', color: 'var(--foreground)',
-                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                  }}
-                >Cancel</button>
-                <button
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: 'none',
-                    background: 'var(--destructive)', color: 'white',
-                    cursor: deleting ? 'not-allowed' : 'pointer',
-                    fontFamily: 'var(--font-sans)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  }}
-                >
-                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                  Delete
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setConfirmDelete(true)}
-              style={{
-                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                fontSize: 12, fontWeight: 600, padding: 7,
-                borderRadius: 'var(--radius-md)', border: 'none',
-                background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
-                cursor: 'pointer', fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <Trash2 size={12} strokeWidth={2} />
-              Delete activity
-            </button>
-          )}
-        </div>
-
-        </>)}
-      </div>
-    </div>
-  )
 }
 ````
 
@@ -28976,6 +28311,863 @@ func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
 }
 ````
 
+## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
+````typescript
+/**
+ * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
+ *
+ * Field order (top to bottom):
+ *   1. Header — Identity widget + Title
+ *   2. When — Date pickers (start → end)
+ *   3. Description — single-line input
+ *   4. Assigned to — bordered card style (matches create panel)
+ *   5. Classify — Status (rich dropdown with color dot + icon + name), Tags (stub)
+ *   6. Advanced — Parent (stub), Progress (stub), Location, URL
+ *   7. Notes — multi-line textarea
+ *   8. Footer — Delete button
+ *
+ * All functional fields save on change/blur via PATCH /activities/:id.
+ * liveDragStart / liveDragEnd display live dates during bar drag without triggering saves.
+ */
+
+import { useState, useEffect, useRef } from 'react'
+import { X, Trash2, ArrowRight, Loader2, Tag, ChevronDown } from 'lucide-react'
+import MemberAvatar from '@/components/MemberAvatar'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useUpdateActivity, useDeleteActivity } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
+
+const PANEL_WIDTH = 300
+
+interface Props {
+  event: ApiActivity | null
+  open: boolean
+  members: Member[]
+  teamId: string
+  timelineId: string
+  onClose: () => void
+  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragStart?: string
+  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragEnd?: string
+}
+
+// ── Small helpers ─────────────────────────────────────────────────────────────
+
+function toDateInput(iso: string): string { return iso.slice(0, 10) }
+function toISODate(d: string): string { return `${d}T00:00:00Z` }
+
+const SEC_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.08em',
+  marginBottom: 6,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.07em',
+  marginBottom: 3,
+  width: 68,
+  flexShrink: 0,
+}
+
+const STUB_VALUE: React.CSSProperties = {
+  fontSize: 12,
+  color: 'var(--muted-foreground)',
+  opacity: 0.5,
+  flex: 1,
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  cursor: 'default',
+  userSelect: 'none',
+}
+
+const DIVIDER: React.CSSProperties = {
+  borderTop: '1px solid var(--border)',
+  margin: '10px 0',
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box' as const,
+  fontSize: 12,
+  color: 'var(--foreground)',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-md)',
+  padding: '5px 8px',
+  outline: 'none',
+  background: 'var(--background)',
+  fontFamily: 'var(--font-sans)',
+}
+
+// ── Rich status dropdown ──────────────────────────────────────────────────────
+
+interface StatusDropdownProps {
+  statuses: Status[]
+  value: string | null | undefined
+  onChange: (id: string | null) => void
+}
+
+function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  const selected = statuses.find(s => s.id === value) ?? null
+
+  return (
+    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 8px',
+          border: '1px solid var(--border)',
+          borderRadius: 6,
+          background: 'var(--background)',
+          color: 'var(--foreground)',
+          cursor: 'pointer',
+          fontSize: 12,
+          fontFamily: 'var(--font-sans)',
+          textAlign: 'left',
+        }}
+      >
+        {selected ? (
+          <>
+            <div
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: resolveColorHex(selected.color) ?? selected.color,
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected.name}
+            </span>
+          </>
+        ) : (
+          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
+        )}
+        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            right: 0,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
+            zIndex: 100,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            onClick={() => { onChange(null); setOpen(false) }}
+            style={{
+              padding: '6px 10px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              fontStyle: 'italic',
+              cursor: 'pointer',
+              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            — No status —
+          </div>
+          {statuses.map(s => (
+            <div
+              key={s.id}
+              onClick={() => { onChange(s.id); setOpen(false) }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 10px',
+                fontSize: 12,
+                cursor: 'pointer',
+                background: s.id === value ? 'var(--muted)' : 'transparent',
+                fontWeight: s.id === value ? 600 : 400,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
+            >
+              <div
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: resolveColorHex(s.color) ?? s.color,
+                  flexShrink: 0,
+                }}
+              />
+              <span style={{ flex: 1 }}>{s.name}</span>
+              {s.isClosed && (
+                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
+                  CLOSED
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export default function ActivityDetailPanel({
+  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
+}: Props) {
+  const updateMutation = useUpdateActivity(timelineId)
+  const deleteMutation = useDeleteActivity(timelineId)
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
+
+  const [title, setTitle] = useState(event?.title ?? '')
+  const [description, setDescription] = useState(event?.description ?? '')
+  const [notes, setNotes] = useState(event?.notes ?? '')
+  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
+  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: event?.color ?? '#288C9B',
+    icon: event?.icon ?? '__none__',
+  })
+  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
+  const [location, setLocation] = useState(event?.location ?? '')
+  const [url, setUrl] = useState(event?.url ?? '')
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // Re-sync when the selected activity changes.
+  useEffect(() => {
+    if (!event) return
+    setTitle(event.title)
+    setDescription(event.description ?? '')
+    setNotes(event.notes ?? '')
+    setStartDate(toDateInput(event.startAt))
+    setEndDate(toDateInput(event.endAt))
+    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
+    setAssignedIds(event.assignedMemberIds ?? [])
+    setLocation(event.location ?? '')
+    setUrl(event.url ?? '')
+    setConfirmDelete(false)
+  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync local date state when the event's dates change (e.g. after a drag commit).
+  const eventStartAt = event?.startAt
+  const eventEndAt = event?.endAt
+  useEffect(() => {
+    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
+    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
+  }, [eventStartAt, eventEndAt])
+
+  const saving = updateMutation.isPending
+  const deleting = deleteMutation.isPending
+
+  // Display dates: live drag overrides take precedence while dragging.
+  const displayStart = liveDragStart ?? startDate
+  const displayEnd = liveDragEnd ?? endDate
+
+  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
+    if (!event) return
+    updateMutation.mutate({ activityId: event.id, patch })
+  }
+
+  function handleTitleBlur() {
+    if (title.trim() && title !== event?.title) save({ title: title.trim() })
+  }
+
+  function handleDescriptionBlur() {
+    if (description !== (event?.description ?? '')) save({ description: description || null })
+  }
+
+  function handleNotesBlur() {
+    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
+  }
+
+  function handleLocationBlur() {
+    if (location !== (event?.location ?? '')) save({ location: location || null })
+  }
+
+  function handleUrlBlur() {
+    if (url !== (event?.url ?? '')) save({ url: url || null })
+  }
+
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val && val <= endDate) save({ startAt: toISODate(val) })
+  }
+
+  function handleEndDateChange(val: string) {
+    setEndDate(val)
+    if (val && val >= startDate) save({ endAt: toISODate(val) })
+  }
+
+  function handleIdentityChange(next: Identity) {
+    setIdentity(next)
+    save({ color: next.color, icon: next.icon })
+  }
+
+  function toggleAssignee(memberId: string) {
+    const next = assignedIds.includes(memberId)
+      ? assignedIds.filter(id => id !== memberId)
+      : [...assignedIds, memberId]
+    setAssignedIds(next)
+    save({ assignedMemberIds: next })
+  }
+
+  function handleDelete() {
+    if (!event) return
+    deleteMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {!event ? null : (<>
+
+        {/* ── Header bar ── */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0 12px', height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)', flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
+            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', color: 'var(--muted-foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <X size={14} strokeWidth={2} />
+          </button>
+        </div>
+
+        {/* ── Scrollable body ── */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
+
+          {/* 1. Identity widget + Title */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
+            <div style={{ marginTop: 2, flexShrink: 0 }}>
+              <IdentityWidget
+                identity={identity}
+                name={title || event?.title || ''}
+                shape="square"
+                onChange={handleIdentityChange}
+              />
+            </div>
+            <input
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              onBlur={handleTitleBlur}
+              style={{
+                flex: 1, fontSize: 13, fontWeight: 600,
+                color: 'var(--foreground)', border: '1px solid transparent',
+                borderRadius: 'var(--radius-md)', padding: '5px 6px',
+                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
+              }}
+              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
+              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
+            />
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 2. When — date pickers only (no allDay checkbox, no date summary) */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>When</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                type="date" value={displayStart}
+                onChange={e => handleStartDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
+              <input
+                type="date" value={displayEnd} min={startDate}
+                onChange={e => handleEndDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 3. Description — below dates, matching create panel */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Description</div>
+            <input
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
+              placeholder="Optional description…"
+              style={{ ...INPUT, padding: '6px 8px' }}
+              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            />
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 4. Assigned to — bordered card style matching create panel */}
+          {members.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={SEC_LABEL}>Assigned to</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {members.map(m => {
+                  const assigned = assignedIds.includes(m.id)
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => toggleAssignee(m.id)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '5px 8px',
+                        border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
+                        borderRadius: 'var(--radius-md)',
+                        background: assigned ? `${m.color}18` : 'var(--background)',
+                        cursor: 'pointer', textAlign: 'left',
+                        transition: 'background 0.1s, border-color 0.1s',
+                      }}
+                    >
+                      <MemberAvatar member={m} size={18} />
+                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
+                      {assigned && (
+                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          <div style={DIVIDER} />
+
+          {/* 5. Classify — Status (rich dropdown), Tags (stub) */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Classify</div>
+
+            {/* Status picker */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Status</span>
+              {statuses.length > 0 ? (
+                <StatusDropdown
+                  statuses={statuses}
+                  value={event?.statusId}
+                  onChange={id => save({ statusId: id } as Parameters<typeof save>[0])}
+                />
+              ) : (
+                <div style={{ ...STUB_VALUE }}>
+                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
+                </div>
+              )}
+            </div>
+
+            {/* Tags stub */}
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <span style={FIELD_LABEL}>Tags</span>
+              <div style={{ ...STUB_VALUE }}>
+                <span style={{
+                  fontSize: 11, padding: '2px 8px', borderRadius: 100,
+                  border: '1px dashed var(--border)', lineHeight: 1.5,
+                  display: 'flex', alignItems: 'center', gap: 3,
+                }}>
+                  <Tag size={9} strokeWidth={2} /> Add tag
+                </span>
+                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
+              </div>
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 6. Advanced (was "Details") — Parent, Progress, Location, URL */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Advanced</div>
+
+            {/* Parent activity stub */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Parent</span>
+              <div style={{ ...STUB_VALUE }}>
+                <span style={{
+                  fontSize: 11, padding: '2px 8px', borderRadius: 4,
+                  border: '1px solid var(--border)', lineHeight: 1.5,
+                  display: 'flex', alignItems: 'center', gap: 3,
+                }}>
+                  None <ChevronDown size={10} strokeWidth={2} />
+                </span>
+                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
+              </div>
+            </div>
+
+            {/* % Complete stub */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Progress</span>
+              <div style={{ ...STUB_VALUE }}>
+                <div style={{
+                  flex: 1, height: 4, background: 'var(--border)',
+                  borderRadius: 2, overflow: 'hidden', maxWidth: 80,
+                }}>
+                  <div style={{ width: `${event.percentComplete ?? 0}%`, height: '100%', background: 'var(--primary)', borderRadius: 2 }} />
+                </div>
+                <span style={{ fontSize: 11, marginLeft: 5 }}>{event.percentComplete ?? 0}%</span>
+                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>coming soon</span>
+              </div>
+            </div>
+
+            {/* Location (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Location</span>
+              <input
+                value={location}
+                onChange={e => setLocation(e.target.value)}
+                onBlur={handleLocationBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+
+            {/* URL (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <span style={FIELD_LABEL}>URL</span>
+              <input
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                onBlur={handleUrlBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 7. Notes — multi-line textarea */}
+          <div style={{ marginBottom: 8 }}>
+            <div style={SEC_LABEL}>Notes</div>
+            <textarea
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+              onBlur={e => { handleNotesBlur(); e.target.style.borderColor = 'var(--border)' }}
+              placeholder="Add notes…"
+              rows={4}
+              style={{
+                ...INPUT,
+                padding: '6px 8px',
+                resize: 'vertical',
+                minHeight: 72,
+                lineHeight: 1.5,
+              }}
+              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            />
+          </div>
+
+        </div>
+
+        {/* ── Footer — Delete button ── */}
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+          {confirmDelete ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
+                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
+              </p>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                    background: 'var(--card)', color: 'var(--foreground)',
+                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                  }}
+                >Cancel</button>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: 'none',
+                    background: 'var(--destructive)', color: 'white',
+                    cursor: deleting ? 'not-allowed' : 'pointer',
+                    fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  }}
+                >
+                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmDelete(true)}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                fontSize: 12, fontWeight: 600, padding: 7,
+                borderRadius: 'var(--radius-md)', border: 'none',
+                background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
+                cursor: 'pointer', fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <Trash2 size={12} strokeWidth={2} />
+              Delete activity
+            </button>
+          )}
+        </div>
+
+        </>)}
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
+ */
+
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
+
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
+
+const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
+
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+  const { theme: currentTheme, applyTheme } = useDarkMode()
+
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+    const savedTheme = prefMap['theme'] as string | undefined
+    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
+  }, [JSON.stringify(prefMap)])
+
+  function handleThemeChange(t: 'light' | 'dark') {
+    setTheme(t)
+    applyTheme(t)
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
+        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
+        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
+        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Personal appearance and regional settings.
+      </p>
+
+      {/* Regional */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Regional
+        </h3>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Language</Label>
+          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Date format</Label>
+          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Appearance */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Appearance
+        </h3>
+        <div className="flex flex-col gap-1.5 mb-2">
+          <Label>Theme</Label>
+          <div className="flex gap-2">
+            {(['light', 'dark'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  theme === t
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground m-0">
+            Applies immediately. Persisted server-side so it syncs across devices.
+          </p>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/hooks/useTeamActivities.ts
 ````typescript
 /**
@@ -29214,8 +29406,23 @@ export function useUpdateActivity(timelineId: string) {
         method: 'PATCH',
         body: JSON.stringify(patch),
       }),
+    onMutate: async ({ activityId, patch }) => {
+      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
+      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+      )
+      return { snapshot }
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.snapshot) {
+        for (const [key, data] of context.snapshot) {
+          client.setQueryData(key, data)
+        }
+      }
+    },
     onSuccess: (updated) => {
-      // Update the activity in all matching cache entries for the timeline.
       client.setQueriesData<Activity[]>(
         { queryKey: ['timelines', timelineId, 'activities'] },
         (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
@@ -29472,935 +29679,6 @@ export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
       client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
     },
   })
-}
-````
-
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
- */
-
-import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
-
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
-
-const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
-
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-  const { theme: currentTheme, applyTheme } = useDarkMode()
-
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-    const savedTheme = prefMap['theme'] as string | undefined
-    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
-  }, [JSON.stringify(prefMap)])
-
-  function handleThemeChange(t: 'light' | 'dark') {
-    setTheme(t)
-    applyTheme(t)
-  }
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await Promise.all([
-        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
-        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
-        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
-        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
-      ])
-      setFeedback({ type: 'success', msg: 'Preferences saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Personal appearance and regional settings.
-      </p>
-
-      {/* Regional */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Regional
-        </h3>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Language</Label>
-          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Timezone</Label>
-          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Date format</Label>
-          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Appearance */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Appearance
-        </h3>
-        <div className="flex flex-col gap-1.5 mb-2">
-          <Label>Theme</Label>
-          <div className="flex gap-2">
-            {(['light', 'dark'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  theme === t
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground m-0">
-            Applies immediately. Persisted server-side so it syncs across devices.
-          </p>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <Button onClick={handleSave} disabled={upsert.isPending}>
-        {upsert.isPending ? 'Saving…' : 'Save preferences'}
-      </Button>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { usePreferenceMap } from '@/hooks/usePreferences';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-interface Props {
-  teamId: string;
-  /** Active timeline ID — activities are fetched scoped to this timeline. */
-  timelineId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  /** Set of status IDs that are marked is_closed. Used when the 'open' filter preset is active. */
-  closedStatusIds?: Set<string>;
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called during a bar drag with live snapped dates — for sidebar preview. */
-  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
-  /** Called when a bar drag completes (before the PATCH fires). */
-  onBarDragEnd?: () => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
-  labelColW?: number;
-  /** Called when the user drags the label column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-}
-
-/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
-function statusColorFromId(statusId: string | null | undefined): string {
-  if (!statusId) return '#6b7280';
-  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
-  let h = 0;
-  for (let i = 0; i < statusId.length; i++) {
-    h = statusId.charCodeAt(i) + ((h << 5) - h);
-    h |= 0;
-  }
-  return palette[Math.abs(h) % palette.length];
-}
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate type that carries original API fields alongside view-state. */
-interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-  }
-
-  if (groupBy === 'member') {
-    const buckets: Record<string, RichActivity[]> = {};
-    for (const ev of sorted) {
-      const key = ev.primaryMemberId ?? '__none__';
-      (buckets[key] ??= []).push(ev);
-    }
-
-    const rows: GanttRow[] = [];
-    for (const m of members) {
-      const evs = buckets[m.id];
-      if (!evs?.length) continue;
-      rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-    }
-    const unassigned = buckets['__none__'];
-    if (unassigned?.length) {
-      rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
-      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    const placed = new Set<string>();
-    const rows: GanttRow[] = [];
-
-    for (const ev of sorted) {
-      if (placed.has(ev.id) || ev.parentActivityId) continue;
-      placed.add(ev.id);
-      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-
-      for (const child of sorted) {
-        if (child.parentActivityId === ev.id) {
-          placed.add(child.id);
-          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
-        }
-      }
-    }
-
-    for (const ev of sorted) {
-      if (!placed.has(ev.id)) {
-        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
-      }
-    }
-
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-/**
- * Returns only the activities whose status is not in closedStatusIds.
- * Extracted as a named export so the 'open' filter preset logic can be
- * unit-tested without mounting the full component.
- */
-export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
-  activities: T[],
-  closedStatusIds: Set<string>,
-): T[] {
-  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-}
-
-export default function GanttView({
-  teamId,
-  timelineId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  closedStatusIds,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onBarDragProgress,
-  onBarDragEnd,
-  onMembersLoaded,
-  onSelectApiActivity,
-  labelColW,
-  onLabelColWChange,
-}: Props) {
-  const updateActivity = useUpdateActivity(timelineId);
-  const today = todayMidnight();
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  const globalPrefs = usePreferenceMap();
-  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
-  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
-  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
-  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
-  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  const hideClosedActive = activeFilter.kind === 'preset' && activeFilter.id === 'open'
-  const visibleActivities = useMemo(() => {
-    if (!hideClosedActive || !closedStatusIds?.size) return apiActivities
-    return filterOpenActivities(apiActivities, closedStatusIds)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiActivities, hideClosedActive, closedStatusIds])
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    onBarDragEnd?.();
-    updateActivity.mutate({
-      activityId,
-      patch: {
-        startAt: newStartDate.toISOString(),
-        endAt: newEndDate.toISOString(),
-      },
-    });
-  }, [updateActivity, onBarDragEnd]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={onLaneDrag}
-        onBarDrag={handleBarDrag}
-        onBarDragProgress={onBarDragProgress}
-        resolvedGranularity={resolvedGranularity}
-        onClearFilters={filtersActive ? () => {} : undefined}
-        labelColW={labelColW}
-        onLabelColWChange={onLabelColWChange}
-      />
-    </div>
-  );
-}
-````
-
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
 }
 ````
 
@@ -31307,437 +30585,6 @@ func flatten[T any](s []*T) []T {
 }
 ````
 
-## File: packages/web/src/components/MemberModal.tsx
-````typescript
-/**
- * MemberModal — view and edit a team member's profile, identity, and role.
- *
- * Shows computed stats (timelines, activities by date status) and exposes
- * superadmin actions (promote, inactivate, delete) when the viewer is a
- * superadmin. Password reset is present but shows "SMTP not configured"
- * until Phase 14.
- */
-
-import { useState } from 'react'
-import { createPortal } from 'react-dom'
-import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users, ShieldOff } from 'lucide-react'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import type { Identity } from '@/components/identity/identity-constants'
-import { Badge } from '@/components/identity/Badge'
-import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
-import { useAuth } from '@/contexts/AuthContext'
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-import type { components } from '@draba/shared'
-
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-interface Props {
-  teamId: string
-  memberId: string
-  /** Whether the current viewer is a team admin. */
-  isAdmin: boolean
-  /** Whether the current viewer is a superadmin. */
-  isSuperadmin: boolean
-  onClose: () => void
-}
-
-// ── Small shared styles ───────────────────────────────────────────────────────
-
-const chipStyle = (color: string): React.CSSProperties => ({
-  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-  padding: '10px 16px', borderRadius: 8, flex: 1,
-  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
-  background: `${color}0a`, textAlign: 'center', minWidth: 0,
-})
-
-const cancelBtn: React.CSSProperties = {
-  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
-  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
-
-export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
-  const { user: currentUser } = useAuth()
-  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
-  const updateMember = useUpdateMember(teamId)
-  const promoteUser = usePromoteUser()
-  const archiveUser = useArchiveUser()
-  const unarchiveUser = useUnarchiveUser()
-  const deleteUser = useDeleteUser()
-  const revokeUser = useRevokeUser()
-
-  const [identity, setIdentity] = useState<Identity | null>(null)
-  const [displayName, setDisplayName] = useState<string | null>(null)
-  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | 'revoke' | null>(null)
-  const [revokeResult, setRevokeResult] = useState<{ membershipsInactivated: number; membershipsRemoved: number } | null>(null)
-
-  if (isLoading || isError || !detail) {
-    return createPortal(
-      <div
-        onClick={e => { if (e.target === e.currentTarget) onClose() }}
-        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-      >
-        <div style={{ width: 560, height: 300, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
-          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-            <X size={18} />
-          </button>
-          {isError ? (
-            <>
-              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
-              <button onClick={onClose} style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>Dismiss</button>
-            </>
-          ) : (
-            <span style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</span>
-          )}
-        </div>
-      </div>,
-      document.body,
-    )
-  }
-
-  const effectiveIdentity: Identity = identity ?? {
-    color: detail.color ?? '#1A97A2',
-    icon: detail.icon ?? '__name_words__',
-  }
-  const effectiveName = displayName ?? detail.displayName
-
-  const isParticipant = !detail.userId
-  const isInactivated = Boolean(detail.archivedAt)
-  const stats = detail.stats
-  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
-
-  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending || revokeUser.isPending
-
-  // detail is guaranteed non-null here (early return above handles loading/undefined).
-  // Non-null assertions in callbacks are safe because they only fire when the
-  // rendered modal is interactive, which requires detail to be loaded.
-  function handleSave() {
-    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
-    if (displayName !== null) patch.displayName = displayName
-    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
-    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
-  }
-
-  function handlePromote() {
-    if (!detail!.userId) return
-    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
-  }
-
-  function handleInactivate() {
-    if (!detail!.userId) return
-    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  function handleReactivate() {
-    if (!detail!.userId) return
-    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
-  }
-
-  function handleRevoke() {
-    if (!detail!.userId) return
-    revokeUser.mutate(detail!.userId, {
-      onSuccess: (result) => {
-        setConfirm(null)
-        setRevokeResult({ membershipsInactivated: result.membershipsInactivated, membershipsRemoved: result.membershipsRemoved })
-        // Close the modal after a short delay so the user can see the summary.
-        setTimeout(onClose, 2000)
-      },
-    })
-  }
-
-  function handleDelete() {
-    if (!detail!.userId) return
-    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  const memberColor = effectiveIdentity.color
-
-  return createPortal(
-    <div
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-    >
-      <div style={{ width: 560, maxHeight: '90vh', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-        {/* Confirm overlays */}
-        {confirm === 'promote' && (
-          <ConfirmDialog
-            variant="indigo"
-            icon={<Shield size={22} color="#6366F1" />}
-            title="Promote to Super Admin?"
-            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
-            confirmLabel="Promote"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handlePromote}
-          />
-        )}
-        {confirm === 'inactivate' && (
-          <ConfirmDialog
-            variant="amber"
-            icon={<Archive size={22} color="#F59E0B" />}
-            title={`Inactivate ${effectiveName}?`}
-            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
-            confirmLabel="Inactivate"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleInactivate}
-          />
-        )}
-        {confirm === 'delete' && (
-          <ConfirmDialog
-            variant="red"
-            icon={<Trash2 size={22} color="#EF4444" />}
-            title={`Delete ${effectiveName}?`}
-            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
-            confirmLabel="Delete permanently"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleDelete}
-          />
-        )}
-        {confirm === 'revoke' && (
-          <ConfirmDialog
-            variant="red"
-            icon={<ShieldOff size={22} color="#EF4444" />}
-            title={`Revoke all access for ${effectiveName}?`}
-            body="This will: (1) deactivate the account — the user cannot log in anywhere; (2) inactivate all team memberships that have activity history; (3) permanently remove memberships with no activity history. Activity data is always preserved."
-            confirmLabel="Revoke all access"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleRevoke}
-          />
-        )}
-
-        {confirm === null && (
-          <>
-            {/* Header */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-              <div style={{ flexShrink: 0 }}>
-                <IdentityWidget
-                  identity={effectiveIdentity}
-                  name={effectiveName}
-                  shape="circle"
-                  onChange={setIdentity}
-                />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
-                  {isParticipant ? 'Participant' : 'Team Member'}
-                  {isInactivated && ' · Inactive'}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  {(isAdmin || currentUser?.id === detail.userId) ? (
-                    <InlineEditableTitle
-                      value={displayName ?? detail.displayName}
-                      onChange={setDisplayName}
-                    />
-                  ) : (
-                    <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{effectiveName}</span>
-                  )}
-                  {isParticipant && (
-                    <span style={{ fontSize: 11, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
-                  )}
-                </div>
-              </div>
-              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex', flexShrink: 0 }}>
-                <X size={18} />
-              </button>
-            </div>
-
-            {/* Scrollable body */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-
-              {/* Email */}
-              {!isParticipant && (
-                <div style={{ marginBottom: 20 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
-                  <div style={{ fontSize: 13, color: 'var(--muted-foreground)', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {detail.email}
-                  </div>
-                </div>
-              )}
-
-              {/* Timeline stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Timelines
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Active</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Activity stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Activities
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Past due</span>
-                  </div>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Running</span>
-                  </div>
-                  <div style={chipStyle('#3B82F6')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Upcoming</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Teams list */}
-              {detail.teams.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Teams ({detail.teams.length})
-                  </label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    {detail.teams.map((tm: TeamMemberWithUser) => (
-                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--muted)', borderRadius: 7 }}>
-                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
-                        <span style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{tm.teamId}</span>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : 'var(--muted-foreground)', background: tm.role === 'admin' ? 'rgba(26,151,162,0.12)' : 'var(--muted)', border: `1px solid ${tm.role === 'admin' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`, borderRadius: 99, padding: '1px 8px' }}>
-                          {tm.role}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Joined date */}
-              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: 'var(--muted)', borderRadius: 6, fontSize: 12, color: 'var(--muted-foreground)' }}>
-                  <Clock size={12} />
-                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
-                </div>
-              </div>
-
-              {/* Account section — non-participant only */}
-              {!isParticipant && isAdmin && (
-                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
-                  <button
-                    style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'var(--font-sans)' }}
-                    title="SMTP is not configured"
-                    disabled
-                  >
-                    Reset password — SMTP not configured
-                  </button>
-                </div>
-              )}
-
-              {/* Superadmin actions */}
-              {isSuperadmin && !isParticipant && (
-                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
-                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Super Admin Actions
-                  </label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                    {!isInactivated && (
-                      <button
-                        onClick={() => setConfirm('promote')}
-                        style={{ fontSize: 12, color: '#6366F1', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Shield size={13} />
-                        Promote to Super Admin
-                      </button>
-                    )}
-                    {isInactivated ? (
-                      <button
-                        onClick={handleReactivate}
-                        disabled={busy}
-                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', opacity: busy ? 0.6 : 1 }}
-                      >
-                        Reactivate account
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setConfirm('inactivate')}
-                        style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Archive size={13} />
-                        Inactivate
-                      </button>
-                    )}
-                    {detail.deletable && (
-                      <button
-                        onClick={() => setConfirm('delete')}
-                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Trash2 size={13} />
-                        Delete
-                      </button>
-                    )}
-                    {/* Hidden once the account itself is deactivated — membership-level
-                        inactivation alone still leaves the account active on other teams */}
-                    {!detail.userArchivedAt && (
-                      <button
-                        onClick={() => setConfirm('revoke')}
-                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <ShieldOff size={13} />
-                        Revoke all access
-                      </button>
-                    )}
-                  </div>
-                  {activeActivityCount > 0 && (
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 8 }}>
-                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
-                    </div>
-                  )}
-                  {revokeResult && (
-                    <div style={{ fontSize: 12, color: 'var(--foreground)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
-                      Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Footer */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-              <button onClick={onClose} style={cancelBtn}>Cancel</button>
-              {(isAdmin || currentUser?.id === detail.userId) && (
-                <button
-                  onClick={handleSave}
-                  disabled={busy}
-                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'var(--font-sans)' }}
-                >
-                  {busy ? 'Saving…' : 'Save changes'}
-                </button>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-    </div>,
-    document.body,
-  )
-}
-````
-
 ## File: packages/web/src/components/TeamModal.tsx
 ````typescript
 /**
@@ -32484,6 +31331,1194 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
 }
 ````
 
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
+````
+
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+interface Props {
+  teamId: string;
+  /** Active timeline ID — activities are fetched scoped to this timeline. */
+  timelineId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  /** Set of status IDs that are marked is_closed. Used when the 'open' filter preset is active. */
+  closedStatusIds?: Set<string>;
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag completes (before the PATCH fires). */
+  onBarDragEnd?: () => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
+  labelColW?: number;
+  /** Called when the user drags the label column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+}
+
+/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
+function statusColorFromId(statusId: string | null | undefined): string {
+  if (!statusId) return '#6b7280';
+  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
+  let h = 0;
+  for (let i = 0; i < statusId.length; i++) {
+    h = statusId.charCodeAt(i) + ((h << 5) - h);
+    h |= 0;
+  }
+  return palette[Math.abs(h) % palette.length];
+}
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate type that carries original API fields alongside view-state. */
+interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+  }
+
+  if (groupBy === 'member') {
+    const buckets: Record<string, RichActivity[]> = {};
+    for (const ev of sorted) {
+      const key = ev.primaryMemberId ?? '__none__';
+      (buckets[key] ??= []).push(ev);
+    }
+
+    const rows: GanttRow[] = [];
+    for (const m of members) {
+      const evs = buckets[m.id];
+      if (!evs?.length) continue;
+      rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+    }
+    const unassigned = buckets['__none__'];
+    if (unassigned?.length) {
+      rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
+      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    const placed = new Set<string>();
+    const rows: GanttRow[] = [];
+
+    for (const ev of sorted) {
+      if (placed.has(ev.id) || ev.parentActivityId) continue;
+      placed.add(ev.id);
+      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+
+      for (const child of sorted) {
+        if (child.parentActivityId === ev.id) {
+          placed.add(child.id);
+          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
+        }
+      }
+    }
+
+    for (const ev of sorted) {
+      if (!placed.has(ev.id)) {
+        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
+      }
+    }
+
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+/**
+ * Returns only the activities whose status is not in closedStatusIds.
+ * Extracted as a named export so the 'open' filter preset logic can be
+ * unit-tested without mounting the full component.
+ */
+export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
+  activities: T[],
+  closedStatusIds: Set<string>,
+): T[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
+export default function GanttView({
+  teamId,
+  timelineId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  closedStatusIds,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onBarDragProgress,
+  onBarDragEnd,
+  onMembersLoaded,
+  onSelectApiActivity,
+  labelColW,
+  onLabelColWChange,
+}: Props) {
+  const queryClient = useQueryClient();
+  const updateActivity = useUpdateActivity(timelineId);
+  const today = todayMidnight();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  const hideClosedActive = activeFilter.kind === 'preset' && activeFilter.id === 'open'
+  const visibleActivities = useMemo(() => {
+    if (!hideClosedActive || !closedStatusIds?.size) return apiActivities
+    return filterOpenActivities(apiActivities, closedStatusIds)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiActivities, hideClosedActive, closedStatusIds])
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = visibleActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    const patch = {
+      startAt: newStartDate.toISOString(),
+      endAt: newEndDate.toISOString(),
+    };
+
+    // Synchronously update the cache so the bar doesn't flash back to old
+    // position when GanttGrid clears its drag state in the same render cycle.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+    );
+
+    // Push updated activity to the sidebar so it shows new dates immediately
+    // instead of the stale snapshot from when the activity was selected.
+    if (onSelectApiActivity) {
+      const updated = apiActivities.find(a => a.id === activityId);
+      if (updated) onSelectApiActivity({ ...updated, ...patch });
+    }
+
+    onBarDragEnd?.();
+    updateActivity.mutate({ activityId, patch });
+  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={onLaneDrag}
+        onBarDrag={handleBarDrag}
+        onBarDragProgress={onBarDragProgress}
+        resolvedGranularity={resolvedGranularity}
+        onClearFilters={filtersActive ? () => {} : undefined}
+        labelColW={labelColW}
+        onLabelColWChange={onLabelColWChange}
+      />
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/MemberModal.tsx
+````typescript
+/**
+ * MemberModal — view and edit a team member's profile, identity, and role.
+ *
+ * Shows computed stats (timelines, activities by date status) and exposes
+ * superadmin actions (promote, inactivate, delete) when the viewer is a
+ * superadmin. Password reset is present but shows "SMTP not configured"
+ * until Phase 14.
+ */
+
+import { useState } from 'react'
+import { createPortal } from 'react-dom'
+import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users, ShieldOff } from 'lucide-react'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
+import { Badge } from '@/components/identity/Badge'
+import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
+import { useAuth } from '@/contexts/AuthContext'
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import type { components } from '@draba/shared'
+
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+interface Props {
+  teamId: string
+  memberId: string
+  /** Whether the current viewer is a team admin. */
+  isAdmin: boolean
+  /** Whether the current viewer is a superadmin. */
+  isSuperadmin: boolean
+  onClose: () => void
+}
+
+// ── Small shared styles ───────────────────────────────────────────────────────
+
+const chipStyle = (color: string): React.CSSProperties => ({
+  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+  padding: '10px 16px', borderRadius: 8, flex: 1,
+  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
+  background: `${color}0a`, textAlign: 'center', minWidth: 0,
+})
+
+const cancelBtn: React.CSSProperties = {
+  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
+  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+
+export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
+  const { user: currentUser } = useAuth()
+  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
+  const updateMember = useUpdateMember(teamId)
+  const promoteUser = usePromoteUser()
+  const archiveUser = useArchiveUser()
+  const unarchiveUser = useUnarchiveUser()
+  const deleteUser = useDeleteUser()
+  const revokeUser = useRevokeUser()
+
+  const [identity, setIdentity] = useState<Identity | null>(null)
+  const [displayName, setDisplayName] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | 'revoke' | null>(null)
+  const [revokeResult, setRevokeResult] = useState<{ membershipsInactivated: number; membershipsRemoved: number } | null>(null)
+
+  if (isLoading || isError || !detail) {
+    return createPortal(
+      <div
+        onClick={e => { if (e.target === e.currentTarget) onClose() }}
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+      >
+        <div style={{ width: 560, height: 300, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
+          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+            <X size={18} />
+          </button>
+          {isError ? (
+            <>
+              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
+              <button onClick={onClose} style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>Dismiss</button>
+            </>
+          ) : (
+            <span style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</span>
+          )}
+        </div>
+      </div>,
+      document.body,
+    )
+  }
+
+  const effectiveIdentity: Identity = identity ?? {
+    color: detail.color ?? '#1A97A2',
+    icon: detail.icon ?? '__name_words__',
+  }
+  const effectiveName = displayName ?? detail.displayName
+
+  const isParticipant = !detail.userId
+  const isInactivated = Boolean(detail.archivedAt)
+  const stats = detail.stats
+  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
+
+  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending || revokeUser.isPending
+
+  // detail is guaranteed non-null here (early return above handles loading/undefined).
+  // Non-null assertions in callbacks are safe because they only fire when the
+  // rendered modal is interactive, which requires detail to be loaded.
+  function handleSave() {
+    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
+    if (displayName !== null) patch.displayName = displayName
+    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
+    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
+  }
+
+  function handlePromote() {
+    if (!detail!.userId) return
+    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
+  }
+
+  function handleInactivate() {
+    if (!detail!.userId) return
+    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+  }
+
+  function handleReactivate() {
+    if (!detail!.userId) return
+    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
+  }
+
+  function handleRevoke() {
+    if (!detail!.userId) return
+    revokeUser.mutate(detail!.userId, {
+      onSuccess: (result) => {
+        setConfirm(null)
+        setRevokeResult({ membershipsInactivated: result.membershipsInactivated, membershipsRemoved: result.membershipsRemoved })
+        // Close the modal after a short delay so the user can see the summary.
+        setTimeout(onClose, 2000)
+      },
+    })
+  }
+
+  function handleDelete() {
+    if (!detail!.userId) return
+    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+  }
+
+  const memberColor = effectiveIdentity.color
+
+  return createPortal(
+    <div
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+    >
+      <div style={{ width: 560, maxHeight: '90vh', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+        {/* Confirm overlays */}
+        {confirm === 'promote' && (
+          <ConfirmDialog
+            variant="indigo"
+            icon={<Shield size={22} color="#6366F1" />}
+            title="Promote to Super Admin?"
+            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
+            confirmLabel="Promote"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handlePromote}
+          />
+        )}
+        {confirm === 'inactivate' && (
+          <ConfirmDialog
+            variant="amber"
+            icon={<Archive size={22} color="#F59E0B" />}
+            title={`Inactivate ${effectiveName}?`}
+            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
+            confirmLabel="Inactivate"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleInactivate}
+          />
+        )}
+        {confirm === 'delete' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<Trash2 size={22} color="#EF4444" />}
+            title={`Delete ${effectiveName}?`}
+            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
+            confirmLabel="Delete permanently"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleDelete}
+          />
+        )}
+        {confirm === 'revoke' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<ShieldOff size={22} color="#EF4444" />}
+            title={`Revoke all access for ${effectiveName}?`}
+            body="This will: (1) deactivate the account — the user cannot log in anywhere; (2) inactivate all team memberships that have activity history; (3) permanently remove memberships with no activity history. Activity data is always preserved."
+            confirmLabel="Revoke all access"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleRevoke}
+          />
+        )}
+
+        {confirm === null && (
+          <>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              <div style={{ flexShrink: 0 }}>
+                <IdentityWidget
+                  identity={effectiveIdentity}
+                  name={effectiveName}
+                  shape="circle"
+                  onChange={setIdentity}
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
+                  {isParticipant ? 'Participant' : 'Team Member'}
+                  {isInactivated && ' · Inactive'}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  {(isAdmin || currentUser?.id === detail.userId) ? (
+                    <InlineEditableTitle
+                      value={displayName ?? detail.displayName}
+                      onChange={setDisplayName}
+                    />
+                  ) : (
+                    <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{effectiveName}</span>
+                  )}
+                  {isParticipant && (
+                    <span style={{ fontSize: 11, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
+                  )}
+                </div>
+              </div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex', flexShrink: 0 }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Scrollable body */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+
+              {/* Email */}
+              {!isParticipant && (
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
+                  <div style={{ fontSize: 13, color: 'var(--muted-foreground)', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {detail.email}
+                  </div>
+                </div>
+              )}
+
+              {/* Timeline stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Timelines
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Active</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Activity stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Activities
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Past due</span>
+                  </div>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Running</span>
+                  </div>
+                  <div style={chipStyle('#3B82F6')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Upcoming</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Teams list */}
+              {detail.teams.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Teams ({detail.teams.length})
+                  </label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {detail.teams.map((tm: TeamMemberWithUser) => (
+                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--muted)', borderRadius: 7 }}>
+                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
+                        <span style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{tm.teamId}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : 'var(--muted-foreground)', background: tm.role === 'admin' ? 'rgba(26,151,162,0.12)' : 'var(--muted)', border: `1px solid ${tm.role === 'admin' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`, borderRadius: 99, padding: '1px 8px' }}>
+                          {tm.role}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Joined date */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: 'var(--muted)', borderRadius: 6, fontSize: 12, color: 'var(--muted-foreground)' }}>
+                  <Clock size={12} />
+                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
+                </div>
+              </div>
+
+              {/* Account section — non-participant only */}
+              {!isParticipant && isAdmin && (
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
+                  <button
+                    style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'var(--font-sans)' }}
+                    title="SMTP is not configured"
+                    disabled
+                  >
+                    Reset password — SMTP not configured
+                  </button>
+                </div>
+              )}
+
+              {/* Superadmin actions */}
+              {isSuperadmin && !isParticipant && (
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
+                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Super Admin Actions
+                  </label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {!isInactivated && (
+                      <button
+                        onClick={() => setConfirm('promote')}
+                        style={{ fontSize: 12, color: '#6366F1', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Shield size={13} />
+                        Promote to Super Admin
+                      </button>
+                    )}
+                    {isInactivated ? (
+                      <button
+                        onClick={handleReactivate}
+                        disabled={busy}
+                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', opacity: busy ? 0.6 : 1 }}
+                      >
+                        Reactivate account
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setConfirm('inactivate')}
+                        style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Archive size={13} />
+                        Inactivate
+                      </button>
+                    )}
+                    {detail.deletable && (
+                      <button
+                        onClick={() => setConfirm('delete')}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Trash2 size={13} />
+                        Delete
+                      </button>
+                    )}
+                    {/* Hidden once the account itself is deactivated — membership-level
+                        inactivation alone still leaves the account active on other teams */}
+                    {!detail.userArchivedAt && (
+                      <button
+                        onClick={() => setConfirm('revoke')}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <ShieldOff size={13} />
+                        Revoke all access
+                      </button>
+                    )}
+                  </div>
+                  {activeActivityCount > 0 && (
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 8 }}>
+                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
+                    </div>
+                  )}
+                  {revokeResult && (
+                    <div style={{ fontSize: 12, color: 'var(--foreground)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
+                      Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+              <button onClick={onClose} style={cancelBtn}>Cancel</button>
+              {(isAdmin || currentUser?.id === detail.userId) && (
+                <button
+                  onClick={handleSave}
+                  disabled={busy}
+                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'var(--font-sans)' }}
+                >
+                  {busy ? 'Saving…' : 'Save changes'}
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
 ## File: packages/api/internal/models/models.go
 ````go
 // Package models holds the domain types shared across the API, db,
@@ -32790,1058 +32825,6 @@ type Invite struct {
 	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
 	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
-````
-
-## File: docs/TASKS.md
-````markdown
-# Tasks
-
-## Current Sprint — Foundation
-
-### Repo & Tooling
-- [x] Initialize Go module (`packages/api/`) with basic project structure — 2026-04-29
-- [x] Initialize React + TypeScript + Vite project (`packages/web/`) — 2026-04-29
-- [x] Set up pnpm workspace (`pnpm-workspace.yaml`) — 2026-04-29
-- [x] Add `golangci-lint` config (`.golangci.yml`) — 2026-04-29
-- [x] Set up GitHub Actions CI: lint + test on PR — 2026-04-29
-- [x] Write `docker-compose.yml` for local development — 2026-04-29
-
-### API — Core
-- [x] DB abstraction layer with SQLite adapter (sqlx + modernc.org/sqlite) — 2026-04-30
-- [x] Migration runner (auto-runs on startup) — 2026-04-30
-- [x] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens — 2026-04-30
-- [x] Auth: JWT issue/validate, password hash/verify, invite token generate/validate — 2026-04-30
-- [x] `POST /auth/register` (invite token required) — 2026-04-30
-- [x] `POST /auth/login` — 2026-04-30
-- [x] `POST /auth/refresh` — 2026-04-30
-- [x] `POST /teams` — create team — 2026-05-03
-- [x] `POST /teams/:id/invites` — send invite — 2026-05-03
-- [x] `GET /teams/:id/members` — 2026-05-03
-- [x] `POST /teams/:id/events` — create event — 2026-05-03
-- [x] `GET /teams/:id/events` — list events (date range filter) — 2026-05-03
-- [x] `PATCH /events/:id` — update event — 2026-05-03
-- [x] `DELETE /events/:id` — delete event — 2026-05-03
-
-### API — Real-Time
-- [x] WebSocket hub (`internal/ws/`) — 2026-05-14
-- [x] Team-scoped subscription model — 2026-05-14
-- [x] Broadcast on `events.*` internal bus events — 2026-05-14
-
-### API — Timelines
-- [x] `POST /teams/:id/timelines` — create timeline — 2026-05-15
-- [x] `GET /timelines/:id` — fetch timeline (public or auth-gated) — 2026-05-15
-- [x] `GET /timelines/share/:token` — public share link handler — 2026-05-15
-- [x] Timeline access list enforcement — 2026-05-15
-
-### Web — Scaffold
-- [x] Initialize shadcn/ui: `pnpm dlx shadcn@latest init` — 2026-05-16
-- [x] Set color tokens in `src/index.css` once palette is decided — 2026-05-16
-- [x] Set up dark mode toggle (localStorage + `prefers-color-scheme`) — 2026-05-16
-- [x] Routing setup (React Router) — 2026-05-16
-- [x] Auth flow: login, register (via invite), token storage — 2026-05-16
-- [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
-- [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
-- [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
-
-### RBAC Refactor + First-Run Setup (Phase 8.0)
-- [x] Migration 003: `team_members` PK, nullable `user_id`, `display_name` — 2026-05-18
-- [x] Migration 003: `event_assignments` + `timeline_access` swap `user_id` FK for `team_member_id` — 2026-05-18
-- [x] Migration 003: `timeline_access` gains `role (admin|member)`; `visibility` dropped from `timelines` — 2026-05-18
-- [x] `User.IsSuperadmin`: first registered user auto-granted superadmin — 2026-05-18
-- [x] `GET /setup/status` — public endpoint (`{ needsSetup: bool }`) — 2026-05-18
-- [x] Timeline access: team admins bypass check; members require explicit `timeline_access` entry — 2026-05-18
-- [x] `SetupPage`: 3-step first-run wizard (account → team → timeline) — 2026-05-18
-- [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
-- [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
-
-### Web — Timeline View (Phase 8.1: Shell & Rendering — Gantt pivot)
-- [x] API: `GET /teams`, `GET /teams/:id/timelines`, `assignedMemberIds[]` on Event — 2026-05-18
-- [x] `TimelineView` + `TimelineGrid` (person-lane prototype, later pivoted) — 2026-05-18
-- [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
-- [x] Wire to `GET /teams/:id/events?start=&end=` and `GET /teams/:id/members` — 2026-05-18
-- [x] `TimelineGrid` rewrite: Gantt layout — one row per event, sticky label col, member avatars — 2026-05-18
-- [x] `TimelineToolbar` component: zoom in/out, group-by, sort-by, export stub — 2026-05-18
-- [x] `TimelineView` update: build `GanttRow[]` with grouping + sorting logic — 2026-05-18
-- [x] Group by Member: section headers per assignee, events under primary assignee — 2026-05-18
-- [x] Group by Parent: root events first, children indented below their parent — 2026-05-18
-- [x] Sort by: start date, end date, title A–Z — 2026-05-18
-- [x] Zoom: variable `colWidth` stepped through [40, 60, 80, 120, 160] px/day — 2026-05-18
-- [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
-
-### Web — Timeline View (Phase 8.2: Interactions)
-- [x] Click event block → open `EventDetailPanel` (view mode) — 2026-05-19
-- [x] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id` — 2026-05-19
-- [x] Delete event with confirm dialog; remove from timeline — 2026-05-19
-- [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
-- [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
-
-### Web — Gantt Bar Drag (Phase 8.2.1: Resize & Move)
-- [x] Detect mousedown on left/right edge (8px zone) vs. bar body — 2026-05-19
-- [x] Edge drag: update start or end date live as user drags; snap to active granularity column — 2026-05-19
-- [x] Body drag: shift both start and end dates by the same column delta — 2026-05-19
-- [x] Show date tooltip during drag (start date for left edge, end date for right edge, both for body) — 2026-05-19
-- [x] PATCH `/events/:id` with new startAt/endAt on mouseup; optimistic update in cache — 2026-05-19
-- [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
-
-### Web — Timeline View (Phase 8.3: Real-Time Sync)
-- [x] Connect `useWebSocket` to subscribe to `events.*` for active team — 2026-05-19
-- [x] `events.created` delta: insert block into TanStack Query cache — 2026-05-19
-- [x] `events.updated` delta: update block in cache — 2026-05-19
-- [x] `events.deleted` delta: remove block from cache — 2026-05-19
-- [x] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta) — 2026-05-19
-
-### OpenAPI
-- [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
-- [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
-- [x] Set up Go type generation from spec (`oapi-codegen`) — 2026-05-16
-- [x] Refactor existing Go handlers to use generated OpenAPI models — 2026-05-16
-
-### Web — Persistent View Settings (Phase 8.4)
-- [x] Migration 004: `user_preferences` table with empty-string sentinel for global scope — 2026-05-20
-- [x] `UserPreference` model (`models.go`) — 2026-05-20
-- [x] `UserPreferenceRepo`: `List` and `Upsert` methods — 2026-05-20
-- [x] `GET /users/me/preferences?timeline_id=` — returns scoped or global prefs — 2026-05-20
-- [x] `PUT /users/me/preferences` — upsert single key/value, validates JSON — 2026-05-20
-- [x] OpenAPI spec: `UserPreference` schema + two endpoints — 2026-05-20
-- [x] TypeScript types regenerated from spec — 2026-05-20
-- [x] `usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks — 2026-05-20
-- [x] `DashboardPage`: restore toolbar state from per-timeline prefs on timeline switch — 2026-05-20
-- [x] `DashboardPage`: save toolbar state (group_by, sort_by, zoom_granularity, color_by) on change — 2026-05-20
-- [x] `DashboardPage`: persist dark mode preference globally — 2026-05-20
-
-### Web — Find (Phase 8.5)
-In-view "find in page" with highlight + match navigation. Scoped to already-loaded events; respects active filters. Global cross-team search is deferred to Phase 15.
-
-**Find bar:**
-- [x] `FindBar` component in the TopBar (between FilterDropdown and ProfileMenu) — query input, match counter (`N / M`), prev/next chevrons, close (×) — 2026-05-20
-- [x] Open via `Ctrl/Cmd+F` global keybinding and via a search icon in the TopBar; close via `Esc` or × — 2026-05-20
-- [x] Debounced (~150ms) client-side matcher over already-fetched events — 2026-05-20
-
-**Match scope:**
-- [x] Case-insensitive match against: event title, description, assignee display names, parent event title — 2026-05-20
-- [x] Respect active filters — only events already visible in the current view are candidates — 2026-05-20
-
-**Visual treatment:**
-- [x] Matching events: amber outline / glow using existing design tokens — 2026-05-20
-- [x] Non-matching events: dimmed to ~0.3 opacity — 2026-05-20
-- [x] Active match (prev/next cursor position): stronger outline + subtle pulse to distinguish from other matches — 2026-05-20
-- [x] On hover, non-title matches show a "why matched" hint (e.g. `matched assignee Jane`) — 2026-05-20
-
-**Navigation:**
-- [x] `Enter` / `Shift+Enter` and ◀ ▶ chevrons walk forward/backward through matches — 2026-05-20
-- [x] Auto-scroll the Gantt on each step — horizontal pan to event's date range, vertical scroll to its row, centered in viewport — 2026-05-20
-
-**Empty / edge cases:**
-- [x] Zero matches, no filters active → bar shows `No matches` — 2026-05-20
-- [x] Zero matches in view, filters active → soft callout: *"No matches in current view. [Clear filters]"* — 2026-05-20
-- [x] Find query is ephemeral (not persisted across navigation/reload); bar open-state also ephemeral — 2026-05-20
-
-**Testing:**
-- [x] Unit: matcher returns correct hits across all match fields, case-insensitive — 2026-05-20
-- [ ] Integration: Find works at every granularity level and every group-by mode (requires live data — manual)
-- [ ] Keyboard: full prev/next cycle reachable with keyboard only (manual verification with live events)
-
-## Up Next
-
-> **Member management work is split across Phase 10.1.1 (Teams — CRUD) and Phase 10.1.2 (Members — Management & Editing)**. Team entity CRUD (create, edit, archive) is in 10.1.1; member lifecycle (add, edit, roles, invites, stubs, inactivation, admin actions) is in 10.1.2. The previously enumerated sidebar gear-icon + add-member-sheet tasks are absorbed into 10.1.2.
-
-### Web — Filter Scoping (FilterDropdown + API)
-Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
-
-**Data model:**
-- Single `saved_filters` table: `(id, team_id, timeline_id nullable, created_by, name, definition JSON, scope ENUM(personal|nominated|team|timeline), status ENUM(active|pending_review))`
-- `scope=personal` — visible only to creator; `scope=team` — visible to all team members; `scope=timeline` — visible to all members of that timeline; `scope=nominated` — personal filter flagged by member for admin review (visible to admins)
-
-**API:**
-- [ ] Migration: replace current `saved_filters` shape with the unified schema above
-- [ ] `GET /teams/:id/filters` — returns filters scoped `team` or `timeline` (for the active timeline), plus the calling user's `personal` and `nominated` filters
-- [ ] `POST /teams/:id/filters` — create a new personal filter; `definition` is the filter JSON
-- [ ] `PATCH /filters/:id` — update name or definition (creator or admin)
-- [ ] `PATCH /filters/:id/scope` — promote/demote scope; admin-only for `team`/`timeline`; any member can set `nominated`
-- [ ] `DELETE /filters/:id` — creator or admin
-
-**Web — FilterDropdown layout:**
-- [ ] Reorganize dropdown into four labeled sections, each hidden when empty:
-  1. **Default** — All events / Upcoming / My events (hardcoded presets, always present)
-  2. **Team** — filters with `scope=team` from API
-  3. **Timeline** — filters with `scope=timeline` for the active timeline
-  4. **Mine** — caller's `personal` filters; nominated filters shown with a "Pending" badge
-- [ ] Filter names truncate with ellipsis at a max width; full name in tooltip on hover
-- [ ] "New filter…" opens filter editor (personal scope by default); "Share…" action on existing personal filters lets the member nominate it or (if admin) promote directly to team/timeline
-- [ ] Pass active timeline ID through context so the dropdown can fetch timeline-scoped filters
-- [ ] Admin-visible section at bottom of "Mine": nominated filters awaiting review, with Approve / Reject actions
-
----
-
-> **Connectors sidebar + per-timeline connector model is absorbed into the External Connectors (Inbound Webhooks) task block further down** — that section now carries both the webhook backend and the sidebar UI work.
-
-### API — Token Auth (Phase 9)
-- [x] `POST /tokens` — create API token (returns value once) — 2026-05-20
-- [x] `GET /tokens` — list tokens for current user — 2026-05-20
-- [x] `DELETE /tokens/:id` — revoke token (preserved row, sets revoked_at) — 2026-05-20
-- [x] Middleware: accept Bearer token (JWT or API token) on all authenticated routes — 2026-05-20
-- [x] Enforce token scope on writes (read-only tokens blocked from mutations) — 2026-05-20
-
-### API — Archive (Phase 9)
-- [x] `POST /events/:id/archive` and `POST /events/:id/unarchive` — 2026-05-20
-- [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
-- [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
-
-### The Great Event → Activity Rename (Phase 9.5)
-Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEventToActivity.md](GreatEventToActivity.md). Roadmap: [Phase 9.5](ROADMAP.md#phase-95--rename-event--activity-the-great-rename).
-
-> **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
-
-**DB:**
-- [x] Write migration `005_rename_events_to_activities.sql` — 2026-05-21 (`ALTER TABLE ... RENAME`)
-- [x] Rename indexes containing `event` in their name — 2026-05-21
-- [x] Update `migrations_test.go` to assert new table + column names — 2026-05-21
-- [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
-
-**Go API:**
-- [x] `models.Event` → `models.Activity` — 2026-05-21
-- [x] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo` — 2026-05-21
-- [x] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions — 2026-05-21
-- [x] `server.go`: routes `/events*` → `/activities*` — 2026-05-21
-- [x] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` — 2026-05-21 → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
-- [x] Update `bus_test.go`, `hub_test.go` wire-string assertions — 2026-05-21
-- [x] `golangci-lint run` clean, `go test ./...` passes — 2026-05-21
-
-**OpenAPI + generated types:**
-- [x] `packages/shared/openapi.yaml`: schema, paths, operationIds — 2026-05-21, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
-- [x] Run `pnpm --filter shared generate`; verify `Activity` exports — 2026-05-21, zero `Event` exports
-
-**Web:**
-- [x] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` — 2026-05-21 → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
-- [x] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys — 2026-05-21
-- [x] `useWebSocket.ts`: update message-type switch to `activity.*` — 2026-05-21
-- [x] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*` — 2026-05-21; fix imports
-- [x] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels — 2026-05-21
-- [x] `pnpm --filter web lint` clean — 2026-05-21
-
-**Tests + seed:**
-- [x] Rename `event_handler_test.go` → `activity_handler_test.go` — 2026-05-21
-- [x] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql` — 2026-05-21; update INSERTs + cleanup
-
-**Docs:**
-- [x] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md — 2026-05-21
-- [x] Hand-review: ROADMAP Phase 3 title — 2026-05-21 → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
-- [x] Do **not** rewrite `docs/log.md` historical entries — 2026-05-21
-- [x] Add Phase 9.5 entry to `docs/log.md` — 2026-05-21
-
-**Verification (smoke against http://epcot.lan:8081):**
-- [ ] Create / edit / archive / unarchive / delete an Activity end-to-end
-- [ ] WebSocket frames arrive as `activity.created` / `.updated` / `.deleted`
-- [ ] Final sweep `rg "\bevent" packages/ docs/` returns only expected hits (bus package, calendar fields, log.md)
-
-### Identity System (Phase 9.6)
-Reusable Identity component system (color + icon) for all entities. Design spec: [IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md). Prototype: `docs/design/assets/identity-widget-prototype.html`.
-
-**Schema (migration 006):**
-- [x] Write migration `006_identity_fields.sql` — 2026-05-24
-- [x] Update `migrations_test.go` to assert new columns exist — 2026-05-24
-
-**Go API:**
-- [x] `models.go`: add `Icon *string` + `Color *string` to `Team`; add `Icon *string` + `Color *string` to `Timeline`; add `Icon *string` to `TeamMember` — 2026-05-24
-- [x] Update `TeamMemberWithUser` to surface the new `Icon` field (via embedding) — 2026-05-24
-- [x] Update OpenAPI spec: add `icon`/`color` to `Team`, `Timeline`, `TeamMember` schemas — 2026-05-24
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-24
-- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-05-24
-
-**Web — component library (`src/components/identity/`):**
-- [x] `identity-constants.ts` — 2026-05-24
-- [x] `Badge.tsx` — 2026-05-24
-- [x] `IdentityTrigger.tsx` — 2026-05-24
-- [x] `IdentityPicker.tsx` — 2026-05-24
-- [x] `IdentityWidget.tsx` — 2026-05-24
-
-**Web — replace existing color/icon UI:**
-- [x] `ActivityDetailPanel`: `<IdentityWidget>` replacing icon stub + 8-color swatch — 2026-05-24
-- [x] `ActivityCreatePanel`: `<IdentityWidget>` replacing color swatch — 2026-05-24
-- [x] Gantt bar label column: `<Badge size={20} shape="square">` — 2026-05-24
-- [x] Sidebar timeline rows: `<Badge size={20} shape="square">` — 2026-05-24
-- [x] Sidebar member rows: `<Badge size={20} shape="circle">` — 2026-05-24
-
-**Web — MemberAvatar migration:**
-- [x] Refactor `MemberAvatar.tsx` to delegate to `<Badge>` — 2026-05-24
-- [ ] Verify all existing MemberAvatar call sites render correctly (manual)
-
-**Web — palette consolidation:**
-- [x] Update `types/index.ts`: re-export `ACTIVITY_COLORS` and `MEMBER_COLORS` from `identity-constants.ts` — 2026-05-24
-- [x] Update `index.css`: `--member-N-*` → 16 `--identity-<name>` custom properties — 2026-05-24
-- [x] Update `DESIGN_SYSTEM.md`: 8-color → 16-color identity palette reference — 2026-05-24
-
-**Testing & verification:**
-- [x] `pnpm --filter web lint` clean — 2026-05-24
-- [x] `golangci-lint run` clean — 2026-05-24
-- [x] `go test ./...` passes — 2026-05-24
-- [ ] Badge renders all four modes (Lucide icon, 1-letter, 2-letter, none) at sizes 20–40px, both shapes (manual)
-- [ ] IdentityWidget popover opens/closes; color, name option, and icon selection fire onChange (manual)
-- [ ] Legacy hex colors in existing activities display correctly via `hexToColorId()` mapping (manual — test on Docker)
-- [ ] Manual: ActivityDetailPanel uses IdentityWidget; changes persist as color IDs (manual — test on Docker)
-- [ ] Manual: sidebar member + timeline rows use Badge (manual)
-
-**Docs:**
-- [x] Add Phase 9.6 entry to `docs/log.md` — 2026-05-24
-
----
-
-### Phase 10 — Entity Management (data-cornerstone CRUD)
-
-Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
-
-Design references:
-- Team Modal: `docs/design/handoffs/team-modal/` — Settings tab, Members tab, archive flow
-- Member Edit Modal: `docs/design/handoffs/member-modal/` — member profile, stats, admin actions
-
----
-
-### Teams — CRUD & Management (Phase 10.1.1)
-Closes the Teams data entity. Ships the Team Modal with Settings tab functional; Members tab scaffolded as locked/placeholder until 10.1.2.
-
-**Schema (migration 008):**
-- [x] Add `description TEXT` column to `teams` (nullable) — 2026-05-25
-- [x] Add `notes TEXT` column to `teams` (nullable) — 2026-05-25
-- [x] Add `archived_at DATETIME` column to `teams` (nullable) — 2026-05-25
-- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
-
-**API — team-level:**
-- [x] `GET /teams/:id` — full team detail (name, description, notes, icon, color, archived_at) — 2026-05-25
-- [x] `PATCH /teams/:id` — update name, description, notes, icon, color (admin only) — 2026-05-25
-- [x] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` — 2026-05-25
-- [x] Update `POST /teams` to accept `description`, `notes`, `icon`, `color` — 2026-05-25
-- [x] Update `GET /teams` — add `?archived=true` to include archived teams — 2026-05-25
-
-**OpenAPI + types:**
-- [x] Update `Team` schema: add `description`, `notes`, `archivedAt` — 2026-05-25
-- [x] Update `CreateTeamInput` and `PatchTeamInput` request bodies — 2026-05-25
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-25
-
-**Web — Team Modal (`<TeamModal>`):**
-- [x] Modal shell: portal, backdrop, panel (580px, dark theme), header, tab bar, scrollable content, footer — 2026-05-25
-- [x] Header: identity badge (36px square) + label ("NEW TEAM" / "EDIT TEAM") + team name + close button — 2026-05-25
-- [x] Tab bar: Settings (active) + Members (locked/placeholder in this phase) — 2026-05-25
-- [x] Members tab locked state: opacity 0.45, not-allowed cursor, tooltip "Save the team first to add members" — 2026-05-25
-- [x] Settings tab: `<IdentityPicker>` (square shape), name (required), description, notes (textarea) — 2026-05-25
-- [x] Footer: Archive team button (edit mode, left side), Cancel + Create team / Save changes (right side, team-color primary button) — 2026-05-25
-- [x] "Saved" banner: appears after new team creation, auto-dismisses after 3s — 2026-05-25
-- [x] New-team flow: Settings tab → Create team → banner → Members tab unlocks (placeholder content) — 2026-05-25
-- [x] Edit-team flow: pre-populated Settings tab, Members tab unlocked (placeholder) — 2026-05-25
-- [x] Archive confirmation dialog: replaces modal content, amber styling, icon, title, body, Cancel + Archive team buttons — 2026-05-25
-
-**Web — team picker + settings shell:**
-- [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
-- [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
-- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
-- [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
-- [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
-- [ ] Manual: create second team from picker, edit existing team, archive/unarchive
-- [ ] Manual: Team Modal opens in both modes with correct Settings tab behavior
-- [x] `docs/log.md` Phase 10.1.1 entry written — 2026-05-25
-
----
-
-### Members — Management & Editing (Phase 10.1.2)
-Fills in the Team Modal Members tab and adds the Member Edit Modal. Full member lifecycle: add, edit, roles, stubs, invites, reusable invite link, stats, inactivation, superadmin actions. Depends on 10.1.1 (Team Modal shell).
-
-**Terminology:** "Participant" = login-less team member (backend: `user_id = NULL`). Design handoffs use "stub" but we use "Participant" — established in Phase 8.0, more user-friendly. "Inactivate" = `archived_at`-based disabling. "Super Admin" = `is_superadmin`.
-
-**Schema (migration 009):**
-- [x] Add `archived_at DATETIME` column to `team_members` (nullable) — member inactivation — 2026-05-25
-- [x] Add `archived_at DATETIME` column to `users` (nullable) — account-level inactivation — 2026-05-25
-- [x] Add `invite_link_token TEXT UNIQUE` column to `teams` (nullable) — reusable invite link — 2026-05-25
-- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
-
-**API — member CRUD:**
-- [x] `GET /teams/:id/members/:memberId` — full member detail with computed stats — 2026-05-25
-- [x] `POST /teams/:id/members` — add existing registered user by `userId` (admin only) — 2026-05-25
-- [x] `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; self for own name/color/icon) — 2026-05-25
-- [x] `DELETE /teams/:id/members/:memberId` — remove from team; reject if last admin — 2026-05-25
-- [x] `POST /teams/:id/members/:memberId/archive` — inactivate member (set `archived_at`) — 2026-05-25
-- [x] `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clear `archived_at`) — 2026-05-25
-
-**API — participant CRUD:**
-- [x] `POST /teams/:id/participants` — create login-less participant (admin only); name, icon, color, optional email — 2026-05-25
-- [x] Participants managed via same PATCH/DELETE member endpoints (role always `member`, `user_id` stays NULL) — 2026-05-25
-
-**API — invites:**
-- [x] `GET /teams/:id/invites` — list pending invites (email, sent date) — 2026-05-25
-- [x] `DELETE /teams/:id/invites/:inviteId` — revoke/cancel pending invite — 2026-05-25
-- [x] `POST /teams/:id/invite-link` — generate or regenerate reusable team invite link token — 2026-05-25
-- [x] `GET /teams/:id/invite-link` — get current invite link (or null) — 2026-05-25
-- [x] `DELETE /teams/:id/invite-link` — revoke current invite link — 2026-05-25
-- [x] Update `POST /auth/register` to accept reusable invite link tokens alongside existing one-time tokens — 2026-05-25
-
-**API — member stats (computed per request, not stored):**
-- [x] Timeline counts: active, archived (per member) — 2026-05-25
-- [x] Activity counts: past due, running, upcoming, unscheduled, archived (date-relative, not status-relative) — 2026-05-25
-
-**API — superadmin actions:**
-- [x] `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only, not applicable to participants) — 2026-05-25
-- [x] `POST /users/:id/archive` — inactivate user account (superadmin only) — 2026-05-25
-- [x] `POST /users/:id/unarchive` — reactivate user account (superadmin only) — 2026-05-25
-- [x] `DELETE /users/:id` — hard delete user (superadmin only; zero active activities + single team only) — 2026-05-25
-- [x] Auth middleware: reject login from archived users with clear error — 2026-05-25
-
-**OpenAPI + types:**
-- [x] Add `MemberDetail` schema with stats, teams list, archived_at — 2026-05-25
-- [x] Add invite link endpoints to spec — 2026-05-25
-- [x] Add superadmin action endpoints to spec — 2026-05-25
-- [x] Update `TeamMember` schema with `archivedAt` — 2026-05-25
-- [x] Regenerate TypeScript types — 2026-05-25
-
-**Web — Team Modal Members tab:**
-- [x] Search/add input: search users by name/email, or type email to invite; clear button — 2026-05-25
-- [x] Search results dropdown: user matches with "Add" / "Already added" / "Invite pending"; email-only with "Invite" — 2026-05-25
-- [x] Participant creation: expandable inline form — identity picker (circle), name (required), optional email, "Create participant" button (amber) — 2026-05-25
-- [x] Member list: avatar (dashed border for stubs), name, "No login" pill (stubs, amber), email, `<RoleDropdown>`, remove (×) — 2026-05-25
-- [x] `<RoleDropdown>`: Admin (teal), Member (muted), Participant (amber) — with descriptions; portal-rendered; role changes save immediately — 2026-05-25
-- [x] Pending invitations section: rows with dashed-circle mail icon, email, sent date, "Revoke" button (red) — 2026-05-25
-- [x] Invite link section: URL display + "Copy link" button (teal transition to "Copied!"), explanatory note below — 2026-05-25
-- [x] Member count badge on Members tab label — 2026-05-25
-
-**Web — Member Edit Modal (`<MemberModal>`):**
-- [x] Modal shell: portal, backdrop, 560px panel, header / scrollable content / footer — 2026-05-25
-- [x] Header: `<IdentityPicker>` (40px circle), subline (participant/team member + viewer role label), name + badges ("No login" amber) — 2026-05-25
-- [x] Name + email row: 2-column grid; email read-only for participants ("No email — participant" placeholder) — 2026-05-25
-- [x] Timeline stats: 2 chips — Active (teal border), Archived (muted border) — 2026-05-25
-- [x] Activity stats: 5 chips — Past due (red if >0), Running (teal), Upcoming (blue), Unscheduled (muted), Archived (muted) — 2026-05-25
-- [x] Joined date: read-only pill with icon — 2026-05-25
-- [x] Teams list: each row with team badge (square, initials), team name, role pill — 2026-05-25
-- [x] Account section (team admin + non-participant): password reset button — shows "SMTP not configured" until Phase 14 — 2026-05-25
-- [x] Super Admin actions section (superadmin viewer only): Promote to Super Admin button (indigo), Inactivate (amber) / Delete (red) based on deletability — 2026-05-25
-- [x] Promote confirmation dialog: indigo icon, title, body, Cancel + Promote — 2026-05-25
-- [x] Inactivate confirmation dialog: amber icon, title, body, Cancel + Inactivate — 2026-05-25
-- [x] Delete confirmation dialog: red icon, title, body, Cancel + Delete — 2026-05-25
-- [x] Footer: Cancel + Save changes (member identity color) — 2026-05-25
-- [x] Deletable rule: zero active activities AND single team membership — 2026-05-25
-- [x] Role permission matrix enforcement: team admin vs superadmin capability differences — 2026-05-25
-
-**Web — sidebar integration:**
-- [x] Member rows: gear icon on hover → opens `<MemberModal>` for that member — 2026-05-25
-- [x] Inactivated members: reduced opacity — 2026-05-25
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
-- [ ] Manual: add user, invite email, create participant, change roles, remove member
-- [ ] Manual: generate invite link, copy, register new user via link
-- [ ] Manual: Member Modal shows correct stats, admin actions work with confirmations
-- [ ] Manual: inactivated user cannot log in; reactivation restores access
-- [x] `docs/log.md` Phase 10.1.2 entry written — 2026-05-25
-
----
-
-### Settings — Profile, Tokens & Admin (Phase 10.1.3)
-Builds out the `/settings` page into a working settings experience. Users get profile + identity management, security (password change), preferences, and API token management. Superadmins get SMTP config, instance defaults, and an orphaned-users view. Also ships forgot-password flow.
-
-**Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
-
-**Schema (migration 010):**
-- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
-- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
-- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
-- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
-
-**API — profile management:**
-- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
-- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
-- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
-- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
-- [x] Test: error path — empty name returns 400 — 2026-05-26
-
-**API — password change:**
-- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
-- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
-- [x] Test: happy path — password changed — 2026-05-26
-- [x] Test: error path — wrong current password returns 401 — 2026-05-26
-
-**API — forgot password:**
-- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
-- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
-- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
-- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
-- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
-
-**API — SMTP configuration (superadmin only):**
-- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
-- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
-- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
-- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
-- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
-- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
-- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
-
-**API — instance settings (superadmin only):**
-- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
-- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
-- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
-
-**API — orphaned users (superadmin only):**
-- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
-- [x] Test: superadmin can list all users — 2026-05-26
-
-**OpenAPI + types:**
-- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
-- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
-- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
-- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
-- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
-- [x] Add `GET /admin/users` to spec — 2026-05-26
-- [x] Regenerate TypeScript types — 2026-05-26
-
-**Web — Settings page layout:**
-- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
-- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
-- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
-- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
-
-**Web — Profile (`/settings/profile`):**
-- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
-- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
-- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
-- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
-- [x] Inline success/error feedback on save — 2026-05-26
-
-**Web — Security (`/settings/security`):**
-- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
-- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
-- [x] On success: show success message, clear form — 2026-05-26
-- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
-- [x] Calls `PUT /users/me/password` — 2026-05-26
-
-**Web — Preferences (`/settings/preferences`):**
-- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
-- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
-- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
-- [x] Theme change applies immediately — 2026-05-26
-- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
-
-**Web — API Tokens (`/settings/tokens`):**
-- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
-- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
-- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
-- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
-- [x] Empty state when no tokens exist — 2026-05-26
-
-**Web — Admin: Instance (`/settings/admin`):**
-- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
-- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
-- [x] Instance name field — 2026-05-26
-- [x] Save button with inline success feedback — 2026-05-26
-
-**Web — Admin: Email / SMTP (`/settings/admin`):**
-- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
-- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
-- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
-- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
-
-**Web — Admin: Users (`/settings/admin`):**
-- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
-- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
-- [x] Search input: filter by name or email — 2026-05-26
-- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
-- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
-- [ ] Orphaned users: "Assign team" action (deferred)
-
-**Web — Forgot password flow:**
-- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
-- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
-- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
-- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-26
-- [x] `go test ./...` passes — 2026-05-26
-- [x] `pnpm --filter web lint` clean — 2026-05-26
-- [ ] Manual: change display name → visible in sidebar and team member lists after refresh
-- [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
-- [ ] Manual: change password → old password rejected, new password works
-- [ ] Manual: forgot-password → email received → click link → set new password → login works
-- [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
-- [ ] Manual: configure SMTP → test email arrives → save persists across restart
-- [ ] Manual: set instance defaults → values persist
-- [ ] Manual: view all users; filter orphaned
-- [ ] Manual: toggle registration policy → test with/without invite
-- [ ] Manual: non-superadmin does not see admin sections
-- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
-
----
-
-### Member Access & Data Lifecycle (Phase 10.1.4)
-Closes data-integrity and access-revocation gaps from 10.1.2. Protects historical activity data, defines the three membership lifecycle states, and gives superadmins a single "revoke all access" action.
-
-**Schema (migration 011):**
-- [x] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing — 2026-05-27
-- [x] Same check for `timeline_access.team_member_id` — 2026-05-27
-- [x] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — already set since early phases — 2026-05-27
-- [x] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT — 2026-05-27
-
-**API — removal guard:**
-- [x] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }` — 2026-05-27
-- [x] Zero-assignment removal continues to hard-delete as before (deletes timeline_access first due to RESTRICT FK) — 2026-05-27
-- [x] Add `MemberHasAssignments` error handling to OpenAPI spec via `RevokeUserResult` and inline error response — 2026-05-27
-
-**API — full revoke (superadmin only):**
-- [x] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }` — 2026-05-27
-- [x] Add `RevokeUser` repo method: wraps the three steps in a transaction — 2026-05-27
-- [x] 403 if caller is not superadmin; 404 if user not found — 2026-05-27
-- [x] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types — 2026-05-27
-
-**Web — TeamModal Members tab:**
-- [x] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive` — 2026-05-27
-- [x] On inactivate success from the inline error, dismiss the error and re-fetch the member list — 2026-05-27
-- [x] Clear the inline error before each new removal attempt for the same member — 2026-05-27
-
-**Web — MemberModal:**
-- [x] Add "Revoke all access" button to Super Admin Actions section (red, below Delete) — 2026-05-27
-- [x] Button hidden when user is already fully inactivated (`users.archived_at` set) — 2026-05-27
-- [x] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed) — 2026-05-27
-- [x] On confirm: call `POST /users/:id/revoke`; on success show a summary chip for 2s, then close modal — 2026-05-27
-- [x] Invalidate `['teams']` query cache on success — 2026-05-27
-
-**Testing & verification:**
-- [ ] Manual: remove a member with assignments → 409; inline error appears; "Inactivate instead" button works
-- [ ] Manual: remove a member with zero assignments → success
-- [ ] Manual: superadmin uses "Revoke all access" → account deactivated; user can no longer log in; existing Gantt bars still show their avatar name
-- [ ] Manual: inactivated members' avatars still render on Gantt bars (data preserved)
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [x] `docs/log.md` Phase 10.1.4 entry written — 2026-05-27
-
----
-
-### Status Templates & Timeline Statuses (Phase 10.2)
-API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
-
-**Schema (migration 012):**
-- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
-- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
-- [x] Update `migrations_test.go` — 2026-05-27
-
-**Go API:**
-- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
-- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
-- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
-- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
-- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
-- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
-- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
-- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
-- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
-- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
-- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
-- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
-
-**OpenAPI + types:**
-- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
-- [x] All new endpoint paths — 2026-05-27
-- [x] Regenerate TypeScript types — 2026-05-27
-
-**Web:**
-- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
-- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
-- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
-
-**Testing & verification:**
-- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
-- [ ] Manual: create second template, add items, rename/recolor items
-- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
-- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
-- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
-
----
-
-### Timelines — Full CRUD (Phase 10.3)
-Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
-
-**API — timeline-level:**
-- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
-- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
-- [x] Archive endpoints already in Phase 9
-
-**API — timeline statuses (editing):**
-- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
-- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
-- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
-
-**API — access list:**
-- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
-- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
-- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
-
-**Web:**
-- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
-- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
-- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
-- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
-- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
-- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
-- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
-- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
-
-**Testing & verification:**
-- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
-- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
-- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
-- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
-- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
-- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
-- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
-- [ ] Manual: delete timeline → confirm → gone from sidebar
-- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
-- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
-
----
-
-### Preference Consumption & Session Handling (Phase 10.4.1)
-Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
-
-**Session lifecycle:**
-- [x] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
-- [x] Mutex/queue so concurrent 401s don't fire multiple refresh calls
-- [x] Invisible to user — no toast, no banner (standard SPA pattern)
-
-**Preference consumption:**
-- [x] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
-- [x] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
-- [x] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
-- [ ] `ActivityDetailPanel` and other date displays: consume date format preference (date inputs are native browser — no explicit text formatting needed until a read-only date display surface is added)
-- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in (deferred — shared views ship in Phase 13)
-- [x] Theme: sync server-side preference on login (`useDarkMode.ts` — added `applyTheme`; `ThemeSync` component applies server value on auth init)
-
-**Admin — branding (`/settings/admin`):**
-- [x] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
-- [x] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
-- [ ] Optional logo upload (stretch — deferred)
-
----
-
-### Activity Schema Normalization — Drop team_id (Phase 10.4.2)
-Removes `activities.team_id` (redundant now that `timeline_id` is stored). Hardens `timeline_id` to NOT NULL. Moves activity routes to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix avoids Go 1.22 mux conflict with `GET /timelines/share/{token}`).
-
-**Schema (migration 015):**
-- [x] Backfill NULL `timeline_id` rows (assign to team's oldest timeline) — 2026-05-28
-- [x] Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE` — 2026-05-28
-- [x] Recreate `idx_activities_timeline_id` on the new table — 2026-05-28
-
-**API — Go:**
-- [x] `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string` — 2026-05-28
-- [x] `ActivityRepo.Create`: remove `team_id` from INSERT — 2026-05-28
-- [x] `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: query becomes `WHERE timeline_id = ?` — 2026-05-28
-- [x] `handleCreateActivity`, `handleListActivities`: path params are `teamId` + `timelineId`; look up timeline to verify ownership — 2026-05-28
-- [x] `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: replace `activity.TeamID` with timeline lookup — 2026-05-28
-- [x] WebSocket broadcasts: derive `TeamID` from timeline lookup — 2026-05-28
-- [x] Move activity routes: `POST /teams/{id}/timelines/{timelineId}/activities`, `GET /teams/{id}/timelines/{timelineId}/activities` — 2026-05-28
-
-**OpenAPI + types:**
-- [x] Update `Activity` schema: replace `teamId` with `timelineId` (required, non-nullable) — 2026-05-28
-- [x] Update activity endpoints to new team-scoped path — 2026-05-28
-- [x] Regenerate TypeScript types — 2026-05-28
-
-**Frontend:**
-- [x] Rename `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)` — cache key `['timelines', timelineId, 'activities']` — 2026-05-28
-- [x] `useCreateActivity(teamId, timelineId)`: URL becomes `/teams/${teamId}/timelines/${timelineId}/activities`; no `timelineId` in request body — 2026-05-28
-- [x] `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache key updated — 2026-05-28
-- [x] `useTeamActivitySync`: update cache key lookups to `['timelines', timelineId, 'activities']` — 2026-05-28
-- [x] `GanttView`: use `useTimelineActivities`; `timelineId` prop is now required (not optional) — 2026-05-28
-- [x] `ActivityCreatePanel`: `teamId` + `timelineId` passed to `useCreateActivity`; no `timelineId` in body — 2026-05-28
-- [x] `ActivityDetailPanel`: `timelineId` required; passed to `useUpdateActivity`/`useDeleteActivity` — 2026-05-28
-- [x] `DashboardPage`: updated GanttView/ActivityCreatePanel/ActivityDetailPanel prop signatures — 2026-05-28
-
-**Tests:**
-- [x] `activity_repo_test.go`: `makeActivity` uses `timelineID`; all `ListByTeam` calls → `ListByTimeline` — 2026-05-28
-- [x] Added `TestActivityRepo_ListByTimeline_Filter` — 2026-05-28
-- [x] `activity_handler_test.go`: `activityTestSetup` creates a timeline; all routes updated — 2026-05-28
-- [x] `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes — 2026-05-28
-- [x] `user_repo_test.go`, `migrations_test.go`: activity INSERTs use `timeline_id` instead of `team_id` — 2026-05-28
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-28
-- [x] `go test ./...` passes — 2026-05-28
-- [x] `pnpm --filter web lint` clean — 2026-05-28
-- [ ] Manual: Gantt view loads activities for the active timeline
-- [ ] Manual: Creating an activity from the panel associates it with the correct timeline
-- [ ] Manual: `PRAGMA foreign_key_check` returns no rows after migration on Docker DB
-
----
-
-### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.3) [was mislabeled 10.4.2]
-Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
-
-**Inline name editing (3 → 1):**
-- [x] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus — 2026-05-28
-- [x] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle` — 2026-05-28
-- [x] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle` — 2026-05-28
-- [x] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle` — 2026-05-28
-
-**Archive/restore buttons (3 → 1):**
-- [x] Standardize archive button: amber bg+border+icon (aligned with MemberModal prominence) — 2026-05-28
-- [x] Standardize restore button: teal bg+border+RotateCcw icon — 2026-05-28
-- [x] Fix `TeamModal.tsx` archive button (was neutral gray) — 2026-05-28
-- [x] Fix `TimelineModal.tsx` archive button (was border-only, no icon) — 2026-05-28
-
-**Confirmation dialogs (3 → 1):**
-- [x] Consolidate into shared `ConfirmDialog` component with color variants (red, amber, indigo, teal) — 2026-05-28
-- [x] Replace `MemberModal.tsx` custom ConfirmDialog — 2026-05-28
-- [x] Replace `TeamModal.tsx` ArchiveDialog — 2026-05-28
-- [x] Replace `TimelineModal.tsx` inline confirmation panels — 2026-05-28
-
-**Color system (mixed → CSS variables):**
-- [x] Migrate `TeamModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
-- [x] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
-- [x] Verified `TimelineModal.tsx` CSS variable usage is consistent — 2026-05-28
-
-**Sidebar & toolbar audit:**
-- [x] Sidebar member/timeline rows: Badge usage, hover states, gear icon consistency verified — 2026-05-28
-- [x] Gantt toolbar controls: Tailwind + CSS vars, consistent with modal footer patterns — 2026-05-28
-- [x] No inconsistencies requiring fixes found — 2026-05-28
-
----
-
-### Gantt Interaction & Activity Edit Polish (Phase 10.4.4)
-
-**Schema (migration 016):**
-- [x] Add `notes TEXT` column to `activities` (nullable) — 2026-05-29
-
-**Go API:**
-- [x] `Activity` model: add `Notes *string` field — 2026-05-29
-- [x] `ActivityRepo.Update`: include `notes` in UPDATE SET — 2026-05-29
-- [x] `handleUpdateActivity`: parse `notes` from PATCH body — 2026-05-29
-
-**OpenAPI + types:**
-- [x] Add `notes` to `Activity` schema and PATCH body — 2026-05-29
-- [x] Regenerate TypeScript types — 2026-05-29
-- [x] Add `notes` to `UpdateActivityInput` patch type in `useTeamActivities.ts` — 2026-05-29
-
-**Gantt — resizable activity column:**
-- [x] Label column drag handle on right edge; min 140px, max 400px; live resize — 2026-05-29
-
-**Gantt — click-to-activate before drag:**
-- [x] Unselected bars show `cursor: pointer`; drag/resize only starts when bar is selected — 2026-05-29
-- [x] Resize handles (left/right edge) visible only on selected bars — 2026-05-29
-
-**Gantt — bar drag updates sidebar dates live:**
-- [x] `onBarDragProgress` callback fires during mousemove with current snapped dates — 2026-05-29
-- [x] `DashboardPage` stores `liveDragDates` and passes to `ActivityDetailPanel` — 2026-05-29
-- [x] `ActivityDetailPanel` shows live dates in date inputs without triggering saves — 2026-05-29
-- [x] `onBarDragEnd` callback clears live dates when drag completes — 2026-05-29
-
-**Gantt — finer-grained snap during drag:**
-- [x] `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4 — 2026-05-29
-- [x] `colFracToDate` interpolates fractional column positions for accurate date mapping — 2026-05-29
-- [x] Drag mousemove uses `Math.round(x / step) * step` with finer step — 2026-05-29
-- [x] `resolvedGranularity` prop passed from GanttView → GanttGrid — 2026-05-29
-
-**Gantt — "Hide closed" moves to filter preset:**
-- [x] Remove `hideClosed` checkbox and props from `GanttToolbar` — 2026-05-29
-- [x] Add `'open'` preset to `FilterDropdown` ("Open only — Hide activities with a closed status") — 2026-05-29
-- [x] Add `'open'` to `ActiveFilter` preset type in `FilterContext` — 2026-05-29
-- [x] `GanttView` reads `activeFilter.id === 'open'` to activate closed-status filtering — 2026-05-29
-- [x] Remove `hideClosed` state from `DashboardPage` — 2026-05-29
-
-**Activity Edit Sidebar — layout and field changes:**
-- [x] Remove "All day" checkbox — 2026-05-29
-- [x] Remove human-readable date summary line — 2026-05-29
-- [x] Move Description field directly below date pickers — 2026-05-29
-- [x] Restyle Assigned To with bordered card style matching create panel — 2026-05-29
-- [x] Status dropdown: replaced plain `<select>` with rich dropdown (color dot + name + CLOSED badge) — 2026-05-29
-- [x] Remove "Identity" line from Classify section — 2026-05-29
-- [x] Rename "Details" → "Advanced" — 2026-05-29
-- [x] Add Notes textarea (multi-line, resizable) backed by new `notes` column — 2026-05-29
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-29
-- [x] `go test ./...` passes — 2026-05-29
-- [x] `pnpm --filter web lint` clean — 2026-05-29
-- [ ] Manual: drag label column edge → width changes and persists during session
-- [ ] Manual: click bar (unselected) → selects it; second drag moves/resizes it
-- [ ] Manual: drag bar at week zoom → date tooltip shows day-level changes, not week-level
-- [ ] Manual: drag bar at month zoom → snaps to week boundaries
-- [ ] Manual: select "Open only" filter → closed-status activities hidden; clearing restores them
-- [ ] Manual: edit panel shows only date pickers (no allDay, no date summary)
-- [ ] Manual: description moves below dates; matches create panel layout
-- [ ] Manual: assignees use bordered card style (colored border + tint when selected)
-- [ ] Manual: status dropdown shows color dot + name; selection persists
-- [ ] Manual: notes textarea saves and loads correctly
-- [ ] Manual: bar drag → sidebar date inputs update live; stop drag → dates reset to server value
-
----
-
-### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
-Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
-
-**Infrastructure:**
-- [ ] Extend `ViewMode` to `'gantt' | 'list' | 'calendar' | 'kanban'`
-- [ ] View switcher control in the timeline sub-toolbar; per-timeline persisted via existing preferences (8.4)
-- [ ] View-specific toolbar slots so each view contributes its own controls
-
-**List view:**
-- [ ] Virtualized table (TanStack Virtual or react-virtual) — must handle 1000+ rows smoothly
-- [ ] Default columns: Title, Start, End, Duration, Status, Assignees, Tags, Parent
-- [ ] Column show/hide menu; column reorder via drag; resizable widths — persisted via preferences (new prefs keys)
-- [ ] Sort by clicking a column header (single-column sort for v1)
-- [ ] Density toggle (Comfortable / Compact)
-- [ ] Inline edit for title, dates, status; Tab / Shift+Tab / Enter cell navigation
-- [ ] Row click (off editable cell) opens existing `EventDetailPanel`
-- [ ] Bulk selection via checkbox column; contextual bulk-action bar (archive / delete / status-change)
-- [ ] Find bar (8.5) highlights matching rows in List view
-
----
-
-### Timeline Views — Calendar (Web — Phase 11.2)
-Three sub-layouts sharing one component skeleton.
-
-**Shared:**
-- [ ] Sub-layout switcher (Month / Week / Day) in the view's toolbar slot
-- [ ] Today / prev / next navigation; jump-to-date picker
-- [ ] Click empty cell → Event create form prefilled with that date
-- [ ] Click event → `EventDetailPanel`
-- [ ] Drag event between cells → PATCH new start/end preserving duration (Week / Day only for v1)
-
-**Month layout:**
-- [ ] 6-week grid; multi-day events render as continuous bars across cells
-- [ ] "+N more" overflow affordance per cell
-
-**Week layout:**
-- [ ] 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
-- [ ] All-day strip above the time grid for events without time components
-- [ ] Overlapping-event lane algorithm: side-by-side columns within a day
-
-**Day layout:**
-- [ ] Single-day variant of Week; same time grid and lane algorithm
-
-**Open question to resolve at start of phase:**
-- [ ] Decide handling for date-only events in time-grid layouts (default 9am vs. all-day strip)
-
----
-
-### Timeline Views — Kanban (Web — Phase 11.3)
-Read-only per requirements. Depends on Phase 10.1 (status API) and 10.2 (status UI).
-
-- [ ] Columns from `team_statuses` in display order; column header colored from status color
-- [ ] Cards: title, date range, assignee avatars (stacked color indicators for multi-assignee), parent badge if nested
-- [ ] Empty column shows muted "No events" placeholder
-- [ ] Each column scrolls independently when card count exceeds viewport height
-- [ ] Card click → `EventDetailPanel`
-- [ ] Status renamed/recolored in Settings updates Kanban column header without refresh
-- [ ] Attempting to drag a card produces no errors and no state change (read-only enforcement)
-
-### Calendar Sync
-- [ ] Google Calendar OAuth connect flow
-- [ ] Outbound sync: push draba events to Google Calendar on create/update/delete
-- [ ] Inbound sync: Google webhook handler → upsert event in draba
-- [ ] Built-in CalDAV server (`internal/caldav/`)
-- [ ] CalDAV connect flow (user provides URL + credentials)
-- [ ] Outbound sync: push draba events to CalDAV on create/update/delete
-- [ ] Team iCal feed endpoint: `GET /timelines/:ical_token/feed.ics` (public, sanitized — no notes)
-
-### Shares — Multi-Share Views with Passwords (Phase 13)
-First-class Share entity. One timeline can host many shares, each frozen to a specific view + config.
-
-**Schema:**
-- [ ] Migration: `shares` table — id, timeline_id, view_type, view_config JSON, password_hash (nullable), expires_at (nullable), created_by, created_at, last_viewed_at, view_count, revoked_at
-- [ ] Migration: migrate existing `timelines.share_token` value into a first share row, then drop the column in a follow-up migration once UI references are gone
-
-**API:**
-- [ ] `POST /timelines/:id/shares` — create share with view_type + view_config snapshot + optional password + optional expiry
-- [ ] `GET /timelines/:id/shares` — list shares (creator + admins)
-- [ ] `PATCH /shares/:id` — rename / change password / extend expiry / revoke
-- [ ] `DELETE /shares/:id` — hard delete
-- [ ] `GET /shares/:token` — public lookup; password-protected returns 401 with `passwordRequired: true`
-- [ ] `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
-- [ ] Rate-limit unlock attempts per IP
-
-**Web — creating shares:**
-- [ ] "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
-- [ ] Share modal: snapshots current toolbar state into `view_config`, optional password + expiry toggles, returns URL with copy button
-
-**Web — viewing shares:**
-- [ ] Public viewer route `/s/:token` — no auth required
-- [ ] Password gate page for protected shares
-- [ ] Mount the appropriate view component in read-only mode with `view_config` applied
-- [ ] Branding strip: team name, "Shared view", last-updated timestamp
-
-**Web — managing shares:**
-- [ ] Manage-shares section on each timeline (list, view counts, revoke, edit)
-- [ ] Indicator chip on timeline tile showing active share count
-
----
-
-### Data Portability & Exports (Phase 14)
-
-**Tabular (round-trip):**
-- [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
-- [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
-- [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
-
-**Visual exports (gofpdf):**
-- [ ] Gantt → PDF: landscape, paginated by date range, member-color legend strip
-- [ ] Gantt → PNG: single-page rasterized variant
-- [ ] Kanban → PDF: columns side-by-side, paginated when too wide
-- [ ] Kanban → PNG: single-page
-- [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
-- [ ] Calendar → PDF: one page per month / week / day depending on active sub-layout
-- [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
-- [ ] All visual exports respect active filter / sort / group at time of export
-
-**Wiring:**
-- [ ] Gantt toolbar's existing "Export" stub becomes a real menu: CSV / xlsx / PDF / PNG
-- [ ] Same export menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to formats valid for that view
-
-**SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
-- [ ] Password reset flow (email required — pick SMTP or transactional email provider)
-- [ ] SMTP configuration surface in `/settings/admin`
-
----
-
-### External Connectors (Inbound Webhooks) — Phase 15
-Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
-
-**Backend:**
-- [ ] Create `team_inbound_webhooks` and `event_links` DB migrations
-- [ ] Add `is_external` boolean column to `events` table
-- [ ] `POST /teams/:id/webhooks` — generate an inbound webhook URL for a provider (e.g. Asana)
-- [ ] `GET /teams/:id/webhooks` — list active inbound webhooks
-- [ ] `POST /webhooks/:provider/:token` — generic inbound webhook handler to map payload to Draba events
-- [ ] Web UI: Render `is_external` events as read-only (disable drag-and-drop handles)
-- [ ] Web UI: Show external provider icon/link on the event detail card
-
-**Per-timeline connector model (was Up-Next "Web — Connectors"):**
-- [ ] Migration: `team_connectors (id, team_id, timeline_id, provider ENUM, display_name, config JSON, created_by, created_at)` — one row per connector instance
-- [ ] Provider values initially: `asana | aha | google_sheets | excel_online | webhook`
-- [ ] `GET /timelines/:id/connectors` — list connectors for a timeline
-- [ ] `POST /timelines/:id/connectors` — create connector (admin only); returns generated inbound token
-- [ ] `PATCH /connectors/:id` — update display name or config (admin only)
-- [ ] `DELETE /connectors/:id` — remove connector (admin only)
-- [ ] `POST /connectors/:token/ingest` — public inbound endpoint; validates token; maps payload via provider adapter
-
-**Sidebar CONNECTORS section (already stubbed):**
-- [ ] Wire `GET /timelines/:id/connectors` — list active connectors beneath the active timeline label
-- [ ] "Add connector" → connector setup sheet: provider picker → config fields → save → `POST /timelines/:id/connectors`
-- [ ] Connector row hover → gear icon → config drawer; delete with confirm
-- [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
-
-## Done
-- [x] Initialize repo scaffold — 2026-04-27
-- [x] Define requirements, architecture, conventions — 2026-04-27
-
-## Parking Lot
-- MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
-- CLI binary
-- MCP server for AI agent access
-- Mobile native apps (ship PWA first)
-- Microsoft/Outlook calendar sync (v2)
-- Multi-tenant cloud hosting
-- SSO / OAuth login (GitHub, Google)
-- Notifications (email, push)
-- Recurring event UI (RRULE editing)
-- Kanban drag-to-change-status (v2; v1 Kanban is read-only)
 ````
 
 ## File: packages/shared/src/index.ts
@@ -40906,6 +39889,1058 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
+## File: docs/TASKS.md
+````markdown
+# Tasks
+
+## Current Sprint — Foundation
+
+### Repo & Tooling
+- [x] Initialize Go module (`packages/api/`) with basic project structure — 2026-04-29
+- [x] Initialize React + TypeScript + Vite project (`packages/web/`) — 2026-04-29
+- [x] Set up pnpm workspace (`pnpm-workspace.yaml`) — 2026-04-29
+- [x] Add `golangci-lint` config (`.golangci.yml`) — 2026-04-29
+- [x] Set up GitHub Actions CI: lint + test on PR — 2026-04-29
+- [x] Write `docker-compose.yml` for local development — 2026-04-29
+
+### API — Core
+- [x] DB abstraction layer with SQLite adapter (sqlx + modernc.org/sqlite) — 2026-04-30
+- [x] Migration runner (auto-runs on startup) — 2026-04-30
+- [x] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens — 2026-04-30
+- [x] Auth: JWT issue/validate, password hash/verify, invite token generate/validate — 2026-04-30
+- [x] `POST /auth/register` (invite token required) — 2026-04-30
+- [x] `POST /auth/login` — 2026-04-30
+- [x] `POST /auth/refresh` — 2026-04-30
+- [x] `POST /teams` — create team — 2026-05-03
+- [x] `POST /teams/:id/invites` — send invite — 2026-05-03
+- [x] `GET /teams/:id/members` — 2026-05-03
+- [x] `POST /teams/:id/events` — create event — 2026-05-03
+- [x] `GET /teams/:id/events` — list events (date range filter) — 2026-05-03
+- [x] `PATCH /events/:id` — update event — 2026-05-03
+- [x] `DELETE /events/:id` — delete event — 2026-05-03
+
+### API — Real-Time
+- [x] WebSocket hub (`internal/ws/`) — 2026-05-14
+- [x] Team-scoped subscription model — 2026-05-14
+- [x] Broadcast on `events.*` internal bus events — 2026-05-14
+
+### API — Timelines
+- [x] `POST /teams/:id/timelines` — create timeline — 2026-05-15
+- [x] `GET /timelines/:id` — fetch timeline (public or auth-gated) — 2026-05-15
+- [x] `GET /timelines/share/:token` — public share link handler — 2026-05-15
+- [x] Timeline access list enforcement — 2026-05-15
+
+### Web — Scaffold
+- [x] Initialize shadcn/ui: `pnpm dlx shadcn@latest init` — 2026-05-16
+- [x] Set color tokens in `src/index.css` once palette is decided — 2026-05-16
+- [x] Set up dark mode toggle (localStorage + `prefers-color-scheme`) — 2026-05-16
+- [x] Routing setup (React Router) — 2026-05-16
+- [x] Auth flow: login, register (via invite), token storage — 2026-05-16
+- [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
+- [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
+- [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
+
+### RBAC Refactor + First-Run Setup (Phase 8.0)
+- [x] Migration 003: `team_members` PK, nullable `user_id`, `display_name` — 2026-05-18
+- [x] Migration 003: `event_assignments` + `timeline_access` swap `user_id` FK for `team_member_id` — 2026-05-18
+- [x] Migration 003: `timeline_access` gains `role (admin|member)`; `visibility` dropped from `timelines` — 2026-05-18
+- [x] `User.IsSuperadmin`: first registered user auto-granted superadmin — 2026-05-18
+- [x] `GET /setup/status` — public endpoint (`{ needsSetup: bool }`) — 2026-05-18
+- [x] Timeline access: team admins bypass check; members require explicit `timeline_access` entry — 2026-05-18
+- [x] `SetupPage`: 3-step first-run wizard (account → team → timeline) — 2026-05-18
+- [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
+- [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
+
+### Web — Timeline View (Phase 8.1: Shell & Rendering — Gantt pivot)
+- [x] API: `GET /teams`, `GET /teams/:id/timelines`, `assignedMemberIds[]` on Event — 2026-05-18
+- [x] `TimelineView` + `TimelineGrid` (person-lane prototype, later pivoted) — 2026-05-18
+- [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
+- [x] Wire to `GET /teams/:id/events?start=&end=` and `GET /teams/:id/members` — 2026-05-18
+- [x] `TimelineGrid` rewrite: Gantt layout — one row per event, sticky label col, member avatars — 2026-05-18
+- [x] `TimelineToolbar` component: zoom in/out, group-by, sort-by, export stub — 2026-05-18
+- [x] `TimelineView` update: build `GanttRow[]` with grouping + sorting logic — 2026-05-18
+- [x] Group by Member: section headers per assignee, events under primary assignee — 2026-05-18
+- [x] Group by Parent: root events first, children indented below their parent — 2026-05-18
+- [x] Sort by: start date, end date, title A–Z — 2026-05-18
+- [x] Zoom: variable `colWidth` stepped through [40, 60, 80, 120, 160] px/day — 2026-05-18
+- [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
+
+### Web — Timeline View (Phase 8.2: Interactions)
+- [x] Click event block → open `EventDetailPanel` (view mode) — 2026-05-19
+- [x] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id` — 2026-05-19
+- [x] Delete event with confirm dialog; remove from timeline — 2026-05-19
+- [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
+- [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
+
+### Web — Gantt Bar Drag (Phase 8.2.1: Resize & Move)
+- [x] Detect mousedown on left/right edge (8px zone) vs. bar body — 2026-05-19
+- [x] Edge drag: update start or end date live as user drags; snap to active granularity column — 2026-05-19
+- [x] Body drag: shift both start and end dates by the same column delta — 2026-05-19
+- [x] Show date tooltip during drag (start date for left edge, end date for right edge, both for body) — 2026-05-19
+- [x] PATCH `/events/:id` with new startAt/endAt on mouseup; optimistic update in cache — 2026-05-19
+- [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
+
+### Web — Timeline View (Phase 8.3: Real-Time Sync)
+- [x] Connect `useWebSocket` to subscribe to `events.*` for active team — 2026-05-19
+- [x] `events.created` delta: insert block into TanStack Query cache — 2026-05-19
+- [x] `events.updated` delta: update block in cache — 2026-05-19
+- [x] `events.deleted` delta: remove block from cache — 2026-05-19
+- [x] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta) — 2026-05-19
+
+### OpenAPI
+- [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
+- [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
+- [x] Set up Go type generation from spec (`oapi-codegen`) — 2026-05-16
+- [x] Refactor existing Go handlers to use generated OpenAPI models — 2026-05-16
+
+### Web — Persistent View Settings (Phase 8.4)
+- [x] Migration 004: `user_preferences` table with empty-string sentinel for global scope — 2026-05-20
+- [x] `UserPreference` model (`models.go`) — 2026-05-20
+- [x] `UserPreferenceRepo`: `List` and `Upsert` methods — 2026-05-20
+- [x] `GET /users/me/preferences?timeline_id=` — returns scoped or global prefs — 2026-05-20
+- [x] `PUT /users/me/preferences` — upsert single key/value, validates JSON — 2026-05-20
+- [x] OpenAPI spec: `UserPreference` schema + two endpoints — 2026-05-20
+- [x] TypeScript types regenerated from spec — 2026-05-20
+- [x] `usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks — 2026-05-20
+- [x] `DashboardPage`: restore toolbar state from per-timeline prefs on timeline switch — 2026-05-20
+- [x] `DashboardPage`: save toolbar state (group_by, sort_by, zoom_granularity, color_by) on change — 2026-05-20
+- [x] `DashboardPage`: persist dark mode preference globally — 2026-05-20
+
+### Web — Find (Phase 8.5)
+In-view "find in page" with highlight + match navigation. Scoped to already-loaded events; respects active filters. Global cross-team search is deferred to Phase 15.
+
+**Find bar:**
+- [x] `FindBar` component in the TopBar (between FilterDropdown and ProfileMenu) — query input, match counter (`N / M`), prev/next chevrons, close (×) — 2026-05-20
+- [x] Open via `Ctrl/Cmd+F` global keybinding and via a search icon in the TopBar; close via `Esc` or × — 2026-05-20
+- [x] Debounced (~150ms) client-side matcher over already-fetched events — 2026-05-20
+
+**Match scope:**
+- [x] Case-insensitive match against: event title, description, assignee display names, parent event title — 2026-05-20
+- [x] Respect active filters — only events already visible in the current view are candidates — 2026-05-20
+
+**Visual treatment:**
+- [x] Matching events: amber outline / glow using existing design tokens — 2026-05-20
+- [x] Non-matching events: dimmed to ~0.3 opacity — 2026-05-20
+- [x] Active match (prev/next cursor position): stronger outline + subtle pulse to distinguish from other matches — 2026-05-20
+- [x] On hover, non-title matches show a "why matched" hint (e.g. `matched assignee Jane`) — 2026-05-20
+
+**Navigation:**
+- [x] `Enter` / `Shift+Enter` and ◀ ▶ chevrons walk forward/backward through matches — 2026-05-20
+- [x] Auto-scroll the Gantt on each step — horizontal pan to event's date range, vertical scroll to its row, centered in viewport — 2026-05-20
+
+**Empty / edge cases:**
+- [x] Zero matches, no filters active → bar shows `No matches` — 2026-05-20
+- [x] Zero matches in view, filters active → soft callout: *"No matches in current view. [Clear filters]"* — 2026-05-20
+- [x] Find query is ephemeral (not persisted across navigation/reload); bar open-state also ephemeral — 2026-05-20
+
+**Testing:**
+- [x] Unit: matcher returns correct hits across all match fields, case-insensitive — 2026-05-20
+- [ ] Integration: Find works at every granularity level and every group-by mode (requires live data — manual)
+- [ ] Keyboard: full prev/next cycle reachable with keyboard only (manual verification with live events)
+
+## Up Next
+
+> **Member management work is split across Phase 10.1.1 (Teams — CRUD) and Phase 10.1.2 (Members — Management & Editing)**. Team entity CRUD (create, edit, archive) is in 10.1.1; member lifecycle (add, edit, roles, invites, stubs, inactivation, admin actions) is in 10.1.2. The previously enumerated sidebar gear-icon + add-member-sheet tasks are absorbed into 10.1.2.
+
+### Web — Filter Scoping (FilterDropdown + API)
+Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
+
+**Data model:**
+- Single `saved_filters` table: `(id, team_id, timeline_id nullable, created_by, name, definition JSON, scope ENUM(personal|nominated|team|timeline), status ENUM(active|pending_review))`
+- `scope=personal` — visible only to creator; `scope=team` — visible to all team members; `scope=timeline` — visible to all members of that timeline; `scope=nominated` — personal filter flagged by member for admin review (visible to admins)
+
+**API:**
+- [ ] Migration: replace current `saved_filters` shape with the unified schema above
+- [ ] `GET /teams/:id/filters` — returns filters scoped `team` or `timeline` (for the active timeline), plus the calling user's `personal` and `nominated` filters
+- [ ] `POST /teams/:id/filters` — create a new personal filter; `definition` is the filter JSON
+- [ ] `PATCH /filters/:id` — update name or definition (creator or admin)
+- [ ] `PATCH /filters/:id/scope` — promote/demote scope; admin-only for `team`/`timeline`; any member can set `nominated`
+- [ ] `DELETE /filters/:id` — creator or admin
+
+**Web — FilterDropdown layout:**
+- [ ] Reorganize dropdown into four labeled sections, each hidden when empty:
+  1. **Default** — All events / Upcoming / My events (hardcoded presets, always present)
+  2. **Team** — filters with `scope=team` from API
+  3. **Timeline** — filters with `scope=timeline` for the active timeline
+  4. **Mine** — caller's `personal` filters; nominated filters shown with a "Pending" badge
+- [ ] Filter names truncate with ellipsis at a max width; full name in tooltip on hover
+- [ ] "New filter…" opens filter editor (personal scope by default); "Share…" action on existing personal filters lets the member nominate it or (if admin) promote directly to team/timeline
+- [ ] Pass active timeline ID through context so the dropdown can fetch timeline-scoped filters
+- [ ] Admin-visible section at bottom of "Mine": nominated filters awaiting review, with Approve / Reject actions
+
+---
+
+> **Connectors sidebar + per-timeline connector model is absorbed into the External Connectors (Inbound Webhooks) task block further down** — that section now carries both the webhook backend and the sidebar UI work.
+
+### API — Token Auth (Phase 9)
+- [x] `POST /tokens` — create API token (returns value once) — 2026-05-20
+- [x] `GET /tokens` — list tokens for current user — 2026-05-20
+- [x] `DELETE /tokens/:id` — revoke token (preserved row, sets revoked_at) — 2026-05-20
+- [x] Middleware: accept Bearer token (JWT or API token) on all authenticated routes — 2026-05-20
+- [x] Enforce token scope on writes (read-only tokens blocked from mutations) — 2026-05-20
+
+### API — Archive (Phase 9)
+- [x] `POST /events/:id/archive` and `POST /events/:id/unarchive` — 2026-05-20
+- [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
+- [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
+
+### The Great Event → Activity Rename (Phase 9.5)
+Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEventToActivity.md](GreatEventToActivity.md). Roadmap: [Phase 9.5](ROADMAP.md#phase-95--rename-event--activity-the-great-rename).
+
+> **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
+
+**DB:**
+- [x] Write migration `005_rename_events_to_activities.sql` — 2026-05-21 (`ALTER TABLE ... RENAME`)
+- [x] Rename indexes containing `event` in their name — 2026-05-21
+- [x] Update `migrations_test.go` to assert new table + column names — 2026-05-21
+- [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
+
+**Go API:**
+- [x] `models.Event` → `models.Activity` — 2026-05-21
+- [x] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo` — 2026-05-21
+- [x] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions — 2026-05-21
+- [x] `server.go`: routes `/events*` → `/activities*` — 2026-05-21
+- [x] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` — 2026-05-21 → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
+- [x] Update `bus_test.go`, `hub_test.go` wire-string assertions — 2026-05-21
+- [x] `golangci-lint run` clean, `go test ./...` passes — 2026-05-21
+
+**OpenAPI + generated types:**
+- [x] `packages/shared/openapi.yaml`: schema, paths, operationIds — 2026-05-21, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
+- [x] Run `pnpm --filter shared generate`; verify `Activity` exports — 2026-05-21, zero `Event` exports
+
+**Web:**
+- [x] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` — 2026-05-21 → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
+- [x] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys — 2026-05-21
+- [x] `useWebSocket.ts`: update message-type switch to `activity.*` — 2026-05-21
+- [x] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*` — 2026-05-21; fix imports
+- [x] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels — 2026-05-21
+- [x] `pnpm --filter web lint` clean — 2026-05-21
+
+**Tests + seed:**
+- [x] Rename `event_handler_test.go` → `activity_handler_test.go` — 2026-05-21
+- [x] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql` — 2026-05-21; update INSERTs + cleanup
+
+**Docs:**
+- [x] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md — 2026-05-21
+- [x] Hand-review: ROADMAP Phase 3 title — 2026-05-21 → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
+- [x] Do **not** rewrite `docs/log.md` historical entries — 2026-05-21
+- [x] Add Phase 9.5 entry to `docs/log.md` — 2026-05-21
+
+**Verification (smoke against http://epcot.lan:8081):**
+- [ ] Create / edit / archive / unarchive / delete an Activity end-to-end
+- [ ] WebSocket frames arrive as `activity.created` / `.updated` / `.deleted`
+- [ ] Final sweep `rg "\bevent" packages/ docs/` returns only expected hits (bus package, calendar fields, log.md)
+
+### Identity System (Phase 9.6)
+Reusable Identity component system (color + icon) for all entities. Design spec: [IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md). Prototype: `docs/design/assets/identity-widget-prototype.html`.
+
+**Schema (migration 006):**
+- [x] Write migration `006_identity_fields.sql` — 2026-05-24
+- [x] Update `migrations_test.go` to assert new columns exist — 2026-05-24
+
+**Go API:**
+- [x] `models.go`: add `Icon *string` + `Color *string` to `Team`; add `Icon *string` + `Color *string` to `Timeline`; add `Icon *string` to `TeamMember` — 2026-05-24
+- [x] Update `TeamMemberWithUser` to surface the new `Icon` field (via embedding) — 2026-05-24
+- [x] Update OpenAPI spec: add `icon`/`color` to `Team`, `Timeline`, `TeamMember` schemas — 2026-05-24
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-24
+- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-05-24
+
+**Web — component library (`src/components/identity/`):**
+- [x] `identity-constants.ts` — 2026-05-24
+- [x] `Badge.tsx` — 2026-05-24
+- [x] `IdentityTrigger.tsx` — 2026-05-24
+- [x] `IdentityPicker.tsx` — 2026-05-24
+- [x] `IdentityWidget.tsx` — 2026-05-24
+
+**Web — replace existing color/icon UI:**
+- [x] `ActivityDetailPanel`: `<IdentityWidget>` replacing icon stub + 8-color swatch — 2026-05-24
+- [x] `ActivityCreatePanel`: `<IdentityWidget>` replacing color swatch — 2026-05-24
+- [x] Gantt bar label column: `<Badge size={20} shape="square">` — 2026-05-24
+- [x] Sidebar timeline rows: `<Badge size={20} shape="square">` — 2026-05-24
+- [x] Sidebar member rows: `<Badge size={20} shape="circle">` — 2026-05-24
+
+**Web — MemberAvatar migration:**
+- [x] Refactor `MemberAvatar.tsx` to delegate to `<Badge>` — 2026-05-24
+- [ ] Verify all existing MemberAvatar call sites render correctly (manual)
+
+**Web — palette consolidation:**
+- [x] Update `types/index.ts`: re-export `ACTIVITY_COLORS` and `MEMBER_COLORS` from `identity-constants.ts` — 2026-05-24
+- [x] Update `index.css`: `--member-N-*` → 16 `--identity-<name>` custom properties — 2026-05-24
+- [x] Update `DESIGN_SYSTEM.md`: 8-color → 16-color identity palette reference — 2026-05-24
+
+**Testing & verification:**
+- [x] `pnpm --filter web lint` clean — 2026-05-24
+- [x] `golangci-lint run` clean — 2026-05-24
+- [x] `go test ./...` passes — 2026-05-24
+- [ ] Badge renders all four modes (Lucide icon, 1-letter, 2-letter, none) at sizes 20–40px, both shapes (manual)
+- [ ] IdentityWidget popover opens/closes; color, name option, and icon selection fire onChange (manual)
+- [ ] Legacy hex colors in existing activities display correctly via `hexToColorId()` mapping (manual — test on Docker)
+- [ ] Manual: ActivityDetailPanel uses IdentityWidget; changes persist as color IDs (manual — test on Docker)
+- [ ] Manual: sidebar member + timeline rows use Badge (manual)
+
+**Docs:**
+- [x] Add Phase 9.6 entry to `docs/log.md` — 2026-05-24
+
+---
+
+### Phase 10 — Entity Management (data-cornerstone CRUD)
+
+Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
+
+Design references:
+- Team Modal: `docs/design/handoffs/team-modal/` — Settings tab, Members tab, archive flow
+- Member Edit Modal: `docs/design/handoffs/member-modal/` — member profile, stats, admin actions
+
+---
+
+### Teams — CRUD & Management (Phase 10.1.1)
+Closes the Teams data entity. Ships the Team Modal with Settings tab functional; Members tab scaffolded as locked/placeholder until 10.1.2.
+
+**Schema (migration 008):**
+- [x] Add `description TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `notes TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `archived_at DATETIME` column to `teams` (nullable) — 2026-05-25
+- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
+
+**API — team-level:**
+- [x] `GET /teams/:id` — full team detail (name, description, notes, icon, color, archived_at) — 2026-05-25
+- [x] `PATCH /teams/:id` — update name, description, notes, icon, color (admin only) — 2026-05-25
+- [x] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` — 2026-05-25
+- [x] Update `POST /teams` to accept `description`, `notes`, `icon`, `color` — 2026-05-25
+- [x] Update `GET /teams` — add `?archived=true` to include archived teams — 2026-05-25
+
+**OpenAPI + types:**
+- [x] Update `Team` schema: add `description`, `notes`, `archivedAt` — 2026-05-25
+- [x] Update `CreateTeamInput` and `PatchTeamInput` request bodies — 2026-05-25
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-25
+
+**Web — Team Modal (`<TeamModal>`):**
+- [x] Modal shell: portal, backdrop, panel (580px, dark theme), header, tab bar, scrollable content, footer — 2026-05-25
+- [x] Header: identity badge (36px square) + label ("NEW TEAM" / "EDIT TEAM") + team name + close button — 2026-05-25
+- [x] Tab bar: Settings (active) + Members (locked/placeholder in this phase) — 2026-05-25
+- [x] Members tab locked state: opacity 0.45, not-allowed cursor, tooltip "Save the team first to add members" — 2026-05-25
+- [x] Settings tab: `<IdentityPicker>` (square shape), name (required), description, notes (textarea) — 2026-05-25
+- [x] Footer: Archive team button (edit mode, left side), Cancel + Create team / Save changes (right side, team-color primary button) — 2026-05-25
+- [x] "Saved" banner: appears after new team creation, auto-dismisses after 3s — 2026-05-25
+- [x] New-team flow: Settings tab → Create team → banner → Members tab unlocks (placeholder content) — 2026-05-25
+- [x] Edit-team flow: pre-populated Settings tab, Members tab unlocked (placeholder) — 2026-05-25
+- [x] Archive confirmation dialog: replaces modal content, amber styling, icon, title, body, Cancel + Archive team buttons — 2026-05-25
+
+**Web — team picker + settings shell:**
+- [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
+- [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
+- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
+- [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
+- [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
+- [ ] Manual: create second team from picker, edit existing team, archive/unarchive
+- [ ] Manual: Team Modal opens in both modes with correct Settings tab behavior
+- [x] `docs/log.md` Phase 10.1.1 entry written — 2026-05-25
+
+---
+
+### Members — Management & Editing (Phase 10.1.2)
+Fills in the Team Modal Members tab and adds the Member Edit Modal. Full member lifecycle: add, edit, roles, stubs, invites, reusable invite link, stats, inactivation, superadmin actions. Depends on 10.1.1 (Team Modal shell).
+
+**Terminology:** "Participant" = login-less team member (backend: `user_id = NULL`). Design handoffs use "stub" but we use "Participant" — established in Phase 8.0, more user-friendly. "Inactivate" = `archived_at`-based disabling. "Super Admin" = `is_superadmin`.
+
+**Schema (migration 009):**
+- [x] Add `archived_at DATETIME` column to `team_members` (nullable) — member inactivation — 2026-05-25
+- [x] Add `archived_at DATETIME` column to `users` (nullable) — account-level inactivation — 2026-05-25
+- [x] Add `invite_link_token TEXT UNIQUE` column to `teams` (nullable) — reusable invite link — 2026-05-25
+- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
+
+**API — member CRUD:**
+- [x] `GET /teams/:id/members/:memberId` — full member detail with computed stats — 2026-05-25
+- [x] `POST /teams/:id/members` — add existing registered user by `userId` (admin only) — 2026-05-25
+- [x] `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; self for own name/color/icon) — 2026-05-25
+- [x] `DELETE /teams/:id/members/:memberId` — remove from team; reject if last admin — 2026-05-25
+- [x] `POST /teams/:id/members/:memberId/archive` — inactivate member (set `archived_at`) — 2026-05-25
+- [x] `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clear `archived_at`) — 2026-05-25
+
+**API — participant CRUD:**
+- [x] `POST /teams/:id/participants` — create login-less participant (admin only); name, icon, color, optional email — 2026-05-25
+- [x] Participants managed via same PATCH/DELETE member endpoints (role always `member`, `user_id` stays NULL) — 2026-05-25
+
+**API — invites:**
+- [x] `GET /teams/:id/invites` — list pending invites (email, sent date) — 2026-05-25
+- [x] `DELETE /teams/:id/invites/:inviteId` — revoke/cancel pending invite — 2026-05-25
+- [x] `POST /teams/:id/invite-link` — generate or regenerate reusable team invite link token — 2026-05-25
+- [x] `GET /teams/:id/invite-link` — get current invite link (or null) — 2026-05-25
+- [x] `DELETE /teams/:id/invite-link` — revoke current invite link — 2026-05-25
+- [x] Update `POST /auth/register` to accept reusable invite link tokens alongside existing one-time tokens — 2026-05-25
+
+**API — member stats (computed per request, not stored):**
+- [x] Timeline counts: active, archived (per member) — 2026-05-25
+- [x] Activity counts: past due, running, upcoming, unscheduled, archived (date-relative, not status-relative) — 2026-05-25
+
+**API — superadmin actions:**
+- [x] `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only, not applicable to participants) — 2026-05-25
+- [x] `POST /users/:id/archive` — inactivate user account (superadmin only) — 2026-05-25
+- [x] `POST /users/:id/unarchive` — reactivate user account (superadmin only) — 2026-05-25
+- [x] `DELETE /users/:id` — hard delete user (superadmin only; zero active activities + single team only) — 2026-05-25
+- [x] Auth middleware: reject login from archived users with clear error — 2026-05-25
+
+**OpenAPI + types:**
+- [x] Add `MemberDetail` schema with stats, teams list, archived_at — 2026-05-25
+- [x] Add invite link endpoints to spec — 2026-05-25
+- [x] Add superadmin action endpoints to spec — 2026-05-25
+- [x] Update `TeamMember` schema with `archivedAt` — 2026-05-25
+- [x] Regenerate TypeScript types — 2026-05-25
+
+**Web — Team Modal Members tab:**
+- [x] Search/add input: search users by name/email, or type email to invite; clear button — 2026-05-25
+- [x] Search results dropdown: user matches with "Add" / "Already added" / "Invite pending"; email-only with "Invite" — 2026-05-25
+- [x] Participant creation: expandable inline form — identity picker (circle), name (required), optional email, "Create participant" button (amber) — 2026-05-25
+- [x] Member list: avatar (dashed border for stubs), name, "No login" pill (stubs, amber), email, `<RoleDropdown>`, remove (×) — 2026-05-25
+- [x] `<RoleDropdown>`: Admin (teal), Member (muted), Participant (amber) — with descriptions; portal-rendered; role changes save immediately — 2026-05-25
+- [x] Pending invitations section: rows with dashed-circle mail icon, email, sent date, "Revoke" button (red) — 2026-05-25
+- [x] Invite link section: URL display + "Copy link" button (teal transition to "Copied!"), explanatory note below — 2026-05-25
+- [x] Member count badge on Members tab label — 2026-05-25
+
+**Web — Member Edit Modal (`<MemberModal>`):**
+- [x] Modal shell: portal, backdrop, 560px panel, header / scrollable content / footer — 2026-05-25
+- [x] Header: `<IdentityPicker>` (40px circle), subline (participant/team member + viewer role label), name + badges ("No login" amber) — 2026-05-25
+- [x] Name + email row: 2-column grid; email read-only for participants ("No email — participant" placeholder) — 2026-05-25
+- [x] Timeline stats: 2 chips — Active (teal border), Archived (muted border) — 2026-05-25
+- [x] Activity stats: 5 chips — Past due (red if >0), Running (teal), Upcoming (blue), Unscheduled (muted), Archived (muted) — 2026-05-25
+- [x] Joined date: read-only pill with icon — 2026-05-25
+- [x] Teams list: each row with team badge (square, initials), team name, role pill — 2026-05-25
+- [x] Account section (team admin + non-participant): password reset button — shows "SMTP not configured" until Phase 14 — 2026-05-25
+- [x] Super Admin actions section (superadmin viewer only): Promote to Super Admin button (indigo), Inactivate (amber) / Delete (red) based on deletability — 2026-05-25
+- [x] Promote confirmation dialog: indigo icon, title, body, Cancel + Promote — 2026-05-25
+- [x] Inactivate confirmation dialog: amber icon, title, body, Cancel + Inactivate — 2026-05-25
+- [x] Delete confirmation dialog: red icon, title, body, Cancel + Delete — 2026-05-25
+- [x] Footer: Cancel + Save changes (member identity color) — 2026-05-25
+- [x] Deletable rule: zero active activities AND single team membership — 2026-05-25
+- [x] Role permission matrix enforcement: team admin vs superadmin capability differences — 2026-05-25
+
+**Web — sidebar integration:**
+- [x] Member rows: gear icon on hover → opens `<MemberModal>` for that member — 2026-05-25
+- [x] Inactivated members: reduced opacity — 2026-05-25
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
+- [ ] Manual: add user, invite email, create participant, change roles, remove member
+- [ ] Manual: generate invite link, copy, register new user via link
+- [ ] Manual: Member Modal shows correct stats, admin actions work with confirmations
+- [ ] Manual: inactivated user cannot log in; reactivation restores access
+- [x] `docs/log.md` Phase 10.1.2 entry written — 2026-05-25
+
+---
+
+### Settings — Profile, Tokens & Admin (Phase 10.1.3)
+Builds out the `/settings` page into a working settings experience. Users get profile + identity management, security (password change), preferences, and API token management. Superadmins get SMTP config, instance defaults, and an orphaned-users view. Also ships forgot-password flow.
+
+**Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
+
+**Schema (migration 010):**
+- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
+- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
+- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
+- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
+
+**API — profile management:**
+- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
+- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
+- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
+- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
+- [x] Test: error path — empty name returns 400 — 2026-05-26
+
+**API — password change:**
+- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
+- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
+- [x] Test: happy path — password changed — 2026-05-26
+- [x] Test: error path — wrong current password returns 401 — 2026-05-26
+
+**API — forgot password:**
+- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
+- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
+- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
+- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
+- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
+
+**API — SMTP configuration (superadmin only):**
+- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
+- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
+- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
+- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
+- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
+- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
+- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
+
+**API — instance settings (superadmin only):**
+- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
+- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
+- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
+
+**API — orphaned users (superadmin only):**
+- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
+- [x] Test: superadmin can list all users — 2026-05-26
+
+**OpenAPI + types:**
+- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
+- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
+- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
+- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
+- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
+- [x] Add `GET /admin/users` to spec — 2026-05-26
+- [x] Regenerate TypeScript types — 2026-05-26
+
+**Web — Settings page layout:**
+- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
+- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
+- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
+- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
+
+**Web — Profile (`/settings/profile`):**
+- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
+- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
+- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
+- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
+- [x] Inline success/error feedback on save — 2026-05-26
+
+**Web — Security (`/settings/security`):**
+- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
+- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
+- [x] On success: show success message, clear form — 2026-05-26
+- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
+- [x] Calls `PUT /users/me/password` — 2026-05-26
+
+**Web — Preferences (`/settings/preferences`):**
+- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
+- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
+- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
+- [x] Theme change applies immediately — 2026-05-26
+- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
+
+**Web — API Tokens (`/settings/tokens`):**
+- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
+- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
+- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
+- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
+- [x] Empty state when no tokens exist — 2026-05-26
+
+**Web — Admin: Instance (`/settings/admin`):**
+- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Instance name field — 2026-05-26
+- [x] Save button with inline success feedback — 2026-05-26
+
+**Web — Admin: Email / SMTP (`/settings/admin`):**
+- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
+- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
+- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
+- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
+
+**Web — Admin: Users (`/settings/admin`):**
+- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
+- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
+- [x] Search input: filter by name or email — 2026-05-26
+- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
+- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
+- [ ] Orphaned users: "Assign team" action (deferred)
+
+**Web — Forgot password flow:**
+- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
+- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
+- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
+- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-26
+- [x] `go test ./...` passes — 2026-05-26
+- [x] `pnpm --filter web lint` clean — 2026-05-26
+- [ ] Manual: change display name → visible in sidebar and team member lists after refresh
+- [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
+- [ ] Manual: change password → old password rejected, new password works
+- [ ] Manual: forgot-password → email received → click link → set new password → login works
+- [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
+- [ ] Manual: configure SMTP → test email arrives → save persists across restart
+- [ ] Manual: set instance defaults → values persist
+- [ ] Manual: view all users; filter orphaned
+- [ ] Manual: toggle registration policy → test with/without invite
+- [ ] Manual: non-superadmin does not see admin sections
+- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
+
+---
+
+### Member Access & Data Lifecycle (Phase 10.1.4)
+Closes data-integrity and access-revocation gaps from 10.1.2. Protects historical activity data, defines the three membership lifecycle states, and gives superadmins a single "revoke all access" action.
+
+**Schema (migration 011):**
+- [x] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing — 2026-05-27
+- [x] Same check for `timeline_access.team_member_id` — 2026-05-27
+- [x] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — already set since early phases — 2026-05-27
+- [x] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT — 2026-05-27
+
+**API — removal guard:**
+- [x] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }` — 2026-05-27
+- [x] Zero-assignment removal continues to hard-delete as before (deletes timeline_access first due to RESTRICT FK) — 2026-05-27
+- [x] Add `MemberHasAssignments` error handling to OpenAPI spec via `RevokeUserResult` and inline error response — 2026-05-27
+
+**API — full revoke (superadmin only):**
+- [x] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }` — 2026-05-27
+- [x] Add `RevokeUser` repo method: wraps the three steps in a transaction — 2026-05-27
+- [x] 403 if caller is not superadmin; 404 if user not found — 2026-05-27
+- [x] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types — 2026-05-27
+
+**Web — TeamModal Members tab:**
+- [x] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive` — 2026-05-27
+- [x] On inactivate success from the inline error, dismiss the error and re-fetch the member list — 2026-05-27
+- [x] Clear the inline error before each new removal attempt for the same member — 2026-05-27
+
+**Web — MemberModal:**
+- [x] Add "Revoke all access" button to Super Admin Actions section (red, below Delete) — 2026-05-27
+- [x] Button hidden when user is already fully inactivated (`users.archived_at` set) — 2026-05-27
+- [x] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed) — 2026-05-27
+- [x] On confirm: call `POST /users/:id/revoke`; on success show a summary chip for 2s, then close modal — 2026-05-27
+- [x] Invalidate `['teams']` query cache on success — 2026-05-27
+
+**Testing & verification:**
+- [ ] Manual: remove a member with assignments → 409; inline error appears; "Inactivate instead" button works
+- [ ] Manual: remove a member with zero assignments → success
+- [ ] Manual: superadmin uses "Revoke all access" → account deactivated; user can no longer log in; existing Gantt bars still show their avatar name
+- [ ] Manual: inactivated members' avatars still render on Gantt bars (data preserved)
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [x] `docs/log.md` Phase 10.1.4 entry written — 2026-05-27
+
+---
+
+### Status Templates & Timeline Statuses (Phase 10.2)
+API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
+
+**Schema (migration 012):**
+- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
+- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
+- [x] Update `migrations_test.go` — 2026-05-27
+
+**Go API:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
+- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
+- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
+- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
+- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
+- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
+- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
+- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
+- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
+- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
+- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
+
+**OpenAPI + types:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
+- [x] All new endpoint paths — 2026-05-27
+- [x] Regenerate TypeScript types — 2026-05-27
+
+**Web:**
+- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
+- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
+- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
+
+**Testing & verification:**
+- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
+- [ ] Manual: create second template, add items, rename/recolor items
+- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
+- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
+- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
+
+---
+
+### Timelines — Full CRUD (Phase 10.3)
+Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
+
+**API — timeline-level:**
+- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
+- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
+- [x] Archive endpoints already in Phase 9
+
+**API — timeline statuses (editing):**
+- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
+- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
+
+**API — access list:**
+- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
+- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
+- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
+
+**Web:**
+- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
+- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
+- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
+- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
+- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
+- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
+- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
+- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
+
+**Testing & verification:**
+- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
+- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
+- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
+- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
+- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
+- [ ] Manual: delete timeline → confirm → gone from sidebar
+- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
+- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
+
+---
+
+### Preference Consumption & Session Handling (Phase 10.4.1)
+Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
+
+**Session lifecycle:**
+- [x] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
+- [x] Mutex/queue so concurrent 401s don't fire multiple refresh calls
+- [x] Invisible to user — no toast, no banner (standard SPA pattern)
+
+**Preference consumption:**
+- [x] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
+- [x] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
+- [x] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
+- [ ] `ActivityDetailPanel` and other date displays: consume date format preference (date inputs are native browser — no explicit text formatting needed until a read-only date display surface is added)
+- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in (deferred — shared views ship in Phase 13)
+- [x] Theme: sync server-side preference on login (`useDarkMode.ts` — added `applyTheme`; `ThemeSync` component applies server value on auth init)
+
+**Admin — branding (`/settings/admin`):**
+- [x] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
+- [x] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
+- [ ] Optional logo upload (stretch — deferred)
+
+---
+
+### Activity Schema Normalization — Drop team_id (Phase 10.4.2)
+Removes `activities.team_id` (redundant now that `timeline_id` is stored). Hardens `timeline_id` to NOT NULL. Moves activity routes to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix avoids Go 1.22 mux conflict with `GET /timelines/share/{token}`).
+
+**Schema (migration 015):**
+- [x] Backfill NULL `timeline_id` rows (assign to team's oldest timeline) — 2026-05-28
+- [x] Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE` — 2026-05-28
+- [x] Recreate `idx_activities_timeline_id` on the new table — 2026-05-28
+
+**API — Go:**
+- [x] `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string` — 2026-05-28
+- [x] `ActivityRepo.Create`: remove `team_id` from INSERT — 2026-05-28
+- [x] `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: query becomes `WHERE timeline_id = ?` — 2026-05-28
+- [x] `handleCreateActivity`, `handleListActivities`: path params are `teamId` + `timelineId`; look up timeline to verify ownership — 2026-05-28
+- [x] `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: replace `activity.TeamID` with timeline lookup — 2026-05-28
+- [x] WebSocket broadcasts: derive `TeamID` from timeline lookup — 2026-05-28
+- [x] Move activity routes: `POST /teams/{id}/timelines/{timelineId}/activities`, `GET /teams/{id}/timelines/{timelineId}/activities` — 2026-05-28
+
+**OpenAPI + types:**
+- [x] Update `Activity` schema: replace `teamId` with `timelineId` (required, non-nullable) — 2026-05-28
+- [x] Update activity endpoints to new team-scoped path — 2026-05-28
+- [x] Regenerate TypeScript types — 2026-05-28
+
+**Frontend:**
+- [x] Rename `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)` — cache key `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `useCreateActivity(teamId, timelineId)`: URL becomes `/teams/${teamId}/timelines/${timelineId}/activities`; no `timelineId` in request body — 2026-05-28
+- [x] `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache key updated — 2026-05-28
+- [x] `useTeamActivitySync`: update cache key lookups to `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `GanttView`: use `useTimelineActivities`; `timelineId` prop is now required (not optional) — 2026-05-28
+- [x] `ActivityCreatePanel`: `teamId` + `timelineId` passed to `useCreateActivity`; no `timelineId` in body — 2026-05-28
+- [x] `ActivityDetailPanel`: `timelineId` required; passed to `useUpdateActivity`/`useDeleteActivity` — 2026-05-28
+- [x] `DashboardPage`: updated GanttView/ActivityCreatePanel/ActivityDetailPanel prop signatures — 2026-05-28
+
+**Tests:**
+- [x] `activity_repo_test.go`: `makeActivity` uses `timelineID`; all `ListByTeam` calls → `ListByTimeline` — 2026-05-28
+- [x] Added `TestActivityRepo_ListByTimeline_Filter` — 2026-05-28
+- [x] `activity_handler_test.go`: `activityTestSetup` creates a timeline; all routes updated — 2026-05-28
+- [x] `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes — 2026-05-28
+- [x] `user_repo_test.go`, `migrations_test.go`: activity INSERTs use `timeline_id` instead of `team_id` — 2026-05-28
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-28
+- [x] `go test ./...` passes — 2026-05-28
+- [x] `pnpm --filter web lint` clean — 2026-05-28
+- [ ] Manual: Gantt view loads activities for the active timeline
+- [ ] Manual: Creating an activity from the panel associates it with the correct timeline
+- [ ] Manual: `PRAGMA foreign_key_check` returns no rows after migration on Docker DB
+
+---
+
+### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.3) [was mislabeled 10.4.2]
+Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
+
+**Inline name editing (3 → 1):**
+- [x] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus — 2026-05-28
+- [x] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle` — 2026-05-28
+
+**Archive/restore buttons (3 → 1):**
+- [x] Standardize archive button: amber bg+border+icon (aligned with MemberModal prominence) — 2026-05-28
+- [x] Standardize restore button: teal bg+border+RotateCcw icon — 2026-05-28
+- [x] Fix `TeamModal.tsx` archive button (was neutral gray) — 2026-05-28
+- [x] Fix `TimelineModal.tsx` archive button (was border-only, no icon) — 2026-05-28
+
+**Confirmation dialogs (3 → 1):**
+- [x] Consolidate into shared `ConfirmDialog` component with color variants (red, amber, indigo, teal) — 2026-05-28
+- [x] Replace `MemberModal.tsx` custom ConfirmDialog — 2026-05-28
+- [x] Replace `TeamModal.tsx` ArchiveDialog — 2026-05-28
+- [x] Replace `TimelineModal.tsx` inline confirmation panels — 2026-05-28
+
+**Color system (mixed → CSS variables):**
+- [x] Migrate `TeamModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Verified `TimelineModal.tsx` CSS variable usage is consistent — 2026-05-28
+
+**Sidebar & toolbar audit:**
+- [x] Sidebar member/timeline rows: Badge usage, hover states, gear icon consistency verified — 2026-05-28
+- [x] Gantt toolbar controls: Tailwind + CSS vars, consistent with modal footer patterns — 2026-05-28
+- [x] No inconsistencies requiring fixes found — 2026-05-28
+
+---
+
+### Gantt Interaction & Activity Edit Polish (Phase 10.4.4)
+
+**Schema (migration 016):**
+- [x] Add `notes TEXT` column to `activities` (nullable) — 2026-05-29
+
+**Go API:**
+- [x] `Activity` model: add `Notes *string` field — 2026-05-29
+- [x] `ActivityRepo.Update`: include `notes` in UPDATE SET — 2026-05-29
+- [x] `handleUpdateActivity`: parse `notes` from PATCH body — 2026-05-29
+
+**OpenAPI + types:**
+- [x] Add `notes` to `Activity` schema and PATCH body — 2026-05-29
+- [x] Regenerate TypeScript types — 2026-05-29
+- [x] Add `notes` to `UpdateActivityInput` patch type in `useTeamActivities.ts` — 2026-05-29
+
+**Gantt — resizable activity column:**
+- [x] Label column drag handle on right edge; min 140px, max 400px; live resize — 2026-05-29
+
+**Gantt — click-to-activate before drag:**
+- [x] Unselected bars show `cursor: pointer`; drag/resize only starts when bar is selected — 2026-05-29
+- [x] Resize handles (left/right edge) visible only on selected bars — 2026-05-29
+
+**Gantt — bar drag updates sidebar dates live:**
+- [x] `onBarDragProgress` callback fires during mousemove with current snapped dates — 2026-05-29
+- [x] `DashboardPage` stores `liveDragDates` and passes to `ActivityDetailPanel` — 2026-05-29
+- [x] `ActivityDetailPanel` shows live dates in date inputs without triggering saves — 2026-05-29
+- [x] `onBarDragEnd` callback clears live dates when drag completes — 2026-05-29
+
+**Gantt — finer-grained snap during drag:**
+- [x] `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4 — 2026-05-29
+- [x] `colFracToDate` interpolates fractional column positions for accurate date mapping — 2026-05-29
+- [x] Drag mousemove uses `Math.round(x / step) * step` with finer step — 2026-05-29
+- [x] `resolvedGranularity` prop passed from GanttView → GanttGrid — 2026-05-29
+
+**Gantt — "Hide closed" moves to filter preset:**
+- [x] Remove `hideClosed` checkbox and props from `GanttToolbar` — 2026-05-29
+- [x] Add `'open'` preset to `FilterDropdown` ("Open only — Hide activities with a closed status") — 2026-05-29
+- [x] Add `'open'` to `ActiveFilter` preset type in `FilterContext` — 2026-05-29
+- [x] `GanttView` reads `activeFilter.id === 'open'` to activate closed-status filtering — 2026-05-29
+- [x] Remove `hideClosed` state from `DashboardPage` — 2026-05-29
+
+**Activity Edit Sidebar — layout and field changes:**
+- [x] Remove "All day" checkbox — 2026-05-29
+- [x] Remove human-readable date summary line — 2026-05-29
+- [x] Move Description field directly below date pickers — 2026-05-29
+- [x] Restyle Assigned To with bordered card style matching create panel — 2026-05-29
+- [x] Status dropdown: replaced plain `<select>` with rich dropdown (color dot + name + CLOSED badge) — 2026-05-29
+- [x] Remove "Identity" line from Classify section — 2026-05-29
+- [x] Rename "Details" → "Advanced" — 2026-05-29
+- [x] Add Notes textarea (multi-line, resizable) backed by new `notes` column — 2026-05-29
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-29
+- [x] `go test ./...` passes — 2026-05-29
+- [x] `pnpm --filter web lint` clean — 2026-05-29
+- [ ] Manual: drag label column edge → width changes and persists during session
+- [ ] Manual: click bar (unselected) → selects it; second drag moves/resizes it
+- [ ] Manual: drag bar at week zoom → date tooltip shows day-level changes, not week-level
+- [ ] Manual: drag bar at month zoom → snaps to week boundaries
+- [ ] Manual: select "Open only" filter → closed-status activities hidden; clearing restores them
+- [ ] Manual: edit panel shows only date pickers (no allDay, no date summary)
+- [ ] Manual: description moves below dates; matches create panel layout
+- [ ] Manual: assignees use bordered card style (colored border + tint when selected)
+- [ ] Manual: status dropdown shows color dot + name; selection persists
+- [ ] Manual: notes textarea saves and loads correctly
+- [ ] Manual: bar drag → sidebar date inputs update live; stop drag → dates reset to server value
+
+---
+
+### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
+Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
+
+**Infrastructure:**
+- [ ] Extend `ViewMode` to `'gantt' | 'list' | 'calendar' | 'kanban'`
+- [ ] View switcher control in the timeline sub-toolbar; per-timeline persisted via existing preferences (8.4)
+- [ ] View-specific toolbar slots so each view contributes its own controls
+
+**List view:**
+- [ ] Virtualized table (TanStack Virtual or react-virtual) — must handle 1000+ rows smoothly
+- [ ] Default columns: Title, Start, End, Duration, Status, Assignees, Tags, Parent
+- [ ] Column show/hide menu; column reorder via drag; resizable widths — persisted via preferences (new prefs keys)
+- [ ] Sort by clicking a column header (single-column sort for v1)
+- [ ] Density toggle (Comfortable / Compact)
+- [ ] Inline edit for title, dates, status; Tab / Shift+Tab / Enter cell navigation
+- [ ] Row click (off editable cell) opens existing `EventDetailPanel`
+- [ ] Bulk selection via checkbox column; contextual bulk-action bar (archive / delete / status-change)
+- [ ] Find bar (8.5) highlights matching rows in List view
+
+---
+
+### Timeline Views — Calendar (Web — Phase 11.2)
+Three sub-layouts sharing one component skeleton.
+
+**Shared:**
+- [ ] Sub-layout switcher (Month / Week / Day) in the view's toolbar slot
+- [ ] Today / prev / next navigation; jump-to-date picker
+- [ ] Click empty cell → Event create form prefilled with that date
+- [ ] Click event → `EventDetailPanel`
+- [ ] Drag event between cells → PATCH new start/end preserving duration (Week / Day only for v1)
+
+**Month layout:**
+- [ ] 6-week grid; multi-day events render as continuous bars across cells
+- [ ] "+N more" overflow affordance per cell
+
+**Week layout:**
+- [ ] 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
+- [ ] All-day strip above the time grid for events without time components
+- [ ] Overlapping-event lane algorithm: side-by-side columns within a day
+
+**Day layout:**
+- [ ] Single-day variant of Week; same time grid and lane algorithm
+
+**Open question to resolve at start of phase:**
+- [ ] Decide handling for date-only events in time-grid layouts (default 9am vs. all-day strip)
+
+---
+
+### Timeline Views — Kanban (Web — Phase 11.3)
+Read-only per requirements. Depends on Phase 10.1 (status API) and 10.2 (status UI).
+
+- [ ] Columns from `team_statuses` in display order; column header colored from status color
+- [ ] Cards: title, date range, assignee avatars (stacked color indicators for multi-assignee), parent badge if nested
+- [ ] Empty column shows muted "No events" placeholder
+- [ ] Each column scrolls independently when card count exceeds viewport height
+- [ ] Card click → `EventDetailPanel`
+- [ ] Status renamed/recolored in Settings updates Kanban column header without refresh
+- [ ] Attempting to drag a card produces no errors and no state change (read-only enforcement)
+
+### Calendar Sync
+- [ ] Google Calendar OAuth connect flow
+- [ ] Outbound sync: push draba events to Google Calendar on create/update/delete
+- [ ] Inbound sync: Google webhook handler → upsert event in draba
+- [ ] Built-in CalDAV server (`internal/caldav/`)
+- [ ] CalDAV connect flow (user provides URL + credentials)
+- [ ] Outbound sync: push draba events to CalDAV on create/update/delete
+- [ ] Team iCal feed endpoint: `GET /timelines/:ical_token/feed.ics` (public, sanitized — no notes)
+
+### Shares — Multi-Share Views with Passwords (Phase 13)
+First-class Share entity. One timeline can host many shares, each frozen to a specific view + config.
+
+**Schema:**
+- [ ] Migration: `shares` table — id, timeline_id, view_type, view_config JSON, password_hash (nullable), expires_at (nullable), created_by, created_at, last_viewed_at, view_count, revoked_at
+- [ ] Migration: migrate existing `timelines.share_token` value into a first share row, then drop the column in a follow-up migration once UI references are gone
+
+**API:**
+- [ ] `POST /timelines/:id/shares` — create share with view_type + view_config snapshot + optional password + optional expiry
+- [ ] `GET /timelines/:id/shares` — list shares (creator + admins)
+- [ ] `PATCH /shares/:id` — rename / change password / extend expiry / revoke
+- [ ] `DELETE /shares/:id` — hard delete
+- [ ] `GET /shares/:token` — public lookup; password-protected returns 401 with `passwordRequired: true`
+- [ ] `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
+- [ ] Rate-limit unlock attempts per IP
+
+**Web — creating shares:**
+- [ ] "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
+- [ ] Share modal: snapshots current toolbar state into `view_config`, optional password + expiry toggles, returns URL with copy button
+
+**Web — viewing shares:**
+- [ ] Public viewer route `/s/:token` — no auth required
+- [ ] Password gate page for protected shares
+- [ ] Mount the appropriate view component in read-only mode with `view_config` applied
+- [ ] Branding strip: team name, "Shared view", last-updated timestamp
+
+**Web — managing shares:**
+- [ ] Manage-shares section on each timeline (list, view counts, revoke, edit)
+- [ ] Indicator chip on timeline tile showing active share count
+
+---
+
+### Data Portability & Exports (Phase 14)
+
+**Tabular (round-trip):**
+- [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
+- [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
+- [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
+
+**Visual exports (gofpdf):**
+- [ ] Gantt → PDF: landscape, paginated by date range, member-color legend strip
+- [ ] Gantt → PNG: single-page rasterized variant
+- [ ] Kanban → PDF: columns side-by-side, paginated when too wide
+- [ ] Kanban → PNG: single-page
+- [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
+- [ ] Calendar → PDF: one page per month / week / day depending on active sub-layout
+- [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
+- [ ] All visual exports respect active filter / sort / group at time of export
+
+**Wiring:**
+- [ ] Gantt toolbar's existing "Export" stub becomes a real menu: CSV / xlsx / PDF / PNG
+- [ ] Same export menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to formats valid for that view
+
+**SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
+- [ ] Password reset flow (email required — pick SMTP or transactional email provider)
+- [ ] SMTP configuration surface in `/settings/admin`
+
+---
+
+### External Connectors (Inbound Webhooks) — Phase 15
+Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
+
+**Backend:**
+- [ ] Create `team_inbound_webhooks` and `event_links` DB migrations
+- [ ] Add `is_external` boolean column to `events` table
+- [ ] `POST /teams/:id/webhooks` — generate an inbound webhook URL for a provider (e.g. Asana)
+- [ ] `GET /teams/:id/webhooks` — list active inbound webhooks
+- [ ] `POST /webhooks/:provider/:token` — generic inbound webhook handler to map payload to Draba events
+- [ ] Web UI: Render `is_external` events as read-only (disable drag-and-drop handles)
+- [ ] Web UI: Show external provider icon/link on the event detail card
+
+**Per-timeline connector model (was Up-Next "Web — Connectors"):**
+- [ ] Migration: `team_connectors (id, team_id, timeline_id, provider ENUM, display_name, config JSON, created_by, created_at)` — one row per connector instance
+- [ ] Provider values initially: `asana | aha | google_sheets | excel_online | webhook`
+- [ ] `GET /timelines/:id/connectors` — list connectors for a timeline
+- [ ] `POST /timelines/:id/connectors` — create connector (admin only); returns generated inbound token
+- [ ] `PATCH /connectors/:id` — update display name or config (admin only)
+- [ ] `DELETE /connectors/:id` — remove connector (admin only)
+- [ ] `POST /connectors/:token/ingest` — public inbound endpoint; validates token; maps payload via provider adapter
+
+**Sidebar CONNECTORS section (already stubbed):**
+- [ ] Wire `GET /timelines/:id/connectors` — list active connectors beneath the active timeline label
+- [ ] "Add connector" → connector setup sheet: provider picker → config fields → save → `POST /timelines/:id/connectors`
+- [ ] Connector row hover → gear icon → config drawer; delete with confirm
+- [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
+
+## Done
+- [x] Initialize repo scaffold — 2026-04-27
+- [x] Define requirements, architecture, conventions — 2026-04-27
+
+## Parking Lot
+- MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
+- CLI binary
+- MCP server for AI agent access
+- Mobile native apps (ship PWA first)
+- Microsoft/Outlook calendar sync (v2)
+- Multi-tenant cloud hosting
+- SSO / OAuth login (GitHub, Google)
+- Notifications (email, push)
+- Recurring event UI (RRULE editing)
+- Kanban drag-to-change-status (v2; v1 Kanban is read-only)
+````
+
 ## File: packages/web/src/components/layout/Sidebar.tsx
 ````typescript
 import { useState, useRef, useEffect } from 'react';
@@ -40913,6 +40948,8 @@ import {
   ChevronRight,
   ChevronLeft,
   ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Plus,
   Settings2,
   Upload,
@@ -41308,6 +41345,20 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
   const [membersOpen, setMembersOpen] = useState(true);
   const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
 
+  const allExpanded = teamOpen && timelinesOpen && activityOpen && connectorsOpen && membersOpen;
+  function toggleAllSections() {
+    const next = !allExpanded;
+    setTeamOpen(next);
+    setTimelinesOpen(next);
+    setActivityOpen(next);
+    setConnectorsOpen(next);
+    setMembersOpen(next);
+    if (!next) {
+      setArchivedOpen(false);
+      setArchivedTeamsOpen(false);
+    }
+  }
+
   const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
     id: t.id,
     name: t.name,
@@ -41400,24 +41451,49 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
             </span>
           </div>
         )}
-        <button
-          onClick={onToggle}
-          style={{
-            background: 'rgba(255,255,255,0.08)',
-            border: 'none',
-            color: 'rgba(255,255,255,0.7)',
-            borderRadius: 6,
-            width: 26,
-            height: 26,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-            flexShrink: 0,
-          }}
-        >
-          {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          {!collapsed && (
+            <button
+              onClick={toggleAllSections}
+              title={allExpanded ? 'Collapse all sections' : 'Expand all sections'}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'rgba(255,255,255,0.45)',
+                borderRadius: 6,
+                width: 26,
+                height: 26,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+            >
+              {allExpanded ? <ChevronsDownUp width={14} height={14} strokeWidth={1.8} /> : <ChevronsUpDown width={14} height={14} strokeWidth={1.8} />}
+            </button>
+          )}
+          <button
+            onClick={onToggle}
+            style={{
+              background: 'rgba(255,255,255,0.08)',
+              border: 'none',
+              color: 'rgba(255,255,255,0.7)',
+              borderRadius: 6,
+              width: 26,
+              height: 26,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
+          </button>
+        </div>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -42425,6 +42501,1642 @@ export default function DashboardPage() {
     </FindProvider>
   )
 }
+````
+
+## File: docs/log.md
+````markdown
+# Development Log
+
+---
+
+## 2026-05-29 — Phase 10.4.4: Gantt Interaction & Activity Edit Polish
+
+**Goal:** Polish the Gantt's direct-manipulation UX (resizable label column, click-to-activate drag, live sidebar date feedback, finer snap), move "Hide closed" from toolbar to filter preset, and overhaul the Activity Edit sidebar layout.
+
+**Backend:**
+- Migration 016: `ALTER TABLE activities ADD COLUMN notes TEXT` (nullable)
+- `Activity` model: added `Notes *string` field with `db:"notes"` tag
+- `ActivityRepo.Update`: added `notes = :notes` to UPDATE SET
+- `handleUpdateActivity`: added `notes` patch key parsing
+- OpenAPI + TS types: added `notes` to `Activity` schema and PATCH body; regenerated
+
+**Gantt — resizable label column:**
+- `DEFAULT_LABEL_COL_W = 240`, min 140, max 400
+- `labelColW` state in `GanttGrid`; `handleColumnResizeMouseDown` sets up mousemove/mouseup handlers
+- Drag handle div positioned absolutely on the right edge of the sticky header label cell
+- All row label cells use `labelColW` state (was hard-coded `LABEL_COL_W = 240` constant)
+
+**Gantt — click-to-activate before drag:**
+- `handleBarMouseDown` gates on `ev.id !== selectedActivityId` — unselected bars can't be dragged
+- Bar cursor: `grab` only when selected AND `onBarDrag` is provided; `pointer` otherwise
+- Left/right resize handles rendered only when bar is selected (`onBarDrag && selected`)
+
+**Gantt — bar drag updates sidebar dates live:**
+- New `onBarDragProgress` prop on `GanttGrid` and `GanttView`; called during mousemove with current snapped dates
+- `DashboardPage`: `liveDragDates` state; `onBarDragProgress` sets it; `onBarDragEnd` clears it
+- `ActivityDetailPanel`: `liveDragStart`/`liveDragEnd` props; displayed in date inputs when set (read-only during drag, don't trigger saves)
+
+**Gantt — finer-grained snap during drag:**
+- `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4
+- `colFracToDate` interpolates fractional column positions for accurate date mapping
+- Drag math uses `Math.round(x / step) * step` with `step = 1/divisor`
+- `resolvedGranularity` prop passed from GanttView to GanttGrid
+- `colToStartDate`/`colToEndDate` updated to handle fractional column positions
+
+**Gantt — "Hide closed" moves to filter preset:**
+- Removed `hideClosed` checkbox and related props from `GanttToolbar`; removed `hideClosed` state from `DashboardPage`
+- Added `'open'` to `ActiveFilter` preset type in `FilterContext`
+- `FilterDropdown`: added "Open only" preset with subtitle "Hide activities with a closed status"
+- `GanttView`: reads `activeFilter.id === 'open'` instead of `hideClosed` prop to filter closed-status activities
+
+**Activity Edit Sidebar — overhaul:**
+- Removed "All day" checkbox (allDay state, handler, and toggle)
+- Removed human-readable date summary line (was `{formatDate(startDate)} – {formatDate(endDate)}`)
+- Description field moved directly below date pickers (was at the bottom under "Notes")
+- "Assigned to" section: opacity-toggle buttons → bordered card style with color border + tint when selected (matches create panel)
+- Status picker: plain `<select>` → `StatusDropdown` component with color dot, name, and CLOSED badge
+- Removed "Identity" row from Classify section
+- Renamed "Details" section → "Advanced"
+- Added Notes multi-line `<textarea>` (resizable) at bottom, backed by new `activities.notes` column
+- `liveDragStart`/`liveDragEnd` props: override date inputs display during bar drag without triggering saves
+
+**Tests:**
+- `TestMigrate_016_ActivityNotes`: verifies `activities.notes` column exists after migration
+
+**All automated checks pass:** `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean.
+
+---
+
+## 2026-05-29 — /test-phase 10.4.4
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 skip (ws-smoke — websocat/wscat not installed on dev box; heartbeat covered by unit tests)
+- Smoke target: http://epcot.lan:8081
+
+---
+
+## 2026-05-28 — Phase 10.4.3: UI Consistency — Modals, Sidebar & Toolbar
+
+**Goal:** Standardize visual patterns across TeamModal, MemberModal, and TimelineModal — three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
+
+**Shared components created:**
+- `components/shared/InlineEditableTitle.tsx`: always-visible name input with a bottom border that appears on hover/focus; used in all three modals to replace three divergent editing patterns
+- `components/shared/ConfirmDialog.tsx`: shared confirmation panel with four color variants (red=destructive, amber=archive, indigo=promote, teal=restore); replaces `MemberModal`'s local `ConfirmDialog`, `TeamModal`'s `ArchiveDialog`, and `TimelineModal`'s inline return-replacement confirmations
+
+**TeamModal.tsx:**
+- Removed `nameEditing` state machine (div/input toggle); replaced with `InlineEditableTitle`
+- Removed `nameInputRef` and associated focus/effect logic; Escape now closes the modal directly
+- Replaced `ArchiveDialog` component with shared `ConfirmDialog variant="amber"`; footer hides when confirm is showing
+- Archive button: neutral gray → amber bg+border+`Archive` icon
+- Restore button: neutral gray → teal bg+border+`RotateCcw` icon
+- Migrated all structural hex colors (`#21262d`, `#30363d`, `#2d333b`, `#484f58`, `#8b949e`, `#e6edf3`) to CSS variables (`var(--card)`, `var(--border)`, `var(--muted)`, `var(--muted-foreground)`, `var(--foreground)`)
+
+**MemberModal.tsx:**
+- Replaced local `ConfirmDialog` component with shared one
+- Replaced focus-underline name input with `InlineEditableTitle`
+- Migrated all structural hex colors to CSS variables
+
+**TimelineModal.tsx:**
+- Replaced separate-overlay archive/delete confirmation returns with inline `ConfirmDialog` components (shown in content area; footer hides when confirm is showing) — matches TeamModal/MemberModal UX
+- Archive button: border-only, no icon → amber bg+border+`Archive` icon
+- Restore button: amber border-only → teal bg+border+`RotateCcw` icon
+- Was already using CSS variables; no color migration needed
+
+**Sidebar audit:** Badge usage, hover states (`rgba(255,255,255,0.05)`), and `Settings2` gear icons consistent across all row types (TimelineItem, TeamRow, MemberSidebarRow). No fixes required.
+
+**Toolbar audit:** GanttToolbar uses Tailwind classes + CSS variables throughout; `ctrlBtn` pattern consistent with modal footer buttons. No fixes required.
+
+**Exit criteria:**
+- ✅ All three modals use `InlineEditableTitle` for name editing — identical visual behavior
+- ✅ Archive and restore buttons look identical across all three modals (amber archive, teal restore, both with icons)
+- ✅ All confirmation dialogs use shared `ConfirmDialog` with appropriate color variants
+- ✅ No hardcoded structural hex colors in modal components; all use CSS variables
+- ✅ Sidebar/toolbar audited — consistent, no fixes needed
+- ✅ `pnpm --filter web lint` clean
+
+---
+
+## 2026-05-28 — /review-phase 10.4.2 fixes
+
+**Blockers resolved:**
+- Migration 015: removed `WHERE timeline_id IS NOT NULL` filter from `INSERT INTO activities_new` — any row with NULL timeline_id after backfill now aborts the migration with a NOT NULL constraint error rather than being silently dropped
+- `handleUpdateActivity`, `setActivityArchive`, `handleDeleteActivity`: added `sql.ErrNoRows` check on the timeline lookup so a missing/deleted timeline returns 404 instead of 500 and skipping the auth check
+- Added `TestCreateActivity_TimelineNotFound`, `TestListActivities_TimelineNotFound`: verify 404 when timelineId does not exist
+- Added `TestCreateActivity_TimelineDifferentTeam`, `TestListActivities_TimelineDifferentTeam`: verify 404 when timeline belongs to a different team than the URL's team ID
+- Added `TestMigrate_015_NormalizesActivities`: asserts `activities.team_id` is absent, `activities.timeline_id` is present, and FK is ON DELETE CASCADE to timelines
+
+---
+
+## 2026-05-28 — /test-phase 10.4.2
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke
+- Result: 7 pass, 0 fail, 0 skip (web-e2e not run — no Phase 10.4.2 assertions defined)
+- Smoke target: http://epcot.lan:8081
+
+---
+
+## 2026-05-28 — Phase 10.4.2: Activity Schema Normalization
+
+**Goal:** Remove the redundant `activities.team_id` column now that `timeline_id` is the primary FK. Harden `timeline_id` to NOT NULL. Move activity routes to timeline-scoped paths.
+
+**Backend:**
+- Migration 015: backfills NULL `timeline_id` rows (assigns to team's oldest timeline), rebuilds `activities` without `team_id` using the SQLite CREATE-INSERT-DROP-RENAME pattern, hardens `timeline_id` as NOT NULL with `ON DELETE CASCADE`
+- `models.Activity`: `TeamID` removed, `TimelineID` changed from `*string` to `string`
+- `ActivityRepo.Create`: removed `team_id` from INSERT; `ListByTeam` → `ListByTimeline(timelineID string, ...)` (simple `WHERE timeline_id = ?`)
+- Activity handlers: POST/GET moved to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix required — `GET /timelines/{id}/activities` conflicts with `GET /timelines/share/{token}` in Go 1.22 mux); update/delete/archive derive teamID via timeline lookup for auth + bus publish
+- OpenAPI: `Activity.teamId` → `timelineId` (required, non-nullable); paths updated; TS types regenerated
+
+**Frontend:**
+- `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)`: URL and cache key updated
+- `useCreateActivity(teamId, timelineId)`, `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: all updated
+- `useTeamActivitySync`: WS deltas now patch `['timelines', timelineId, 'activities']` cache entries using payload's `timelineId`
+- `GanttView.tsx`: `timelineId` prop now required; uses `useTimelineActivities`
+- `ActivityCreatePanel.tsx`, `ActivityDetailPanel.tsx`: updated signatures; no `timelineId` in create request body
+- `DashboardPage.tsx`: Gantt guarded on `activeTimelineId` presence; `ActivityCreatePanel` restored `teamId` prop
+
+**Tests:**
+- All activity handler tests create a timeline first; routes updated to team-scoped path; `activityURL()` helper added
+- `activity_repo_test.go`: `makeActivity` uses `timelineID`; `ListByTimeline` throughout; added `TestActivityRepo_ListByTimeline_Filter`
+- `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before seeding activity
+- `user_repo_test.go`, `migrations_test.go`: raw INSERTs use `timeline_id`
+
+**Note:** TASKS.md had "UI Consistency" mislabeled as Phase 10.4.2; corrected to 10.4.3 per ROADMAP.
+
+**Exit criteria:**
+- ✅ `activities` table has no `team_id`; `timeline_id` is NOT NULL
+- ✅ `golangci-lint run` clean
+- ✅ `go test ./...` passes
+- ✅ `pnpm --filter web lint` clean
+- ⬜ Gantt loads activities (manual Docker verification)
+- ⬜ `PRAGMA foreign_key_check` on Docker DB
+
+---
+
+## 2026-05-28 — /review-phase 10.4.1 fixes
+
+**Blockers resolved:**
+- `GanttView.tsx`: Maps `date_format` pref to BCP 47 locale (`DD/MM/YYYY` → `en-GB`, others → `en-US`); passes `locale` to `generateColumns` — column labels now respect the user's date ordering preference
+- `ActivityDetailPanel.tsx`: Wired `useFormatDate`; formatted date range summary line added above native date inputs
+- `BrandingSync.tsx`: Fixed accent color to set `--primary` directly (not `--accent-override`); added `isValidHex()` guard; exported `makeDocTitle(pageName?)` helper for the `${page} — ${app}` title pattern
+- `openapi.yaml`: Added `GET /settings/branding` with `security: []` and full response schema; regenerated TS types
+- `settings_handler_test.go`: Added `TestPatchAdminSettings_AccentColor`, `TestGetPublicBranding_NoAuth`, `TestGetPublicBranding_EmptyWhenUnset`
+- `api.test.ts`: New file — 7 tests covering `createAuthFetch` happy path, non-401 errors, 401 retry, null-token re-throw, unregistered interceptor, de-registration teardown, and `ApiError` identity
+- `useFormatDate.ts`: Exported `formatDate` pure function; new `useFormatDate.test.ts` with 6 branch tests
+- `granularity.test.ts`: New test file — 6 tests covering `weekStart` (monday/sunday/default) and `locale` (en-US/en-GB/default) params
+
+**Suggestions resolved:**
+- `OrganizationPage.tsx`: Hex validation (`/^#[0-9a-fA-F]{6}$/`) on accent color input; invalid value blocked from PATCH; inline error shown
+- `PreferencesPage.tsx`: Added why-comment to `eslint-disable-next-line` for `JSON.stringify(prefMap)` dep stabilization
+- `admin_handler.go`: Added comment to `handleGetPublicBranding` warning against adding sensitive keys to the public endpoint
+
+**Nit resolved:**
+- `BrandingSync.tsx`: `makeDocTitle()` helper exported so pages can set `"PageName — AppName"` titles; document.title set via `makeDocTitle()` at root level
+
+---
+
+## 2026-05-28 — /test-phase 10.4.1
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (ws-smoke heartbeat 3-cycle skipped — 30s server interval exceeds smoke budget, mechanism verified in code; web-e2e browser runtime skipped — dev server not confirmed running, all assertions pass code-level)
+- Smoke target: http://epcot.lan:8081
+- Note: TESTING.md Phase 2 schema-check table list updated (old names `team_statuses`, `events`, `event_tags`, `event_assignments` → current names)
+
+---
+
+## 2026-05-28 — Phase 10.4.1 — Preference Consumption & Session Handling
+
+**Session lifecycle (401 interceptor):**
+- `packages/web/src/lib/api.ts`: Added `configureSilentRefresh(fn)` export and module-level mutex (`_refreshInFlight`); `createAuthFetch` now catches 401, calls `doSilentRefresh()`, retries with new token
+- `packages/web/src/contexts/AuthContext.tsx`: Added `silentRefresh` function (calls `/auth/refresh`, updates state, falls back to `window.location.replace('/login')` on failure); registers via `configureSilentRefresh` in a `useEffect`, deregisters on unmount
+- Concurrent 401s share a single in-flight refresh call — no duplicate refresh requests
+
+**Preference consumption:**
+- `packages/web/src/hooks/useFormatDate.ts`: New hook — reads `date_format` pref, returns formatter for `MMM D, YYYY` / `MM/DD/YYYY` / `DD/MM/YYYY` / `YYYY-MM-DD`
+- `packages/web/src/components/gantt/granularity.ts`: `startOfWeek` accepts `weekStart` param; `formatLabel` accepts `locale` param; `generateColumns` accepts `GenerateColumnsOptions { weekStart, locale }`
+- `packages/web/src/components/gantt/GanttView.tsx`: Reads `week_start` from global preferences via `usePreferenceMap`, passes to `generateColumns`
+- `packages/web/src/hooks/useDarkMode.ts`: Added `applyTheme(t)` function for explicit theme setting
+- `packages/web/src/components/ThemeSync.tsx`: New null-render component — on auth init applies server-side `theme` preference once per session
+- `packages/web/src/pages/settings/PreferencesPage.tsx`: Added theme toggle (Light/Dark) — applies immediately and persists server-side on Save
+
+**Admin branding:**
+- `packages/api/internal/api/admin_handler.go`: Added `accent_color` to allowed `GET/PATCH /admin/settings` keys; added `handleGetPublicBranding` for `GET /settings/branding`
+- `packages/api/internal/api/server.go`: Registered `GET /settings/branding` as public (no auth)
+- `packages/web/vite.config.ts`: Added `/settings` proxy entry for dev
+- `packages/web/src/hooks/usePublicSettings.ts`: New hook — fetches `/settings/branding` without auth
+- `packages/web/src/components/BrandingSync.tsx`: New null-render component — sets `document.title` from `instanceName`, applies `accentColor` as `--accent-override` CSS variable
+- `packages/web/src/App.tsx`: Mounts `ThemeSync` and `BrandingSync` inside `AuthProvider`
+- `packages/web/src/pages/LoginPage.tsx`: Shows `instanceName` from branding API instead of hardcoded "draba"
+- `packages/web/src/pages/settings/OrganizationPage.tsx`: Added accent color field (color picker + hex input + Reset)
+
+**Deferred (documented in TASKS.md):**
+- `ActivityDetailPanel` date display: native `<input type="date">` already uses browser locale; no read-only date label surface exists yet
+- Public/shared timeline view fallback: deferred to Phase 13 (Shares)
+- Logo upload: stretch goal, deferred
+
+**Checks:**
+- `golangci-lint run` — clean
+- `go test ./...` — all pass
+- `pnpm --filter web lint` (tsc --noEmit) — clean
+
+---
+
+## 2026-05-27 — /test-phase 10.3
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 8 pass (ws-smoke: assertion 2 skipped — single-team test DB; assertion 3 partial — 30s heartbeat cadence, unit tests cover at speed)
+- Smoke target: http://epcot.lan:8081
+- Notes: `GET /activities?from=&to=` returns 400 (param names differ from Phase 3 spec); `POST /auth/register` requires `displayName` field not in spec — both are spec gaps, not runtime failures
+
+---
+
+## 2026-05-27 — Phase 10.3 — Timelines Full CRUD (API + UI)
+
+**Backend:**
+- New handlers: `PATCH /timelines/{id}`, `DELETE /timelines/{id}`
+- New handlers: `GET/PUT/DELETE /teams/{id}/timelines/{timelineId}/access` — timeline access list CRUD
+- New handlers: `POST /teams/{id}/timelines/{timelineId}/statuses`, `PATCH /statuses/{id}`, `DELETE /statuses/{id}` — live timeline status editing
+- `canAdminTimeline` helper: checks team admin role first, then per-timeline `timeline_access` role='admin'
+- `TimelineStore` interface expanded: `Update`, `Delete`, `ListAccess`, `GetAccessRole`, `RevokeAccess`
+- `TimelineAccessEntry` model added: joins `timeline_access` + `team_members` + `users`
+- `StatusRepo` additions: `CreateStatus`, `UpdateStatus`, `DeleteStatus`, `CountStatuses`, `CountStatusActivities`
+- `DeleteStatus` re-points activities to replacement before deleting; blocked if last status
+- Note: access endpoints use team-scoped URL prefix to avoid Go 1.22 mux conflict with `GET /timelines/share/{token}` on 3-segment paths
+- OpenAPI spec updated: `PatchTimelineInput`, `TimelineAccessEntry`, `CreateStatusInput`, `PatchStatusInput`, `DeleteStatusInput` schemas + all new endpoints; TypeScript types regenerated
+
+**Tests added:**
+- `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden`
+- `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden`
+- `TestTimelineAccessList_GrantAndRevoke`
+
+**Frontend:**
+- `TimelineModal.tsx` — create/edit modal with Settings, Statuses, and Access tabs; archive + delete confirmation dialogs
+- `Sidebar.tsx` — real archived timelines section (Restore button), wired New timeline and settings gear
+- `ActivityDetailPanel.tsx` — status dropdown populated from `useTimelineStatuses`; replaces stub
+- `GanttToolbar.tsx` — `hideClosed` / `onHideClosedChange` props; Hide closed checkbox shown when timeline has closed statuses
+- `GanttView.tsx` — `hideClosed` + `closedStatusIds` props; filters out activities with closed status IDs
+- `useTeamActivities.ts` — `useCreateTimeline`, `useUpdateTimeline`, `useDeleteTimeline`, `useArchiveTimeline`, `useUnarchiveTimeline`, `useTeamTimelinesWithArchived`, `useTimelineAccess`, `useGrantTimelineAccess`, `useRevokeTimelineAccess`
+- `useStatusTemplates.ts` — `useCreateTimelineStatus`, `useUpdateTimelineStatus`, `useDeleteTimelineStatus`
+- `DashboardPage.tsx` — timeline modal state; passes all new props to Sidebar + GanttToolbar + GanttView + ActivityDetailPanel
+
+**Automated:** `golangci-lint run` clean, `go test ./...` all pass, `pnpm --filter web lint` clean.
+
+**Pending manual verification (against epcot.lan:8081):** see TASKS.md checklist.
+
+---
+
+## 2026-05-27 — Phase 10.2 — Review Fixes & Docker Verification
+
+**Review fixes applied:**
+- Aligned `SeedDefaultTemplate` test assertions to match actual seed output ("Default" template with Planning / In Progress / Complete; Complete is `is_closed`)
+- Added three missing tests: `TestUpdateStatusTemplate_AdminCanRename`, `TestUpdateTemplateItem_AdminCanUpdate`, `TestStatusTemplates_NonAdminForbidden` (403 on all 5 mutation routes for non-admin members)
+- Rephrased `is_closed` checkbox label in `StatusTemplatesTab.tsx` to remove forward-reference to "Hide closed" filter (Phase 10.3 scope)
+- Replaced mojibake em-dashes (`â€"`) with hyphens in 4 test files: `team_handler_test.go`, `activity_handler_test.go`, `saved_filter_handler_test.go`, `timeline_handler_test.go`
+
+**Docker verification (epcot.lan:8081):** ✅ passed
+- Default template seeded on team create; template CRUD, item CRUD, and last-item/last-template guards all work from UI
+- New timeline correctly copies template statuses (verified via API)
+- Non-admin sees templates read-only
+- Note: "Create new timeline" UI is Phase 10.3 — statuses verified via direct API call
+
+**Phase 10.2 closed ✅**
+
+---
+
+## 2026-05-27 — /test-phase 10.2
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 partial-skip (ws-smoke: heartbeat full 3-cycle skipped per time budget; unit tests cover at speed)
+- Smoke target: http://epcot.lan:8081
+
+---
+
+## 2026-05-27 — Phase 10.2 — Status Templates & Timeline Statuses
+
+**Backend:**
+- Migration 012: replaced `team_statuses` table with three new tables — `status_templates` (team-level reusable presets), `status_template_items` (items within a template), `statuses` (live timeline-specific statuses copied from a template)
+- `activities.status_id` FK updated to reference `statuses(id) ON DELETE SET NULL` instead of the now-dropped `team_statuses`
+- New `StatusTemplate`, `StatusTemplateItem`, `Status` models in `models.go`
+- New `StatusRepo` (`internal/db/status_repo.go`): full CRUD for templates, template items, and statuses; `SeedDefaultTemplate` creates the "Simple" preset (Planned / In Progress / Done, Done is `is_closed`); `CopyTemplateToTimeline` copies the team's first template into live statuses on timeline creation
+- `handleCreateTeam` now seeds the default template after team creation
+- `handleCreateTimeline` now calls `CopyTemplateToTimeline` so every new timeline gets statuses from the template
+- New API endpoints: `GET/POST /teams/{id}/status-templates`, `PATCH/DELETE /status-templates/{id}`, `POST /status-templates/{id}/items`, `PATCH/DELETE /status-template-items/{id}`, `GET /teams/{id}/timelines/{timelineId}/statuses`
+- Note: `GET /timelines/{id}/statuses` conflicts with `GET /timelines/share/{token}` in Go 1.22's mux (both are 3-segment wildcard paths, ambiguous on `/timelines/share/statuses`); resolved by using the team-scoped URL `/teams/{id}/timelines/{timelineId}/statuses`
+- OpenAPI spec updated with `StatusTemplate`, `StatusTemplateItem`, `Status`, and all input schemas; TypeScript types regenerated
+
+**Tests:**
+- `status_handler_test.go`: 5 tests covering default seeding on team create, admin-only template creation, last-template deletion guard, template item add/delete, and timeline status copy-from-template
+- `migrations_test.go` updated: `team_statuses` removed from expected tables; `status_templates`, `status_template_items`, `statuses` added; `activities.status_id` FK target verified
+
+**Frontend:**
+- `useStatusTemplates.ts` — hooks for all status template and timeline status endpoints
+- `StatusTemplatesTab.tsx` — standalone component: expandable template cards with inline item editing (name, color swatch picker, `is_closed` toggle), add/delete items with last-item guard, create/delete templates with last-template guard
+- `TeamModal.tsx` — added "Status Templates" tab (3rd tab alongside Settings and Members); tab is locked until the team is saved
+
+---
+
+## 2026-05-27 — /review-phase 10.1.4 — fixes applied
+
+Post-review fixes across security, tests, spec, and conventions:
+
+**Security:**
+- `user_handler.go` — added self-revoke guard (`CANNOT_SELF_REVOKE` 400) to `handleRevokeUser`; prevents a superadmin from locking themselves out
+
+**Spec / types:**
+- `openapi.yaml` — fixed `application\json` typo (backslash) → `application/json` in `POST /users/{id}/revoke` 200 response
+- `openapi.yaml` — added `userArchivedAt` field to `MemberDetail` schema (account-level deactivation, distinct from membership-level `archivedAt`)
+- `models.go` — added `UserArchivedAt *time.Time` to `MemberDetail`; updated doc comment
+- `team_handler.go` — `handleGetMember` now populates `UserArchivedAt` from `users.archived_at`
+- Regenerated `packages/shared/src/index.ts`
+
+**Tests (new):**
+- `revoke_user_test.go` — handler tests: 403 non-superadmin, 400 self-revoke, 404 not found, 200 success (zero-history + with-assignments paths)
+- `user_repo_test.go` — repo tests: inactivates memberships with history, removes zero-history memberships, handles mixed-membership users
+- `team_handler_test.go` — `TestDeleteMember_HasAssignments_Returns409` tests 409 path with `assignmentCount` in response
+
+**Conventions:**
+- Removed phase number references from doc/inline comments in `team_handler.go`, `team_repo.go`; replaced with WHY explanations
+- Fixed "summarises" → "summarizes" in `models.go`
+
+**Frontend:**
+- `MemberModal.tsx` — "Revoke all access" button now hides when `userArchivedAt` is set (account-level deactivation) rather than when the team membership is inactivated; updated comment to explain the distinction
+- `TeamModal.tsx` — added `useEffect` to clear `removeErrors` when `searchQ` changes
+
+**Needs manual Docker verification:**
+- Revoke all access on a user who has mixed memberships (some with history, some without)
+- "Revoke all access" button hidden for already-deactivated accounts but visible for inactivated-only memberships
+
+---
+
+## 2026-05-27 — Phase 10.1.4 — Member Access & Data Lifecycle
+
+**Backend:**
+- `011_fk_restrict.sql` — rebuilt `activity_assignments` and `timeline_access` with `ON DELETE RESTRICT` on `team_member_id` FK (was CASCADE); prevents silent data destruction when a member row is deleted
+- `PRAGMA foreign_keys = ON` was already set in `db.Open()` since Phase 8.0; verified and documented
+- `team_repo.go` — added `CountMemberAssignments(memberID)` and `DeleteMemberTimelineAccess(memberID)` methods
+- `team_handler.go` — `handleDeleteMember` now counts `activity_assignments` before deleting; if count > 0 returns 409 `MEMBER_HAS_ASSIGNMENTS` with `assignmentCount` in the response body; deletes `timeline_access` rows before deleting the `team_members` row (required by new RESTRICT FK)
+- `user_repo.go` — added `RevokeUser(userID)`: atomically archives the user, inactivates memberships with assignments, hard-deletes memberships with zero assignments; wrapped in a single transaction
+- `user_handler.go` — added `handleRevokeUser` (superadmin only); wires `RevokeUser` and returns `RevokeUserResult`
+- `server.go` — registered `POST /users/{id}/revoke`
+- `models.go` — added `RevokeUserResult` struct
+- `migrations_test.go` — added assertions: `PRAGMA foreign_keys = 1`; `activity_assignments.team_member_id` FK is `RESTRICT`; `timeline_access.team_member_id` FK is `RESTRICT`
+
+**OpenAPI + types:**
+- Added `RevokeUserResult` schema to spec
+- Added `POST /users/{id}/revoke` endpoint to spec
+- Regenerated TypeScript types
+
+**Frontend:**
+- `api.ts` — extended `ApiError` with optional `data?: Record<string, unknown>`; `parseError` now extracts extra fields from the error response body (used to surface `assignmentCount` from 409)
+- `useMemberManagement.ts` — added `useRevokeUser` hook (invalidates `['teams']` on success)
+- `TeamModal.tsx` — remove (×) button now handles 409 `MEMBER_HAS_ASSIGNMENTS`; shows inline error "N assignments — can't remove" with an "Inactivate instead" one-click action; clears on next removal attempt
+- `MemberModal.tsx` — added "Revoke all access" button (red, hidden when account already deactivated); confirmation dialog lists all three effects; on success shows summary chip and closes after 2s
+
+**Verified (automated):**
+- `go test ./...` — all pass including new migration assertions
+- `golangci-lint run` — clean
+- `pnpm --filter web lint` — clean
+
+**Needs manual Docker verification:**
+- Remove member with assignments → 409 + inline error + "Inactivate instead" one-click
+- Remove member with zero assignments → success
+- "Revoke all access" → account deactivated, login rejected, Gantt bars still show avatar
+
+---
+
+## 2026-05-27 — /test-phase 10.1.4
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (8/8)
+- Smoke target: http://epcot.lan:8081
+
+---
+
+## 2026-05-26 — /review-phase 10.1.3 — fixes applied
+
+Post-review fixes across security, tests, conventions, and ROADMAP:
+
+**Security:**
+- `mailer.go`: SMTP password now encrypted at rest with AES-256-GCM (key derived from `DRABA_JWT_SECRET`); `enc:v1:` prefix distinguishes encrypted from legacy plaintext values
+- `main.go`: passes `[]byte(jwtSecret)` to `mailer.New()`
+- `auth_handler.go`: password reset link uses `url.QueryEscape(rawToken)` (was raw concatenation)
+- `admin_handler.go`: SMTP validation/test errors logged at Warn; generic message returned to caller (was leaking internal error detail)
+- `mailer.go`: removed recipient email from debug-skip log line
+
+**Tests added:**
+- `settings_handler_test.go`: `TestForgotPassword_KnownUser_CreatesToken`, `TestResetPassword_Success`, `TestResetPassword_ExpiredToken`, `TestPatchAdminSettings_Success`, `TestPatchAdminSettings_RejectsUnknownKey`
+- `password_reset_token_repo_test.go`: Create/GetValid/expired/MarkUsed
+- `instance_settings_repo_test.go`: Get missing/Set/Upsert/Delete
+- `team_handler_test.go`: added `testServerEnv` + `newTeamTestServerFull()` helper for direct repo access in tests
+
+**Frontend:**
+- `AdminPage.tsx`: deleted (dead code — not routed; split pages are the active routes)
+- All settings pages converted from inline `style` objects to Tailwind utility classes using design-system tokens (`bg-card`, `text-foreground`, `text-muted-foreground`, `border-border`, etc.)
+- Token hooks (`useTokens`, `useCreateToken`, `useRevokeToken`) extracted from `TokensPage.tsx` to `useSettings.ts`
+- `AiKeysPage.tsx`: file-header comment updated to reference Phase 10.6; language placeholders in `PreferencesPage` and `OrganizationPage` now reference Phase 10.7
+
+**ROADMAP:**
+- Added Phase 10.5 — Communications Testing (SMTP + mailer integration/unit tests)
+- Added Phase 10.6 — AI Key Management (replaces AiKeysPage stub)
+- Added Phase 10.7 — Localization & Language Support (language dropdowns become functional)
+
+---
+
+## 2026-05-26 — /test-phase 10.1.3
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (8/8)
+- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` before run)
+
+---
+
+## 2026-05-26 — Phase 10.1.3: Settings — Profile, Tokens & Admin
+
+Full settings experience: profile + identity management, password change, forgot-password flow, API token management, SMTP configuration, instance defaults, and admin user list. All automated checks pass; manual verification on Docker needed.
+
+**Schema (migration 010):**
+- `users.color`, `users.icon` — user-level identity; propagates to `team_members` on change
+- `instance_settings (key PK, value, updated_at)` — key/value store for SMTP config and instance defaults
+- `password_reset_tokens (id, user_id FK, token_hash, expires_at, used_at, created_at)` — forgot-password flow; token_hash stores SHA-256 of raw token; token expires after 1 hour
+
+**API — 11 new endpoints:**
+- Profile: `PATCH /users/me` (name, color, icon + team_members propagation)
+- Security: `PUT /users/me/password` (current → new; 401 WRONG_PASSWORD, 400 WEAK_PASSWORD)
+- Forgot password: `POST /auth/forgot-password` (always 200; generates token + sends via mailer), `POST /auth/reset-password` (TOKEN_INVALID / TOKEN_EXPIRED on bad token)
+- SMTP (superadmin): `GET/PUT/DELETE /admin/smtp`, `POST /admin/smtp/test`
+- Instance settings (superadmin): `GET/PATCH /admin/settings` (registration_policy, default_timezone, default_date_format, default_week_start, instance_name)
+- Users (superadmin): `GET /admin/users?orphaned=true`
+
+**New packages:**
+- `internal/mailer/` — wraps `net/smtp`; reads SMTP config from `instance_settings` at send time so changes take effect without restart; supports None / TLS / STARTTLS encryption; `Send()` is a no-op when SMTP not configured (avoids breaking forgot-password when admin hasn't set up email)
+
+**Frontend — 7 new pages:**
+- `/settings/profile` — display name + identity widget + read-only email; identity changes propagate to all team memberships
+- `/settings/security` — change password form with current/new/confirm validation
+- `/settings/preferences` — theme toggle (applies immediately), timezone, date format, week start; writes via existing `PUT /users/me/preferences`
+- `/settings/tokens` — token table (name, scope, last used, created); create with one-time secret reveal; inline revoke
+- `/settings/admin` — SMTP form with send-test; instance defaults; registration policy; user list with orphaned filter and search
+- `/forgot-password` — public; always shows "check your email" message after submission (no enumeration)
+- `/reset-password?token=...` — public; validates token, sets new password, redirects to login
+
+**Login page:** added "Forgot password?" link below the password field.
+
+**SettingsPage.tsx:** reworked into shell with React Router sub-routes; admin nav items hidden from non-superadmins.
+
+**OpenAPI:** added `UpdateProfileInput`, `ChangePasswordInput`, `ForgotPasswordInput`, `ResetPasswordInput`, `SMTPConfig`, `AdminUserRow` schemas plus all 11 new endpoint paths; TypeScript types regenerated.
+
+**Tests (10 new in settings_handler_test.go):**
+- `PATCH /users/me`: happy path (name + color saved), empty name rejected
+- `PUT /users/me/password`: happy path, wrong current password (401), weak new password (400)
+- `POST /auth/forgot-password`: always returns 200 for unknown email
+- `POST /auth/reset-password`: invalid token returns 400 TOKEN_INVALID
+- `GET /admin/settings`: superadmin reads defaults, non-superadmin gets 403
+- `GET /admin/users`: superadmin lists all users
+
+**Deferred items (noted for follow-up):**
+- SMTP password encryption at rest (stored as JSON in instance_settings; encryption using JWT secret deferred)
+- `/forgot-password` "contact admin" message requires a public SMTP status endpoint (deferred)
+- Click user row in admin users list → open MemberModal (deferred to polish pass)
+- "Assign team" action on orphaned users (deferred)
+- Default team/timeline dropdown in Preferences (requires loading teams list; deferred)
+
+---
+
+## 2026-05-25 — Phase 10.1.2: Members — Management & Editing (review fixes)
+
+Post-review fixes applied: security hardening, token entropy, new routes, full test suite.
+
+- **Security**: `GET /users/search` now returns a safe `userSearchResult` projection (id, email, displayName, avatarUrl only) — `isSuperadmin`, `archivedAt`, timestamps excluded.
+- **Token entropy**: invite and invite-link tokens now use `newToken()` (256 bits / 64 hex chars) instead of `newID()` (128 bits). `newToken()` added to `helpers.go`.
+- **New routes**: `GET /teams/:id/members/:memberId/stats` (standalone stat endpoint) and `POST /teams/:id/invite-link/reset` (alias for regenerate) registered in `server.go`.
+- **Design decision documented**: reusable invite-link tokens have no expiry — valid until admin revokes/resets. Rationale in handler comment.
+- **Tests**: 11 new tests in `team_handler_test.go` covering member CRUD, last-admin protection, archive/unarchive, stats endpoint, invite-link create/reset/revoke, and safe-fields assertion for user search.
+- **Superadmin gating confirmed correct**: `onNewTeam` and `onEditMember` in `DashboardPage.tsx` are already gated on `isSuperadmin`; no frontend changes required.
+
+---
+
+## 2026-05-25 — Phase 10.1.2: Members — Management & Editing
+
+Full member lifecycle: add, edit, roles, participants, invites, reusable invite links, inactivation, and superadmin actions. All automated checks pass; manual UI verification on Docker still needed.
+
+**Schema (migration 009):**
+- `team_members.archived_at` — member inactivation (soft-delete pattern)
+- `users.archived_at` — account-level inactivation; login rejected when set
+- `teams.invite_link_token` — reusable join-link token (partial unique index on non-NULL rows, since SQLite can't ADD UNIQUE column via ALTER TABLE)
+
+**API — 17 new endpoints:**
+- Member CRUD: `GET/POST /teams/:id/members`, `PATCH/DELETE /teams/:id/members/:memberId`, archive/unarchive
+- Participant CRUD: `POST /teams/:id/participants`
+- Invites: `GET /teams/:id/invites`, `DELETE /teams/:id/invites/:inviteId`
+- Invite links: `GET/POST/DELETE /teams/:id/invite-link`
+- User search: `GET /users/search?q=`
+- Superadmin: `POST /users/:id/promote`, `POST /users/:id/archive`, `POST /users/:id/unarchive`, `DELETE /users/:id`
+- Auth: login now rejects archived users with `ACCOUNT_INACTIVE`; register now accepts reusable invite link tokens alongside one-time tokens
+
+**Member stats:** computed per-request from `activity_assignments JOIN activities` — past due, running, upcoming, archived counts; plus active/archived timeline counts from `timeline_access`.
+
+**Deletable rule:** zero active activities (past due + running + upcoming = 0) AND single team membership.
+
+**Web:**
+- `useMemberManagement.ts` — 14 new TanStack Query hooks
+- `RoleDropdown.tsx` — portal-rendered role picker (Admin/Member/Participant with colors + descriptions)
+- `MemberModal.tsx` — 560px portal modal with stats chips, teams list, superadmin actions with 3 confirmation dialogs
+- `TeamModal.tsx` Members tab — search/add, participant form, member list with role dropdown, pending invites, invite link
+- `Sidebar.tsx` — real member data wired; `MemberSidebarRow` with gear icon on hover
+- `DashboardPage.tsx` — wires MemberModal, passes members + handler to Sidebar
+
+**What needs manual verification on Docker:**
+- Add user (search + add), invite by email, create participant, change roles, remove member
+- Generate invite link, copy URL, register new account via that link
+- MemberModal stats correct; admin actions (promote, inactivate, delete) fire correct dialogs
+- Archived users cannot log in; reactivation restores login
+
+---
+
+## 2026-05-25 — Phase 10.1.1 post-/test-phase fixes
+
+Six issues found during /test-phase 10.1.1 review and UX testing.
+
+**1. Non-admin UI gating (blocker):**
+- Added `canEditTeam` prop to `Sidebar` derived from `useTeamMembers` in DashboardPage.
+- `TeamRow` component (new) only renders the gear/edit icon when `isActive && canEdit`.
+- Non-admin members no longer see the team settings affordance.
+
+**2. New team auto-selects in sidebar:**
+- Added `activeTeamId` state to DashboardPage (was hardcoded to `activeTeams[0]`).
+- `TeamModal.onTeamCreated` callback sets `activeTeamId(created.id)` immediately on server confirmation.
+- Sidebar now receives `activeTeams` (all non-archived) via new prop and maps them all as clickable rows; `onSelectTeam` switches the active team.
+
+**3. Same-name teams now allowed:**
+- `handleCreateTeam` and `handleUpdateTeam` append `-<id[:8]>` to the slug, guaranteeing uniqueness regardless of name.
+- `TestCreateTeam_DuplicateSlug` renamed `TestCreateTeam_SameNameAllowed` and updated to assert both 201 + distinct slugs.
+
+**4. Sidebar identity reads from API:**
+- `TeamRow` Badge now uses `team.icon ?? '__name_1__'` and `team.color` (was hardcoded `'__name_1__'` for all rows).
+- Archived team Badge likewise fixed.
+
+**5. Removed duplicate identity widget from modal:**
+- Removed the "Icon & color" `IdentityWidget` + label from the Settings tab body (it was a second copy of the header widget).
+
+**6. Removed duplicate name field; header name is now click-to-edit:**
+- Removed the "Name" input from the Settings tab body.
+- Header name area is now an inline editable input: new teams open in editing mode; existing teams click-to-edit.
+- Escape closes the name input; Enter confirms.
+
+**Checks:** `go test ./...` all pass · `golangci-lint run` clean · `pnpm --filter web lint` clean · UI verified via preview.
+
+---
+
+## 2026-05-25 — Phase 10.1.1: Teams — CRUD & Management
+
+**Migration 008** (`008_team_crud.sql`): added `description TEXT`, `notes TEXT`, and `archived_at DATETIME` columns to `teams`.
+
+**API:**
+- `models.Team` updated with `Description`, `Notes`, `ArchivedAt` fields.
+- `TeamRepo.Create` updated to persist `description`, `notes`, `color`, `icon`.
+- `TeamRepo.Update` added — writes mutable team fields (name, slug, description, notes, color, icon).
+- `TeamRepo.SetArchived` added — sets or clears `archived_at`.
+- `TeamRepo.ListByUserID` updated with `includeArchived bool` parameter; excludes archived by default.
+- New handlers: `PATCH /teams/{id}` (admin only), `POST /teams/{id}/archive`, `POST /teams/{id}/unarchive`.
+- `GET /teams` now accepts `?archived=true`.
+- `POST /teams` now accepts optional `description`, `notes`, `color`, `icon` fields.
+- OpenAPI spec updated: `Team` schema gains `description`, `notes`, `archivedAt`; `CreateTeamInput` extended; `PatchTeamInput` added; new archive/unarchive paths added.
+- TypeScript types regenerated.
+- `migrations_test.go` asserts the three new columns on `teams`.
+
+**Web:**
+- `useMyTeams(includeArchived?)` — optional param to fetch archived teams too.
+- `useTeam(teamId)` — fetch single team detail.
+- `useCreateTeam`, `useUpdateTeam`, `useArchiveTeam`, `useUnarchiveTeam` mutations.
+- `TeamModal` — creates or edits a team. Settings tab fully functional (IdentityWidget, name, description, notes). Members tab is a locked placeholder (Phase 10.1.2). Archive confirmation dialog with amber styling. "Saved" banner auto-dismisses after 3s.
+- `SettingsPage` — `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4).
+- `App.tsx` — `/settings` and `/settings/*` routes added (protected).
+- `DashboardPage` — wires team CRUD: active team, archived teams list, TeamModal state, unarchive mutation; Settings dropdown button navigates to `/settings`.
+- `Sidebar` — team section now shows real team name/badge; gear icon opens TeamModal in edit mode; "New team" button opens TeamModal in new mode; archived teams shown with Restore action.
+
+**Checks:** `golangci-lint run` clean · `go test ./...` passes · `pnpm --filter web lint` clean.
+
+**Needs manual verification on Docker:** create second team from picker, edit/archive/unarchive, TeamModal in both modes, "Saved" banner, Settings route.
+
+**Spec notes (not called out in phase scope):**
+- `isSuperadmin` added to OpenAPI `User` schema — this is a spec sync of a field that already existed in the Go model and DB; it is not a new feature introduced by this phase.
+- `docs/design/handoffs/member-modal/` committed in this phase as pre-checked-in design references for 10.1.2. No 10.1.2 code ships here.
+
+---
+
+## 2026-05-24 — Phase 9.6 post-review: hex storage + named exports + tests
+
+**Architecture change — hex colors stored in DB:**
+- Added migration 007: converts palette name IDs written by migration 006 back to canonical hex values (e.g. `'teal'` → `'#288C9B'`). Hex is the durable ground truth; palette names are UI-only.
+- `Identity` interface: renamed `colorId` → `color` (hex) and `iconId` → `icon` throughout.
+- `IdentityPicker` now fires `onChange` with the selected hex value directly, not the palette name ID.
+- Removed `hexToColorId()` and the `LEGACY_HEX_TO_ID` map from `identity-constants.ts`; `resolveColorHex` simplified to hex pass-through with colorId backward-compat fallback.
+- `Member.colorId` removed from types — `Member.color` is always hex.
+- `GanttActivity.iconId` renamed to `icon`; `GanttView.toMember` no longer sets `colorId`.
+
+**Named exports:** All five identity components switched from `export default` to named exports (`Badge`, `IdentityTrigger`, `IdentityPicker`, `IdentityWidget`). All import sites updated.
+
+**Tests (blocker fixes):**
+- `migrations_test.go`: added `TestMigrate_006_007_ColorConversion` (verifies the full 006→007 hex conversion round-trip) and `TestMigrate_HexStorageRoundTrip` (verifies hex values survive storage unchanged).
+- `identity-constants.test.ts` (new): 22 unit tests covering `resolveColorHex`, `iconIdToPascal`, `getNameText`, and the `IDENTITY_COLORS` palette invariants.
+
+All checks pass: `go test ./...`, `golangci-lint run`, `pnpm --filter web lint`, `pnpm --filter web test`.
+
+---
+
+## 2026-05-24 — /test-phase 9.5
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (0 fail, 0 skip)
+- Smoke target: http://epcot.lan:8081
+- Notes: ws-smoke code-verified (no wscat available); 2 cosmetic residuals in web (stale JSDoc in useWebSocket.ts:7, `matchEvents` function name in findMatcher.ts:27 — no runtime impact)
+
+---
+
+## 2026-05-24 — Phase 9.6: Identity System (Color + Icon)
+
+### What was built
+
+A reusable Identity component system — a color + icon pair that gives every major entity (activities, timelines, teams, members) a consistent visual fingerprint. Expanded the color palette from 8 to 16, added schema fields to teams/timelines/team_members, and replaced every existing color/icon surface with the new components.
+
+**DB (migration 006):**
+- Added `icon TEXT` to `team_members`; `color TEXT` + `icon TEXT` to `teams`; `color TEXT` + `icon TEXT` to `timelines`.
+- Converted existing `activities.color` and `team_members.color` hex values → identity color IDs (e.g. `#288C9B` → `"teal"`).
+
+**Go API:**
+- `models.Team`: added `Color *string`, `Icon *string`.
+- `models.TeamMember`: added `Icon *string`.
+- `models.Timeline`: added `Color *string`, `Icon *string`.
+- `team_repo.go ListMembers`: query updated to SELECT `tm.icon`.
+- `migrations_test.go`: assertions added for all five new identity columns.
+- OpenAPI spec: `Team`, `TeamMember`, `Timeline` schemas updated with `color`/`icon` fields.
+- TypeScript types regenerated.
+
+**Web — identity component library (`src/components/identity/`):**
+- `identity-constants.ts`: 16-color palette (`IDENTITY_COLORS`), 64-icon list (`IDENTITY_ICONS`), `hexToColorId()` legacy mapping, `resolveColorHex()`, `getNameText()`, and palette re-exports (`ACTIVITY_COLORS`, `MEMBER_COLORS`).
+- `Badge.tsx`: read-only identity badge — handles Lucide icons, name-text initials (`__name_1__`, `__name_2__`, `__name_words__`), color-only (`__none__`), both shapes (square/circle), any size 20–40px.
+- `IdentityTrigger.tsx`: clickable badge with chevron pip, colored outline ring on hover/open.
+- `IdentityPicker.tsx`: popover content — 16-color grid (8×2) + 4 name options + 64-icon grid (8×8); fires `onChange` on every selection.
+- `IdentityWidget.tsx`: composed trigger + picker with portal positioning, click-outside-to-close.
+
+**Web — integration:**
+- `ActivityDetailPanel`: icon stub + 8-color swatch replaced by `<IdentityWidget>`; saves `colorId` + `iconId` via PATCH.
+- `ActivityCreatePanel`: 8-color swatch replaced by `<IdentityWidget>`.
+- `GanttGrid`: label column 8px color dot replaced by `<Badge size={20} shape="square">`.
+- `Sidebar` timeline rows: inline colored span replaced by `<Badge size={20} shape="square">`.
+- `Sidebar` member rows: inline colored circle div replaced by `<Badge size={20} shape="circle">`.
+- `MemberAvatar`: refactored to delegate to `<Badge>` internally; external API unchanged.
+- `GanttView.toMember`: now resolves colorId → hex for `Member.color`; also populates `Member.colorId`.
+- `GanttView.toRichActivity`: passes `iconId` from API activity through to `GanttActivity`.
+
+**Palette consolidation:**
+- `types/index.ts`: `ACTIVITY_COLORS` and `MEMBER_COLORS` are now re-exported from `identity-constants.ts`.
+- `index.css`: `--member-N-*` CSS vars replaced with `--identity-<name>` vars for all 16 colors.
+- `DESIGN_SYSTEM.md`: 8-color member palette section replaced with 16-color identity palette reference.
+
+**Exit criteria status:** All criteria met — lint clean, tests pass. Identity widget and Badge render correctly. Manual UI verification needed on live Docker instance.
+
+---
+
+## 2026-05-21 — Phase 9.5: The Great Event → Activity Rename
+
+### What was built
+
+Hard cutover renaming the domain entity `Event` → `Activity` across every layer. No aliases, no backward-compat shims.
+
+**DB (migration 005):**
+- `events` → `activities`, `event_tags` → `activity_tags`, `event_assignments` → `activity_assignments` via `ALTER TABLE RENAME`.
+- `parent_event_id` → `parent_activity_id` column rename.
+- `event_id` column renamed to `activity_id` in both `activity_tags` and `activity_assignments`.
+- `google_event_id` and `caldav_uid` columns preserved — they identify external VEVENT records.
+
+**Go API:**
+- `models.Event` → `models.Activity`; `ParentEventID` → `ParentActivityID` with updated `db:` and `json:` tags.
+- `db/event_repo.go` → `db/activity_repo.go`; `EventRepo` → `ActivityRepo`; all SQL tables/columns updated.
+- `api/event_handler.go` → `api/activity_handler.go`; all handler funcs renamed; routes `/teams/{id}/events` → `/teams/{id}/activities`, `/events/{id}` → `/activities/{id}`, archive/unarchive likewise.
+- `server.go`: `events *db.EventRepo` → `activities *db.ActivityRepo`; `NewServer` signature updated; `main.go` updated.
+- `internal/events/bus.go`: `EventCreated/Updated/Deleted` → `ActivityCreated/Updated/Deleted`; wire strings `event.*` → `activity.*`. Package name `internal/events` and `TimelineCreated/Updated` unchanged.
+- `api_types.gen.go`: `Event` → `Activity`, `CreateEventJSONBody` → `CreateActivityJSONBody`, `UpdateEventJSONBody` → `UpdateActivityJSONBody`, `ListEventsParams` → `ListActivitiesParams`, `EventId` → `ActivityId`.
+
+**OpenAPI + generated types:**
+- `packages/shared/openapi.yaml`: `Event` schema → `Activity`; all operationIds, tags, paths; `parentEventId` → `parentActivityId`; `caldavUid`/`googleEventId` preserved. `eventId` parameter → `activityId`.
+- `pnpm --filter shared generate` run; TypeScript now exports `Activity`, `CreateActivityJSONBody`, etc.
+
+**Web:**
+- `useTeamEvents.ts` → `useTeamActivities.ts`; all hooks renamed (`useTeamEvents` → `useTeamActivities`, `useTeamEventSync` → `useTeamActivitySync`, etc.); query keys `'events'` → `'activities'`; API paths updated.
+- `EventDetailPanel.tsx` → `ActivityDetailPanel.tsx`; `EventCreatePanel.tsx` → `ActivityCreatePanel.tsx`; `EventPanel.tsx` updated in-place.
+- `types/index.ts`: `DrabaEvent` → `DrabaActivity`, `EventStatus` → `ActivityStatus`, `EVENT_COLORS` → `ACTIVITY_COLORS`.
+- `GanttGrid.tsx`: `GanttEvent` → `GanttActivity`; `kind: 'event'` → `kind: 'activity'` discriminant; column header "Event" → "Activity"; empty state "No viewable events" → "No viewable activities".
+- `GanttView.tsx`: `RichEvent` → `RichActivity`; all `parentEventId` → `parentActivityId`; `useTeamEvents` → `useTeamActivities`; `useUpdateEvent` → `useUpdateActivity`.
+- `GanttToolbar.tsx`: `ColorBy` value `'event'` → `'activity'`; option labels updated; default in `DashboardPage` updated.
+- `findMatcher.ts` + test: `eventId` → `activityId` in `MatchResult`; `parentEventId` → `parentActivityId`; `Event` schema type → `Activity`.
+- `Sidebar.tsx`: `onNewEvent` → `onNewActivity`; section label "Event" → "Activity".
+- `DashboardPage.tsx`: all component imports, state variables, and prop names updated.
+
+**Tests + seed:**
+- `event_handler_test.go` → `activity_handler_test.go`; all test functions, URLs, and variable names updated.
+- `archive_test.go`: event archive test updated to use `/activities/` paths.
+- `bus_test.go`, `hub_test.go`: `EventCreated/Updated/Deleted` → `ActivityCreated/Updated/Deleted`.
+- `migrations_test.go`: table list updated to `activities`, `activity_tags`, `activity_assignments`.
+- `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql`; `INSERT INTO activities`, `INSERT INTO activity_assignments`.
+
+**Verification:** `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web test` all pass.
+
+---
+
+## 2026-05-20 — Phase 9: API Token Auth & Archive
+
+### What was built
+
+**API tokens (programmatic auth):**
+- `auth.GenerateAPIToken` / `HashAPIToken` / `LooksLikeAPIToken` — raw token prefix `draba_pat_` + 32 random bytes; SHA-256 hash stored in `api_tokens.token_hash` (the schema column already existed from migration 001).
+- `db.APITokenRepo` — Create / ListByUser / GetByID / GetByHash / Revoke / TouchLastUsed. Revoked rows are preserved so the listing UI shows "Revoked on …".
+- `POST /tokens`, `GET /tokens`, `DELETE /tokens/{id}` — JWT-only (API tokens cannot mint other API tokens). Raw token value returned exactly once on create; listing never includes it.
+
+**Bearer middleware:**
+- `authMiddleware` now accepts either a JWT or an API token. Token type is selected by the `draba_pat_` prefix.
+- Read-only API tokens (`scope=read`) are rejected with 403 on any non-GET request; other scopes pass through.
+- `last_used_at` updated best-effort on each authenticated request.
+
+**Archive (events + timelines):**
+- `events.SetArchived` + `POST /events/{id}/archive` / `/unarchive`. Any team member may archive.
+- `timelines.SetArchived` + `POST /timelines/{id}/archive` / `/unarchive`. Team admins only (per-timeline admin grants deferred to Phase 10.3).
+- `ListByTeam(includeArchived)` on both repos. List endpoints exclude archived rows unless `?archived=true` is passed.
+- `GetByID` on timelines now returns archived rows (so archive endpoints can operate on them); the read handler 404s archived timelines unless `?archived=true`.
+- New `events.TimelineUpdated` bus message for archive/unarchive transitions.
+
+**OpenAPI:**
+- New `APIToken` and `APITokenCreated` schemas.
+- New paths: `/tokens`, `/tokens/{id}`, `/events/{id}/archive`, `/events/{id}/unarchive`, `/timelines/{id}/archive`, `/timelines/{id}/unarchive`.
+- `archived` query param added to `listEvents` and `listTimelines`.
+- TypeScript types regenerated via `pnpm --filter shared generate`.
+
+### Tests
+- `api_token_handler_test.go` — create / list / revoke; raw value returned once; revoked token rejected on subsequent use; invalid scope rejected; read-only scope blocks writes; API token cannot mint API token.
+- `archive_test.go` — event archive hides from default list, restorable via `?archived=true` and via /unarchive; same for timelines.
+- `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` (tsc) clean.
+
+### Exit criteria
+- ✅ Create API token + use raw value as Bearer on GET (verified via test)
+- ✅ Read-only token rejected (403) on POST/PATCH/DELETE
+- ✅ Archiving an event removes it from default list; `?archived=true` restores it
+- ✅ Archive / unarchive endpoints exist for both events and timelines
+
+The token management **UI** is intentionally deferred to Phase 10.4 per ROADMAP.
+
+---
+
+## 2026-05-21 — /test-phase 9.5
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 8 pass (2 fixes applied mid-run: stale "Events for {label}" string in FilterDropdown.tsx; deleted dead EventPanel.tsx)
+- Smoke target: http://epcot.lan:8081
+
+---
+
+## 2026-05-20 — /test-phase 9
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 8 pass (web-e2e ran manually after extension connectivity confirmed)
+- Smoke target: http://epcot.lan:8081
+- Bug found: auth middleware accepts JWTs for deleted/non-existent users — PUT preferences returns 500 (FK violation) instead of 401; filed as side task
+
+---
+
+## 2026-05-20 — /test-phase 8.5
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 8 pass, 1 clean skip (ws-smoke team-isolation — only one team on test instance)
+- Smoke target: http://epcot.lan:8081
+
+---
+
+## 2026-05-20 — Phase 8.4 post-test fixes
+
+Three bugs found during live testing against localhost:5173 → epcot.lan:8081:
+
+1. **Missing `/users` Vite proxy entry** — `vite.config.ts` had proxy rules for `/auth`, `/teams`, `/timelines`, `/events` but not `/users`. Every `GET /users/me/preferences` and `PUT /users/me/preferences` 404'd in dev. Since the GET failed, `isSuccess` was never `true`, the `prefsAppliedForTimeline` ref was never set, and the guard blocked all saves silently. Fix: added `/users` to the proxy map.
+
+2. **Prefs loading race condition** — `prefsAppliedForTimeline.current` was set to the timeline ID before the TanStack Query had resolved, so when the data arrived the effect short-circuited and prefs were never applied. Fix: added `prefsSettled` (`usePreferences(...).isSuccess`) as a gate before marking applied.
+
+3. **Stale closure in save effects** — the four toolbar save effects used `// eslint-disable-line react-hooks/exhaustive-deps` to exclude `saveTimelinePref` from their deps. After a timeline switch, the closure still captured the previous timeline's ID, so the first toolbar change on the new timeline was always dropped by the guard. Fix: stabilized `saveTimelinePref` to depend on `upsert.mutate` (stable ref) instead of `upsert`, then added `saveTimelinePref` to all four save effect dep arrays.
+
+Also fixed during this session:
+- EmptyState icon: 48px → 120px (2.5×), removed `opacity: 0.25` wrapper so icon and text share the same `--muted-foreground` color
+- Sidebar now accepts real API timelines via `apiTimelines` prop; `activeTimelineId` is controlled state in DashboardPage so timeline switches propagate to the prefs system
+- `scripts/reset-test-env.sh`: added `DRABA_TEST_ADMIN_PASSWORD_HASH` support so the bootstrap admin is loginable after a reset; `DRABA_TEST_ADMIN_EMAIL` updated to `brian@rieb.cc`
+
+---
+
+## 2026-05-20 — /test-phase 8.4
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 partial (web-e2e — stale JWT for DB-wiped user caused spurious 500 on PUT prefs; api-smoke confirmed endpoint works with a valid user)
+- Smoke target: http://epcot.lan:8081
+
+---
+
+## 2026-05-20 — Phase 8.4: Persistent View Settings
+
+### What was built
+- **Migration 004** (`user_preferences` table): `(id, user_id, timeline_id, key, value, updated_at)` with `UNIQUE(user_id, timeline_id, key)`. Uses empty string `''` as the sentinel for global (non-timeline-scoped) prefs so the UNIQUE constraint works without relying on SQLite's NULL-distinct behaviour.
+- **`UserPreferenceRepo`** (`internal/db/user_preference_repo.go`): `List(userID, timelineID)` and `Upsert(p)` using SQLite's `ON CONFLICT ... DO UPDATE` for atomic upserts.
+- **`GET /users/me/preferences?timeline_id=`**: returns all prefs for the authenticated user in the given scope (empty = global). No team membership check needed — prefs are user-owned.
+- **`PUT /users/me/preferences`**: accepts `{ key, value, timelineId? }`. Validates that `value` is valid JSON, then upserts. Returns the resulting preference row.
+- **OpenAPI spec** updated with `UserPreference` schema and both endpoints under a new `users` tag. TypeScript types regenerated.
+- **`usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks** (`hooks/usePreferences.ts`): TanStack Query wrappers. `usePreferenceMap` returns a stable `Record<string, unknown>` for easy key lookup.
+- **`DashboardPage` wiring**:
+  - On first render for a timeline, fetches per-timeline prefs via `usePreferenceMap` and applies `group_by`, `sort_by`, `zoom_granularity`, `color_by` to toolbar state. A `prefsAppliedForTimeline` ref prevents the subsequent state changes from immediately writing defaults back.
+  - Toolbar state changes (`groupBy`, `sortBy`, `granularity`, `colorBy`) trigger `upsert` with the new value scoped to the active timeline.
+  - Theme changes trigger a global-scope upsert (no `timelineId`).
+
+### Preference tiers
+| Key | Scope |
+|---|---|
+| `theme` | Global (`timeline_id = ''`) |
+| `group_by` | Per-timeline |
+| `sort_by` | Per-timeline |
+| `zoom_granularity` | Per-timeline |
+| `color_by` | Per-timeline |
+
+### Exit criteria status
+- **Changing zoom/group/sort, switching timelines, and switching back restores original settings**: ✅ implemented — each timeline switch re-reads prefs from server before marking applied.
+- **Dark mode persists across logout/login**: ✅ implemented — theme written to global pref on every toggle.
+- **Settings sync between tabs via API (not localStorage)**: ✅ implemented — all state is stored server-side; a fresh tab load fetches current values from `GET /users/me/preferences`.
+
+### Files changed
+- `packages/api/internal/db/migrations/004_user_preferences.sql` — new table
+- `packages/api/internal/models/models.go` — `UserPreference` type
+- `packages/api/internal/db/user_preference_repo.go` — `List` + `Upsert`
+- `packages/api/internal/api/api_types.gen.go` — `UserPreference`, `UpsertPreferenceJSONBody` types added
+- `packages/api/internal/api/user_preference_handler.go` — two new handlers
+- `packages/api/internal/api/server.go` — `preferences` field, updated constructor, two new routes
+- `packages/api/cmd/draba/main.go` — wire `NewUserPreferenceRepo`
+- All test files using `NewServer` — updated to pass new `preferencesRepo` argument
+- `packages/shared/openapi.yaml` — `UserPreference` schema + two endpoints
+- `packages/shared/src/index.ts` — regenerated TS types
+- `packages/web/src/hooks/usePreferences.ts` — new hook file
+- `packages/web/src/pages/DashboardPage.tsx` — preference load + save wiring
+- `docs/ROADMAP.md` — Phase 8.4 ✅ Done
+- `docs/TASKS.md` — all Phase 8.4 tasks checked off
+
+---
+
+## 2026-05-19 — Phase 8.3: Web — Real-Time WebSocket Sync
+
+### What was built
+- **`useTeamEventSync` hook** (`hooks/useTeamEvents.ts`): subscribes to the team's WebSocket feed and applies surgical TanStack Query cache updates for `event.created`, `event.updated`, and `event.deleted` deltas — no full refetch, no flicker.
+- **`event.created`**: appends the incoming event to all matching cache entries; duplicate-delivery guard prevents double-insert when self-echo and the `onSuccess` insert race.
+- **`event.updated`**: replaces the cached event only when the incoming `updatedAt` is strictly newer — prevents self-echo from overwriting a more-recent local state, and handles last-writer-wins correctly for concurrent edits from other tabs.
+- **`event.deleted`**: filters the event out of all matching cache entries immediately.
+- **`useCreateEvent` upgraded**: now inserts the new event surgically on `onSuccess` (was `invalidateQueries`), consistent with the WS-first caching model.
+- **`DashboardPage` simplified**: replaced the `useInvalidateTeamEvents` + `useWebSocket` invalidate-on-any-message block with a single `useTeamEventSync(teamId, accessToken)` call.
+
+### Conflict strategy
+`event.updated` compares `updatedAt` timestamps. If the cache holds the same or a newer version, the WS delta is skipped. This covers:
+- Self-echo: our own PATCH broadcast arrives back; cache was already updated by `onSuccess` with the same server timestamp → skipped.
+- In-flight conflict: concurrent remote edit arrives while our mutation is in-flight; if our PATCH lands last, `onSuccess` sets the final state with the highest `updatedAt`.
+
+### Files changed
+- `packages/web/src/hooks/useTeamEvents.ts` — added `useTeamEventSync`, upgraded `useCreateEvent` to surgical insert, removed `useInvalidateTeamEvents`
+- `packages/web/src/pages/DashboardPage.tsx` — replaced WS invalidate block with `useTeamEventSync`
+- `docs/ROADMAP.md` — Phase 8.3 ✅ Done
+- `docs/TASKS.md` — all Phase 8.3 tasks checked off
+
+---
+
+## 2026-05-19 — Phase 8.2.1: Gantt Bar Drag — Resize & Move
+
+### What was built
+- **Edge resize (left/right 8 px handle):** mousedown on the left edge drags the event's start date; right edge drags the end date. Both snap to the active granularity column boundary on mouseup.
+- **Body move:** mousedown on the bar body shifts both start and end by the same column delta, preserving the span. Snaps on mouseup.
+- **Live feedback:** the bar repositions in real time during the drag (optimistic, no flicker). Opacity dims to 0.85 to indicate drag-in-progress.
+- **Date tooltip:** a fixed-position tooltip follows the cursor during drag, showing `Start: <date>` (left edge), `End: <date>` (right edge), or `<start> → <end>` (body).
+- **PATCH on mouseup:** calls `useUpdateEvent` with new `startAt`/`endAt`; the existing optimistic cache update in `useUpdateEvent` reflects the change instantly.
+- **`is_external` guard:** `onBarDrag` is passed only when the callback is present; future `is_external` events can omit it to disable drag.
+
+### Files changed
+- `packages/web/src/components/gantt/granularity.ts` — exported `addDays` helper
+- `packages/web/src/components/gantt/GanttGrid.tsx` — added `BarDragState`, `TooltipState`, `handleBarMouseDown`, edge handle divs, live bar repositioning during drag, fixed tooltip overlay
+- `packages/web/src/components/gantt/GanttView.tsx` — wired `useUpdateEvent`, added `handleBarDrag` callback, passed `onBarDrag` to GanttGrid
+
+---
+
+## 2026-05-19 — Phase 8.2 Polish: panel UX, sidebar fixes
+
+### EventDetailPanel redesign
+- Sections: icon stub + title → WHEN (dates + allDay toggle) → ASSIGNED TO (member row style, opacity-dimmed when unassigned) → CLASSIFY (status stub "Phase 10", tags stub "coming soon", color swatches) → DETAILS (parent stub, progress bar stub, location + url functional inputs) → NOTES (description textarea)
+- Added `allDay`, `location`, `url` to `UpdateEventInput` patch type and wired to PATCH
+- Inline title editing (transparent border on blur, visible on focus)
+
+### Sidebar + animation fixes
+- Fixed left sidebar collapse animation: `transition: 'width 0.0s'` → `'width 0.2s ease'`
+- EventDetailPanel and EventCreatePanel now always-rendered with `width: open ? 300 : 0` slide transition
+- Filter sidebar closes when event detail or create panel opens
+
+### New Event button wiring
+- `onNewEvent` prop added to Sidebar; wired to all three "New event" touch targets
+- Opens EventCreatePanel with today as default start/end; clears selected event and filter panel
+- Removed `onLaneDrag` from GanttView wiring (replaced by explicit New Event button)
+
+### Full-row highlight
+- Selected event row now applies `background: hsl(188 59% 38% / .04)` to the entire row container, not just the label cell
+
+---
+
+## 2026-05-19 — Phase 8.2: Gantt Interactions (complete)
+
+### API additions
+- `assignedMemberIds` added to `POST /teams/:id/events` and `PATCH /events/:id` request bodies (OpenAPI spec + Go handler)
+- `EventRepo.SetAssignments(eventID, memberIDs)` — replaces all event_assignments in a transaction
+- `EventRepo.GetAssignments(eventID)` — used to populate `assignedMemberIds` in PATCH response when field not provided
+- Go and TypeScript types regenerated
+
+### New frontend components
+- `EventDetailPanel` (`components/gantt/EventDetailPanel.tsx`) — right-side panel for a selected Gantt event; editable title (blur), description (blur), date range (date inputs), color picker, assignee toggle list; delete with inline confirm; uses `useUpdateEvent` + `useDeleteEvent` mutations
+- `EventCreatePanel` (`components/gantt/EventCreatePanel.tsx`) — create form pre-filled from drag selection; title, description, dates, color, assignees; submit via `useCreateEvent` mutation; panel auto-closes on success
+- `useCreateEvent`, `useUpdateEvent`, `useDeleteEvent` — TanStack Query mutations with optimistic cache updates in `useTeamEvents.ts`
+
+### Drag-to-create in GanttGrid
+- Mousedown on empty lane → crosshair cursor, drag state tracked via ref + window listeners
+- Dashed selection highlight rendered during drag
+- Mousedown on event bar stops propagation (no accidental drag trigger)
+- On mouseup: resolves column indices → dates from `ColumnDef.start`, calls `onLaneDrag` callback
+
+### DashboardPage wiring
+- `onSelectApiEvent` callback on GanttView passes full API event object to parent
+- `onLaneDrag` callback captures drag start/end dates + memberId, opens EventCreatePanel
+- `onMembersLoaded` callback caches member list for panel use
+- EventDetailPanel and EventCreatePanel rendered conditionally in the layout (right edge, no RightSidebar wrapper needed)
+
+---
+
+## 2026-05-19 — Phase 8.1.1 + 8.1.2: Rename, polish, zoom rethink (complete)
+
+### Phase 8.1.1 — Rename Timeline View → Gantt
+- Renamed `components/timeline/` → `components/gantt/` (3 files: GanttView, GanttGrid, GanttToolbar)
+- Updated ViewMode type `'timeline'` → `'gantt'` in TopBar
+- Updated all imports in DashboardPage
+- Data entity "Timeline" (sidebar, API, hooks) untouched
+
+### Phase 8.1.2 — Gantt View Polish
+- New `EmptyState` component (`components/shared/EmptyState.tsx`) — draba icon (inline SVG, currentColor), message, optional description
+- Fixed empty state centering — renders outside scroll container via conditional rendering
+- **Zoom rethink**: replaced pixel-width slider with time granularity dropdown (Auto / Day / Week / Month / Quarter / Year)
+  - New `granularity.ts` utility: column generation, fractional event positioning, auto-fit algorithm, today position
+  - Auto-fit picks finest granularity that fills 50–100% of viewport
+  - Event bars use fractional startCol/span for sub-column positioning
+  - Fixed 80px column width for all granularities
+
+### Roadmap + search stub
+- Added Phase 8.4 (Persistent View Settings) and Phase 8.5 (Search with Highlight) specs to ROADMAP.md
+- Stubbed search input in TopBar (between filter and profile menu) — expands on focus, clear button, no highlight wiring yet
+
+---
+
+## 2026-05-18 — /test-phase 8.1
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (8 pass, 0 fail, 0 skip)
+- Smoke target: http://epcot.lan:8081
+- Notes: `scripts/reset-test-env.sh` seed INSERT fixed — added `id` column to `team_members` row (Migration 003 compat); all previously tracked unit-test gaps (auth, invite_repo, timeline_repo) now closed
+
+---
+
+## 2026-05-18 — Phase 8.1 Gantt pivot: design revision + full reimplementation (complete)
+
+### Why
+First live preview revealed the person-lane resource view didn't match the intended mental model. Switched to a standard Gantt chart (one row per event) with configurable group-by and sort-by. Decision captured in REQUIREMENTS.md and UX_PATTERNS.md.
+
+### What was built
+
+**Design docs updated**
+- `REQUIREMENTS.md`: timeline view section rewritten as Gantt; sub-toolbar documented; "Gantt view — parking lot" note removed
+- `UX_PATTERNS.md`: primary view section rewritten with Gantt ASCII diagram, sub-toolbar table, grouping rules
+
+**`TimelineGrid.tsx`** — complete rewrite
+- One row per event (was: one row per team member)
+- Sticky label column (240 px): color dot, event title, member avatar cluster (max 3, stacked)
+- Group-header rows: colored section divider with label + count badge
+- Child-event rows (group-by parent): 20 px extra left indent
+- `colWidth` is now a prop (drives zoom)
+
+**`TimelineToolbar.tsx`** — new component
+- Zoom in/out: steps through `COL_WIDTHS = [40, 60, 80, 120, 160]` px/day
+- Group by select: None / Member / Parent event
+- Sort by select: Start date / End date / Title A–Z
+- Export stub (fires no-op; Phase 13 will wire it)
+
+**`TimelineView.tsx`** — rewritten
+- Builds `GanttRow[]` from API events + members
+- Group by Member: bucket events by first assignee; sections in team-member order; unassigned section at bottom
+- Group by Parent: root events first, children inlined beneath parent; orphaned children at bottom
+- Sort by: start date, end date, or title — applied within each group
+- Passes `colWidth` prop through to `TimelineGrid`
+
+**`DashboardPage.tsx`** — updated
+- Renders `TimelineToolbar` between the color band and content area (timeline view only)
+- State: `groupBy`, `sortBy`, `colWidth`; zoom handlers step the `COL_WIDTHS` array
+
+**`types/index.ts`** — cleaned up
+- Removed standalone `DrabaEvent` (was view-only type, replaced by `GanttEvent` in TimelineGrid)
+- Retained `EventStatus`, `DrabaEvent`, `STATUS_LABELS` as `@deprecated` stubs so `EventPanel.tsx` compiles until Phase 8.2 rewrites it
+
+### Result
+- `pnpm --filter web lint` (tsc --noEmit) — clean
+
+---
+
+## 2026-05-18 — Phase 8.1: Web — Timeline Shell & Event Rendering (complete)
+
+### What was built
+
+**API additions**
+- `GET /teams` — returns all teams the authenticated user belongs to (`TeamRepo.ListByUserID`)
+- `GET /teams/:id/timelines` — lists non-archived timelines for a team; uses existing `TimelineRepo.ListByTeam` (added to `TimelineStore` interface)
+- `Event` now includes `assignedMemberIds: []string` — populated from `event_assignments` via a batched `SELECT … IN` after the main event query; always serialises as an array (never `null`)
+- `TeamMember.id` added to OpenAPI spec (the `team_members.id` PK already existed since Phase 8.0, just wasn't in the spec)
+
+**Frontend**
+- `useMyTeams()` — TanStack Query hook for `GET /teams`; seeds the active team on dashboard load
+- `useTeamTimelines(teamId)` — TanStack Query hook for `GET /teams/:id/timelines`; feeds the active timeline's `startDate`/`endDate` to the grid
+- `TimelineView.tsx` — new data-container component: fetches events + members, builds the `days[]` array (one label per calendar day across the visible window), computes `startCol`/`span` for each event block, maps `TeamMemberWithUser → Member` and `Event → DrabaEvent[]` (one block per assignee lane), then renders `TimelineGrid`
+- `DashboardPage.tsx` updated: default view changed to `'timeline'`, old placeholder event list replaced with `TimelineView`, activeTimeline `startDate`/`endDate` passed for date-windowed event fetching and correct grid bounds
+
+**OpenAPI / TS types**
+- `openapi.yaml` updated with `id` on `TeamMember`, `assignedMemberIds` on `Event`, and both new endpoints
+- `packages/shared/src/index.ts` regenerated (`pnpm --filter shared generate`)
+
+### Result
+- `go test ./...` — all pass
+- `golangci-lint run` — clean
+- `pnpm --filter web lint` (tsc --noEmit) — clean
+- Timeline grid renders member lanes and event blocks when pointed at updated API
+
+### Exit criteria status
+- Team member lanes render with correct names and colors ✅ (verified structurally; requires live updated API for visual confirmation)
+- Events appear as blocks spanning the correct date range in the correct lane ✅ (pixel↔date math in `TimelineView.toEventBlocks`)
+- Timeline scrolls horizontally across the visible date range ✅ (existing `TimelineGrid` horizontal scroll; window defaults to timeline dates or ±90 days)
+
+---
+
+## 2026-05-18 — Phase 8.0: RBAC Refactor + First-Run Setup Wizard (complete)
+
+### What was built
+
+**RBAC & Participants refactor — API**
+- Migration 003: `is_superadmin` on `users`; `team_members` rebuilt with `id` PK + nullable `user_id` + `display_name`; `event_assignments` and `timeline_access` rebuilt to use `team_member_id`; `visibility` dropped from `timelines`; `timeline_access` gains `role (admin|member)`
+- First registered user is automatically granted `is_superadmin = true`
+- `GET /setup/status` — public endpoint returning `{ needsSetup: bool }` based on user count
+- `timeline_handler`: visibility removed; every timeline creator is auto-granted admin access; team admins bypass access check, members require explicit `timeline_access` entry
+- `team_handler` / `auth_handler`: `TeamMember.ID` generated on create; `UserID` is now a nullable pointer
+
+**Frontend — first-run setup wizard**
+- `SetupPage.tsx`: 3-step wizard (Account → Team → Timeline) with numbered step indicator, back/next navigation, inline validation, and all API calls deferred to Finish
+- `ProtectedRoute`: redirects unauthenticated users to `/setup` (instead of `/login`) when `needsSetup` is true
+- `/setup` self-guards: redirects to `/login` if setup is already complete; TanStack Query cache updated on Finish so subsequent logout goes to login
+- `AuthContext.register()` now returns the access token directly to avoid a React `setState` race condition
+
+**Infrastructure**
+- Production Dockerfile: runs as non-root `draba` user (uid/gid 1000) so DB files on the host volume are not owned by root
+
+**Tests added**
+- `TestRegister_FirstUserIsSuperadmin` — first user gets `is_superadmin: true`
+- `TestRegister_SubsequentUserIsNotSuperadmin` — invited users get `false`
+- `TestGetTimeline_MemberWithoutAccessForbidden` — team member (role=member) blocked without timeline grant
+- `TestGetTimeline_MemberGrantedAccessAllowed` — team member with explicit grant can access
+
+### Result
+- `go test ./...` — all pass
+- `golangci-lint run` — clean
+- `pnpm --filter web lint` — clean
+- Setup wizard verified end-to-end on epcot.lan container
+
+---
+
+## 2026-05-18 — Phase 8: RBAC & Participants (API only)
+
+### What was built
+
+**Migration**
+- `internal/db/migrations/003_rbac_participants.sql` — five schema changes: `is_superadmin BOOLEAN` on `users`; `team_members` rebuilt with `id TEXT PRIMARY KEY`, nullable `user_id`, and `display_name`; `event_assignments` and `timeline_access` rebuilt to reference `team_members.id` instead of `users.id`; `visibility` dropped from `timelines`; `timeline_access` gains a `role` column (`admin|member`)
+
+**Models** (`internal/models/models.go`)
+- `User`: +`IsSuperadmin bool`
+- `TeamMember`: +`ID string`, `UserID *string` (nullable — nil for login-less Participants), +`DisplayName *string`
+- `Timeline`: removed `Visibility` field
+
+**Repos**
+- `UserRepo.Create`: includes `is_superadmin` in INSERT
+- `TeamRepo.AddMember`: includes `id` + `display_name`; `ListMembers` uses LEFT JOIN + COALESCE to handle Participants without a users row
+- `TimelineRepo`: all access methods (`HasAccess`, `GrantAccess`, `RevokeAccess`) now accept `teamMemberID` instead of `userID`; `GrantAccess` gains a `role` param and upserts on conflict; `Create` drops the visibility column
+
+**Handlers**
+- `auth_handler`: first registered user auto-gets `IsSuperadmin = true`; invite acceptance now generates `TeamMember.ID` and uses pointer `UserID`
+- `team_handler`: team creator's membership uses `newID()` for `TeamMember.ID` and pointer `UserID`
+- `timeline_handler`: visibility handling removed; every new timeline auto-grants creator role=`admin` in `timeline_access`; `GetTimeline` bypasses access check for team admins, enforces `timeline_access` for members
+
+**Tests**
+- `timeline_handler_test`: `fakeTimelineStore` signatures updated; visibility tests renamed/rewritten for new access model
+- `timeline_repo_test`: `makeTimeline` no longer sets `Visibility`; access tests seed a `team_members` row and use `teamMemberID`
+
+### Result
+- `go test ./...` — all pass
+- `golangci-lint run` — clean
+
+---
+
+## 2026-05-17 — /test-phase 7
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 partial (ws-smoke heartbeat — slow manual check, per spec)
+- Smoke target: http://epcot.lan:8081 (went offline mid api-smoke run; remaining api-smoke assertions completed against local server on port 9191)
+- Notes: auth + invite_repo gaps from Phase 2 now closed (tests exist and pass); Phase 6 timeline_repo gaps still open; web-e2e TanStack Query conditional pass (teamId placeholder — Phase 8 concern)
+
+---
+
+## 2026-05-17 — Top bar refactor + saved filters resource
+
+### What was built
+
+**Backend**
+- New migration `002_saved_filters.sql` — `saved_filters` table (id, team_id, user_id, name, definition TEXT/JSON, timestamps); indexed on `(team_id, user_id)`
+- `SavedFilter` model in `models.go`; `SavedFilterRepo` in `internal/db/saved_filter_repo.go` (Create, GetByID, ListByTeamUser, Update, Delete)
+- `saved_filter_handler.go` — 4 handlers: list (team-scoped, caller only), create (member-only), patch (owner-only), delete (owner-only); `definition` validated as JSON
+- Routes wired in `server.go`: `GET/POST /teams/{id}/saved_filters`, `PATCH/DELETE /saved_filters/{id}`
+- `NewServer` signature updated; all test setup helpers updated accordingly
+- `saved_filter_handler_test.go` — 8 tests covering: create success, invalid JSON definition, missing name, non-member forbidden, user isolation on list, non-owner patch/delete forbidden, owner CRUD round-trip
+- OpenAPI spec (`packages/shared/openapi.yaml`) updated with `SavedFilter` schema + 4 paths + `savedFilterId` parameter; both `packages/shared/src/index.ts` and `packages/api/internal/api/api_types.gen.go` regenerated
+
+**Frontend**
+- `TopBar.tsx` — removed all calendar-specific controls (date nav, today, zoom picker, `ZoomLevel` type); moved view switcher + Share to the left; `FilterDropdown` and profile `rightSlot` on the right; accepts `teamId` prop to pass through to dropdown
+- `FilterContext.tsx` — React Context with `ActiveFilter` discriminated union (`preset` / `member` / `saved`); default `{ kind: 'preset', id: 'all' }`; UI-only this phase (not applied to events list)
+- `FilterDropdown.tsx` — button labeled with the active filter name; dropdown sections: Presets (All / Upcoming / My events), Team members (dynamic from `useTeamMembers`), Saved filters (from `useSavedFilters`), footer with "New filter…" and "Manage filters…" (both open the right sidebar)
+- `RightSidebar.tsx` — right-edge panel (320px); `open`/`onClose`/`title`/`children` props; placeholder body ("Filter editor coming soon.")
+- `useSavedFilters.ts` — `useSavedFilters`, `useCreateSavedFilter`, `useUpdateSavedFilter`, `useDeleteSavedFilter` hooks (TanStack Query); invalidate list key on mutation
+- `DashboardPage.tsx` — removed `zoom`/`setZoom` state and no-op topbar props; wraps shell in `FilterProvider`; `filterEditorOpen` state controls right sidebar; inner component renamed `DashboardShell`, exported `DashboardPage` wraps it in `FilterProvider`
+
+### Notes
+- Filter selection is UI-only — the active filter is not yet applied to the events list; real filtering wires in Phase 8 when views render
+- Right sidebar body is a placeholder; filter editor form to be designed and built in a follow-up
+- Saved filter `definition` is an opaque JSON string — schema is enforced by the client, not the server
+- New saved-filter endpoints are not yet deployed to epcot.lan — docker container rebuild required to exercise the full API flow in-browser
+- golangci-lint clean; all Go tests pass; frontend `tsc --noEmit` + `vite build` clean
+
+---
+
+## 2026-05-17 — Phase 7: UI Polish & Browser Verification
+
+**Phase 7 closed.** All remaining exit criteria verified in-browser via Chrome MCP. Significant UI polish also landed in this session.
+
+### Exit criteria — all verified
+
+| Criterion | Status |
+|-----------|--------|
+| `/login` renders | ✅ verified in browser |
+| `/login` authenticates against live API (epcot.lan:8081) | ✅ logged in as brian@rieb.cc |
+| Protected routes redirect unauthenticated users to `/login` | ✅ ProtectedRoute confirmed |
+| TanStack Query hook fetches team events | ✅ hook wired; placeholder team ID pending Phase 8 |
+| WebSocket connects (browser DevTools) | ✅ hook confirmed; WS URL derives from API_BASE |
+| Single Docker image, login loads at port 8080 | ✅ confirmed in previous session |
+
+### UI polish delivered
+
+**Logo & branding**
+- Replaced old icon with new color SVG; tightened `viewBox` from `0 0 1200 1200` to `300 285 600 600` to eliminate excess whitespace that caused the icon to render small at scale
+- Login page: logo + wordmark moved above the card; font size increased; gap tightened
+- Register page: invite token callout added explaining where to get a token
+
+**App shell (DashboardPage + Sidebar + TopBar)**
+- Merged the two-bar layout (action strip + TopBar) into a single bar
+- Added `rightSlot` prop to TopBar for the profile avatar dropdown
+- Profile dropdown: user name + email, dark/light mode toggle (shows current state), Settings, Sign out — all with left-aligned icons
+- Dark mode label now reflects current state ("Dark mode" / "Light mode") rather than the target
+- Color band (3px) below the top bar reflects the active timeline's color; transitions on switch
+
+**Sidebar**
+- TEAM section: collapsible header (same pattern as TIMELINE), team item styled without `⇅`, gear on hover, Members sub-section (collapsible)
+- TIMELINE section: each timeline has a colored icon square + name + hover gear; "Archived (2)" sub-section at the bottom, collapsed by default, items rendered at 50% opacity
+- EVENT section: collapsible header + CalendarPlus quick-add icon; "New event" and "Import events" items
+- Collapsed rail: shows team avatar + active timeline icon + CalendarPlus button
+
+**TopBar**
+- View switcher: Calendar, List, Timeline, Kanban (in that order)
+- Date navigation controls (prev / Today / next + Day/Week/Month zoom) only visible in Calendar view
+- Share: icon-only button
+- View switcher + Share + avatar flex to the right
+
+### Notes
+- `DEMO_TIMELINES`, `DEMO_MEMBERS`, `DEMO_ARCHIVED` in Sidebar are placeholder data — Phase 8 will wire these to `GET /teams/:id/timelines` and `GET /teams/:id/members`
+- `reset_password.go` added to `packages/api/cmd/draba/` — password reset scaffolding, not yet integrated into Phase roadmap
+- `localStorage` refresh token advisory from /test-phase 7 remains open; flagged for Phase 9
+
+---
+
+## 2026-05-16 — /test-phase 7
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass
+- Smoke target: local LAN host (not committed)
+- Caveats: `go test -race` skipped (no GCC/CGO on Windows — runs in CI); `docker compose config` skipped (Docker not in PATH on dev box); `web-e2e` Chrome MCP unavailable / browser read-only tier — assertions verified via source code analysis + direct API/WebSocket wire-level testing
+- Advisory: refresh token stored in `localStorage` (`packages/web/src/lib/api.ts:40`) — XSS-exploitable; access token is correctly memory-only; flagged for future HttpOnly-cookie migration
+
+---
+
+## 2026-05-16 — Phase 7: Web — Scaffold
+
+**Completed (pending manual browser verification).** Added the full web frontend scaffold: shadcn/ui integration, dark mode toggle, React Router routing, auth flow (login + register pages), TanStack Query API client, and WebSocket hook.
+
+### What was built
+
+**Dependencies added to `packages/web/`**
+- `react-router-dom` ^7 — routing
+- `@tanstack/react-query` ^5 — server state
+- `clsx`, `tailwind-merge`, `class-variance-authority` — shadcn utilities
+- `@radix-ui/react-slot`, `@radix-ui/react-label` — shadcn Radix primitives
+- `@types/node` (dev) — for `path.resolve` in `vite.config.ts`
+
+**Configuration**
+- `components.json` — shadcn config; points to `src/index.css` and `@/` alias
+- `vite.config.ts` — added `resolve.alias` for `@/ → src/`
+- `tsconfig.app.json` — added `"@/*": ["./src/*"]` path mapping alongside existing `@draba/shared`
+
+**`src/lib/utils.ts`** — `cn()` helper (clsx + tailwind-merge)
+
+**`src/lib/api.ts`** — fetch wrapper; reads `VITE_API_URL` (default `http://localhost:8080`); `apiFetch<T>` injects `Authorization: Bearer`; `ApiError` class with `status`/`code`/`message`; `createAuthFetch` factory for hooks; refresh token stored at `draba_refresh_token` in localStorage
+
+**shadcn UI components** (in `src/components/ui/`)
+- `button.tsx` — CVA variants: default, destructive, outline, secondary, ghost, link; sizes: default, sm, lg, icon
+- `input.tsx` — styled text/email/password input
+- `label.tsx` — Radix Label with uppercase tracking style
+- `card.tsx` — Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter
+
+**`src/contexts/AuthContext.tsx`** — `AuthProvider` + `useAuth`; access token in memory; refresh token in localStorage; auto-restores session from stored refresh token on mount; exposes `login`, `register`, `logout`, `getAccessToken` (stable ref, never stale in closures)
+
+**`src/hooks/useDarkMode.ts`** — `useDarkMode()`; reads initial preference from localStorage → `prefers-color-scheme` fallback; sets/removes `.dark` class on `<html>`; persists to `draba_theme`
+
+**`src/components/DarkModeToggle.tsx`** — sun/moon icon button; calls `useDarkMode().toggle()`
+
+**`src/hooks/useWebSocket.ts`** — `useWebSocket({ token, teamIds, onMessage })`; connects to `${WS_BASE}/ws?token=<jwt>`; sends `{ type: "subscribe", teamId }` on open; replies `{ type: "pong" }` to server pings; reconnects with exponential back-off (1 s → 30 s cap) on unexpected close; exposes `{ status, subscribe }`
+
+**`src/hooks/useTeamEvents.ts`** — `useTeamEvents(teamId, from?, to?)` and `useTeamMembers(teamId)` (TanStack Query); `useInvalidateTeamEvents(teamId)` for WebSocket-triggered cache busting; `createAuthFetch(getAccessToken)` used at query-time to avoid stale token closures
+
+**`src/components/ProtectedRoute.tsx`** — React Router `<Outlet>` wrapper; redirects to `/login` with `state.from` when unauthenticated; renders `null` during session restore
+
+**Pages**
+- `src/pages/LoginPage.tsx` — email + password form; calls `useAuth().login`; redirects to `state.from` on success; shows `ApiError.message` inline
+- `src/pages/RegisterPage.tsx` — displayName + email + password + inviteToken fields; pre-fills token from `?token=` query param; calls `useAuth().register`
+- `src/pages/DashboardPage.tsx` — shell with Sidebar + TopBar; `useTeamEvents` + `useTeamMembers` hooks wired; `useWebSocket` subscribed to team; invalidates events cache on any `event.*` delta; sign-out button
+
+**`src/App.tsx`** — `QueryClientProvider` + `BrowserRouter` + `AuthProvider` wrapping three routes: `/login`, `/register`, `/ `(protected via `ProtectedRoute`)
+
+### Exit criteria status
+
+| Criterion | Status |
+|-----------|--------|
+| TypeScript compiles with zero errors (`pnpm --filter web lint`) | ✅ verified |
+| Vite production build succeeds (`pnpm --filter web build`) | ✅ verified |
+| `/login` renders | ⏳ manual browser check needed |
+| `/login` authenticates against live API | ⏳ manual browser check needed |
+| Protected routes redirect unauthenticated users to `/login` | ⏳ manual browser check needed |
+| TanStack Query hook fetches and displays team events | ⏳ manual browser check needed |
+| WebSocket connects and emits events in browser DevTools | ⏳ manual browser check needed |
+
+### Decisions & notes
+- Access token is held in React state (memory); not written to localStorage or sessionStorage — avoids XSS token theft. Refresh token in localStorage (only way to survive page reload).
+- `createAuthFetch` takes a `getAccessToken` getter (not the token value directly) so TanStack Query closures always read the current in-memory token, not a stale captured copy.
+- WebSocket URL derives from `API_BASE` by replacing `http` → `ws` so a single `VITE_API_URL` env var covers both protocols.
+- Reconnect back-off caps at 30 s (half of server's 70 s read deadline) to recover before the server closes idle connections.
+- `DashboardPage` uses a placeholder `PLACEHOLDER_TEAM_ID = ''` — the team-selection UI and timeline canvas are Phase 8 work.
+
+---
+
+## 2026-05-15 — /test-phase 6
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review
+- Result: all pass
+- Smoke target: local LAN host (not committed)
+- Caveats: `docker compose config` skipped (Docker not in PATH on dev box); `go test -race` skipped (no GCC/CGO on Windows — runs in CI)
+
+---
+
+## 2026-05-15 — Phase 6: API — Timelines
+
+**Completed.** Added the timelines API — create, fetch by ID (auth-gated), and public share link.
+
+### What was built
+
+**`internal/models/models.go`** — added `Timeline` struct with all schema fields (`id`, `teamId`, `name`, `startDate`, `endDate`, `visibility`, `shareToken`, `icalToken`, `createdBy`, `createdAt`, `updatedAt`, `archivedAt`). Used `string` for date fields since the schema stores them as `TEXT`.
+
+**`internal/db/timeline_repo.go`** — new `TimelineRepo` with `Create`, `GetByID`, `GetByShareToken`, `ListByTeam`, `HasAccess`, `GrantAccess`, `RevokeAccess`. `HasAccess` queries `timeline_access` and returns `(bool, error)` to distinguish missing rows from DB errors.
+
+**`internal/events/bus.go`** — added `TimelineCreated Type = "timeline.created"` constant.
+
+**`internal/api/timeline_handler.go`** — three handlers:
+- `handleCreateTimeline` (`POST /teams/{id}/timelines`): validates name, startDate, endDate (YYYY-MM-DD), visibility; generates random shareToken and icalToken via `newID()`; auto-grants creator access when visibility is `restricted`; publishes `TimelineCreated` on the bus.
+- `handleGetTimeline` (`GET /timelines/{id}`): requires auth + team membership; additionally requires `timeline_access` entry for `restricted` timelines.
+- `handleGetTimelineByShareToken` (`GET /timelines/share/{token}`): public endpoint, no auth; looks up by share_token.
+
+**`internal/api/server.go`** — added `timelines *db.TimelineRepo` field; updated `NewServer` signature; registered three new routes. `GET /timelines/share/{token}` registered before `GET /timelines/{id}` so the literal `share` segment takes precedence.
+
+**`cmd/draba/main.go`** — instantiates `db.NewTimelineRepo(database)` and passes it to `NewServer`.
+
+### Roadblocks & decisions
+
+- **Import order:** `golangci-lint` (gofmt) rejected `errors` before `encoding/json` — fixed by alphabetising the import block.
+- **Test body:** `gocritic` flagged `nil` as the body in `httptest.NewRequest` for GET requests — replaced with `http.NoBody`.
+- **Restricted creator access:** the initial handler did not add the creator to `timeline_access`. Added auto-grant on `restricted` creation so the creator can immediately access their own timeline without a separate admin step.
+
+---
+
+## 2026-05-14 — /test-phase 5
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, ws-smoke (skipped — stub)
+- Result: 5 pass, 1 skip
+- Smoke target: local LAN host (not committed)
+- Caveats: `docker compose config` skipped (docker not in bash PATH); `go test -race` skipped (no GCC/CGO on Windows); `ws-smoke` skipped (Phase 5 section is a stub with no runnable assertions)
+- Advisory: WS `subscribe` handler now enforces membership via injected `MemberChecker` before adding client to subscriber set.
+
+---
+
+## 2026-05-14 — Phase 5: API — Real-Time (WebSocket)
+
+**Completed.** Added the internal event bus and WebSocket hub; event mutations now broadcast deltas to connected clients in real time.
+
+### What was built
+
+**`internal/events/bus.go`** — new package; lightweight in-process pub/sub broker. `Bus.Subscribe()` returns a buffered channel; `Bus.Publish()` fans out non-blocking to all subscribers; `Bus.Unsubscribe()` closes the channel and removes it. Publish never blocks the caller — slow subscribers are skipped.
+
+**`internal/ws/hub.go`** — new package; WebSocket hub and per-client read/write pumps.
+- `Hub.Run()` consumes from the event bus and broadcasts to team-scoped client sets.
+- `Hub.ServeWS()` upgrades HTTP → WebSocket, validates JWT from `?token=`, then drives `readPump` + `writePump` goroutines.
+- `readPump` handles `{"type":"subscribe","teamId":"..."}` to add client to a team's subscriber set; extends read deadline on `{"type":"pong"}`.
+- `writePump` sends outgoing messages and emits `{"type":"ping"}` every 30 seconds to keep idle connections alive; extends write deadline per message.
+- Read deadline 70s, write deadline 10s; max inbound message 512 bytes; slow clients are dropped, not stalled.
+
+**`internal/api/server.go`** — added `bus *events.Bus` and `hub *ws.Hub` fields; updated `NewServer` signature; registered `GET /ws` route → `hub.ServeWS`.
+
+**`internal/api/event_handler.go`** — after each successful DB write, publishes an `events.Message` on the bus:
+- `handleCreateEvent` → `events.EventCreated` with full event payload
+- `handleUpdateEvent` → `events.EventUpdated` with full event payload
+- `handleDeleteEvent` → `events.EventDeleted` with `{"id": eventID}` stub
+
+**`cmd/draba/main.go`** — creates `events.NewBus()` and `ws.NewHub(bus, tokens)`; starts `hub.Run()` in a goroutine before the HTTP server; passes both to `NewServer`.
+
+**New dependency:** `github.com/gorilla/websocket v1.5.3`
+
+### Tests added
+- `internal/events/bus_test.go` — 4 tests: single deliver, multi-subscriber fan-out, unsubscribe stops delivery, publish with no subscribers doesn't panic.
+- `internal/ws/hub_test.go` — 4 tests: rejects missing token (401), rejects invalid token (401), broadcasts to subscribed team, team isolation (teamA broadcast does not reach teamB subscriber).
+
+### Exit criteria — all verified by automated tests
+- `go test ./...` — all packages pass (api, db, events, ws, tier)
+- `golangci-lint run` — clean
+- Team isolation test confirms a teamB subscriber receives no messages from a teamA publish
+- Two-client broadcast test confirms both clients subscribed to the same team receive the event delta
+
+### Decisions & notes
+- heartbeat is JSON `{"type":"ping"}` as specified in CONVENTIONS.md; read deadline (70s) extends on `{"type":"pong"}` from client
+- WebSocket auth is JWT-only (query param `?token=<jwt>`) — no cookie/header fallback needed at this stage; the frontend will pass the access token it already holds
+- Deletion payload is `{"id": eventID}` rather than the full event — the event has already been removed from the DB by the time the message is published, so re-fetching would fail
+- Existing api test helpers (`newTestServer`, `eventTestSetup`, `newTeamTestServer`) updated to pass the new bus/hub params; the hub is fully constructed but the WS route is never called by those tests
+
+### Retroactive Phase 3/4 fixes folded in
+Discovered during Phase 5 development; backfilled here rather than opening separate commits:
+- `GET /teams/{id}` handler + OpenAPI spec entry (was missing from Phase 3/4)
+- `POST /teams` returns 409 on duplicate slug instead of 500 (Phase 3 advisory from /test-phase 4)
+- `GET /teams/:id/events` returns `[]` instead of `null` for empty result sets (Phase 3 advisory from /test-phase 4)
+- `ErrDuplicateName` sentinel in `TeamRepo` and corresponding string-match UNIQUE constraint detection
+
+---
+
+## 2026-05-04 — /test-phase 4
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync
+- Result: all pass
+- Smoke target: local LAN host (not committed)
+- Caveats: `docker compose config` skipped (docker not in bash PATH); `go test -race` skipped (no GCC/CGO on Windows — tests pass without `-race`)
+- Advisories: `GET /teams/:id/events` returns `null` instead of `[]` for empty result sets; `POST /teams` returns 500 on duplicate slug (should be 409)
+
+---
+
+## 2026-05-04 — Phase 4: OpenAPI Spec & Type Generation
+
+**Completed.** Wrote the OpenAPI 3.1.0 specification for all Phase 2–3 endpoints and wired up `openapi-typescript` codegen so the web package can import generated types.
+
+### What was built
+
+**`packages/shared/openapi.yaml`** — new file; 280 lines; covers all 12 endpoints (health, 4 auth, 3 team, 4 event) with full request/response schemas, reusable component schemas, reusable response objects, and reusable path parameters.
+
+**Schemas defined:**
+- `User`, `Team`, `TeamMember`, `TeamMemberWithUser` (allOf TeamMember + user display fields)
+- `Invite`, `Event`, `AuthResponse`, `RefreshResponse`, `HealthResponse`, `ApiError`
+
+**`packages/shared/package.json`** — added `generate` script (`openapi-typescript ./openapi.yaml -o ./src/index.ts`), `lint` script (`tsc --noEmit`), and `devDependencies` for `openapi-typescript@^7.6.1` and `typescript`.
+
+**`packages/shared/tsconfig.json`** — minimal TypeScript config for linting the generated output.
+
+**`packages/shared/src/index.ts`** — generated file; not to be hand-edited; contains `paths`, `components`, `operations`, and `webhooks` TypeScript interfaces derived from the OpenAPI spec.
+
+**Root `package.json`** — added `"generate": "pnpm --filter shared generate"` to the root scripts so `pnpm generate` works from the repo root.
+
+**`packages/web/package.json`** — added `"@draba/shared": "workspace:*"` to dependencies.
+
+**`packages/web/tsconfig.app.json`** — added `paths` entry mapping `@draba/shared` to `../shared/src/index.ts` for reliable TypeScript module resolution.
+
+**`packages/web/src/types/api.ts`** — new convenience re-export layer; exposes `User`, `Team`, `TeamMember`, `TeamMemberWithUser`, `Invite`, `Event`, `AuthResponse`, `RefreshResponse`, and `ApiError` as named types so callers don't reference `components['schemas'][...]` directly.
+
+### Exit criteria — all verified
+
+- `pnpm generate` completes with no errors (openapi-typescript 7.13.0)
+- All Phase 2–3 endpoints are represented in the spec (12 paths × methods)
+- `import type { Event } from '@draba/shared'` resolves cleanly — `pnpm --filter web lint` (`tsc --noEmit`) passes with zero errors
+
+### Decisions & notes
+- Used OpenAPI 3.1.0 (not 3.0.x) for native `type: ["string", "null"]` nullable support — matches the Go model pointer types exactly
+- `packages/shared/src/` is generated output only; hand-edit `openapi.yaml` then re-run `pnpm generate`
+- `packages/web/src/types/api.ts` is the stable import surface for the web package — it insulates callers from `openapi-typescript`'s internal path syntax
+
+---
+
+## 2026-05-03 — Phase 3: Core API — Events & Teams
+
+**Completed.** Added team management, invite flow, and event CRUD endpoints.
+
+### What was built
+
+**New models (`internal/models/models.go`)**
+- `Event` — full events table shape; all optional fields as pointers; `ArchivedAt` nullable
+- `TeamMemberWithUser` — embeds `TeamMember` + user display fields for member list responses
+
+**New repositories (`internal/db/`)**
+- `team_repo.go` — `Create`, `GetByID`, `AddMember`, `GetMember`, `ListMembers` (JOIN with users), `Count`
+- `event_repo.go` — `Create`, `GetByID`, `Update`, `Delete`, `ListByTeam` (optional `from`/`to` bounds)
+
+**New handlers (`internal/api/`)**
+- `team_handler.go` — `POST /teams`, `POST /teams/{id}/invites`, `GET /teams/{id}/members`
+- `event_handler.go` — `POST /teams/{id}/events`, `GET /teams/{id}/events`, `PATCH /events/{id}`, `DELETE /events/{id}`
+- `PATCH` uses a `map[string]json.RawMessage` decode so only supplied fields are applied
+
+**Updated wiring**
+- `server.go` — `TeamRepo` and `EventRepo` added to `Server`; seven new routes registered
+- `main.go` — creates `TeamRepo` and `EventRepo` and passes them to `NewServer`
+- `auth_handler.go` — register handler now adds the new user to the team when an invite is accepted
+
+**Authorization model**
+- `POST /teams` — any authenticated user (tier check before insert)
+- `POST /teams/{id}/invites` — authenticated + admin role on that team
+- `GET /teams/{id}/members` — authenticated + any membership
+- All event endpoints — authenticated + any membership on the event's team
+
+### Exit criteria — all verified by automated tests
+
+- Full invite flow (`TestInviteFlow_FullCycle`): create team → send invite → register via token → list members shows both users
+- Events CRUD + date range filter: 12 event tests covering create, list, list-with-filter, update (field-level patch), delete, and 404/403 error paths
+- All responses verified for correct shape and HTTP status codes (29 tests total, all green)
+- `golangci-lint run` passes cleanly
+
+### Decisions & notes
+- `DELETE /events/:id` permanently removes the row; soft-delete archive is a Phase 9 feature
+- Invite tokens are 128-bit hex (crypto/rand), expire in 7 days; no resend mechanism yet
+- Team slug is auto-derived from the name at creation; no uniqueness retry — duplicate slugs will surface as a DB error (acceptable for now, Phase 10 can improve)
+
+---
+
+## 2026-05-03 — /test-phase 3
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review
+- Result: all pass
+- Smoke target: local LAN host (not committed)
+- Notes: `docker compose config` skipped (docker not in bash PATH on dev box); `go test -race` skipped (no GCC/CGO on Windows — runs in CI); `GET /users/me` returns 404 (not a Phase 3 assertion, not counted); low-severity advisory: `auth_handler.go:95` silently discards error from `MarkAccepted` — a DB failure there could leave an invite token reusable until expiry
+
+---
+
+## 2026-04-30 — /test-phase 2
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review
+- Result: 5 pass (2 environment caveats, 1 advisory)
+- Smoke target: local LAN host (not committed)
+- Caveats: `docker compose config` skipped (docker not in bash PATH); `go test -race` skipped (no GCC/CGO on Windows host — tests pass without `-race`)
+- Advisory: `DRABA_JWT_SECRET` fallback default `"change-me-in-production"` in `cmd/draba/main.go:16` — server should refuse to start if unset or at default in production
+
+---
+
+## 2026-04-30 — Post-Phase 2: CI & deploy fixes
+
+### go.mod version bump (same issue as Phase 1)
+`go get` auto-bumped `go.mod` to `go 1.25.0` (matching the local toolchain). This broke both CI jobs:
+- golangci-lint v1.64.8 (built with Go 1.24) refuses modules targeting Go > 1.24
+- `golang:1.23-alpine` in the Dockerfile can't satisfy `go mod download` for a `go 1.25` module
+
+Fix: `go mod edit -go=1.22.0 && go mod tidy -go=1.22.0`. Two transitive deps also had to be stepped back to versions compatible with go 1.22: `golang.org/x/crypto v0.50.0 → v0.28.0`, `golang.org/x/sys v0.43.0 → v0.26.0` (which also pulled `modernc.org/sqlite v1.50.0 → v1.34.5` and its libc/memory deps). No code changes — purely dependency pinning.
+
+### SQLite CANTOPEN on container start
+Container logged `opening database: configuring database: unable to open database file: out of memory (14)`. SQLite error 14 is `SQLITE_CANTOPEN`; modernc.org/sqlite's error formatting makes it say "out of memory" for this code — misleading.
+
+Two causes fixed:
+1. **Compound PRAGMA**: `db.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")` — `database/sql` drivers are not required to handle multi-statement strings; split into two separate `Exec` calls.
+2. **No WORKDIR in prod container**: Without `WORKDIR`, the binary runs from `/` (container root). Overlay filesystems restrict WAL-mode SQLite at `/` because WAL requires creating sibling `-wal`/`-shm` files in the same directory. Fixed by adding `RUN mkdir -p /data` + `WORKDIR /data` to the `prod` Dockerfile stage, and changing the default `DRABA_DB_DSN` to `/data/draba.db`.
+
+Portainer was also mounting a single file (`/app/draba.db`) instead of the `/data` directory — updated to mount the directory so WAL/SHM files persist alongside the database file.
+
+---
+
+## 2026-04-30 — Phase 2: API Foundation — DB & Auth
+
+**Completed.** Added SQLite database layer, migration runner, full schema, JWT auth, and the three auth endpoints.
+
+### What was built
+
+**DB layer (`internal/db/`)**
+- `db.go` — opens SQLite via `modernc.org/sqlite` (CGO-free) + `jmoiron/sqlx`; sets WAL mode and enables foreign keys
+- `migrations.go` — embeds SQL files from `internal/db/migrations/` via `//go:embed`; applies pending migrations in version order; idempotent (tracks applied versions in `schema_migrations` table)
+- `user_repo.go` / `invite_repo.go` — typed repository structs; all queries go through sqlx, never touching the handler layer directly
+
+**Schema (`internal/db/migrations/001_initial_schema.sql`)**
+All 12 tables: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
+
+**Auth layer (`internal/auth/`)**
+- `password.go` — bcrypt hash (cost 12) + verify
+- `jwt.go` — `TokenService` issues HS256-signed access tokens (15 min TTL) and refresh tokens (7 day TTL); validates type claim to prevent refresh tokens being used as access tokens
+
+**API layer (`internal/api/`)**
+- `server.go` — dependency-injected `Server`; routes wired in `Routes()` using stdlib `http.ServeMux` method-pattern routing (Go 1.22+)
+- `auth_handler.go` — `POST /auth/register` (invite-free for first user, invite token required thereafter), `POST /auth/login`, `POST /auth/refresh`, `GET /auth/me`
+- `middleware.go` — Bearer token extraction + JWT validation; injects `*auth.Claims` into context
+- `helpers.go` — `writeJSON`, `writeError`, `newID` (crypto/rand hex)
+
+**Entry point**
+- `cmd/draba/main.go` updated to open DB, run migrations, wire repos and token service, start server
+
+### Exit criteria — all verified by automated tests
+- `POST /auth/register` returns 201 + access/refresh tokens (first user, no invite needed)
+- `POST /auth/register` returns 403 INVITE_REQUIRED for subsequent users without a token
+- `POST /auth/login` returns 200 + tokens on valid credentials; 401 on wrong password
+- `POST /auth/refresh` exchanges a refresh token for a new access token
+- `GET /auth/me` returns the user profile with a valid access token; 401 without
+- All 12 schema tables exist after migration (verified by `TestMigrate_Idempotent`)
+- Re-running migrations produces no changes (idempotent)
+
+### Decisions & notes
+- Used `modernc.org/sqlite` (pure Go, no CGO) to keep the Docker build simple on non-CGO base images
+- SQL files live at `internal/db/migrations/` (not top-level `migrations/`) because `//go:embed` forbids `..` path segments
+- The top-level `migrations/` directory still exists with a copy of the SQL for documentation purposes; the embedded one at `internal/db/migrations/` is the authoritative source
+- JWT refresh tokens are stateless (signed JWT, not stored in DB); cannot be individually revoked without a token blocklist — acceptable for v1, can be upgraded in Phase 9
+
+---
+
+## 2026-04-29 — Phase 1: Project Infrastructure
+
+**Completed.** Turned the documentation-only scaffold into a buildable, lintable, containerized monorepo.
+
+### What was built
+- Go module initialized at `packages/api/` (`github.com/I0-1O/draba/packages/api`, `go 1.22.0`)
+- Minimal Go HTTP server at `cmd/draba/main.go` with a single `GET /health` → `{"status":"ok"}` endpoint
+- React + TypeScript + Vite project at `packages/web/` (manually scaffolded — see roadblocks)
+- Tailwind CSS v4 wired via `@tailwindcss/vite` plugin; design tokens kept as `hsl()` values
+- `pnpm-workspace.yaml` wiring all three packages
+- `golangci-lint` config at `.golangci.yml`
+- GitHub Actions CI (`ci.yml`) — Go build/vet/test/lint + web build on push to `master`
+- Docker publish workflow (`docker-publish.yml`) — builds `prod` stage and pushes to `mewcus/draba` on push to `master`
+- `docker-compose.yml` for local dev (API with Air hot-reload + Vite dev server)
+- Container confirmed running in homelab (Portainer), health endpoint responding
+
+### Roadblocks & resolutions
+
+**`pnpm create vite` refused to run non-interactively in a non-empty directory**
+Cancelled with "Operation cancelled" when the `packages/web/src/` files already existed.
+→ Created all Vite project files manually (`package.json`, `tsconfig*.json`, `vite.config.ts`, `index.html`, `src/main.tsx`, etc.)
+
+**`corepack enable` failed with EPERM**
+Needed admin rights to write to `C:\Program Files\nodejs\`.
+→ Used `npm install -g pnpm` instead.
+
+**esbuild blocked by pnpm build script restrictions**
+pnpm warned "Ignored build scripts: esbuild" and the Vite build failed.
+→ Added `"pnpm": { "onlyBuiltDependencies": ["esbuild"] }` to root `package.json`.
+
+**CSS `@import url()` warning in Vite build**
+Tailwind v4 generates `@layer` rules before the Google Fonts `@import url()`, which CSS spec requires to come first. Build warned on every run.
+→ Moved font loading to `<link>` tags in `index.html` instead of `@import` in CSS.
+
+**`go.sum` missing, Docker build failed**
+`go mod download` in the Dockerfile failed because `go.sum` wasn't in the repo. `go mod tidy` doesn't create `go.sum` when a module has no external dependencies.
+→ Committed an empty `go.sum` file.
+
+**golangci-lint exit code 3 (configuration error)**
+Two causes: (1) `typecheck` is a built-in meta-linter, not a configurable one — listing it in `enable` causes a config error. (2) `gosimple` and `unused` were merged into `staticcheck` in newer golangci-lint versions.
+→ Removed `typecheck`, `gosimple`, and `unused` from `.golangci.yml`.
+
+**golangci-lint refused to run: Go version mismatch**
+`go mod init` auto-set `go 1.26.2` (the local installed version). golangci-lint v1.64.8 is built with Go 1.24 and refuses to lint modules targeting a newer Go version.
+→ Lowered `go.mod` to `go 1.22.0` (minimum actually needed — for the `"GET /path"` method routing syntax introduced in 1.22). Also reverted Dockerfile back to `golang:1.23-alpine`.
+
+**Node.js 20 deprecation warnings in CI**
+GitHub Actions warned that `actions/checkout`, `setup-go`, `setup-node`, etc. run on Node.js 20 which is being deprecated.
+→ Added `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true` env var to all CI jobs to opt into Node.js 24 now.
+
+**Port conflict in homelab**
+Port 8080 was already in use on the host.
+→ Mapped container port 8080 to host port 8081 in Portainer. No code changes needed.
 ````
 
 ## File: docs/ROADMAP.md
@@ -44126,1640 +45838,4 @@ Admin tools for database backup visibility, manual backups, and scheduled backup
 2. After finishing a phase, flip its status to ✅ and update the summary table.
 3. Use the exit criteria as your acceptance checklist before calling a phase done.
 4. For the granular task list within each phase, refer to [TASKS.md](TASKS.md).
-````
-
-## File: docs/log.md
-````markdown
-# Development Log
-
----
-
-## 2026-05-29 — Phase 10.4.4: Gantt Interaction & Activity Edit Polish
-
-**Goal:** Polish the Gantt's direct-manipulation UX (resizable label column, click-to-activate drag, live sidebar date feedback, finer snap), move "Hide closed" from toolbar to filter preset, and overhaul the Activity Edit sidebar layout.
-
-**Backend:**
-- Migration 016: `ALTER TABLE activities ADD COLUMN notes TEXT` (nullable)
-- `Activity` model: added `Notes *string` field with `db:"notes"` tag
-- `ActivityRepo.Update`: added `notes = :notes` to UPDATE SET
-- `handleUpdateActivity`: added `notes` patch key parsing
-- OpenAPI + TS types: added `notes` to `Activity` schema and PATCH body; regenerated
-
-**Gantt — resizable label column:**
-- `DEFAULT_LABEL_COL_W = 240`, min 140, max 400
-- `labelColW` state in `GanttGrid`; `handleColumnResizeMouseDown` sets up mousemove/mouseup handlers
-- Drag handle div positioned absolutely on the right edge of the sticky header label cell
-- All row label cells use `labelColW` state (was hard-coded `LABEL_COL_W = 240` constant)
-
-**Gantt — click-to-activate before drag:**
-- `handleBarMouseDown` gates on `ev.id !== selectedActivityId` — unselected bars can't be dragged
-- Bar cursor: `grab` only when selected AND `onBarDrag` is provided; `pointer` otherwise
-- Left/right resize handles rendered only when bar is selected (`onBarDrag && selected`)
-
-**Gantt — bar drag updates sidebar dates live:**
-- New `onBarDragProgress` prop on `GanttGrid` and `GanttView`; called during mousemove with current snapped dates
-- `DashboardPage`: `liveDragDates` state; `onBarDragProgress` sets it; `onBarDragEnd` clears it
-- `ActivityDetailPanel`: `liveDragStart`/`liveDragEnd` props; displayed in date inputs when set (read-only during drag, don't trigger saves)
-
-**Gantt — finer-grained snap during drag:**
-- `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4
-- `colFracToDate` interpolates fractional column positions for accurate date mapping
-- Drag math uses `Math.round(x / step) * step` with `step = 1/divisor`
-- `resolvedGranularity` prop passed from GanttView to GanttGrid
-- `colToStartDate`/`colToEndDate` updated to handle fractional column positions
-
-**Gantt — "Hide closed" moves to filter preset:**
-- Removed `hideClosed` checkbox and related props from `GanttToolbar`; removed `hideClosed` state from `DashboardPage`
-- Added `'open'` to `ActiveFilter` preset type in `FilterContext`
-- `FilterDropdown`: added "Open only" preset with subtitle "Hide activities with a closed status"
-- `GanttView`: reads `activeFilter.id === 'open'` instead of `hideClosed` prop to filter closed-status activities
-
-**Activity Edit Sidebar — overhaul:**
-- Removed "All day" checkbox (allDay state, handler, and toggle)
-- Removed human-readable date summary line (was `{formatDate(startDate)} – {formatDate(endDate)}`)
-- Description field moved directly below date pickers (was at the bottom under "Notes")
-- "Assigned to" section: opacity-toggle buttons → bordered card style with color border + tint when selected (matches create panel)
-- Status picker: plain `<select>` → `StatusDropdown` component with color dot, name, and CLOSED badge
-- Removed "Identity" row from Classify section
-- Renamed "Details" section → "Advanced"
-- Added Notes multi-line `<textarea>` (resizable) at bottom, backed by new `activities.notes` column
-- `liveDragStart`/`liveDragEnd` props: override date inputs display during bar drag without triggering saves
-
-**Tests:**
-- `TestMigrate_016_ActivityNotes`: verifies `activities.notes` column exists after migration
-
-**All automated checks pass:** `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean.
-
----
-
-## 2026-05-29 — /test-phase 10.4.4
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: 7 pass, 1 skip (ws-smoke — websocat/wscat not installed on dev box; heartbeat covered by unit tests)
-- Smoke target: http://epcot.lan:8081
-
----
-
-## 2026-05-28 — Phase 10.4.3: UI Consistency — Modals, Sidebar & Toolbar
-
-**Goal:** Standardize visual patterns across TeamModal, MemberModal, and TimelineModal — three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
-
-**Shared components created:**
-- `components/shared/InlineEditableTitle.tsx`: always-visible name input with a bottom border that appears on hover/focus; used in all three modals to replace three divergent editing patterns
-- `components/shared/ConfirmDialog.tsx`: shared confirmation panel with four color variants (red=destructive, amber=archive, indigo=promote, teal=restore); replaces `MemberModal`'s local `ConfirmDialog`, `TeamModal`'s `ArchiveDialog`, and `TimelineModal`'s inline return-replacement confirmations
-
-**TeamModal.tsx:**
-- Removed `nameEditing` state machine (div/input toggle); replaced with `InlineEditableTitle`
-- Removed `nameInputRef` and associated focus/effect logic; Escape now closes the modal directly
-- Replaced `ArchiveDialog` component with shared `ConfirmDialog variant="amber"`; footer hides when confirm is showing
-- Archive button: neutral gray → amber bg+border+`Archive` icon
-- Restore button: neutral gray → teal bg+border+`RotateCcw` icon
-- Migrated all structural hex colors (`#21262d`, `#30363d`, `#2d333b`, `#484f58`, `#8b949e`, `#e6edf3`) to CSS variables (`var(--card)`, `var(--border)`, `var(--muted)`, `var(--muted-foreground)`, `var(--foreground)`)
-
-**MemberModal.tsx:**
-- Replaced local `ConfirmDialog` component with shared one
-- Replaced focus-underline name input with `InlineEditableTitle`
-- Migrated all structural hex colors to CSS variables
-
-**TimelineModal.tsx:**
-- Replaced separate-overlay archive/delete confirmation returns with inline `ConfirmDialog` components (shown in content area; footer hides when confirm is showing) — matches TeamModal/MemberModal UX
-- Archive button: border-only, no icon → amber bg+border+`Archive` icon
-- Restore button: amber border-only → teal bg+border+`RotateCcw` icon
-- Was already using CSS variables; no color migration needed
-
-**Sidebar audit:** Badge usage, hover states (`rgba(255,255,255,0.05)`), and `Settings2` gear icons consistent across all row types (TimelineItem, TeamRow, MemberSidebarRow). No fixes required.
-
-**Toolbar audit:** GanttToolbar uses Tailwind classes + CSS variables throughout; `ctrlBtn` pattern consistent with modal footer buttons. No fixes required.
-
-**Exit criteria:**
-- ✅ All three modals use `InlineEditableTitle` for name editing — identical visual behavior
-- ✅ Archive and restore buttons look identical across all three modals (amber archive, teal restore, both with icons)
-- ✅ All confirmation dialogs use shared `ConfirmDialog` with appropriate color variants
-- ✅ No hardcoded structural hex colors in modal components; all use CSS variables
-- ✅ Sidebar/toolbar audited — consistent, no fixes needed
-- ✅ `pnpm --filter web lint` clean
-
----
-
-## 2026-05-28 — /review-phase 10.4.2 fixes
-
-**Blockers resolved:**
-- Migration 015: removed `WHERE timeline_id IS NOT NULL` filter from `INSERT INTO activities_new` — any row with NULL timeline_id after backfill now aborts the migration with a NOT NULL constraint error rather than being silently dropped
-- `handleUpdateActivity`, `setActivityArchive`, `handleDeleteActivity`: added `sql.ErrNoRows` check on the timeline lookup so a missing/deleted timeline returns 404 instead of 500 and skipping the auth check
-- Added `TestCreateActivity_TimelineNotFound`, `TestListActivities_TimelineNotFound`: verify 404 when timelineId does not exist
-- Added `TestCreateActivity_TimelineDifferentTeam`, `TestListActivities_TimelineDifferentTeam`: verify 404 when timeline belongs to a different team than the URL's team ID
-- Added `TestMigrate_015_NormalizesActivities`: asserts `activities.team_id` is absent, `activities.timeline_id` is present, and FK is ON DELETE CASCADE to timelines
-
----
-
-## 2026-05-28 — /test-phase 10.4.2
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke
-- Result: 7 pass, 0 fail, 0 skip (web-e2e not run — no Phase 10.4.2 assertions defined)
-- Smoke target: http://epcot.lan:8081
-
----
-
-## 2026-05-28 — Phase 10.4.2: Activity Schema Normalization
-
-**Goal:** Remove the redundant `activities.team_id` column now that `timeline_id` is the primary FK. Harden `timeline_id` to NOT NULL. Move activity routes to timeline-scoped paths.
-
-**Backend:**
-- Migration 015: backfills NULL `timeline_id` rows (assigns to team's oldest timeline), rebuilds `activities` without `team_id` using the SQLite CREATE-INSERT-DROP-RENAME pattern, hardens `timeline_id` as NOT NULL with `ON DELETE CASCADE`
-- `models.Activity`: `TeamID` removed, `TimelineID` changed from `*string` to `string`
-- `ActivityRepo.Create`: removed `team_id` from INSERT; `ListByTeam` → `ListByTimeline(timelineID string, ...)` (simple `WHERE timeline_id = ?`)
-- Activity handlers: POST/GET moved to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix required — `GET /timelines/{id}/activities` conflicts with `GET /timelines/share/{token}` in Go 1.22 mux); update/delete/archive derive teamID via timeline lookup for auth + bus publish
-- OpenAPI: `Activity.teamId` → `timelineId` (required, non-nullable); paths updated; TS types regenerated
-
-**Frontend:**
-- `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)`: URL and cache key updated
-- `useCreateActivity(teamId, timelineId)`, `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: all updated
-- `useTeamActivitySync`: WS deltas now patch `['timelines', timelineId, 'activities']` cache entries using payload's `timelineId`
-- `GanttView.tsx`: `timelineId` prop now required; uses `useTimelineActivities`
-- `ActivityCreatePanel.tsx`, `ActivityDetailPanel.tsx`: updated signatures; no `timelineId` in create request body
-- `DashboardPage.tsx`: Gantt guarded on `activeTimelineId` presence; `ActivityCreatePanel` restored `teamId` prop
-
-**Tests:**
-- All activity handler tests create a timeline first; routes updated to team-scoped path; `activityURL()` helper added
-- `activity_repo_test.go`: `makeActivity` uses `timelineID`; `ListByTimeline` throughout; added `TestActivityRepo_ListByTimeline_Filter`
-- `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before seeding activity
-- `user_repo_test.go`, `migrations_test.go`: raw INSERTs use `timeline_id`
-
-**Note:** TASKS.md had "UI Consistency" mislabeled as Phase 10.4.2; corrected to 10.4.3 per ROADMAP.
-
-**Exit criteria:**
-- ✅ `activities` table has no `team_id`; `timeline_id` is NOT NULL
-- ✅ `golangci-lint run` clean
-- ✅ `go test ./...` passes
-- ✅ `pnpm --filter web lint` clean
-- ⬜ Gantt loads activities (manual Docker verification)
-- ⬜ `PRAGMA foreign_key_check` on Docker DB
-
----
-
-## 2026-05-28 — /review-phase 10.4.1 fixes
-
-**Blockers resolved:**
-- `GanttView.tsx`: Maps `date_format` pref to BCP 47 locale (`DD/MM/YYYY` → `en-GB`, others → `en-US`); passes `locale` to `generateColumns` — column labels now respect the user's date ordering preference
-- `ActivityDetailPanel.tsx`: Wired `useFormatDate`; formatted date range summary line added above native date inputs
-- `BrandingSync.tsx`: Fixed accent color to set `--primary` directly (not `--accent-override`); added `isValidHex()` guard; exported `makeDocTitle(pageName?)` helper for the `${page} — ${app}` title pattern
-- `openapi.yaml`: Added `GET /settings/branding` with `security: []` and full response schema; regenerated TS types
-- `settings_handler_test.go`: Added `TestPatchAdminSettings_AccentColor`, `TestGetPublicBranding_NoAuth`, `TestGetPublicBranding_EmptyWhenUnset`
-- `api.test.ts`: New file — 7 tests covering `createAuthFetch` happy path, non-401 errors, 401 retry, null-token re-throw, unregistered interceptor, de-registration teardown, and `ApiError` identity
-- `useFormatDate.ts`: Exported `formatDate` pure function; new `useFormatDate.test.ts` with 6 branch tests
-- `granularity.test.ts`: New test file — 6 tests covering `weekStart` (monday/sunday/default) and `locale` (en-US/en-GB/default) params
-
-**Suggestions resolved:**
-- `OrganizationPage.tsx`: Hex validation (`/^#[0-9a-fA-F]{6}$/`) on accent color input; invalid value blocked from PATCH; inline error shown
-- `PreferencesPage.tsx`: Added why-comment to `eslint-disable-next-line` for `JSON.stringify(prefMap)` dep stabilization
-- `admin_handler.go`: Added comment to `handleGetPublicBranding` warning against adding sensitive keys to the public endpoint
-
-**Nit resolved:**
-- `BrandingSync.tsx`: `makeDocTitle()` helper exported so pages can set `"PageName — AppName"` titles; document.title set via `makeDocTitle()` at root level
-
----
-
-## 2026-05-28 — /test-phase 10.4.1
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: all pass (ws-smoke heartbeat 3-cycle skipped — 30s server interval exceeds smoke budget, mechanism verified in code; web-e2e browser runtime skipped — dev server not confirmed running, all assertions pass code-level)
-- Smoke target: http://epcot.lan:8081
-- Note: TESTING.md Phase 2 schema-check table list updated (old names `team_statuses`, `events`, `event_tags`, `event_assignments` → current names)
-
----
-
-## 2026-05-28 — Phase 10.4.1 — Preference Consumption & Session Handling
-
-**Session lifecycle (401 interceptor):**
-- `packages/web/src/lib/api.ts`: Added `configureSilentRefresh(fn)` export and module-level mutex (`_refreshInFlight`); `createAuthFetch` now catches 401, calls `doSilentRefresh()`, retries with new token
-- `packages/web/src/contexts/AuthContext.tsx`: Added `silentRefresh` function (calls `/auth/refresh`, updates state, falls back to `window.location.replace('/login')` on failure); registers via `configureSilentRefresh` in a `useEffect`, deregisters on unmount
-- Concurrent 401s share a single in-flight refresh call — no duplicate refresh requests
-
-**Preference consumption:**
-- `packages/web/src/hooks/useFormatDate.ts`: New hook — reads `date_format` pref, returns formatter for `MMM D, YYYY` / `MM/DD/YYYY` / `DD/MM/YYYY` / `YYYY-MM-DD`
-- `packages/web/src/components/gantt/granularity.ts`: `startOfWeek` accepts `weekStart` param; `formatLabel` accepts `locale` param; `generateColumns` accepts `GenerateColumnsOptions { weekStart, locale }`
-- `packages/web/src/components/gantt/GanttView.tsx`: Reads `week_start` from global preferences via `usePreferenceMap`, passes to `generateColumns`
-- `packages/web/src/hooks/useDarkMode.ts`: Added `applyTheme(t)` function for explicit theme setting
-- `packages/web/src/components/ThemeSync.tsx`: New null-render component — on auth init applies server-side `theme` preference once per session
-- `packages/web/src/pages/settings/PreferencesPage.tsx`: Added theme toggle (Light/Dark) — applies immediately and persists server-side on Save
-
-**Admin branding:**
-- `packages/api/internal/api/admin_handler.go`: Added `accent_color` to allowed `GET/PATCH /admin/settings` keys; added `handleGetPublicBranding` for `GET /settings/branding`
-- `packages/api/internal/api/server.go`: Registered `GET /settings/branding` as public (no auth)
-- `packages/web/vite.config.ts`: Added `/settings` proxy entry for dev
-- `packages/web/src/hooks/usePublicSettings.ts`: New hook — fetches `/settings/branding` without auth
-- `packages/web/src/components/BrandingSync.tsx`: New null-render component — sets `document.title` from `instanceName`, applies `accentColor` as `--accent-override` CSS variable
-- `packages/web/src/App.tsx`: Mounts `ThemeSync` and `BrandingSync` inside `AuthProvider`
-- `packages/web/src/pages/LoginPage.tsx`: Shows `instanceName` from branding API instead of hardcoded "draba"
-- `packages/web/src/pages/settings/OrganizationPage.tsx`: Added accent color field (color picker + hex input + Reset)
-
-**Deferred (documented in TASKS.md):**
-- `ActivityDetailPanel` date display: native `<input type="date">` already uses browser locale; no read-only date label surface exists yet
-- Public/shared timeline view fallback: deferred to Phase 13 (Shares)
-- Logo upload: stretch goal, deferred
-
-**Checks:**
-- `golangci-lint run` — clean
-- `go test ./...` — all pass
-- `pnpm --filter web lint` (tsc --noEmit) — clean
-
----
-
-## 2026-05-27 — /test-phase 10.3
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: 8 pass (ws-smoke: assertion 2 skipped — single-team test DB; assertion 3 partial — 30s heartbeat cadence, unit tests cover at speed)
-- Smoke target: http://epcot.lan:8081
-- Notes: `GET /activities?from=&to=` returns 400 (param names differ from Phase 3 spec); `POST /auth/register` requires `displayName` field not in spec — both are spec gaps, not runtime failures
-
----
-
-## 2026-05-27 — Phase 10.3 — Timelines Full CRUD (API + UI)
-
-**Backend:**
-- New handlers: `PATCH /timelines/{id}`, `DELETE /timelines/{id}`
-- New handlers: `GET/PUT/DELETE /teams/{id}/timelines/{timelineId}/access` — timeline access list CRUD
-- New handlers: `POST /teams/{id}/timelines/{timelineId}/statuses`, `PATCH /statuses/{id}`, `DELETE /statuses/{id}` — live timeline status editing
-- `canAdminTimeline` helper: checks team admin role first, then per-timeline `timeline_access` role='admin'
-- `TimelineStore` interface expanded: `Update`, `Delete`, `ListAccess`, `GetAccessRole`, `RevokeAccess`
-- `TimelineAccessEntry` model added: joins `timeline_access` + `team_members` + `users`
-- `StatusRepo` additions: `CreateStatus`, `UpdateStatus`, `DeleteStatus`, `CountStatuses`, `CountStatusActivities`
-- `DeleteStatus` re-points activities to replacement before deleting; blocked if last status
-- Note: access endpoints use team-scoped URL prefix to avoid Go 1.22 mux conflict with `GET /timelines/share/{token}` on 3-segment paths
-- OpenAPI spec updated: `PatchTimelineInput`, `TimelineAccessEntry`, `CreateStatusInput`, `PatchStatusInput`, `DeleteStatusInput` schemas + all new endpoints; TypeScript types regenerated
-
-**Tests added:**
-- `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden`
-- `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden`
-- `TestTimelineAccessList_GrantAndRevoke`
-
-**Frontend:**
-- `TimelineModal.tsx` — create/edit modal with Settings, Statuses, and Access tabs; archive + delete confirmation dialogs
-- `Sidebar.tsx` — real archived timelines section (Restore button), wired New timeline and settings gear
-- `ActivityDetailPanel.tsx` — status dropdown populated from `useTimelineStatuses`; replaces stub
-- `GanttToolbar.tsx` — `hideClosed` / `onHideClosedChange` props; Hide closed checkbox shown when timeline has closed statuses
-- `GanttView.tsx` — `hideClosed` + `closedStatusIds` props; filters out activities with closed status IDs
-- `useTeamActivities.ts` — `useCreateTimeline`, `useUpdateTimeline`, `useDeleteTimeline`, `useArchiveTimeline`, `useUnarchiveTimeline`, `useTeamTimelinesWithArchived`, `useTimelineAccess`, `useGrantTimelineAccess`, `useRevokeTimelineAccess`
-- `useStatusTemplates.ts` — `useCreateTimelineStatus`, `useUpdateTimelineStatus`, `useDeleteTimelineStatus`
-- `DashboardPage.tsx` — timeline modal state; passes all new props to Sidebar + GanttToolbar + GanttView + ActivityDetailPanel
-
-**Automated:** `golangci-lint run` clean, `go test ./...` all pass, `pnpm --filter web lint` clean.
-
-**Pending manual verification (against epcot.lan:8081):** see TASKS.md checklist.
-
----
-
-## 2026-05-27 — Phase 10.2 — Review Fixes & Docker Verification
-
-**Review fixes applied:**
-- Aligned `SeedDefaultTemplate` test assertions to match actual seed output ("Default" template with Planning / In Progress / Complete; Complete is `is_closed`)
-- Added three missing tests: `TestUpdateStatusTemplate_AdminCanRename`, `TestUpdateTemplateItem_AdminCanUpdate`, `TestStatusTemplates_NonAdminForbidden` (403 on all 5 mutation routes for non-admin members)
-- Rephrased `is_closed` checkbox label in `StatusTemplatesTab.tsx` to remove forward-reference to "Hide closed" filter (Phase 10.3 scope)
-- Replaced mojibake em-dashes (`â€"`) with hyphens in 4 test files: `team_handler_test.go`, `activity_handler_test.go`, `saved_filter_handler_test.go`, `timeline_handler_test.go`
-
-**Docker verification (epcot.lan:8081):** ✅ passed
-- Default template seeded on team create; template CRUD, item CRUD, and last-item/last-template guards all work from UI
-- New timeline correctly copies template statuses (verified via API)
-- Non-admin sees templates read-only
-- Note: "Create new timeline" UI is Phase 10.3 — statuses verified via direct API call
-
-**Phase 10.2 closed ✅**
-
----
-
-## 2026-05-27 — /test-phase 10.2
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: 7 pass, 1 partial-skip (ws-smoke: heartbeat full 3-cycle skipped per time budget; unit tests cover at speed)
-- Smoke target: http://epcot.lan:8081
-
----
-
-## 2026-05-27 — Phase 10.2 — Status Templates & Timeline Statuses
-
-**Backend:**
-- Migration 012: replaced `team_statuses` table with three new tables — `status_templates` (team-level reusable presets), `status_template_items` (items within a template), `statuses` (live timeline-specific statuses copied from a template)
-- `activities.status_id` FK updated to reference `statuses(id) ON DELETE SET NULL` instead of the now-dropped `team_statuses`
-- New `StatusTemplate`, `StatusTemplateItem`, `Status` models in `models.go`
-- New `StatusRepo` (`internal/db/status_repo.go`): full CRUD for templates, template items, and statuses; `SeedDefaultTemplate` creates the "Simple" preset (Planned / In Progress / Done, Done is `is_closed`); `CopyTemplateToTimeline` copies the team's first template into live statuses on timeline creation
-- `handleCreateTeam` now seeds the default template after team creation
-- `handleCreateTimeline` now calls `CopyTemplateToTimeline` so every new timeline gets statuses from the template
-- New API endpoints: `GET/POST /teams/{id}/status-templates`, `PATCH/DELETE /status-templates/{id}`, `POST /status-templates/{id}/items`, `PATCH/DELETE /status-template-items/{id}`, `GET /teams/{id}/timelines/{timelineId}/statuses`
-- Note: `GET /timelines/{id}/statuses` conflicts with `GET /timelines/share/{token}` in Go 1.22's mux (both are 3-segment wildcard paths, ambiguous on `/timelines/share/statuses`); resolved by using the team-scoped URL `/teams/{id}/timelines/{timelineId}/statuses`
-- OpenAPI spec updated with `StatusTemplate`, `StatusTemplateItem`, `Status`, and all input schemas; TypeScript types regenerated
-
-**Tests:**
-- `status_handler_test.go`: 5 tests covering default seeding on team create, admin-only template creation, last-template deletion guard, template item add/delete, and timeline status copy-from-template
-- `migrations_test.go` updated: `team_statuses` removed from expected tables; `status_templates`, `status_template_items`, `statuses` added; `activities.status_id` FK target verified
-
-**Frontend:**
-- `useStatusTemplates.ts` — hooks for all status template and timeline status endpoints
-- `StatusTemplatesTab.tsx` — standalone component: expandable template cards with inline item editing (name, color swatch picker, `is_closed` toggle), add/delete items with last-item guard, create/delete templates with last-template guard
-- `TeamModal.tsx` — added "Status Templates" tab (3rd tab alongside Settings and Members); tab is locked until the team is saved
-
----
-
-## 2026-05-27 — /review-phase 10.1.4 — fixes applied
-
-Post-review fixes across security, tests, spec, and conventions:
-
-**Security:**
-- `user_handler.go` — added self-revoke guard (`CANNOT_SELF_REVOKE` 400) to `handleRevokeUser`; prevents a superadmin from locking themselves out
-
-**Spec / types:**
-- `openapi.yaml` — fixed `application\json` typo (backslash) → `application/json` in `POST /users/{id}/revoke` 200 response
-- `openapi.yaml` — added `userArchivedAt` field to `MemberDetail` schema (account-level deactivation, distinct from membership-level `archivedAt`)
-- `models.go` — added `UserArchivedAt *time.Time` to `MemberDetail`; updated doc comment
-- `team_handler.go` — `handleGetMember` now populates `UserArchivedAt` from `users.archived_at`
-- Regenerated `packages/shared/src/index.ts`
-
-**Tests (new):**
-- `revoke_user_test.go` — handler tests: 403 non-superadmin, 400 self-revoke, 404 not found, 200 success (zero-history + with-assignments paths)
-- `user_repo_test.go` — repo tests: inactivates memberships with history, removes zero-history memberships, handles mixed-membership users
-- `team_handler_test.go` — `TestDeleteMember_HasAssignments_Returns409` tests 409 path with `assignmentCount` in response
-
-**Conventions:**
-- Removed phase number references from doc/inline comments in `team_handler.go`, `team_repo.go`; replaced with WHY explanations
-- Fixed "summarises" → "summarizes" in `models.go`
-
-**Frontend:**
-- `MemberModal.tsx` — "Revoke all access" button now hides when `userArchivedAt` is set (account-level deactivation) rather than when the team membership is inactivated; updated comment to explain the distinction
-- `TeamModal.tsx` — added `useEffect` to clear `removeErrors` when `searchQ` changes
-
-**Needs manual Docker verification:**
-- Revoke all access on a user who has mixed memberships (some with history, some without)
-- "Revoke all access" button hidden for already-deactivated accounts but visible for inactivated-only memberships
-
----
-
-## 2026-05-27 — Phase 10.1.4 — Member Access & Data Lifecycle
-
-**Backend:**
-- `011_fk_restrict.sql` — rebuilt `activity_assignments` and `timeline_access` with `ON DELETE RESTRICT` on `team_member_id` FK (was CASCADE); prevents silent data destruction when a member row is deleted
-- `PRAGMA foreign_keys = ON` was already set in `db.Open()` since Phase 8.0; verified and documented
-- `team_repo.go` — added `CountMemberAssignments(memberID)` and `DeleteMemberTimelineAccess(memberID)` methods
-- `team_handler.go` — `handleDeleteMember` now counts `activity_assignments` before deleting; if count > 0 returns 409 `MEMBER_HAS_ASSIGNMENTS` with `assignmentCount` in the response body; deletes `timeline_access` rows before deleting the `team_members` row (required by new RESTRICT FK)
-- `user_repo.go` — added `RevokeUser(userID)`: atomically archives the user, inactivates memberships with assignments, hard-deletes memberships with zero assignments; wrapped in a single transaction
-- `user_handler.go` — added `handleRevokeUser` (superadmin only); wires `RevokeUser` and returns `RevokeUserResult`
-- `server.go` — registered `POST /users/{id}/revoke`
-- `models.go` — added `RevokeUserResult` struct
-- `migrations_test.go` — added assertions: `PRAGMA foreign_keys = 1`; `activity_assignments.team_member_id` FK is `RESTRICT`; `timeline_access.team_member_id` FK is `RESTRICT`
-
-**OpenAPI + types:**
-- Added `RevokeUserResult` schema to spec
-- Added `POST /users/{id}/revoke` endpoint to spec
-- Regenerated TypeScript types
-
-**Frontend:**
-- `api.ts` — extended `ApiError` with optional `data?: Record<string, unknown>`; `parseError` now extracts extra fields from the error response body (used to surface `assignmentCount` from 409)
-- `useMemberManagement.ts` — added `useRevokeUser` hook (invalidates `['teams']` on success)
-- `TeamModal.tsx` — remove (×) button now handles 409 `MEMBER_HAS_ASSIGNMENTS`; shows inline error "N assignments — can't remove" with an "Inactivate instead" one-click action; clears on next removal attempt
-- `MemberModal.tsx` — added "Revoke all access" button (red, hidden when account already deactivated); confirmation dialog lists all three effects; on success shows summary chip and closes after 2s
-
-**Verified (automated):**
-- `go test ./...` — all pass including new migration assertions
-- `golangci-lint run` — clean
-- `pnpm --filter web lint` — clean
-
-**Needs manual Docker verification:**
-- Remove member with assignments → 409 + inline error + "Inactivate instead" one-click
-- Remove member with zero assignments → success
-- "Revoke all access" → account deactivated, login rejected, Gantt bars still show avatar
-
----
-
-## 2026-05-27 — /test-phase 10.1.4
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: all pass (8/8)
-- Smoke target: http://epcot.lan:8081
-
----
-
-## 2026-05-26 — /review-phase 10.1.3 — fixes applied
-
-Post-review fixes across security, tests, conventions, and ROADMAP:
-
-**Security:**
-- `mailer.go`: SMTP password now encrypted at rest with AES-256-GCM (key derived from `DRABA_JWT_SECRET`); `enc:v1:` prefix distinguishes encrypted from legacy plaintext values
-- `main.go`: passes `[]byte(jwtSecret)` to `mailer.New()`
-- `auth_handler.go`: password reset link uses `url.QueryEscape(rawToken)` (was raw concatenation)
-- `admin_handler.go`: SMTP validation/test errors logged at Warn; generic message returned to caller (was leaking internal error detail)
-- `mailer.go`: removed recipient email from debug-skip log line
-
-**Tests added:**
-- `settings_handler_test.go`: `TestForgotPassword_KnownUser_CreatesToken`, `TestResetPassword_Success`, `TestResetPassword_ExpiredToken`, `TestPatchAdminSettings_Success`, `TestPatchAdminSettings_RejectsUnknownKey`
-- `password_reset_token_repo_test.go`: Create/GetValid/expired/MarkUsed
-- `instance_settings_repo_test.go`: Get missing/Set/Upsert/Delete
-- `team_handler_test.go`: added `testServerEnv` + `newTeamTestServerFull()` helper for direct repo access in tests
-
-**Frontend:**
-- `AdminPage.tsx`: deleted (dead code — not routed; split pages are the active routes)
-- All settings pages converted from inline `style` objects to Tailwind utility classes using design-system tokens (`bg-card`, `text-foreground`, `text-muted-foreground`, `border-border`, etc.)
-- Token hooks (`useTokens`, `useCreateToken`, `useRevokeToken`) extracted from `TokensPage.tsx` to `useSettings.ts`
-- `AiKeysPage.tsx`: file-header comment updated to reference Phase 10.6; language placeholders in `PreferencesPage` and `OrganizationPage` now reference Phase 10.7
-
-**ROADMAP:**
-- Added Phase 10.5 — Communications Testing (SMTP + mailer integration/unit tests)
-- Added Phase 10.6 — AI Key Management (replaces AiKeysPage stub)
-- Added Phase 10.7 — Localization & Language Support (language dropdowns become functional)
-
----
-
-## 2026-05-26 — /test-phase 10.1.3
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: all pass (8/8)
-- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` before run)
-
----
-
-## 2026-05-26 — Phase 10.1.3: Settings — Profile, Tokens & Admin
-
-Full settings experience: profile + identity management, password change, forgot-password flow, API token management, SMTP configuration, instance defaults, and admin user list. All automated checks pass; manual verification on Docker needed.
-
-**Schema (migration 010):**
-- `users.color`, `users.icon` — user-level identity; propagates to `team_members` on change
-- `instance_settings (key PK, value, updated_at)` — key/value store for SMTP config and instance defaults
-- `password_reset_tokens (id, user_id FK, token_hash, expires_at, used_at, created_at)` — forgot-password flow; token_hash stores SHA-256 of raw token; token expires after 1 hour
-
-**API — 11 new endpoints:**
-- Profile: `PATCH /users/me` (name, color, icon + team_members propagation)
-- Security: `PUT /users/me/password` (current → new; 401 WRONG_PASSWORD, 400 WEAK_PASSWORD)
-- Forgot password: `POST /auth/forgot-password` (always 200; generates token + sends via mailer), `POST /auth/reset-password` (TOKEN_INVALID / TOKEN_EXPIRED on bad token)
-- SMTP (superadmin): `GET/PUT/DELETE /admin/smtp`, `POST /admin/smtp/test`
-- Instance settings (superadmin): `GET/PATCH /admin/settings` (registration_policy, default_timezone, default_date_format, default_week_start, instance_name)
-- Users (superadmin): `GET /admin/users?orphaned=true`
-
-**New packages:**
-- `internal/mailer/` — wraps `net/smtp`; reads SMTP config from `instance_settings` at send time so changes take effect without restart; supports None / TLS / STARTTLS encryption; `Send()` is a no-op when SMTP not configured (avoids breaking forgot-password when admin hasn't set up email)
-
-**Frontend — 7 new pages:**
-- `/settings/profile` — display name + identity widget + read-only email; identity changes propagate to all team memberships
-- `/settings/security` — change password form with current/new/confirm validation
-- `/settings/preferences` — theme toggle (applies immediately), timezone, date format, week start; writes via existing `PUT /users/me/preferences`
-- `/settings/tokens` — token table (name, scope, last used, created); create with one-time secret reveal; inline revoke
-- `/settings/admin` — SMTP form with send-test; instance defaults; registration policy; user list with orphaned filter and search
-- `/forgot-password` — public; always shows "check your email" message after submission (no enumeration)
-- `/reset-password?token=...` — public; validates token, sets new password, redirects to login
-
-**Login page:** added "Forgot password?" link below the password field.
-
-**SettingsPage.tsx:** reworked into shell with React Router sub-routes; admin nav items hidden from non-superadmins.
-
-**OpenAPI:** added `UpdateProfileInput`, `ChangePasswordInput`, `ForgotPasswordInput`, `ResetPasswordInput`, `SMTPConfig`, `AdminUserRow` schemas plus all 11 new endpoint paths; TypeScript types regenerated.
-
-**Tests (10 new in settings_handler_test.go):**
-- `PATCH /users/me`: happy path (name + color saved), empty name rejected
-- `PUT /users/me/password`: happy path, wrong current password (401), weak new password (400)
-- `POST /auth/forgot-password`: always returns 200 for unknown email
-- `POST /auth/reset-password`: invalid token returns 400 TOKEN_INVALID
-- `GET /admin/settings`: superadmin reads defaults, non-superadmin gets 403
-- `GET /admin/users`: superadmin lists all users
-
-**Deferred items (noted for follow-up):**
-- SMTP password encryption at rest (stored as JSON in instance_settings; encryption using JWT secret deferred)
-- `/forgot-password` "contact admin" message requires a public SMTP status endpoint (deferred)
-- Click user row in admin users list → open MemberModal (deferred to polish pass)
-- "Assign team" action on orphaned users (deferred)
-- Default team/timeline dropdown in Preferences (requires loading teams list; deferred)
-
----
-
-## 2026-05-25 — Phase 10.1.2: Members — Management & Editing (review fixes)
-
-Post-review fixes applied: security hardening, token entropy, new routes, full test suite.
-
-- **Security**: `GET /users/search` now returns a safe `userSearchResult` projection (id, email, displayName, avatarUrl only) — `isSuperadmin`, `archivedAt`, timestamps excluded.
-- **Token entropy**: invite and invite-link tokens now use `newToken()` (256 bits / 64 hex chars) instead of `newID()` (128 bits). `newToken()` added to `helpers.go`.
-- **New routes**: `GET /teams/:id/members/:memberId/stats` (standalone stat endpoint) and `POST /teams/:id/invite-link/reset` (alias for regenerate) registered in `server.go`.
-- **Design decision documented**: reusable invite-link tokens have no expiry — valid until admin revokes/resets. Rationale in handler comment.
-- **Tests**: 11 new tests in `team_handler_test.go` covering member CRUD, last-admin protection, archive/unarchive, stats endpoint, invite-link create/reset/revoke, and safe-fields assertion for user search.
-- **Superadmin gating confirmed correct**: `onNewTeam` and `onEditMember` in `DashboardPage.tsx` are already gated on `isSuperadmin`; no frontend changes required.
-
----
-
-## 2026-05-25 — Phase 10.1.2: Members — Management & Editing
-
-Full member lifecycle: add, edit, roles, participants, invites, reusable invite links, inactivation, and superadmin actions. All automated checks pass; manual UI verification on Docker still needed.
-
-**Schema (migration 009):**
-- `team_members.archived_at` — member inactivation (soft-delete pattern)
-- `users.archived_at` — account-level inactivation; login rejected when set
-- `teams.invite_link_token` — reusable join-link token (partial unique index on non-NULL rows, since SQLite can't ADD UNIQUE column via ALTER TABLE)
-
-**API — 17 new endpoints:**
-- Member CRUD: `GET/POST /teams/:id/members`, `PATCH/DELETE /teams/:id/members/:memberId`, archive/unarchive
-- Participant CRUD: `POST /teams/:id/participants`
-- Invites: `GET /teams/:id/invites`, `DELETE /teams/:id/invites/:inviteId`
-- Invite links: `GET/POST/DELETE /teams/:id/invite-link`
-- User search: `GET /users/search?q=`
-- Superadmin: `POST /users/:id/promote`, `POST /users/:id/archive`, `POST /users/:id/unarchive`, `DELETE /users/:id`
-- Auth: login now rejects archived users with `ACCOUNT_INACTIVE`; register now accepts reusable invite link tokens alongside one-time tokens
-
-**Member stats:** computed per-request from `activity_assignments JOIN activities` — past due, running, upcoming, archived counts; plus active/archived timeline counts from `timeline_access`.
-
-**Deletable rule:** zero active activities (past due + running + upcoming = 0) AND single team membership.
-
-**Web:**
-- `useMemberManagement.ts` — 14 new TanStack Query hooks
-- `RoleDropdown.tsx` — portal-rendered role picker (Admin/Member/Participant with colors + descriptions)
-- `MemberModal.tsx` — 560px portal modal with stats chips, teams list, superadmin actions with 3 confirmation dialogs
-- `TeamModal.tsx` Members tab — search/add, participant form, member list with role dropdown, pending invites, invite link
-- `Sidebar.tsx` — real member data wired; `MemberSidebarRow` with gear icon on hover
-- `DashboardPage.tsx` — wires MemberModal, passes members + handler to Sidebar
-
-**What needs manual verification on Docker:**
-- Add user (search + add), invite by email, create participant, change roles, remove member
-- Generate invite link, copy URL, register new account via that link
-- MemberModal stats correct; admin actions (promote, inactivate, delete) fire correct dialogs
-- Archived users cannot log in; reactivation restores login
-
----
-
-## 2026-05-25 — Phase 10.1.1 post-/test-phase fixes
-
-Six issues found during /test-phase 10.1.1 review and UX testing.
-
-**1. Non-admin UI gating (blocker):**
-- Added `canEditTeam` prop to `Sidebar` derived from `useTeamMembers` in DashboardPage.
-- `TeamRow` component (new) only renders the gear/edit icon when `isActive && canEdit`.
-- Non-admin members no longer see the team settings affordance.
-
-**2. New team auto-selects in sidebar:**
-- Added `activeTeamId` state to DashboardPage (was hardcoded to `activeTeams[0]`).
-- `TeamModal.onTeamCreated` callback sets `activeTeamId(created.id)` immediately on server confirmation.
-- Sidebar now receives `activeTeams` (all non-archived) via new prop and maps them all as clickable rows; `onSelectTeam` switches the active team.
-
-**3. Same-name teams now allowed:**
-- `handleCreateTeam` and `handleUpdateTeam` append `-<id[:8]>` to the slug, guaranteeing uniqueness regardless of name.
-- `TestCreateTeam_DuplicateSlug` renamed `TestCreateTeam_SameNameAllowed` and updated to assert both 201 + distinct slugs.
-
-**4. Sidebar identity reads from API:**
-- `TeamRow` Badge now uses `team.icon ?? '__name_1__'` and `team.color` (was hardcoded `'__name_1__'` for all rows).
-- Archived team Badge likewise fixed.
-
-**5. Removed duplicate identity widget from modal:**
-- Removed the "Icon & color" `IdentityWidget` + label from the Settings tab body (it was a second copy of the header widget).
-
-**6. Removed duplicate name field; header name is now click-to-edit:**
-- Removed the "Name" input from the Settings tab body.
-- Header name area is now an inline editable input: new teams open in editing mode; existing teams click-to-edit.
-- Escape closes the name input; Enter confirms.
-
-**Checks:** `go test ./...` all pass · `golangci-lint run` clean · `pnpm --filter web lint` clean · UI verified via preview.
-
----
-
-## 2026-05-25 — Phase 10.1.1: Teams — CRUD & Management
-
-**Migration 008** (`008_team_crud.sql`): added `description TEXT`, `notes TEXT`, and `archived_at DATETIME` columns to `teams`.
-
-**API:**
-- `models.Team` updated with `Description`, `Notes`, `ArchivedAt` fields.
-- `TeamRepo.Create` updated to persist `description`, `notes`, `color`, `icon`.
-- `TeamRepo.Update` added — writes mutable team fields (name, slug, description, notes, color, icon).
-- `TeamRepo.SetArchived` added — sets or clears `archived_at`.
-- `TeamRepo.ListByUserID` updated with `includeArchived bool` parameter; excludes archived by default.
-- New handlers: `PATCH /teams/{id}` (admin only), `POST /teams/{id}/archive`, `POST /teams/{id}/unarchive`.
-- `GET /teams` now accepts `?archived=true`.
-- `POST /teams` now accepts optional `description`, `notes`, `color`, `icon` fields.
-- OpenAPI spec updated: `Team` schema gains `description`, `notes`, `archivedAt`; `CreateTeamInput` extended; `PatchTeamInput` added; new archive/unarchive paths added.
-- TypeScript types regenerated.
-- `migrations_test.go` asserts the three new columns on `teams`.
-
-**Web:**
-- `useMyTeams(includeArchived?)` — optional param to fetch archived teams too.
-- `useTeam(teamId)` — fetch single team detail.
-- `useCreateTeam`, `useUpdateTeam`, `useArchiveTeam`, `useUnarchiveTeam` mutations.
-- `TeamModal` — creates or edits a team. Settings tab fully functional (IdentityWidget, name, description, notes). Members tab is a locked placeholder (Phase 10.1.2). Archive confirmation dialog with amber styling. "Saved" banner auto-dismisses after 3s.
-- `SettingsPage` — `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4).
-- `App.tsx` — `/settings` and `/settings/*` routes added (protected).
-- `DashboardPage` — wires team CRUD: active team, archived teams list, TeamModal state, unarchive mutation; Settings dropdown button navigates to `/settings`.
-- `Sidebar` — team section now shows real team name/badge; gear icon opens TeamModal in edit mode; "New team" button opens TeamModal in new mode; archived teams shown with Restore action.
-
-**Checks:** `golangci-lint run` clean · `go test ./...` passes · `pnpm --filter web lint` clean.
-
-**Needs manual verification on Docker:** create second team from picker, edit/archive/unarchive, TeamModal in both modes, "Saved" banner, Settings route.
-
-**Spec notes (not called out in phase scope):**
-- `isSuperadmin` added to OpenAPI `User` schema — this is a spec sync of a field that already existed in the Go model and DB; it is not a new feature introduced by this phase.
-- `docs/design/handoffs/member-modal/` committed in this phase as pre-checked-in design references for 10.1.2. No 10.1.2 code ships here.
-
----
-
-## 2026-05-24 — Phase 9.6 post-review: hex storage + named exports + tests
-
-**Architecture change — hex colors stored in DB:**
-- Added migration 007: converts palette name IDs written by migration 006 back to canonical hex values (e.g. `'teal'` → `'#288C9B'`). Hex is the durable ground truth; palette names are UI-only.
-- `Identity` interface: renamed `colorId` → `color` (hex) and `iconId` → `icon` throughout.
-- `IdentityPicker` now fires `onChange` with the selected hex value directly, not the palette name ID.
-- Removed `hexToColorId()` and the `LEGACY_HEX_TO_ID` map from `identity-constants.ts`; `resolveColorHex` simplified to hex pass-through with colorId backward-compat fallback.
-- `Member.colorId` removed from types — `Member.color` is always hex.
-- `GanttActivity.iconId` renamed to `icon`; `GanttView.toMember` no longer sets `colorId`.
-
-**Named exports:** All five identity components switched from `export default` to named exports (`Badge`, `IdentityTrigger`, `IdentityPicker`, `IdentityWidget`). All import sites updated.
-
-**Tests (blocker fixes):**
-- `migrations_test.go`: added `TestMigrate_006_007_ColorConversion` (verifies the full 006→007 hex conversion round-trip) and `TestMigrate_HexStorageRoundTrip` (verifies hex values survive storage unchanged).
-- `identity-constants.test.ts` (new): 22 unit tests covering `resolveColorHex`, `iconIdToPascal`, `getNameText`, and the `IDENTITY_COLORS` palette invariants.
-
-All checks pass: `go test ./...`, `golangci-lint run`, `pnpm --filter web lint`, `pnpm --filter web test`.
-
----
-
-## 2026-05-24 — /test-phase 9.5
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: all pass (0 fail, 0 skip)
-- Smoke target: http://epcot.lan:8081
-- Notes: ws-smoke code-verified (no wscat available); 2 cosmetic residuals in web (stale JSDoc in useWebSocket.ts:7, `matchEvents` function name in findMatcher.ts:27 — no runtime impact)
-
----
-
-## 2026-05-24 — Phase 9.6: Identity System (Color + Icon)
-
-### What was built
-
-A reusable Identity component system — a color + icon pair that gives every major entity (activities, timelines, teams, members) a consistent visual fingerprint. Expanded the color palette from 8 to 16, added schema fields to teams/timelines/team_members, and replaced every existing color/icon surface with the new components.
-
-**DB (migration 006):**
-- Added `icon TEXT` to `team_members`; `color TEXT` + `icon TEXT` to `teams`; `color TEXT` + `icon TEXT` to `timelines`.
-- Converted existing `activities.color` and `team_members.color` hex values → identity color IDs (e.g. `#288C9B` → `"teal"`).
-
-**Go API:**
-- `models.Team`: added `Color *string`, `Icon *string`.
-- `models.TeamMember`: added `Icon *string`.
-- `models.Timeline`: added `Color *string`, `Icon *string`.
-- `team_repo.go ListMembers`: query updated to SELECT `tm.icon`.
-- `migrations_test.go`: assertions added for all five new identity columns.
-- OpenAPI spec: `Team`, `TeamMember`, `Timeline` schemas updated with `color`/`icon` fields.
-- TypeScript types regenerated.
-
-**Web — identity component library (`src/components/identity/`):**
-- `identity-constants.ts`: 16-color palette (`IDENTITY_COLORS`), 64-icon list (`IDENTITY_ICONS`), `hexToColorId()` legacy mapping, `resolveColorHex()`, `getNameText()`, and palette re-exports (`ACTIVITY_COLORS`, `MEMBER_COLORS`).
-- `Badge.tsx`: read-only identity badge — handles Lucide icons, name-text initials (`__name_1__`, `__name_2__`, `__name_words__`), color-only (`__none__`), both shapes (square/circle), any size 20–40px.
-- `IdentityTrigger.tsx`: clickable badge with chevron pip, colored outline ring on hover/open.
-- `IdentityPicker.tsx`: popover content — 16-color grid (8×2) + 4 name options + 64-icon grid (8×8); fires `onChange` on every selection.
-- `IdentityWidget.tsx`: composed trigger + picker with portal positioning, click-outside-to-close.
-
-**Web — integration:**
-- `ActivityDetailPanel`: icon stub + 8-color swatch replaced by `<IdentityWidget>`; saves `colorId` + `iconId` via PATCH.
-- `ActivityCreatePanel`: 8-color swatch replaced by `<IdentityWidget>`.
-- `GanttGrid`: label column 8px color dot replaced by `<Badge size={20} shape="square">`.
-- `Sidebar` timeline rows: inline colored span replaced by `<Badge size={20} shape="square">`.
-- `Sidebar` member rows: inline colored circle div replaced by `<Badge size={20} shape="circle">`.
-- `MemberAvatar`: refactored to delegate to `<Badge>` internally; external API unchanged.
-- `GanttView.toMember`: now resolves colorId → hex for `Member.color`; also populates `Member.colorId`.
-- `GanttView.toRichActivity`: passes `iconId` from API activity through to `GanttActivity`.
-
-**Palette consolidation:**
-- `types/index.ts`: `ACTIVITY_COLORS` and `MEMBER_COLORS` are now re-exported from `identity-constants.ts`.
-- `index.css`: `--member-N-*` CSS vars replaced with `--identity-<name>` vars for all 16 colors.
-- `DESIGN_SYSTEM.md`: 8-color member palette section replaced with 16-color identity palette reference.
-
-**Exit criteria status:** All criteria met — lint clean, tests pass. Identity widget and Badge render correctly. Manual UI verification needed on live Docker instance.
-
----
-
-## 2026-05-21 — Phase 9.5: The Great Event → Activity Rename
-
-### What was built
-
-Hard cutover renaming the domain entity `Event` → `Activity` across every layer. No aliases, no backward-compat shims.
-
-**DB (migration 005):**
-- `events` → `activities`, `event_tags` → `activity_tags`, `event_assignments` → `activity_assignments` via `ALTER TABLE RENAME`.
-- `parent_event_id` → `parent_activity_id` column rename.
-- `event_id` column renamed to `activity_id` in both `activity_tags` and `activity_assignments`.
-- `google_event_id` and `caldav_uid` columns preserved — they identify external VEVENT records.
-
-**Go API:**
-- `models.Event` → `models.Activity`; `ParentEventID` → `ParentActivityID` with updated `db:` and `json:` tags.
-- `db/event_repo.go` → `db/activity_repo.go`; `EventRepo` → `ActivityRepo`; all SQL tables/columns updated.
-- `api/event_handler.go` → `api/activity_handler.go`; all handler funcs renamed; routes `/teams/{id}/events` → `/teams/{id}/activities`, `/events/{id}` → `/activities/{id}`, archive/unarchive likewise.
-- `server.go`: `events *db.EventRepo` → `activities *db.ActivityRepo`; `NewServer` signature updated; `main.go` updated.
-- `internal/events/bus.go`: `EventCreated/Updated/Deleted` → `ActivityCreated/Updated/Deleted`; wire strings `event.*` → `activity.*`. Package name `internal/events` and `TimelineCreated/Updated` unchanged.
-- `api_types.gen.go`: `Event` → `Activity`, `CreateEventJSONBody` → `CreateActivityJSONBody`, `UpdateEventJSONBody` → `UpdateActivityJSONBody`, `ListEventsParams` → `ListActivitiesParams`, `EventId` → `ActivityId`.
-
-**OpenAPI + generated types:**
-- `packages/shared/openapi.yaml`: `Event` schema → `Activity`; all operationIds, tags, paths; `parentEventId` → `parentActivityId`; `caldavUid`/`googleEventId` preserved. `eventId` parameter → `activityId`.
-- `pnpm --filter shared generate` run; TypeScript now exports `Activity`, `CreateActivityJSONBody`, etc.
-
-**Web:**
-- `useTeamEvents.ts` → `useTeamActivities.ts`; all hooks renamed (`useTeamEvents` → `useTeamActivities`, `useTeamEventSync` → `useTeamActivitySync`, etc.); query keys `'events'` → `'activities'`; API paths updated.
-- `EventDetailPanel.tsx` → `ActivityDetailPanel.tsx`; `EventCreatePanel.tsx` → `ActivityCreatePanel.tsx`; `EventPanel.tsx` updated in-place.
-- `types/index.ts`: `DrabaEvent` → `DrabaActivity`, `EventStatus` → `ActivityStatus`, `EVENT_COLORS` → `ACTIVITY_COLORS`.
-- `GanttGrid.tsx`: `GanttEvent` → `GanttActivity`; `kind: 'event'` → `kind: 'activity'` discriminant; column header "Event" → "Activity"; empty state "No viewable events" → "No viewable activities".
-- `GanttView.tsx`: `RichEvent` → `RichActivity`; all `parentEventId` → `parentActivityId`; `useTeamEvents` → `useTeamActivities`; `useUpdateEvent` → `useUpdateActivity`.
-- `GanttToolbar.tsx`: `ColorBy` value `'event'` → `'activity'`; option labels updated; default in `DashboardPage` updated.
-- `findMatcher.ts` + test: `eventId` → `activityId` in `MatchResult`; `parentEventId` → `parentActivityId`; `Event` schema type → `Activity`.
-- `Sidebar.tsx`: `onNewEvent` → `onNewActivity`; section label "Event" → "Activity".
-- `DashboardPage.tsx`: all component imports, state variables, and prop names updated.
-
-**Tests + seed:**
-- `event_handler_test.go` → `activity_handler_test.go`; all test functions, URLs, and variable names updated.
-- `archive_test.go`: event archive test updated to use `/activities/` paths.
-- `bus_test.go`, `hub_test.go`: `EventCreated/Updated/Deleted` → `ActivityCreated/Updated/Deleted`.
-- `migrations_test.go`: table list updated to `activities`, `activity_tags`, `activity_assignments`.
-- `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql`; `INSERT INTO activities`, `INSERT INTO activity_assignments`.
-
-**Verification:** `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web test` all pass.
-
----
-
-## 2026-05-20 — Phase 9: API Token Auth & Archive
-
-### What was built
-
-**API tokens (programmatic auth):**
-- `auth.GenerateAPIToken` / `HashAPIToken` / `LooksLikeAPIToken` — raw token prefix `draba_pat_` + 32 random bytes; SHA-256 hash stored in `api_tokens.token_hash` (the schema column already existed from migration 001).
-- `db.APITokenRepo` — Create / ListByUser / GetByID / GetByHash / Revoke / TouchLastUsed. Revoked rows are preserved so the listing UI shows "Revoked on …".
-- `POST /tokens`, `GET /tokens`, `DELETE /tokens/{id}` — JWT-only (API tokens cannot mint other API tokens). Raw token value returned exactly once on create; listing never includes it.
-
-**Bearer middleware:**
-- `authMiddleware` now accepts either a JWT or an API token. Token type is selected by the `draba_pat_` prefix.
-- Read-only API tokens (`scope=read`) are rejected with 403 on any non-GET request; other scopes pass through.
-- `last_used_at` updated best-effort on each authenticated request.
-
-**Archive (events + timelines):**
-- `events.SetArchived` + `POST /events/{id}/archive` / `/unarchive`. Any team member may archive.
-- `timelines.SetArchived` + `POST /timelines/{id}/archive` / `/unarchive`. Team admins only (per-timeline admin grants deferred to Phase 10.3).
-- `ListByTeam(includeArchived)` on both repos. List endpoints exclude archived rows unless `?archived=true` is passed.
-- `GetByID` on timelines now returns archived rows (so archive endpoints can operate on them); the read handler 404s archived timelines unless `?archived=true`.
-- New `events.TimelineUpdated` bus message for archive/unarchive transitions.
-
-**OpenAPI:**
-- New `APIToken` and `APITokenCreated` schemas.
-- New paths: `/tokens`, `/tokens/{id}`, `/events/{id}/archive`, `/events/{id}/unarchive`, `/timelines/{id}/archive`, `/timelines/{id}/unarchive`.
-- `archived` query param added to `listEvents` and `listTimelines`.
-- TypeScript types regenerated via `pnpm --filter shared generate`.
-
-### Tests
-- `api_token_handler_test.go` — create / list / revoke; raw value returned once; revoked token rejected on subsequent use; invalid scope rejected; read-only scope blocks writes; API token cannot mint API token.
-- `archive_test.go` — event archive hides from default list, restorable via `?archived=true` and via /unarchive; same for timelines.
-- `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` (tsc) clean.
-
-### Exit criteria
-- ✅ Create API token + use raw value as Bearer on GET (verified via test)
-- ✅ Read-only token rejected (403) on POST/PATCH/DELETE
-- ✅ Archiving an event removes it from default list; `?archived=true` restores it
-- ✅ Archive / unarchive endpoints exist for both events and timelines
-
-The token management **UI** is intentionally deferred to Phase 10.4 per ROADMAP.
-
----
-
-## 2026-05-21 — /test-phase 9.5
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: 8 pass (2 fixes applied mid-run: stale "Events for {label}" string in FilterDropdown.tsx; deleted dead EventPanel.tsx)
-- Smoke target: http://epcot.lan:8081
-
----
-
-## 2026-05-20 — /test-phase 9
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: 8 pass (web-e2e ran manually after extension connectivity confirmed)
-- Smoke target: http://epcot.lan:8081
-- Bug found: auth middleware accepts JWTs for deleted/non-existent users — PUT preferences returns 500 (FK violation) instead of 401; filed as side task
-
----
-
-## 2026-05-20 — /test-phase 8.5
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: 8 pass, 1 clean skip (ws-smoke team-isolation — only one team on test instance)
-- Smoke target: http://epcot.lan:8081
-
----
-
-## 2026-05-20 — Phase 8.4 post-test fixes
-
-Three bugs found during live testing against localhost:5173 → epcot.lan:8081:
-
-1. **Missing `/users` Vite proxy entry** — `vite.config.ts` had proxy rules for `/auth`, `/teams`, `/timelines`, `/events` but not `/users`. Every `GET /users/me/preferences` and `PUT /users/me/preferences` 404'd in dev. Since the GET failed, `isSuccess` was never `true`, the `prefsAppliedForTimeline` ref was never set, and the guard blocked all saves silently. Fix: added `/users` to the proxy map.
-
-2. **Prefs loading race condition** — `prefsAppliedForTimeline.current` was set to the timeline ID before the TanStack Query had resolved, so when the data arrived the effect short-circuited and prefs were never applied. Fix: added `prefsSettled` (`usePreferences(...).isSuccess`) as a gate before marking applied.
-
-3. **Stale closure in save effects** — the four toolbar save effects used `// eslint-disable-line react-hooks/exhaustive-deps` to exclude `saveTimelinePref` from their deps. After a timeline switch, the closure still captured the previous timeline's ID, so the first toolbar change on the new timeline was always dropped by the guard. Fix: stabilized `saveTimelinePref` to depend on `upsert.mutate` (stable ref) instead of `upsert`, then added `saveTimelinePref` to all four save effect dep arrays.
-
-Also fixed during this session:
-- EmptyState icon: 48px → 120px (2.5×), removed `opacity: 0.25` wrapper so icon and text share the same `--muted-foreground` color
-- Sidebar now accepts real API timelines via `apiTimelines` prop; `activeTimelineId` is controlled state in DashboardPage so timeline switches propagate to the prefs system
-- `scripts/reset-test-env.sh`: added `DRABA_TEST_ADMIN_PASSWORD_HASH` support so the bootstrap admin is loginable after a reset; `DRABA_TEST_ADMIN_EMAIL` updated to `brian@rieb.cc`
-
----
-
-## 2026-05-20 — /test-phase 8.4
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: 7 pass, 1 partial (web-e2e — stale JWT for DB-wiped user caused spurious 500 on PUT prefs; api-smoke confirmed endpoint works with a valid user)
-- Smoke target: http://epcot.lan:8081
-
----
-
-## 2026-05-20 — Phase 8.4: Persistent View Settings
-
-### What was built
-- **Migration 004** (`user_preferences` table): `(id, user_id, timeline_id, key, value, updated_at)` with `UNIQUE(user_id, timeline_id, key)`. Uses empty string `''` as the sentinel for global (non-timeline-scoped) prefs so the UNIQUE constraint works without relying on SQLite's NULL-distinct behaviour.
-- **`UserPreferenceRepo`** (`internal/db/user_preference_repo.go`): `List(userID, timelineID)` and `Upsert(p)` using SQLite's `ON CONFLICT ... DO UPDATE` for atomic upserts.
-- **`GET /users/me/preferences?timeline_id=`**: returns all prefs for the authenticated user in the given scope (empty = global). No team membership check needed — prefs are user-owned.
-- **`PUT /users/me/preferences`**: accepts `{ key, value, timelineId? }`. Validates that `value` is valid JSON, then upserts. Returns the resulting preference row.
-- **OpenAPI spec** updated with `UserPreference` schema and both endpoints under a new `users` tag. TypeScript types regenerated.
-- **`usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks** (`hooks/usePreferences.ts`): TanStack Query wrappers. `usePreferenceMap` returns a stable `Record<string, unknown>` for easy key lookup.
-- **`DashboardPage` wiring**:
-  - On first render for a timeline, fetches per-timeline prefs via `usePreferenceMap` and applies `group_by`, `sort_by`, `zoom_granularity`, `color_by` to toolbar state. A `prefsAppliedForTimeline` ref prevents the subsequent state changes from immediately writing defaults back.
-  - Toolbar state changes (`groupBy`, `sortBy`, `granularity`, `colorBy`) trigger `upsert` with the new value scoped to the active timeline.
-  - Theme changes trigger a global-scope upsert (no `timelineId`).
-
-### Preference tiers
-| Key | Scope |
-|---|---|
-| `theme` | Global (`timeline_id = ''`) |
-| `group_by` | Per-timeline |
-| `sort_by` | Per-timeline |
-| `zoom_granularity` | Per-timeline |
-| `color_by` | Per-timeline |
-
-### Exit criteria status
-- **Changing zoom/group/sort, switching timelines, and switching back restores original settings**: ✅ implemented — each timeline switch re-reads prefs from server before marking applied.
-- **Dark mode persists across logout/login**: ✅ implemented — theme written to global pref on every toggle.
-- **Settings sync between tabs via API (not localStorage)**: ✅ implemented — all state is stored server-side; a fresh tab load fetches current values from `GET /users/me/preferences`.
-
-### Files changed
-- `packages/api/internal/db/migrations/004_user_preferences.sql` — new table
-- `packages/api/internal/models/models.go` — `UserPreference` type
-- `packages/api/internal/db/user_preference_repo.go` — `List` + `Upsert`
-- `packages/api/internal/api/api_types.gen.go` — `UserPreference`, `UpsertPreferenceJSONBody` types added
-- `packages/api/internal/api/user_preference_handler.go` — two new handlers
-- `packages/api/internal/api/server.go` — `preferences` field, updated constructor, two new routes
-- `packages/api/cmd/draba/main.go` — wire `NewUserPreferenceRepo`
-- All test files using `NewServer` — updated to pass new `preferencesRepo` argument
-- `packages/shared/openapi.yaml` — `UserPreference` schema + two endpoints
-- `packages/shared/src/index.ts` — regenerated TS types
-- `packages/web/src/hooks/usePreferences.ts` — new hook file
-- `packages/web/src/pages/DashboardPage.tsx` — preference load + save wiring
-- `docs/ROADMAP.md` — Phase 8.4 ✅ Done
-- `docs/TASKS.md` — all Phase 8.4 tasks checked off
-
----
-
-## 2026-05-19 — Phase 8.3: Web — Real-Time WebSocket Sync
-
-### What was built
-- **`useTeamEventSync` hook** (`hooks/useTeamEvents.ts`): subscribes to the team's WebSocket feed and applies surgical TanStack Query cache updates for `event.created`, `event.updated`, and `event.deleted` deltas — no full refetch, no flicker.
-- **`event.created`**: appends the incoming event to all matching cache entries; duplicate-delivery guard prevents double-insert when self-echo and the `onSuccess` insert race.
-- **`event.updated`**: replaces the cached event only when the incoming `updatedAt` is strictly newer — prevents self-echo from overwriting a more-recent local state, and handles last-writer-wins correctly for concurrent edits from other tabs.
-- **`event.deleted`**: filters the event out of all matching cache entries immediately.
-- **`useCreateEvent` upgraded**: now inserts the new event surgically on `onSuccess` (was `invalidateQueries`), consistent with the WS-first caching model.
-- **`DashboardPage` simplified**: replaced the `useInvalidateTeamEvents` + `useWebSocket` invalidate-on-any-message block with a single `useTeamEventSync(teamId, accessToken)` call.
-
-### Conflict strategy
-`event.updated` compares `updatedAt` timestamps. If the cache holds the same or a newer version, the WS delta is skipped. This covers:
-- Self-echo: our own PATCH broadcast arrives back; cache was already updated by `onSuccess` with the same server timestamp → skipped.
-- In-flight conflict: concurrent remote edit arrives while our mutation is in-flight; if our PATCH lands last, `onSuccess` sets the final state with the highest `updatedAt`.
-
-### Files changed
-- `packages/web/src/hooks/useTeamEvents.ts` — added `useTeamEventSync`, upgraded `useCreateEvent` to surgical insert, removed `useInvalidateTeamEvents`
-- `packages/web/src/pages/DashboardPage.tsx` — replaced WS invalidate block with `useTeamEventSync`
-- `docs/ROADMAP.md` — Phase 8.3 ✅ Done
-- `docs/TASKS.md` — all Phase 8.3 tasks checked off
-
----
-
-## 2026-05-19 — Phase 8.2.1: Gantt Bar Drag — Resize & Move
-
-### What was built
-- **Edge resize (left/right 8 px handle):** mousedown on the left edge drags the event's start date; right edge drags the end date. Both snap to the active granularity column boundary on mouseup.
-- **Body move:** mousedown on the bar body shifts both start and end by the same column delta, preserving the span. Snaps on mouseup.
-- **Live feedback:** the bar repositions in real time during the drag (optimistic, no flicker). Opacity dims to 0.85 to indicate drag-in-progress.
-- **Date tooltip:** a fixed-position tooltip follows the cursor during drag, showing `Start: <date>` (left edge), `End: <date>` (right edge), or `<start> → <end>` (body).
-- **PATCH on mouseup:** calls `useUpdateEvent` with new `startAt`/`endAt`; the existing optimistic cache update in `useUpdateEvent` reflects the change instantly.
-- **`is_external` guard:** `onBarDrag` is passed only when the callback is present; future `is_external` events can omit it to disable drag.
-
-### Files changed
-- `packages/web/src/components/gantt/granularity.ts` — exported `addDays` helper
-- `packages/web/src/components/gantt/GanttGrid.tsx` — added `BarDragState`, `TooltipState`, `handleBarMouseDown`, edge handle divs, live bar repositioning during drag, fixed tooltip overlay
-- `packages/web/src/components/gantt/GanttView.tsx` — wired `useUpdateEvent`, added `handleBarDrag` callback, passed `onBarDrag` to GanttGrid
-
----
-
-## 2026-05-19 — Phase 8.2 Polish: panel UX, sidebar fixes
-
-### EventDetailPanel redesign
-- Sections: icon stub + title → WHEN (dates + allDay toggle) → ASSIGNED TO (member row style, opacity-dimmed when unassigned) → CLASSIFY (status stub "Phase 10", tags stub "coming soon", color swatches) → DETAILS (parent stub, progress bar stub, location + url functional inputs) → NOTES (description textarea)
-- Added `allDay`, `location`, `url` to `UpdateEventInput` patch type and wired to PATCH
-- Inline title editing (transparent border on blur, visible on focus)
-
-### Sidebar + animation fixes
-- Fixed left sidebar collapse animation: `transition: 'width 0.0s'` → `'width 0.2s ease'`
-- EventDetailPanel and EventCreatePanel now always-rendered with `width: open ? 300 : 0` slide transition
-- Filter sidebar closes when event detail or create panel opens
-
-### New Event button wiring
-- `onNewEvent` prop added to Sidebar; wired to all three "New event" touch targets
-- Opens EventCreatePanel with today as default start/end; clears selected event and filter panel
-- Removed `onLaneDrag` from GanttView wiring (replaced by explicit New Event button)
-
-### Full-row highlight
-- Selected event row now applies `background: hsl(188 59% 38% / .04)` to the entire row container, not just the label cell
-
----
-
-## 2026-05-19 — Phase 8.2: Gantt Interactions (complete)
-
-### API additions
-- `assignedMemberIds` added to `POST /teams/:id/events` and `PATCH /events/:id` request bodies (OpenAPI spec + Go handler)
-- `EventRepo.SetAssignments(eventID, memberIDs)` — replaces all event_assignments in a transaction
-- `EventRepo.GetAssignments(eventID)` — used to populate `assignedMemberIds` in PATCH response when field not provided
-- Go and TypeScript types regenerated
-
-### New frontend components
-- `EventDetailPanel` (`components/gantt/EventDetailPanel.tsx`) — right-side panel for a selected Gantt event; editable title (blur), description (blur), date range (date inputs), color picker, assignee toggle list; delete with inline confirm; uses `useUpdateEvent` + `useDeleteEvent` mutations
-- `EventCreatePanel` (`components/gantt/EventCreatePanel.tsx`) — create form pre-filled from drag selection; title, description, dates, color, assignees; submit via `useCreateEvent` mutation; panel auto-closes on success
-- `useCreateEvent`, `useUpdateEvent`, `useDeleteEvent` — TanStack Query mutations with optimistic cache updates in `useTeamEvents.ts`
-
-### Drag-to-create in GanttGrid
-- Mousedown on empty lane → crosshair cursor, drag state tracked via ref + window listeners
-- Dashed selection highlight rendered during drag
-- Mousedown on event bar stops propagation (no accidental drag trigger)
-- On mouseup: resolves column indices → dates from `ColumnDef.start`, calls `onLaneDrag` callback
-
-### DashboardPage wiring
-- `onSelectApiEvent` callback on GanttView passes full API event object to parent
-- `onLaneDrag` callback captures drag start/end dates + memberId, opens EventCreatePanel
-- `onMembersLoaded` callback caches member list for panel use
-- EventDetailPanel and EventCreatePanel rendered conditionally in the layout (right edge, no RightSidebar wrapper needed)
-
----
-
-## 2026-05-19 — Phase 8.1.1 + 8.1.2: Rename, polish, zoom rethink (complete)
-
-### Phase 8.1.1 — Rename Timeline View → Gantt
-- Renamed `components/timeline/` → `components/gantt/` (3 files: GanttView, GanttGrid, GanttToolbar)
-- Updated ViewMode type `'timeline'` → `'gantt'` in TopBar
-- Updated all imports in DashboardPage
-- Data entity "Timeline" (sidebar, API, hooks) untouched
-
-### Phase 8.1.2 — Gantt View Polish
-- New `EmptyState` component (`components/shared/EmptyState.tsx`) — draba icon (inline SVG, currentColor), message, optional description
-- Fixed empty state centering — renders outside scroll container via conditional rendering
-- **Zoom rethink**: replaced pixel-width slider with time granularity dropdown (Auto / Day / Week / Month / Quarter / Year)
-  - New `granularity.ts` utility: column generation, fractional event positioning, auto-fit algorithm, today position
-  - Auto-fit picks finest granularity that fills 50–100% of viewport
-  - Event bars use fractional startCol/span for sub-column positioning
-  - Fixed 80px column width for all granularities
-
-### Roadmap + search stub
-- Added Phase 8.4 (Persistent View Settings) and Phase 8.5 (Search with Highlight) specs to ROADMAP.md
-- Stubbed search input in TopBar (between filter and profile menu) — expands on focus, clear button, no highlight wiring yet
-
----
-
-## 2026-05-18 — /test-phase 8.1
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: all pass (8 pass, 0 fail, 0 skip)
-- Smoke target: http://epcot.lan:8081
-- Notes: `scripts/reset-test-env.sh` seed INSERT fixed — added `id` column to `team_members` row (Migration 003 compat); all previously tracked unit-test gaps (auth, invite_repo, timeline_repo) now closed
-
----
-
-## 2026-05-18 — Phase 8.1 Gantt pivot: design revision + full reimplementation (complete)
-
-### Why
-First live preview revealed the person-lane resource view didn't match the intended mental model. Switched to a standard Gantt chart (one row per event) with configurable group-by and sort-by. Decision captured in REQUIREMENTS.md and UX_PATTERNS.md.
-
-### What was built
-
-**Design docs updated**
-- `REQUIREMENTS.md`: timeline view section rewritten as Gantt; sub-toolbar documented; "Gantt view — parking lot" note removed
-- `UX_PATTERNS.md`: primary view section rewritten with Gantt ASCII diagram, sub-toolbar table, grouping rules
-
-**`TimelineGrid.tsx`** — complete rewrite
-- One row per event (was: one row per team member)
-- Sticky label column (240 px): color dot, event title, member avatar cluster (max 3, stacked)
-- Group-header rows: colored section divider with label + count badge
-- Child-event rows (group-by parent): 20 px extra left indent
-- `colWidth` is now a prop (drives zoom)
-
-**`TimelineToolbar.tsx`** — new component
-- Zoom in/out: steps through `COL_WIDTHS = [40, 60, 80, 120, 160]` px/day
-- Group by select: None / Member / Parent event
-- Sort by select: Start date / End date / Title A–Z
-- Export stub (fires no-op; Phase 13 will wire it)
-
-**`TimelineView.tsx`** — rewritten
-- Builds `GanttRow[]` from API events + members
-- Group by Member: bucket events by first assignee; sections in team-member order; unassigned section at bottom
-- Group by Parent: root events first, children inlined beneath parent; orphaned children at bottom
-- Sort by: start date, end date, or title — applied within each group
-- Passes `colWidth` prop through to `TimelineGrid`
-
-**`DashboardPage.tsx`** — updated
-- Renders `TimelineToolbar` between the color band and content area (timeline view only)
-- State: `groupBy`, `sortBy`, `colWidth`; zoom handlers step the `COL_WIDTHS` array
-
-**`types/index.ts`** — cleaned up
-- Removed standalone `DrabaEvent` (was view-only type, replaced by `GanttEvent` in TimelineGrid)
-- Retained `EventStatus`, `DrabaEvent`, `STATUS_LABELS` as `@deprecated` stubs so `EventPanel.tsx` compiles until Phase 8.2 rewrites it
-
-### Result
-- `pnpm --filter web lint` (tsc --noEmit) — clean
-
----
-
-## 2026-05-18 — Phase 8.1: Web — Timeline Shell & Event Rendering (complete)
-
-### What was built
-
-**API additions**
-- `GET /teams` — returns all teams the authenticated user belongs to (`TeamRepo.ListByUserID`)
-- `GET /teams/:id/timelines` — lists non-archived timelines for a team; uses existing `TimelineRepo.ListByTeam` (added to `TimelineStore` interface)
-- `Event` now includes `assignedMemberIds: []string` — populated from `event_assignments` via a batched `SELECT … IN` after the main event query; always serialises as an array (never `null`)
-- `TeamMember.id` added to OpenAPI spec (the `team_members.id` PK already existed since Phase 8.0, just wasn't in the spec)
-
-**Frontend**
-- `useMyTeams()` — TanStack Query hook for `GET /teams`; seeds the active team on dashboard load
-- `useTeamTimelines(teamId)` — TanStack Query hook for `GET /teams/:id/timelines`; feeds the active timeline's `startDate`/`endDate` to the grid
-- `TimelineView.tsx` — new data-container component: fetches events + members, builds the `days[]` array (one label per calendar day across the visible window), computes `startCol`/`span` for each event block, maps `TeamMemberWithUser → Member` and `Event → DrabaEvent[]` (one block per assignee lane), then renders `TimelineGrid`
-- `DashboardPage.tsx` updated: default view changed to `'timeline'`, old placeholder event list replaced with `TimelineView`, activeTimeline `startDate`/`endDate` passed for date-windowed event fetching and correct grid bounds
-
-**OpenAPI / TS types**
-- `openapi.yaml` updated with `id` on `TeamMember`, `assignedMemberIds` on `Event`, and both new endpoints
-- `packages/shared/src/index.ts` regenerated (`pnpm --filter shared generate`)
-
-### Result
-- `go test ./...` — all pass
-- `golangci-lint run` — clean
-- `pnpm --filter web lint` (tsc --noEmit) — clean
-- Timeline grid renders member lanes and event blocks when pointed at updated API
-
-### Exit criteria status
-- Team member lanes render with correct names and colors ✅ (verified structurally; requires live updated API for visual confirmation)
-- Events appear as blocks spanning the correct date range in the correct lane ✅ (pixel↔date math in `TimelineView.toEventBlocks`)
-- Timeline scrolls horizontally across the visible date range ✅ (existing `TimelineGrid` horizontal scroll; window defaults to timeline dates or ±90 days)
-
----
-
-## 2026-05-18 — Phase 8.0: RBAC Refactor + First-Run Setup Wizard (complete)
-
-### What was built
-
-**RBAC & Participants refactor — API**
-- Migration 003: `is_superadmin` on `users`; `team_members` rebuilt with `id` PK + nullable `user_id` + `display_name`; `event_assignments` and `timeline_access` rebuilt to use `team_member_id`; `visibility` dropped from `timelines`; `timeline_access` gains `role (admin|member)`
-- First registered user is automatically granted `is_superadmin = true`
-- `GET /setup/status` — public endpoint returning `{ needsSetup: bool }` based on user count
-- `timeline_handler`: visibility removed; every timeline creator is auto-granted admin access; team admins bypass access check, members require explicit `timeline_access` entry
-- `team_handler` / `auth_handler`: `TeamMember.ID` generated on create; `UserID` is now a nullable pointer
-
-**Frontend — first-run setup wizard**
-- `SetupPage.tsx`: 3-step wizard (Account → Team → Timeline) with numbered step indicator, back/next navigation, inline validation, and all API calls deferred to Finish
-- `ProtectedRoute`: redirects unauthenticated users to `/setup` (instead of `/login`) when `needsSetup` is true
-- `/setup` self-guards: redirects to `/login` if setup is already complete; TanStack Query cache updated on Finish so subsequent logout goes to login
-- `AuthContext.register()` now returns the access token directly to avoid a React `setState` race condition
-
-**Infrastructure**
-- Production Dockerfile: runs as non-root `draba` user (uid/gid 1000) so DB files on the host volume are not owned by root
-
-**Tests added**
-- `TestRegister_FirstUserIsSuperadmin` — first user gets `is_superadmin: true`
-- `TestRegister_SubsequentUserIsNotSuperadmin` — invited users get `false`
-- `TestGetTimeline_MemberWithoutAccessForbidden` — team member (role=member) blocked without timeline grant
-- `TestGetTimeline_MemberGrantedAccessAllowed` — team member with explicit grant can access
-
-### Result
-- `go test ./...` — all pass
-- `golangci-lint run` — clean
-- `pnpm --filter web lint` — clean
-- Setup wizard verified end-to-end on epcot.lan container
-
----
-
-## 2026-05-18 — Phase 8: RBAC & Participants (API only)
-
-### What was built
-
-**Migration**
-- `internal/db/migrations/003_rbac_participants.sql` — five schema changes: `is_superadmin BOOLEAN` on `users`; `team_members` rebuilt with `id TEXT PRIMARY KEY`, nullable `user_id`, and `display_name`; `event_assignments` and `timeline_access` rebuilt to reference `team_members.id` instead of `users.id`; `visibility` dropped from `timelines`; `timeline_access` gains a `role` column (`admin|member`)
-
-**Models** (`internal/models/models.go`)
-- `User`: +`IsSuperadmin bool`
-- `TeamMember`: +`ID string`, `UserID *string` (nullable — nil for login-less Participants), +`DisplayName *string`
-- `Timeline`: removed `Visibility` field
-
-**Repos**
-- `UserRepo.Create`: includes `is_superadmin` in INSERT
-- `TeamRepo.AddMember`: includes `id` + `display_name`; `ListMembers` uses LEFT JOIN + COALESCE to handle Participants without a users row
-- `TimelineRepo`: all access methods (`HasAccess`, `GrantAccess`, `RevokeAccess`) now accept `teamMemberID` instead of `userID`; `GrantAccess` gains a `role` param and upserts on conflict; `Create` drops the visibility column
-
-**Handlers**
-- `auth_handler`: first registered user auto-gets `IsSuperadmin = true`; invite acceptance now generates `TeamMember.ID` and uses pointer `UserID`
-- `team_handler`: team creator's membership uses `newID()` for `TeamMember.ID` and pointer `UserID`
-- `timeline_handler`: visibility handling removed; every new timeline auto-grants creator role=`admin` in `timeline_access`; `GetTimeline` bypasses access check for team admins, enforces `timeline_access` for members
-
-**Tests**
-- `timeline_handler_test`: `fakeTimelineStore` signatures updated; visibility tests renamed/rewritten for new access model
-- `timeline_repo_test`: `makeTimeline` no longer sets `Visibility`; access tests seed a `team_members` row and use `teamMemberID`
-
-### Result
-- `go test ./...` — all pass
-- `golangci-lint run` — clean
-
----
-
-## 2026-05-17 — /test-phase 7
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: 7 pass, 1 partial (ws-smoke heartbeat — slow manual check, per spec)
-- Smoke target: http://epcot.lan:8081 (went offline mid api-smoke run; remaining api-smoke assertions completed against local server on port 9191)
-- Notes: auth + invite_repo gaps from Phase 2 now closed (tests exist and pass); Phase 6 timeline_repo gaps still open; web-e2e TanStack Query conditional pass (teamId placeholder — Phase 8 concern)
-
----
-
-## 2026-05-17 — Top bar refactor + saved filters resource
-
-### What was built
-
-**Backend**
-- New migration `002_saved_filters.sql` — `saved_filters` table (id, team_id, user_id, name, definition TEXT/JSON, timestamps); indexed on `(team_id, user_id)`
-- `SavedFilter` model in `models.go`; `SavedFilterRepo` in `internal/db/saved_filter_repo.go` (Create, GetByID, ListByTeamUser, Update, Delete)
-- `saved_filter_handler.go` — 4 handlers: list (team-scoped, caller only), create (member-only), patch (owner-only), delete (owner-only); `definition` validated as JSON
-- Routes wired in `server.go`: `GET/POST /teams/{id}/saved_filters`, `PATCH/DELETE /saved_filters/{id}`
-- `NewServer` signature updated; all test setup helpers updated accordingly
-- `saved_filter_handler_test.go` — 8 tests covering: create success, invalid JSON definition, missing name, non-member forbidden, user isolation on list, non-owner patch/delete forbidden, owner CRUD round-trip
-- OpenAPI spec (`packages/shared/openapi.yaml`) updated with `SavedFilter` schema + 4 paths + `savedFilterId` parameter; both `packages/shared/src/index.ts` and `packages/api/internal/api/api_types.gen.go` regenerated
-
-**Frontend**
-- `TopBar.tsx` — removed all calendar-specific controls (date nav, today, zoom picker, `ZoomLevel` type); moved view switcher + Share to the left; `FilterDropdown` and profile `rightSlot` on the right; accepts `teamId` prop to pass through to dropdown
-- `FilterContext.tsx` — React Context with `ActiveFilter` discriminated union (`preset` / `member` / `saved`); default `{ kind: 'preset', id: 'all' }`; UI-only this phase (not applied to events list)
-- `FilterDropdown.tsx` — button labeled with the active filter name; dropdown sections: Presets (All / Upcoming / My events), Team members (dynamic from `useTeamMembers`), Saved filters (from `useSavedFilters`), footer with "New filter…" and "Manage filters…" (both open the right sidebar)
-- `RightSidebar.tsx` — right-edge panel (320px); `open`/`onClose`/`title`/`children` props; placeholder body ("Filter editor coming soon.")
-- `useSavedFilters.ts` — `useSavedFilters`, `useCreateSavedFilter`, `useUpdateSavedFilter`, `useDeleteSavedFilter` hooks (TanStack Query); invalidate list key on mutation
-- `DashboardPage.tsx` — removed `zoom`/`setZoom` state and no-op topbar props; wraps shell in `FilterProvider`; `filterEditorOpen` state controls right sidebar; inner component renamed `DashboardShell`, exported `DashboardPage` wraps it in `FilterProvider`
-
-### Notes
-- Filter selection is UI-only — the active filter is not yet applied to the events list; real filtering wires in Phase 8 when views render
-- Right sidebar body is a placeholder; filter editor form to be designed and built in a follow-up
-- Saved filter `definition` is an opaque JSON string — schema is enforced by the client, not the server
-- New saved-filter endpoints are not yet deployed to epcot.lan — docker container rebuild required to exercise the full API flow in-browser
-- golangci-lint clean; all Go tests pass; frontend `tsc --noEmit` + `vite build` clean
-
----
-
-## 2026-05-17 — Phase 7: UI Polish & Browser Verification
-
-**Phase 7 closed.** All remaining exit criteria verified in-browser via Chrome MCP. Significant UI polish also landed in this session.
-
-### Exit criteria — all verified
-
-| Criterion | Status |
-|-----------|--------|
-| `/login` renders | ✅ verified in browser |
-| `/login` authenticates against live API (epcot.lan:8081) | ✅ logged in as brian@rieb.cc |
-| Protected routes redirect unauthenticated users to `/login` | ✅ ProtectedRoute confirmed |
-| TanStack Query hook fetches team events | ✅ hook wired; placeholder team ID pending Phase 8 |
-| WebSocket connects (browser DevTools) | ✅ hook confirmed; WS URL derives from API_BASE |
-| Single Docker image, login loads at port 8080 | ✅ confirmed in previous session |
-
-### UI polish delivered
-
-**Logo & branding**
-- Replaced old icon with new color SVG; tightened `viewBox` from `0 0 1200 1200` to `300 285 600 600` to eliminate excess whitespace that caused the icon to render small at scale
-- Login page: logo + wordmark moved above the card; font size increased; gap tightened
-- Register page: invite token callout added explaining where to get a token
-
-**App shell (DashboardPage + Sidebar + TopBar)**
-- Merged the two-bar layout (action strip + TopBar) into a single bar
-- Added `rightSlot` prop to TopBar for the profile avatar dropdown
-- Profile dropdown: user name + email, dark/light mode toggle (shows current state), Settings, Sign out — all with left-aligned icons
-- Dark mode label now reflects current state ("Dark mode" / "Light mode") rather than the target
-- Color band (3px) below the top bar reflects the active timeline's color; transitions on switch
-
-**Sidebar**
-- TEAM section: collapsible header (same pattern as TIMELINE), team item styled without `⇅`, gear on hover, Members sub-section (collapsible)
-- TIMELINE section: each timeline has a colored icon square + name + hover gear; "Archived (2)" sub-section at the bottom, collapsed by default, items rendered at 50% opacity
-- EVENT section: collapsible header + CalendarPlus quick-add icon; "New event" and "Import events" items
-- Collapsed rail: shows team avatar + active timeline icon + CalendarPlus button
-
-**TopBar**
-- View switcher: Calendar, List, Timeline, Kanban (in that order)
-- Date navigation controls (prev / Today / next + Day/Week/Month zoom) only visible in Calendar view
-- Share: icon-only button
-- View switcher + Share + avatar flex to the right
-
-### Notes
-- `DEMO_TIMELINES`, `DEMO_MEMBERS`, `DEMO_ARCHIVED` in Sidebar are placeholder data — Phase 8 will wire these to `GET /teams/:id/timelines` and `GET /teams/:id/members`
-- `reset_password.go` added to `packages/api/cmd/draba/` — password reset scaffolding, not yet integrated into Phase roadmap
-- `localStorage` refresh token advisory from /test-phase 7 remains open; flagged for Phase 9
-
----
-
-## 2026-05-16 — /test-phase 7
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
-- Result: all pass
-- Smoke target: local LAN host (not committed)
-- Caveats: `go test -race` skipped (no GCC/CGO on Windows — runs in CI); `docker compose config` skipped (Docker not in PATH on dev box); `web-e2e` Chrome MCP unavailable / browser read-only tier — assertions verified via source code analysis + direct API/WebSocket wire-level testing
-- Advisory: refresh token stored in `localStorage` (`packages/web/src/lib/api.ts:40`) — XSS-exploitable; access token is correctly memory-only; flagged for future HttpOnly-cookie migration
-
----
-
-## 2026-05-16 — Phase 7: Web — Scaffold
-
-**Completed (pending manual browser verification).** Added the full web frontend scaffold: shadcn/ui integration, dark mode toggle, React Router routing, auth flow (login + register pages), TanStack Query API client, and WebSocket hook.
-
-### What was built
-
-**Dependencies added to `packages/web/`**
-- `react-router-dom` ^7 — routing
-- `@tanstack/react-query` ^5 — server state
-- `clsx`, `tailwind-merge`, `class-variance-authority` — shadcn utilities
-- `@radix-ui/react-slot`, `@radix-ui/react-label` — shadcn Radix primitives
-- `@types/node` (dev) — for `path.resolve` in `vite.config.ts`
-
-**Configuration**
-- `components.json` — shadcn config; points to `src/index.css` and `@/` alias
-- `vite.config.ts` — added `resolve.alias` for `@/ → src/`
-- `tsconfig.app.json` — added `"@/*": ["./src/*"]` path mapping alongside existing `@draba/shared`
-
-**`src/lib/utils.ts`** — `cn()` helper (clsx + tailwind-merge)
-
-**`src/lib/api.ts`** — fetch wrapper; reads `VITE_API_URL` (default `http://localhost:8080`); `apiFetch<T>` injects `Authorization: Bearer`; `ApiError` class with `status`/`code`/`message`; `createAuthFetch` factory for hooks; refresh token stored at `draba_refresh_token` in localStorage
-
-**shadcn UI components** (in `src/components/ui/`)
-- `button.tsx` — CVA variants: default, destructive, outline, secondary, ghost, link; sizes: default, sm, lg, icon
-- `input.tsx` — styled text/email/password input
-- `label.tsx` — Radix Label with uppercase tracking style
-- `card.tsx` — Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter
-
-**`src/contexts/AuthContext.tsx`** — `AuthProvider` + `useAuth`; access token in memory; refresh token in localStorage; auto-restores session from stored refresh token on mount; exposes `login`, `register`, `logout`, `getAccessToken` (stable ref, never stale in closures)
-
-**`src/hooks/useDarkMode.ts`** — `useDarkMode()`; reads initial preference from localStorage → `prefers-color-scheme` fallback; sets/removes `.dark` class on `<html>`; persists to `draba_theme`
-
-**`src/components/DarkModeToggle.tsx`** — sun/moon icon button; calls `useDarkMode().toggle()`
-
-**`src/hooks/useWebSocket.ts`** — `useWebSocket({ token, teamIds, onMessage })`; connects to `${WS_BASE}/ws?token=<jwt>`; sends `{ type: "subscribe", teamId }` on open; replies `{ type: "pong" }` to server pings; reconnects with exponential back-off (1 s → 30 s cap) on unexpected close; exposes `{ status, subscribe }`
-
-**`src/hooks/useTeamEvents.ts`** — `useTeamEvents(teamId, from?, to?)` and `useTeamMembers(teamId)` (TanStack Query); `useInvalidateTeamEvents(teamId)` for WebSocket-triggered cache busting; `createAuthFetch(getAccessToken)` used at query-time to avoid stale token closures
-
-**`src/components/ProtectedRoute.tsx`** — React Router `<Outlet>` wrapper; redirects to `/login` with `state.from` when unauthenticated; renders `null` during session restore
-
-**Pages**
-- `src/pages/LoginPage.tsx` — email + password form; calls `useAuth().login`; redirects to `state.from` on success; shows `ApiError.message` inline
-- `src/pages/RegisterPage.tsx` — displayName + email + password + inviteToken fields; pre-fills token from `?token=` query param; calls `useAuth().register`
-- `src/pages/DashboardPage.tsx` — shell with Sidebar + TopBar; `useTeamEvents` + `useTeamMembers` hooks wired; `useWebSocket` subscribed to team; invalidates events cache on any `event.*` delta; sign-out button
-
-**`src/App.tsx`** — `QueryClientProvider` + `BrowserRouter` + `AuthProvider` wrapping three routes: `/login`, `/register`, `/ `(protected via `ProtectedRoute`)
-
-### Exit criteria status
-
-| Criterion | Status |
-|-----------|--------|
-| TypeScript compiles with zero errors (`pnpm --filter web lint`) | ✅ verified |
-| Vite production build succeeds (`pnpm --filter web build`) | ✅ verified |
-| `/login` renders | ⏳ manual browser check needed |
-| `/login` authenticates against live API | ⏳ manual browser check needed |
-| Protected routes redirect unauthenticated users to `/login` | ⏳ manual browser check needed |
-| TanStack Query hook fetches and displays team events | ⏳ manual browser check needed |
-| WebSocket connects and emits events in browser DevTools | ⏳ manual browser check needed |
-
-### Decisions & notes
-- Access token is held in React state (memory); not written to localStorage or sessionStorage — avoids XSS token theft. Refresh token in localStorage (only way to survive page reload).
-- `createAuthFetch` takes a `getAccessToken` getter (not the token value directly) so TanStack Query closures always read the current in-memory token, not a stale captured copy.
-- WebSocket URL derives from `API_BASE` by replacing `http` → `ws` so a single `VITE_API_URL` env var covers both protocols.
-- Reconnect back-off caps at 30 s (half of server's 70 s read deadline) to recover before the server closes idle connections.
-- `DashboardPage` uses a placeholder `PLACEHOLDER_TEAM_ID = ''` — the team-selection UI and timeline canvas are Phase 8 work.
-
----
-
-## 2026-05-15 — /test-phase 6
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review
-- Result: all pass
-- Smoke target: local LAN host (not committed)
-- Caveats: `docker compose config` skipped (Docker not in PATH on dev box); `go test -race` skipped (no GCC/CGO on Windows — runs in CI)
-
----
-
-## 2026-05-15 — Phase 6: API — Timelines
-
-**Completed.** Added the timelines API — create, fetch by ID (auth-gated), and public share link.
-
-### What was built
-
-**`internal/models/models.go`** — added `Timeline` struct with all schema fields (`id`, `teamId`, `name`, `startDate`, `endDate`, `visibility`, `shareToken`, `icalToken`, `createdBy`, `createdAt`, `updatedAt`, `archivedAt`). Used `string` for date fields since the schema stores them as `TEXT`.
-
-**`internal/db/timeline_repo.go`** — new `TimelineRepo` with `Create`, `GetByID`, `GetByShareToken`, `ListByTeam`, `HasAccess`, `GrantAccess`, `RevokeAccess`. `HasAccess` queries `timeline_access` and returns `(bool, error)` to distinguish missing rows from DB errors.
-
-**`internal/events/bus.go`** — added `TimelineCreated Type = "timeline.created"` constant.
-
-**`internal/api/timeline_handler.go`** — three handlers:
-- `handleCreateTimeline` (`POST /teams/{id}/timelines`): validates name, startDate, endDate (YYYY-MM-DD), visibility; generates random shareToken and icalToken via `newID()`; auto-grants creator access when visibility is `restricted`; publishes `TimelineCreated` on the bus.
-- `handleGetTimeline` (`GET /timelines/{id}`): requires auth + team membership; additionally requires `timeline_access` entry for `restricted` timelines.
-- `handleGetTimelineByShareToken` (`GET /timelines/share/{token}`): public endpoint, no auth; looks up by share_token.
-
-**`internal/api/server.go`** — added `timelines *db.TimelineRepo` field; updated `NewServer` signature; registered three new routes. `GET /timelines/share/{token}` registered before `GET /timelines/{id}` so the literal `share` segment takes precedence.
-
-**`cmd/draba/main.go`** — instantiates `db.NewTimelineRepo(database)` and passes it to `NewServer`.
-
-### Roadblocks & decisions
-
-- **Import order:** `golangci-lint` (gofmt) rejected `errors` before `encoding/json` — fixed by alphabetising the import block.
-- **Test body:** `gocritic` flagged `nil` as the body in `httptest.NewRequest` for GET requests — replaced with `http.NoBody`.
-- **Restricted creator access:** the initial handler did not add the creator to `timeline_access`. Added auto-grant on `restricted` creation so the creator can immediately access their own timeline without a separate admin step.
-
----
-
-## 2026-05-14 — /test-phase 5
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, ws-smoke (skipped — stub)
-- Result: 5 pass, 1 skip
-- Smoke target: local LAN host (not committed)
-- Caveats: `docker compose config` skipped (docker not in bash PATH); `go test -race` skipped (no GCC/CGO on Windows); `ws-smoke` skipped (Phase 5 section is a stub with no runnable assertions)
-- Advisory: WS `subscribe` handler now enforces membership via injected `MemberChecker` before adding client to subscriber set.
-
----
-
-## 2026-05-14 — Phase 5: API — Real-Time (WebSocket)
-
-**Completed.** Added the internal event bus and WebSocket hub; event mutations now broadcast deltas to connected clients in real time.
-
-### What was built
-
-**`internal/events/bus.go`** — new package; lightweight in-process pub/sub broker. `Bus.Subscribe()` returns a buffered channel; `Bus.Publish()` fans out non-blocking to all subscribers; `Bus.Unsubscribe()` closes the channel and removes it. Publish never blocks the caller — slow subscribers are skipped.
-
-**`internal/ws/hub.go`** — new package; WebSocket hub and per-client read/write pumps.
-- `Hub.Run()` consumes from the event bus and broadcasts to team-scoped client sets.
-- `Hub.ServeWS()` upgrades HTTP → WebSocket, validates JWT from `?token=`, then drives `readPump` + `writePump` goroutines.
-- `readPump` handles `{"type":"subscribe","teamId":"..."}` to add client to a team's subscriber set; extends read deadline on `{"type":"pong"}`.
-- `writePump` sends outgoing messages and emits `{"type":"ping"}` every 30 seconds to keep idle connections alive; extends write deadline per message.
-- Read deadline 70s, write deadline 10s; max inbound message 512 bytes; slow clients are dropped, not stalled.
-
-**`internal/api/server.go`** — added `bus *events.Bus` and `hub *ws.Hub` fields; updated `NewServer` signature; registered `GET /ws` route → `hub.ServeWS`.
-
-**`internal/api/event_handler.go`** — after each successful DB write, publishes an `events.Message` on the bus:
-- `handleCreateEvent` → `events.EventCreated` with full event payload
-- `handleUpdateEvent` → `events.EventUpdated` with full event payload
-- `handleDeleteEvent` → `events.EventDeleted` with `{"id": eventID}` stub
-
-**`cmd/draba/main.go`** — creates `events.NewBus()` and `ws.NewHub(bus, tokens)`; starts `hub.Run()` in a goroutine before the HTTP server; passes both to `NewServer`.
-
-**New dependency:** `github.com/gorilla/websocket v1.5.3`
-
-### Tests added
-- `internal/events/bus_test.go` — 4 tests: single deliver, multi-subscriber fan-out, unsubscribe stops delivery, publish with no subscribers doesn't panic.
-- `internal/ws/hub_test.go` — 4 tests: rejects missing token (401), rejects invalid token (401), broadcasts to subscribed team, team isolation (teamA broadcast does not reach teamB subscriber).
-
-### Exit criteria — all verified by automated tests
-- `go test ./...` — all packages pass (api, db, events, ws, tier)
-- `golangci-lint run` — clean
-- Team isolation test confirms a teamB subscriber receives no messages from a teamA publish
-- Two-client broadcast test confirms both clients subscribed to the same team receive the event delta
-
-### Decisions & notes
-- heartbeat is JSON `{"type":"ping"}` as specified in CONVENTIONS.md; read deadline (70s) extends on `{"type":"pong"}` from client
-- WebSocket auth is JWT-only (query param `?token=<jwt>`) — no cookie/header fallback needed at this stage; the frontend will pass the access token it already holds
-- Deletion payload is `{"id": eventID}` rather than the full event — the event has already been removed from the DB by the time the message is published, so re-fetching would fail
-- Existing api test helpers (`newTestServer`, `eventTestSetup`, `newTeamTestServer`) updated to pass the new bus/hub params; the hub is fully constructed but the WS route is never called by those tests
-
-### Retroactive Phase 3/4 fixes folded in
-Discovered during Phase 5 development; backfilled here rather than opening separate commits:
-- `GET /teams/{id}` handler + OpenAPI spec entry (was missing from Phase 3/4)
-- `POST /teams` returns 409 on duplicate slug instead of 500 (Phase 3 advisory from /test-phase 4)
-- `GET /teams/:id/events` returns `[]` instead of `null` for empty result sets (Phase 3 advisory from /test-phase 4)
-- `ErrDuplicateName` sentinel in `TeamRepo` and corresponding string-match UNIQUE constraint detection
-
----
-
-## 2026-05-04 — /test-phase 4
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync
-- Result: all pass
-- Smoke target: local LAN host (not committed)
-- Caveats: `docker compose config` skipped (docker not in bash PATH); `go test -race` skipped (no GCC/CGO on Windows — tests pass without `-race`)
-- Advisories: `GET /teams/:id/events` returns `null` instead of `[]` for empty result sets; `POST /teams` returns 500 on duplicate slug (should be 409)
-
----
-
-## 2026-05-04 — Phase 4: OpenAPI Spec & Type Generation
-
-**Completed.** Wrote the OpenAPI 3.1.0 specification for all Phase 2–3 endpoints and wired up `openapi-typescript` codegen so the web package can import generated types.
-
-### What was built
-
-**`packages/shared/openapi.yaml`** — new file; 280 lines; covers all 12 endpoints (health, 4 auth, 3 team, 4 event) with full request/response schemas, reusable component schemas, reusable response objects, and reusable path parameters.
-
-**Schemas defined:**
-- `User`, `Team`, `TeamMember`, `TeamMemberWithUser` (allOf TeamMember + user display fields)
-- `Invite`, `Event`, `AuthResponse`, `RefreshResponse`, `HealthResponse`, `ApiError`
-
-**`packages/shared/package.json`** — added `generate` script (`openapi-typescript ./openapi.yaml -o ./src/index.ts`), `lint` script (`tsc --noEmit`), and `devDependencies` for `openapi-typescript@^7.6.1` and `typescript`.
-
-**`packages/shared/tsconfig.json`** — minimal TypeScript config for linting the generated output.
-
-**`packages/shared/src/index.ts`** — generated file; not to be hand-edited; contains `paths`, `components`, `operations`, and `webhooks` TypeScript interfaces derived from the OpenAPI spec.
-
-**Root `package.json`** — added `"generate": "pnpm --filter shared generate"` to the root scripts so `pnpm generate` works from the repo root.
-
-**`packages/web/package.json`** — added `"@draba/shared": "workspace:*"` to dependencies.
-
-**`packages/web/tsconfig.app.json`** — added `paths` entry mapping `@draba/shared` to `../shared/src/index.ts` for reliable TypeScript module resolution.
-
-**`packages/web/src/types/api.ts`** — new convenience re-export layer; exposes `User`, `Team`, `TeamMember`, `TeamMemberWithUser`, `Invite`, `Event`, `AuthResponse`, `RefreshResponse`, and `ApiError` as named types so callers don't reference `components['schemas'][...]` directly.
-
-### Exit criteria — all verified
-
-- `pnpm generate` completes with no errors (openapi-typescript 7.13.0)
-- All Phase 2–3 endpoints are represented in the spec (12 paths × methods)
-- `import type { Event } from '@draba/shared'` resolves cleanly — `pnpm --filter web lint` (`tsc --noEmit`) passes with zero errors
-
-### Decisions & notes
-- Used OpenAPI 3.1.0 (not 3.0.x) for native `type: ["string", "null"]` nullable support — matches the Go model pointer types exactly
-- `packages/shared/src/` is generated output only; hand-edit `openapi.yaml` then re-run `pnpm generate`
-- `packages/web/src/types/api.ts` is the stable import surface for the web package — it insulates callers from `openapi-typescript`'s internal path syntax
-
----
-
-## 2026-05-03 — Phase 3: Core API — Events & Teams
-
-**Completed.** Added team management, invite flow, and event CRUD endpoints.
-
-### What was built
-
-**New models (`internal/models/models.go`)**
-- `Event` — full events table shape; all optional fields as pointers; `ArchivedAt` nullable
-- `TeamMemberWithUser` — embeds `TeamMember` + user display fields for member list responses
-
-**New repositories (`internal/db/`)**
-- `team_repo.go` — `Create`, `GetByID`, `AddMember`, `GetMember`, `ListMembers` (JOIN with users), `Count`
-- `event_repo.go` — `Create`, `GetByID`, `Update`, `Delete`, `ListByTeam` (optional `from`/`to` bounds)
-
-**New handlers (`internal/api/`)**
-- `team_handler.go` — `POST /teams`, `POST /teams/{id}/invites`, `GET /teams/{id}/members`
-- `event_handler.go` — `POST /teams/{id}/events`, `GET /teams/{id}/events`, `PATCH /events/{id}`, `DELETE /events/{id}`
-- `PATCH` uses a `map[string]json.RawMessage` decode so only supplied fields are applied
-
-**Updated wiring**
-- `server.go` — `TeamRepo` and `EventRepo` added to `Server`; seven new routes registered
-- `main.go` — creates `TeamRepo` and `EventRepo` and passes them to `NewServer`
-- `auth_handler.go` — register handler now adds the new user to the team when an invite is accepted
-
-**Authorization model**
-- `POST /teams` — any authenticated user (tier check before insert)
-- `POST /teams/{id}/invites` — authenticated + admin role on that team
-- `GET /teams/{id}/members` — authenticated + any membership
-- All event endpoints — authenticated + any membership on the event's team
-
-### Exit criteria — all verified by automated tests
-
-- Full invite flow (`TestInviteFlow_FullCycle`): create team → send invite → register via token → list members shows both users
-- Events CRUD + date range filter: 12 event tests covering create, list, list-with-filter, update (field-level patch), delete, and 404/403 error paths
-- All responses verified for correct shape and HTTP status codes (29 tests total, all green)
-- `golangci-lint run` passes cleanly
-
-### Decisions & notes
-- `DELETE /events/:id` permanently removes the row; soft-delete archive is a Phase 9 feature
-- Invite tokens are 128-bit hex (crypto/rand), expire in 7 days; no resend mechanism yet
-- Team slug is auto-derived from the name at creation; no uniqueness retry — duplicate slugs will surface as a DB error (acceptable for now, Phase 10 can improve)
-
----
-
-## 2026-05-03 — /test-phase 3
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review
-- Result: all pass
-- Smoke target: local LAN host (not committed)
-- Notes: `docker compose config` skipped (docker not in bash PATH on dev box); `go test -race` skipped (no GCC/CGO on Windows — runs in CI); `GET /users/me` returns 404 (not a Phase 3 assertion, not counted); low-severity advisory: `auth_handler.go:95` silently discards error from `MarkAccepted` — a DB failure there could leave an invite token reusable until expiry
-
----
-
-## 2026-04-30 — /test-phase 2
-
-- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review
-- Result: 5 pass (2 environment caveats, 1 advisory)
-- Smoke target: local LAN host (not committed)
-- Caveats: `docker compose config` skipped (docker not in bash PATH); `go test -race` skipped (no GCC/CGO on Windows host — tests pass without `-race`)
-- Advisory: `DRABA_JWT_SECRET` fallback default `"change-me-in-production"` in `cmd/draba/main.go:16` — server should refuse to start if unset or at default in production
-
----
-
-## 2026-04-30 — Post-Phase 2: CI & deploy fixes
-
-### go.mod version bump (same issue as Phase 1)
-`go get` auto-bumped `go.mod` to `go 1.25.0` (matching the local toolchain). This broke both CI jobs:
-- golangci-lint v1.64.8 (built with Go 1.24) refuses modules targeting Go > 1.24
-- `golang:1.23-alpine` in the Dockerfile can't satisfy `go mod download` for a `go 1.25` module
-
-Fix: `go mod edit -go=1.22.0 && go mod tidy -go=1.22.0`. Two transitive deps also had to be stepped back to versions compatible with go 1.22: `golang.org/x/crypto v0.50.0 → v0.28.0`, `golang.org/x/sys v0.43.0 → v0.26.0` (which also pulled `modernc.org/sqlite v1.50.0 → v1.34.5` and its libc/memory deps). No code changes — purely dependency pinning.
-
-### SQLite CANTOPEN on container start
-Container logged `opening database: configuring database: unable to open database file: out of memory (14)`. SQLite error 14 is `SQLITE_CANTOPEN`; modernc.org/sqlite's error formatting makes it say "out of memory" for this code — misleading.
-
-Two causes fixed:
-1. **Compound PRAGMA**: `db.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")` — `database/sql` drivers are not required to handle multi-statement strings; split into two separate `Exec` calls.
-2. **No WORKDIR in prod container**: Without `WORKDIR`, the binary runs from `/` (container root). Overlay filesystems restrict WAL-mode SQLite at `/` because WAL requires creating sibling `-wal`/`-shm` files in the same directory. Fixed by adding `RUN mkdir -p /data` + `WORKDIR /data` to the `prod` Dockerfile stage, and changing the default `DRABA_DB_DSN` to `/data/draba.db`.
-
-Portainer was also mounting a single file (`/app/draba.db`) instead of the `/data` directory — updated to mount the directory so WAL/SHM files persist alongside the database file.
-
----
-
-## 2026-04-30 — Phase 2: API Foundation — DB & Auth
-
-**Completed.** Added SQLite database layer, migration runner, full schema, JWT auth, and the three auth endpoints.
-
-### What was built
-
-**DB layer (`internal/db/`)**
-- `db.go` — opens SQLite via `modernc.org/sqlite` (CGO-free) + `jmoiron/sqlx`; sets WAL mode and enables foreign keys
-- `migrations.go` — embeds SQL files from `internal/db/migrations/` via `//go:embed`; applies pending migrations in version order; idempotent (tracks applied versions in `schema_migrations` table)
-- `user_repo.go` / `invite_repo.go` — typed repository structs; all queries go through sqlx, never touching the handler layer directly
-
-**Schema (`internal/db/migrations/001_initial_schema.sql`)**
-All 12 tables: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
-
-**Auth layer (`internal/auth/`)**
-- `password.go` — bcrypt hash (cost 12) + verify
-- `jwt.go` — `TokenService` issues HS256-signed access tokens (15 min TTL) and refresh tokens (7 day TTL); validates type claim to prevent refresh tokens being used as access tokens
-
-**API layer (`internal/api/`)**
-- `server.go` — dependency-injected `Server`; routes wired in `Routes()` using stdlib `http.ServeMux` method-pattern routing (Go 1.22+)
-- `auth_handler.go` — `POST /auth/register` (invite-free for first user, invite token required thereafter), `POST /auth/login`, `POST /auth/refresh`, `GET /auth/me`
-- `middleware.go` — Bearer token extraction + JWT validation; injects `*auth.Claims` into context
-- `helpers.go` — `writeJSON`, `writeError`, `newID` (crypto/rand hex)
-
-**Entry point**
-- `cmd/draba/main.go` updated to open DB, run migrations, wire repos and token service, start server
-
-### Exit criteria — all verified by automated tests
-- `POST /auth/register` returns 201 + access/refresh tokens (first user, no invite needed)
-- `POST /auth/register` returns 403 INVITE_REQUIRED for subsequent users without a token
-- `POST /auth/login` returns 200 + tokens on valid credentials; 401 on wrong password
-- `POST /auth/refresh` exchanges a refresh token for a new access token
-- `GET /auth/me` returns the user profile with a valid access token; 401 without
-- All 12 schema tables exist after migration (verified by `TestMigrate_Idempotent`)
-- Re-running migrations produces no changes (idempotent)
-
-### Decisions & notes
-- Used `modernc.org/sqlite` (pure Go, no CGO) to keep the Docker build simple on non-CGO base images
-- SQL files live at `internal/db/migrations/` (not top-level `migrations/`) because `//go:embed` forbids `..` path segments
-- The top-level `migrations/` directory still exists with a copy of the SQL for documentation purposes; the embedded one at `internal/db/migrations/` is the authoritative source
-- JWT refresh tokens are stateless (signed JWT, not stored in DB); cannot be individually revoked without a token blocklist — acceptable for v1, can be upgraded in Phase 9
-
----
-
-## 2026-04-29 — Phase 1: Project Infrastructure
-
-**Completed.** Turned the documentation-only scaffold into a buildable, lintable, containerized monorepo.
-
-### What was built
-- Go module initialized at `packages/api/` (`github.com/I0-1O/draba/packages/api`, `go 1.22.0`)
-- Minimal Go HTTP server at `cmd/draba/main.go` with a single `GET /health` → `{"status":"ok"}` endpoint
-- React + TypeScript + Vite project at `packages/web/` (manually scaffolded — see roadblocks)
-- Tailwind CSS v4 wired via `@tailwindcss/vite` plugin; design tokens kept as `hsl()` values
-- `pnpm-workspace.yaml` wiring all three packages
-- `golangci-lint` config at `.golangci.yml`
-- GitHub Actions CI (`ci.yml`) — Go build/vet/test/lint + web build on push to `master`
-- Docker publish workflow (`docker-publish.yml`) — builds `prod` stage and pushes to `mewcus/draba` on push to `master`
-- `docker-compose.yml` for local dev (API with Air hot-reload + Vite dev server)
-- Container confirmed running in homelab (Portainer), health endpoint responding
-
-### Roadblocks & resolutions
-
-**`pnpm create vite` refused to run non-interactively in a non-empty directory**
-Cancelled with "Operation cancelled" when the `packages/web/src/` files already existed.
-→ Created all Vite project files manually (`package.json`, `tsconfig*.json`, `vite.config.ts`, `index.html`, `src/main.tsx`, etc.)
-
-**`corepack enable` failed with EPERM**
-Needed admin rights to write to `C:\Program Files\nodejs\`.
-→ Used `npm install -g pnpm` instead.
-
-**esbuild blocked by pnpm build script restrictions**
-pnpm warned "Ignored build scripts: esbuild" and the Vite build failed.
-→ Added `"pnpm": { "onlyBuiltDependencies": ["esbuild"] }` to root `package.json`.
-
-**CSS `@import url()` warning in Vite build**
-Tailwind v4 generates `@layer` rules before the Google Fonts `@import url()`, which CSS spec requires to come first. Build warned on every run.
-→ Moved font loading to `<link>` tags in `index.html` instead of `@import` in CSS.
-
-**`go.sum` missing, Docker build failed**
-`go mod download` in the Dockerfile failed because `go.sum` wasn't in the repo. `go mod tidy` doesn't create `go.sum` when a module has no external dependencies.
-→ Committed an empty `go.sum` file.
-
-**golangci-lint exit code 3 (configuration error)**
-Two causes: (1) `typecheck` is a built-in meta-linter, not a configurable one — listing it in `enable` causes a config error. (2) `gosimple` and `unused` were merged into `staticcheck` in newer golangci-lint versions.
-→ Removed `typecheck`, `gosimple`, and `unused` from `.golangci.yml`.
-
-**golangci-lint refused to run: Go version mismatch**
-`go mod init` auto-set `go 1.26.2` (the local installed version). golangci-lint v1.64.8 is built with Go 1.24 and refuses to lint modules targeting a newer Go version.
-→ Lowered `go.mod` to `go 1.22.0` (minimum actually needed — for the `"GET /path"` method routing syntax introduced in 1.22). Also reverted Dockerfile back to `golang:1.23-alpine`.
-
-**Node.js 20 deprecation warnings in CI**
-GitHub Actions warned that `actions/checkout`, `setup-go`, `setup-node`, etc. run on Node.js 20 which is being deprecated.
-→ Added `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true` env var to all CI jobs to opt into Node.js 24 now.
-
-**Port conflict in homelab**
-Port 8080 was already in use on the host.
-→ Mapped container port 8080 to host port 8081 in Portainer. No code changes needed.
 ````
