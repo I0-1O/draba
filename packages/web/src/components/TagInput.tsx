@@ -61,6 +61,26 @@ export default function TagInput({ teamId, tags, selectedTagIds, onChange }: Pro
     inputRef.current?.focus()
   }
 
+  /**
+   * Keyboard shortcuts inside the text field:
+   *   Enter     → select an exact-name match if one exists, else create the tag
+   *   Backspace → remove the last selected pill when the field is empty
+   */
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Enter') {
+      const trimmed = query.trim()
+      if (!trimmed) return
+      e.preventDefault()
+      const exact = tags.find(
+        t => t.name.toLowerCase() === trimmed.toLowerCase() && !selectedTagIds.includes(t.id),
+      )
+      if (exact) selectTag(exact.id)
+      else if (showCreate) handleCreateTag()
+    } else if (e.key === 'Backspace' && query === '' && selectedTags.length > 0) {
+      removeTag(selectedTags[selectedTags.length - 1].id)
+    }
+  }
+
   function handleCreateTag() {
     const name = query.trim()
     if (!name) return
@@ -147,6 +167,7 @@ export default function TagInput({ teamId, tags, selectedTagIds, onChange }: Pro
           value={query}
           onChange={e => { setQuery(e.target.value); setOpen(true) }}
           onFocus={() => setOpen(true)}
+          onKeyDown={handleKeyDown}
           placeholder={selectedTags.length === 0 ? 'Add tags…' : ''}
           style={{
             border: 'none',

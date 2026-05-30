@@ -15,10 +15,16 @@ const mockMutate = vi.fn()
 vi.mock('@/hooks/useTeamActivities', () => ({
   useUpdateActivity: () => ({ mutate: mockMutate, isPending: false }),
   useDeleteActivity: () => ({ mutate: vi.fn(), isPending: false }),
+  useTimelineActivities: () => ({ data: [] }),
 }))
 
 vi.mock('@/hooks/useStatusTemplates', () => ({
   useTimelineStatuses: () => ({ data: [] }),
+}))
+
+vi.mock('@/hooks/useTags', () => ({
+  useTags: () => ({ data: [] }),
+  useCreateTag: () => ({ mutate: vi.fn() }),
 }))
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ openapi: "3.0.3"
 
 info:
   title: draba API
-  description: Team coordination API — Phases 2–6 (auth, teams, events, timelines).
+  description: Team coordination API — Phases 2–10.4.5 (auth, teams, events, timelines, tags).
   version: "1.0.0"
 
 servers:
@@ -2665,6 +2665,135 @@ paths:
       responses:
         "204":
           description: Saved filter deleted (no body).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Tags ─────────────────────────────────────────────────────
+
+  /teams/{id}/tags:
+    get:
+      operationId: listTags
+      summary: List tags for a team
+      tags: [tags]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Array of tags for the team.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Tag"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createTag
+      summary: Create a tag for a team
+      tags: [tags]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                color:
+                  type: string
+                  nullable: true
+      responses:
+        "201":
+          description: Tag created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A tag with that name already exists in this team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /tags/{id}:
+    patch:
+      operationId: updateTag
+      summary: Update a tag's name or color
+      tags: [tags]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                color:
+                  type: string
+                  nullable: true
+      responses:
+        "200":
+          description: Updated tag.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A tag with that name already exists in this team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteTag
+      summary: Delete a tag (cascades to activity_tags)
+      tags: [tags]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "204":
+          description: Tag deleted (no body).
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

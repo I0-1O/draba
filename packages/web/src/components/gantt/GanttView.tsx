@@ -113,7 +113,7 @@ function toMember(m: TeamMemberWithUser, index: number): Member {
 }
 
 /** Intermediate type that carries original API fields alongside view-state. */
-interface RichActivity extends GanttActivity {
+export interface RichActivity extends GanttActivity {
   startAtMs: number;
   endAtMs: number;
   parentActivityId: string | null;
@@ -176,16 +176,24 @@ function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivit
 
 // ── Grouping ─────────────────────────────────────────────────────────────────
 
-function buildRows(
+/**
+ * Builds the flat GanttRow list from positioned activities, applying grouping,
+ * sorting, parent→child nesting (arbitrary depth), and collapse state.
+ * Exported for unit testing of the tree/collapse logic.
+ */
+export function buildRows(
   activities: RichActivity[],
   members: Member[],
   groupBy: GroupBy,
   sortBy: SortBy,
+  collapsedParents: Set<string>,
+  collapsedGroups: Set<string>,
 ): GanttRow[] {
   const sorted = sortActivities(activities, sortBy);
 
   if (groupBy === 'none') {
-    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+    // Flat list — no parent nesting, so children are not indented.
+    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
   }
 
   if (groupBy === 'member') {
@@ -196,43 +204,77 @@ function buildRows(
     }
 
     const rows: GanttRow[] = [];
+    const pushBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
+      const collapsed = collapsedGroups.has(id);
+      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
+      if (collapsed) return;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    };
+
     for (const m of members) {
       const evs = buckets[m.id];
       if (!evs?.length) continue;
-      rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+      pushBucket(m.id, m.name, m.color, evs);
     }
     const unassigned = buckets['__none__'];
     if (unassigned?.length) {
-      rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
-      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+      pushBucket('__none__', 'Unassigned', 'var(--muted-foreground)', unassigned);
     }
     return rows;
   }
 
   if (groupBy === 'parent') {
-    const placed = new Set<string>();
+    // Build a parent→children index, then emit rows via depth-first traversal so
+    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
+    // has no parent or its parent fell outside the current view.
+    const byId = new Map(sorted.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, RichActivity[]>();
+    const roots: RichActivity[] = [];
+    for (const ev of sorted) {
+      const pid = ev.parentActivityId;
+      if (pid && byId.has(pid)) {
+        const list = childrenByParent.get(pid) ?? [];
+        list.push(ev);
+        childrenByParent.set(pid, list);
+      } else {
+        roots.push(ev);
+      }
+    }
+
     const rows: GanttRow[] = [];
+    const seen = new Set<string>();   // emitted into rows (also guards cycles)
+    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
 
+    // Recursively mark a collapsed node's descendants as hidden so the leftover
+    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
+    const markHidden = (ev: RichActivity) => {
+      if (hidden.has(ev.id)) return;
+      hidden.add(ev.id);
+      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
+    };
+
+    const visit = (ev: RichActivity, depth: number) => {
+      if (seen.has(ev.id)) return;
+      seen.add(ev.id);
+      const kids = childrenByParent.get(ev.id) ?? [];
+      const hasChildren = kids.length > 0;
+      const collapsed = collapsedParents.has(ev.id);
+      rows.push({
+        kind: 'activity',
+        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
+      });
+      if (!hasChildren) return;
+      if (collapsed) for (const k of kids) markHidden(k);
+      else for (const k of kids) visit(k, depth + 1);
+    };
+
+    for (const r of roots) visit(r, 0);
+    // Safety net: emit any activity unreachable from a root (e.g. a parent-
+    // pointer cycle where no node qualifies as a root) at depth 0, but never
+    // resurrect a node intentionally hidden under a collapsed ancestor.
     for (const ev of sorted) {
-      if (placed.has(ev.id) || ev.parentActivityId) continue;
-      placed.add(ev.id);
-      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-
-      for (const child of sorted) {
-        if (child.parentActivityId === ev.id) {
-          placed.add(child.id);
-          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
-        }
-      }
+      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
     }
-
-    for (const ev of sorted) {
-      if (!placed.has(ev.id)) {
-        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
-      }
-    }
-
     return rows;
   }
 
@@ -276,6 +318,28 @@ export default function GanttView({
   const queryClient = useQueryClient();
   const updateActivity = useUpdateActivity(timelineId);
   const today = todayMidnight();
+
+  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
+  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
+  // activities (member grouping). Both persist across re-renders and view tweaks.
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  const toggleParent = useCallback((id: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleGroup = useCallback((id: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(800);
 
@@ -368,9 +432,9 @@ export default function GanttView({
     const richActivities = visibleActivities
       .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
       .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy);
+    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns, collapsedParents, collapsedGroups]);
 
   // ── Find: compute matches and register with context ───────────────────────
 
@@ -473,6 +537,8 @@ export default function GanttView({
         onClearFilters={filtersActive ? () => {} : undefined}
         labelColW={labelColW}
         onLabelColWChange={onLabelColWChange}
+        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
+        onToggleGroup={groupBy === 'member' ? toggleGroup : undefined}
       />
     </div>
   );

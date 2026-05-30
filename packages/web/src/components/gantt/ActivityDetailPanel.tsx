@@ -16,9 +16,10 @@
  */
 
 import { useState, useEffect, useRef } from 'react'
-import { X, Trash2, ArrowRight, Loader2, ChevronDown } from 'lucide-react'
+import { X, Trash2, ArrowRight, Loader2, ChevronDown, Search } from 'lucide-react'
 import MemberAvatar from '@/components/MemberAvatar'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
 import { resolveColorHex } from '@/components/identity/identity-constants'
 import type { Identity } from '@/components/identity/identity-constants'
 import { useUpdateActivity, useDeleteActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
@@ -234,6 +235,136 @@ function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
   )
 }
 
+// ── Searchable parent activity picker ─────────────────────────────────────────
+
+interface ParentPickerProps {
+  activities: ApiActivity[]
+  value: string | null | undefined
+  onChange: (id: string | null) => void
+}
+
+/**
+ * Searchable combobox for choosing a parent activity. Scales past a plain
+ * <select> by filtering as you type, shows each activity's identity badge,
+ * and ellipsis-truncates long titles so the panel never overflows.
+ */
+function ParentActivityPicker({ activities, value, onChange }: ParentPickerProps) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQuery('') }
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  // Focus the search field whenever the dropdown opens.
+  useEffect(() => { if (open) inputRef.current?.focus() }, [open])
+
+  const selected = activities.find(a => a.id === value) ?? null
+  const filtered = activities.filter(a => a.title.toLowerCase().includes(query.trim().toLowerCase()))
+
+  function choose(id: string | null) {
+    onChange(id)
+    setOpen(false)
+    setQuery('')
+  }
+
+  return (
+    <div ref={ref} style={{ flex: 1, position: 'relative', minWidth: 0 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', gap: 6,
+          padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 6,
+          background: 'var(--background)', color: 'var(--foreground)', cursor: 'pointer',
+          fontSize: 12, fontFamily: 'var(--font-sans)', textAlign: 'left',
+        }}
+      >
+        {selected ? (
+          <>
+            <Badge identity={{ color: selected.color ?? '#288C9B', icon: selected.icon ?? '__none__' }} name={selected.title} size={16} />
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected.title}
+            </span>
+          </>
+        ) : (
+          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— None —</span>
+        )}
+        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)', zIndex: 100, overflow: 'hidden',
+          }}
+        >
+          {/* Search field */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
+            <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search activities…"
+              style={{
+                flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'none',
+                fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
+              }}
+            />
+          </div>
+
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            <div
+              onClick={() => choose(null)}
+              style={{
+                padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
+                fontStyle: 'italic', cursor: 'pointer',
+                borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              — None —
+            </div>
+            {filtered.map(a => (
+              <div
+                key={a.id}
+                onClick={() => choose(a.id)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
+                  fontSize: 12, cursor: 'pointer',
+                  background: a.id === value ? 'var(--muted)' : 'transparent',
+                  fontWeight: a.id === value ? 600 : 400,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
+              >
+                <Badge identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }} name={a.title} size={16} />
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {a.title}
+                </span>
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+                No matching activities
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function ActivityDetailPanel({
@@ -259,6 +390,15 @@ export default function ActivityDetailPanel({
   const [location, setLocation] = useState(event?.location ?? '')
   const [url, setUrl] = useState(event?.url ?? '')
   const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
+  // Parent and status are mirrored locally so the picker reflects a change
+  // immediately — the `event` prop is a snapshot taken at selection time and
+  // doesn't refresh until the activity is reselected.
+  const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
+  const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
+  // Progress percent renders as a label until clicked; `progressDraft` holds the
+  // in-flight text while editing.
+  const [editingProgress, setEditingProgress] = useState(false)
+  const [progressDraft, setProgressDraft] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   // Re-sync when the selected activity changes.
@@ -275,6 +415,9 @@ export default function ActivityDetailPanel({
     setLocation(event.location ?? '')
     setUrl(event.url ?? '')
     setProgressValue(event.percentComplete ?? 0)
+    setParentId(event.parentActivityId ?? null)
+    setStatusId(event.statusId ?? null)
+    setEditingProgress(false)
     setConfirmDelete(false)
   }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -346,19 +489,31 @@ export default function ActivityDetailPanel({
     save({ tagIds: ids } as Parameters<typeof save>[0])
   }
 
-  function handleParentChange(e: React.ChangeEvent<HTMLSelectElement>) {
-    const val = e.target.value || null
-    save({ parentActivityId: val } as Parameters<typeof save>[0])
-  }
-
   function handleProgressChange(e: React.ChangeEvent<HTMLInputElement>) {
     setProgressValue(Number(e.target.value))
   }
 
+  // Clamps to 0–100, rounds to an integer, and saves only on a real change.
+  function commitProgress(val: number) {
+    const clamped = Math.max(0, Math.min(100, Math.round(Number.isFinite(val) ? val : 0)))
+    setProgressValue(clamped)
+    if (clamped !== (event?.percentComplete ?? 0)) {
+      save({ percentComplete: clamped } as Parameters<typeof save>[0])
+    }
+  }
+
   function handleProgressCommit(e: React.ChangeEvent<HTMLInputElement>) {
-    const val = Number(e.target.value)
-    setProgressValue(val)
-    save({ percentComplete: val } as Parameters<typeof save>[0])
+    commitProgress(Number(e.target.value))
+  }
+
+  function startEditProgress() {
+    setProgressDraft(String(progressValue))
+    setEditingProgress(true)
+  }
+
+  function commitProgressEdit() {
+    commitProgress(progressDraft === '' ? 0 : Number(progressDraft))
+    setEditingProgress(false)
   }
 
   function handleDelete() {
@@ -520,8 +675,8 @@ export default function ActivityDetailPanel({
               {statuses.length > 0 ? (
                 <StatusDropdown
                   statuses={statuses}
-                  value={event?.statusId}
-                  onChange={id => save({ statusId: id } as Parameters<typeof save>[0])}
+                  value={statusId}
+                  onChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
                 />
               ) : (
                 <div style={{ ...STUB_VALUE }}>
@@ -551,23 +706,11 @@ export default function ActivityDetailPanel({
             {/* Parent activity picker */}
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
               <span style={FIELD_LABEL}>Parent</span>
-              <select
-                value={event.parentActivityId ?? ''}
-                onChange={handleParentChange}
-                style={{
-                  flex: 1, fontSize: 12, color: 'var(--foreground)',
-                  border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-                  padding: '4px 6px', outline: 'none', background: 'var(--background)',
-                  fontFamily: 'var(--font-sans)', cursor: 'pointer',
-                }}
-              >
-                <option value="">— None —</option>
-                {allActivities
-                  .filter(a => a.id !== event.id)
-                  .map(a => (
-                    <option key={a.id} value={a.id}>{a.title}</option>
-                  ))}
-              </select>
+              <ParentActivityPicker
+                activities={allActivities.filter(a => a.id !== event.id)}
+                value={parentId}
+                onChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
+              />
             </div>
 
             {/* % Complete slider */}
@@ -585,9 +728,44 @@ export default function ActivityDetailPanel({
                   onTouchEnd={handleProgressCommit as unknown as React.TouchEventHandler}
                   style={{ flex: 1, cursor: 'pointer', accentColor: 'var(--primary)' }}
                 />
-                <span style={{ fontSize: 11, color: 'var(--muted-foreground)', minWidth: 30, textAlign: 'right' }}>
-                  {progressValue}%
-                </span>
+                {editingProgress ? (
+                  <input
+                    autoFocus
+                    type="text"
+                    inputMode="numeric"
+                    value={progressDraft}
+                    onChange={e => setProgressDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
+                    onBlur={commitProgressEdit}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') commitProgressEdit()
+                      else if (e.key === 'Escape') setEditingProgress(false)
+                    }}
+                    aria-label="Percent complete"
+                    style={{
+                      width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
+                      color: 'var(--foreground)', border: '1px solid var(--primary)',
+                      borderRadius: 4, padding: '2px 4px', outline: 'none',
+                      background: 'var(--background)', fontFamily: 'var(--font-sans)',
+                    }}
+                  />
+                ) : (
+                  <span
+                    onClick={startEditProgress}
+                    title="Click to edit"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEditProgress() } }}
+                    style={{
+                      fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
+                      textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
+                      padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    {progressValue}%
+                  </span>
+                )}
               </div>
             </div>
 

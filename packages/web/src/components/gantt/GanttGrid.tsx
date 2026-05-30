@@ -19,6 +19,7 @@
  */
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import MemberAvatar from '../MemberAvatar';
 import { Badge } from '../identity/Badge';
 import EmptyState from '../shared/EmptyState';
@@ -49,11 +50,17 @@ export interface GanttActivity {
   icon?: string;
   members: Member[];
   isChild: boolean;
+  /** Nesting depth in the parent→child tree (0 = root). Drives left indent. */
+  depth?: number;
+  /** True when this activity has child activities nested beneath it. */
+  hasChildren?: boolean;
+  /** True when this activity's subtree is currently collapsed (children hidden). */
+  collapsed?: boolean;
   percentComplete?: number | null;
 }
 
 export type GanttRow =
-  | { kind: 'group'; id: string; label: string; color: string; count: number }
+  | { kind: 'group'; id: string; label: string; color: string; count: number; collapsed?: boolean }
   | { kind: 'activity'; event: GanttActivity };
 
 /** Visual state for the in-view Find feature. Passed from GanttView. */
@@ -131,6 +138,10 @@ interface Props {
   labelColW?: number;
   /** Called when the user drags the column resize handle. */
   onLabelColWChange?: (w: number) => void;
+  /** Toggles the collapsed state of an activity's child subtree (parent grouping). */
+  onToggleActivity?: (id: string) => void;
+  /** Toggles the collapsed state of a group header (member grouping). */
+  onToggleGroup?: (id: string) => void;
 }
 
 // ── Bar drag helpers ─────────────────────────────────────────────────────────
@@ -187,6 +198,8 @@ export default function GanttGrid({
   onClearFilters,
   labelColW: labelColWProp,
   onLabelColWChange,
+  onToggleActivity,
+  onToggleGroup,
 }: Props) {
   // ── Resizable label column ─────────────────────────────────────────────────
   // When the parent passes labelColW + onLabelColWChange the column is
@@ -582,20 +595,28 @@ export default function GanttGrid({
                   }}
                 >
                   <div
+                    onClick={onToggleGroup ? () => onToggleGroup(row.id) : undefined}
                     style={{
                       width: labelColW,
                       flexShrink: 0,
                       display: 'flex',
                       alignItems: 'center',
-                      gap: 7,
+                      gap: 6,
                       padding: '0 14px',
                       position: 'sticky',
                       left: 0,
                       background: 'var(--muted)',
                       zIndex: 3,
                       borderRight: '1px solid var(--border)',
+                      cursor: onToggleGroup ? 'pointer' : 'default',
+                      userSelect: 'none',
                     }}
                   >
+                    {onToggleGroup ? (
+                      row.collapsed
+                        ? <ChevronRight size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+                        : <ChevronDown size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+                    ) : null}
                     <div
                       style={{
                         width: 9,
@@ -639,7 +660,7 @@ export default function GanttGrid({
 
             const ev = row.event;
             const selected = selectedActivityId === ev.id;
-            const indent = ev.isChild ? 20 : 0;
+            const indent = (ev.depth ?? (ev.isChild ? 1 : 0)) * 18;
             const evIsMatch = isMatch(ev.id);
             const evIsActive = isActive(ev.id);
             const dimmed = hasQuery && !evIsMatch;
@@ -684,6 +705,30 @@ export default function GanttGrid({
                     e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
                   }}
                 >
+                  {/* Expand/collapse chevron slot — reserved (empty for leaves) so
+                      sibling badges stay aligned within a tree level. */}
+                  {onToggleActivity && (
+                    <div style={{ width: 16, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {ev.hasChildren && (
+                        <button
+                          onClick={e => { e.stopPropagation(); onToggleActivity(ev.id); }}
+                          title={ev.collapsed ? 'Expand' : 'Collapse'}
+                          aria-label={ev.collapsed ? 'Expand children' : 'Collapse children'}
+                          style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            width: 16, height: 16, padding: 0, border: 'none', borderRadius: 3,
+                            background: 'none', cursor: 'pointer', color: 'var(--muted-foreground)',
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--border)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                        >
+                          {ev.collapsed
+                            ? <ChevronRight size={13} strokeWidth={2.5} />
+                            : <ChevronDown size={13} strokeWidth={2.5} />}
+                        </button>
+                      )}
+                    </div>
+                  )}
                   <Badge
                     identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
                     name={ev.title}
