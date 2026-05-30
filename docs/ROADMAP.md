@@ -1204,6 +1204,13 @@ Replaces the three "coming soon" stubs in the activity edit panel with fully fun
 - Save on mouse-up
 - Optional: Gantt bar partial-fill indicator (darker overlay at `percentComplete%` width)
 
+*Web — Gantt tree expand/collapse (ratified in-scope):*
+- Activities with `parentActivityId` render indented under their parent in the Gantt grid
+- Chevron toggle per row collapses/expands that parent's children
+- Group-level rows (assignee / status grouping) have their own collapse toggle
+- `collapsedParents` and `collapsedGroups` state in `GanttView`; `buildRows` rewritten for arbitrary-depth nesting
+- `GanttView.tree.test.ts` covers the `buildRows` tree and collapse logic
+
 *Sample data:*
 - `sample_data/10_tags.sql` — 5–8 tags per team + activity_tags associations
 
@@ -1213,6 +1220,7 @@ Replaces the three "coming soon" stubs in the activity edit panel with fully fun
 - Parent picker: searchable dropdown within same timeline, replaces stub; cycles prevented
 - Progress slider: editable 0–100 range, saves on change, replaces stub
 - Sample data includes tags and activity-tag associations
+- Gantt tree expand/collapse renders parent-child hierarchy with per-row chevron toggles
 - `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
 
 ---

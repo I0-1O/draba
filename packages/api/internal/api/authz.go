@@ -51,6 +51,23 @@ func (s *Server) requireTeamAdmin(w http.ResponseWriter, r *http.Request, teamID
 	return member, true
 }
 
+// hasTeamAccess reports whether the authenticated caller may access the given
+// team without writing a response. Use when the correct failure status is
+// NOT_FOUND rather than FORBIDDEN — e.g. resource-scoped endpoints where
+// revealing a resource exists via a 403 is undesirable.
+func (s *Server) hasTeamAccess(r *http.Request, teamID string) bool {
+	claims := claimsFromContext(r.Context())
+	_, err := s.teams.GetMember(teamID, claims.UserID)
+	if err == nil {
+		return true
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	caller, err := s.users.GetByID(claims.UserID)
+	return err == nil && caller.IsSuperadmin
+}
+
 // superadminMember returns a synthetic TeamMember for superadmins who are
 // not explicit members of a team. The ID is empty (no real row exists) and
 // the role is "admin" so all admin-gated checks pass.

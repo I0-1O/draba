@@ -1,12 +1,17 @@
 package db
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/jmoiron/sqlx"
 
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
+
+// ErrTagOwnership is returned by ValidateTeamOwnership when one or more tag
+// IDs belong to a different team (or do not exist).
+var ErrTagOwnership = errors.New("tag belongs to another team")
 
 // TagRepo is the persistence layer for Tag records.
 type TagRepo struct {
@@ -70,6 +75,29 @@ func (r *TagRepo) Delete(id string) error {
 	_, err := r.db.Exec(`DELETE FROM tags WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("deleting tag: %w", err)
+	}
+	return nil
+}
+
+// ValidateTeamOwnership confirms that every ID in tagIDs belongs to teamID.
+// Returns ErrTagOwnership if any ID is missing or owned by another team.
+func (r *TagRepo) ValidateTeamOwnership(teamID string, tagIDs []string) error {
+	if len(tagIDs) == 0 {
+		return nil
+	}
+	query, args, err := sqlx.In(
+		`SELECT COUNT(*) FROM tags WHERE id IN (?) AND team_id = ?`,
+		tagIDs, teamID,
+	)
+	if err != nil {
+		return fmt.Errorf("building ownership query: %w", err)
+	}
+	var count int
+	if err := r.db.Get(&count, query, args...); err != nil {
+		return fmt.Errorf("checking tag ownership: %w", err)
+	}
+	if count != len(tagIDs) {
+		return ErrTagOwnership
 	}
 	return nil
 }

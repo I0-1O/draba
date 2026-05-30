@@ -150,8 +150,8 @@ function DashboardShell() {
   // The activeTeams[0] fallback here handles the edge case where the saved team
   // was archived or deleted between sessions.
   const activeTeam = activeTeamId !== null
-    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? null)
-    : null
+    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
+    : undefined
   const teamId = activeTeam?.id ?? ''
 
   // Check whether the current user is an admin of the active team.

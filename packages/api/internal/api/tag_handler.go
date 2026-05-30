@@ -27,6 +27,9 @@ func (s *Server) handleListTags(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tags)
 }
 
+// tagNameMaxLen is the maximum byte length accepted for a tag name.
+const tagNameMaxLen = 50
+
 // handleCreateTag handles POST /teams/{id}/tags. Any team member may create a
 // tag; they become the creator. Returns 409 when a tag with the same name
 // already exists in the team.
@@ -48,6 +51,10 @@ func (s *Server) handleCreateTag(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if len(req.Name) > tagNameMaxLen {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must be 50 characters or fewer")
 		return
 	}
 
@@ -86,7 +93,9 @@ func (s *Server) handleUpdateTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := s.requireTeamMember(w, r, tag.TeamID); !ok {
+	// Return 404 (not 403) for non-members so callers cannot probe tag existence.
+	if !s.hasTeamAccess(r, tag.TeamID) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
 		return
 	}
 
@@ -101,6 +110,10 @@ func (s *Server) handleUpdateTag(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil {
 		if *req.Name == "" {
 			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
+			return
+		}
+		if len(*req.Name) > tagNameMaxLen {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must be 50 characters or fewer")
 			return
 		}
 		tag.Name = *req.Name
@@ -135,7 +148,9 @@ func (s *Server) handleDeleteTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := s.requireTeamMember(w, r, tag.TeamID); !ok {
+	// Return 404 (not 403) for non-members so callers cannot probe tag existence.
+	if !s.hasTeamAccess(r, tag.TeamID) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
 		return
 	}
 

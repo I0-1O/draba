@@ -102,7 +102,7 @@ func TestTagRepo_UniqueNamePerTeam(t *testing.T) {
 	tag2 := makeTag("t-uniq2", teamID, userID)
 	tag2.Name = "duplicate"
 	err := repo.Create(tag2)
-	assert.Error(t, err, "expected unique constraint error for duplicate name")
+	assert.ErrorContains(t, err, "UNIQUE constraint failed", "expected a unique constraint violation")
 }
 
 func TestTagRepo_SetAndGetTagsOnActivity(t *testing.T) {
@@ -130,6 +130,32 @@ func TestTagRepo_SetAndGetTagsOnActivity(t *testing.T) {
 	ids, err := actRepo.GetTags(act.ID)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{tag1.ID, tag2.ID}, ids)
+}
+
+func TestTagRepo_ValidateTeamOwnership(t *testing.T) {
+	database := openTestDB(t)
+	repo := db.NewTagRepo(database)
+	teamID, userID := seedTeamAndUser(t, database, "tag-own")
+
+	tag := makeTag("t-own", teamID, userID)
+	require.NoError(t, repo.Create(tag))
+
+	// Valid: tag belongs to this team.
+	assert.NoError(t, repo.ValidateTeamOwnership(teamID, []string{tag.ID}))
+
+	// Empty slice is always valid.
+	assert.NoError(t, repo.ValidateTeamOwnership(teamID, []string{}))
+
+	// Non-existent ID must return ErrTagOwnership.
+	err := repo.ValidateTeamOwnership(teamID, []string{"no-such-id"})
+	assert.ErrorIs(t, err, db.ErrTagOwnership)
+
+	// Tag from a different team must return ErrTagOwnership.
+	teamID2, userID2 := seedTeamAndUser(t, database, "tag-own2")
+	otherTag := makeTag("t-other", teamID2, userID2)
+	require.NoError(t, repo.Create(otherTag))
+	err2 := repo.ValidateTeamOwnership(teamID, []string{otherTag.ID})
+	assert.ErrorIs(t, err2, db.ErrTagOwnership)
 }
 
 func TestTagRepo_ListByTimelinePopulatesTagIDs(t *testing.T) {

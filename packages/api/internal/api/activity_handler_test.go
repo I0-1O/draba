@@ -514,6 +514,109 @@ func TestListActivities_TimelineDifferentTeam(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+func TestCreateActivity_WithTags(t *testing.T) {
+	srv, token, teamID, timelineID := activityTestSetup(t)
+
+	// Create a tag for this team.
+	wt := httptest.NewRecorder()
+	srv.ServeHTTP(wt, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/tags", teamID),
+		map[string]any{"name": "critical", "color": "red"}, token))
+	require.Equal(t, http.StatusCreated, wt.Code)
+	var tag map[string]any
+	require.NoError(t, json.NewDecoder(wt.Body).Decode(&tag))
+	tagID := tag["id"].(string)
+
+	// Create an activity referencing the tag.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID), map[string]any{
+		"title":   "Tagged Activity",
+		"startAt": "2026-06-01T09:00:00Z",
+		"endAt":   "2026-06-01T17:00:00Z",
+		"tagIds":  []string{tagID},
+	}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+	ids := created["tagIds"].([]any)
+	require.Len(t, ids, 1)
+	assert.Equal(t, tagID, ids[0])
+}
+
+func TestUpdateActivity_TagIDs(t *testing.T) {
+	srv, token, teamID, timelineID := activityTestSetup(t)
+
+	// Create two tags.
+	var tagIDs []string
+	for _, name := range []string{"alpha", "beta"} {
+		wt := httptest.NewRecorder()
+		srv.ServeHTTP(wt, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/tags", teamID),
+			map[string]any{"name": name}, token))
+		require.Equal(t, http.StatusCreated, wt.Code)
+		var tag map[string]any
+		require.NoError(t, json.NewDecoder(wt.Body).Decode(&tag))
+		tagIDs = append(tagIDs, tag["id"].(string))
+	}
+
+	// Create an activity without tags.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamID, timelineID), map[string]any{
+		"title": "Untagged", "startAt": "2026-06-01T09:00:00Z", "endAt": "2026-06-01T17:00:00Z",
+	}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+	activityID := created["id"].(string)
+
+	// Patch tagIds onto the activity.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPatch, fmt.Sprintf("/activities/%s", activityID),
+		map[string]any{"tagIds": tagIDs}, token))
+	require.Equal(t, http.StatusOK, w2.Code)
+	var updated map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&updated))
+	got := updated["tagIds"].([]any)
+	assert.Len(t, got, 2)
+
+	// Clear tags by passing an empty slice.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPatch, fmt.Sprintf("/activities/%s", activityID),
+		map[string]any{"tagIds": []string{}}, token))
+	require.Equal(t, http.StatusOK, w3.Code)
+	var cleared map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&cleared))
+	assert.Empty(t, cleared["tagIds"])
+}
+
+func TestCreateActivity_CrossTeamTagsRejected(t *testing.T) {
+	srv, aliceToken, teamAID, timelineID := activityTestSetup(t)
+
+	// Create a second team (still owned by Alice) and a tag in it.
+	wb := httptest.NewRecorder()
+	srv.ServeHTTP(wb, authReq(http.MethodPost, "/teams", map[string]any{"name": "Team B", "slug": "xteam-tag-b"}, aliceToken))
+	require.Equal(t, http.StatusCreated, wb.Code)
+	var teamB map[string]any
+	require.NoError(t, json.NewDecoder(wb.Body).Decode(&teamB))
+	teamBID := teamB["id"].(string)
+
+	wt := httptest.NewRecorder()
+	srv.ServeHTTP(wt, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/tags", teamBID),
+		map[string]any{"name": "foreign-tag"}, aliceToken))
+	require.Equal(t, http.StatusCreated, wt.Code)
+	var ftag map[string]any
+	require.NoError(t, json.NewDecoder(wt.Body).Decode(&ftag))
+	foreignTagID := ftag["id"].(string)
+
+	// Attempt to use Team B's tag on a Team A activity — must be 400.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, activityURL(teamAID, timelineID), map[string]any{
+		"title":   "Cross-team tag attempt",
+		"startAt": "2026-06-01T09:00:00Z",
+		"endAt":   "2026-06-01T17:00:00Z",
+		"tagIds":  []string{foreignTagID},
+	}, aliceToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
 func TestActivityCRUD_NonMemberForbidden(t *testing.T) {
 	srv, aliceToken, teamID, timelineID := activityTestSetup(t)
 

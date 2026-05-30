@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
@@ -98,6 +99,14 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.TagIds != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
 		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
 			return
@@ -336,6 +345,14 @@ func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if newTagIDs != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
 		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
 			return

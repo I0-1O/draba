@@ -22,8 +22,17 @@ vi.mock('@/hooks/useStatusTemplates', () => ({
   useTimelineStatuses: () => ({ data: [] }),
 }))
 
+const TAG_FIXTURE = {
+  id: 'tag-a',
+  teamId: 'team-1',
+  name: 'urgent',
+  color: 'red',
+  createdBy: 'user-1',
+  createdAt: '2026-01-01T00:00:00Z',
+}
+
 vi.mock('@/hooks/useTags', () => ({
-  useTags: () => ({ data: [] }),
+  useTags: () => ({ data: [TAG_FIXTURE] }),
   useCreateTag: () => ({ mutate: vi.fn() }),
 }))
 
@@ -49,6 +58,7 @@ const baseActivity = {
   createdAt: '2026-06-01T00:00:00Z',
   updatedAt: '2026-06-01T00:00:00Z',
   assignedMemberIds: [] as string[],
+  tagIds: [] as string[],
 }
 
 function renderPanel(overrides: Partial<typeof baseActivity> = {}) {
@@ -98,5 +108,19 @@ describe('ActivityDetailPanel — notes field', () => {
     const textarea = screen.getByPlaceholderText('Add notes…')
     fireEvent.blur(textarea)
     expect(mockMutate).not.toHaveBeenCalled()
+  })
+})
+
+describe('ActivityDetailPanel — tags field', () => {
+  beforeEach(() => mockMutate.mockClear())
+
+  it('renders the tag input with "Add tags…" placeholder when no tags are selected', () => {
+    renderPanel({ tagIds: [] })
+    expect(screen.getByPlaceholderText('Add tags…')).toBeTruthy()
+  })
+
+  it('renders selected tag pill when activity has a tagId matching the team tag', () => {
+    renderPanel({ tagIds: ['tag-a'] })
+    expect(screen.getByText('urgent')).toBeTruthy()
   })
 })
