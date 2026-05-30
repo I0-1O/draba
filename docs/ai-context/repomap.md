@@ -450,6 +450,1309 @@ jobs:
           cache-to: type=gha,mode=max
 ````
 
+## File: docs/design/assets/Icon Color Picker.html
+````html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Identity Widget — Draba</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #0d1117; font-family: 'Inter', system-ui, sans-serif; color: #e6edf3; overflow: hidden; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 99px; }
+  button { font-family: inherit; cursor: pointer; }
+  input { font-family: inherit; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useMemo } = React;
+
+// ── Tokens ────────────────────────────────────────────────────────────────────
+const T = {
+  bg0:'#0d1117', bg1:'#161b22', bg2:'#21262d', bg3:'#2d333b', bg4:'#373e47',
+  border:'#30363d', border2:'#21262d',
+  text1:'#e6edf3', text2:'#8b949e', text3:'#484f58',
+  accent:'#288C9B',
+};
+
+// ── 16 colors ─────────────────────────────────────────────────────────────────
+const COLORS = [
+  {id:'teal',   hex:'#288C9B'},{id:'cyan',   hex:'#06B6D4'},
+  {id:'blue',   hex:'#3B82F6'},{id:'indigo', hex:'#6366F1'},
+  {id:'violet', hex:'#8B5CF6'},{id:'purple', hex:'#A855F7'},
+  {id:'pink',   hex:'#EC4899'},{id:'rose',   hex:'#F43F5E'},
+  {id:'red',    hex:'#EF4444'},{id:'orange', hex:'#F97316'},
+  {id:'amber',  hex:'#F59E0B'},{id:'yellow', hex:'#EAB308'},
+  {id:'lime',   hex:'#84CC16'},{id:'green',  hex:'#22C55E'},
+  {id:'slate',  hex:'#64748B'},{id:'stone',  hex:'#78716C'},
+];
+
+// ── 64 Lucide icons ───────────────────────────────────────────────────────────
+const ICONS = {
+  'activity':      [['polyline',{points:'22 12 18 12 15 21 9 3 6 12 2 12'}]],
+  'archive':       [['polyline',{points:'21 8 21 21 3 21 3 8'}],['rect',{x:'1',y:'3',width:'22',height:'5'}],['line',{x1:'10',y1:'12',x2:'14',y2:'12'}]],
+  'award':         [['circle',{cx:'12',cy:'8',r:'7'}],['polyline',{points:'8.21 13.89 7 23 12 20 17 23 15.79 13.88'}]],
+  'bar-chart':     [['line',{x1:'18',y1:'20',x2:'18',y2:'10'}],['line',{x1:'12',y1:'20',x2:'12',y2:'4'}],['line',{x1:'6',y1:'20',x2:'6',y2:'14'}]],
+  'bell':          [['path',{d:'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9'}],['path',{d:'M13.73 21a2 2 0 0 1-3.46 0'}]],
+  'bookmark':      [['path',{d:'M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'}]],
+  'briefcase':     [['rect',{x:'2',y:'7',width:'20',height:'14',rx:'2',ry:'2'}],['path',{d:'M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16'}]],
+  'calendar':      [['rect',{x:'3',y:'4',width:'18',height:'18',rx:'2',ry:'2'}],['line',{x1:'16',y1:'2',x2:'16',y2:'6'}],['line',{x1:'8',y1:'2',x2:'8',y2:'6'}],['line',{x1:'3',y1:'10',x2:'21',y2:'10'}]],
+  'check-circle':  [['path',{d:'M22 11.08V12a10 10 0 1 1-5.93-9.14'}],['polyline',{points:'22 4 12 14.01 9 11.01'}]],
+  'clipboard':     [['path',{d:'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2'}],['rect',{x:'8',y:'2',width:'8',height:'4',rx:'1',ry:'1'}]],
+  'clock':         [['circle',{cx:'12',cy:'12',r:'10'}],['polyline',{points:'12 6 12 12 16 14'}]],
+  'cloud':         [['path',{d:'M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z'}]],
+  'code':          [['polyline',{points:'16 18 22 12 16 6'}],['polyline',{points:'8 6 2 12 8 18'}]],
+  'coffee':        [['path',{d:'M18 8h1a4 4 0 0 1 0 8h-1'}],['path',{d:'M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z'}],['line',{x1:'6',y1:'1',x2:'6',y2:'4'}],['line',{x1:'10',y1:'1',x2:'10',y2:'4'}],['line',{x1:'14',y1:'1',x2:'14',y2:'4'}]],
+  'compass':       [['circle',{cx:'12',cy:'12',r:'10'}],['polygon',{points:'16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76'}]],
+  'cpu':           [['rect',{x:'4',y:'4',width:'16',height:'16',rx:'2',ry:'2'}],['rect',{x:'9',y:'9',width:'6',height:'6'}],['line',{x1:'9',y1:'1',x2:'9',y2:'4'}],['line',{x1:'15',y1:'1',x2:'15',y2:'4'}],['line',{x1:'9',y1:'20',x2:'9',y2:'23'}],['line',{x1:'15',y1:'20',x2:'15',y2:'23'}],['line',{x1:'20',y1:'9',x2:'23',y2:'9'}],['line',{x1:'1',y1:'9',x2:'4',y2:'9'}]],
+  'database':      [['ellipse',{cx:'12',cy:'5',rx:'9',ry:'3'}],['path',{d:'M21 12c0 1.66-4 3-9 3s-9-1.34-9-3'}],['path',{d:'M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5'}]],
+  'download':      [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'7 10 12 15 17 10'}],['line',{x1:'12',y1:'15',x2:'12',y2:'3'}]],
+  'edit':          [['path',{d:'M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7'}],['path',{d:'M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z'}]],
+  'eye':           [['path',{d:'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z'}],['circle',{cx:'12',cy:'12',r:'3'}]],
+  'file-text':     [['path',{d:'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'}],['polyline',{points:'14 2 14 8 20 8'}],['line',{x1:'16',y1:'13',x2:'8',y2:'13'}],['line',{x1:'16',y1:'17',x2:'8',y2:'17'}]],
+  'filter':        [['polygon',{points:'22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3'}]],
+  'flag':          [['path',{d:'M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z'}],['line',{x1:'4',y1:'22',x2:'4',y2:'15'}]],
+  'folder':        [['path',{d:'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'}]],
+  'git-branch':    [['line',{x1:'6',y1:'3',x2:'6',y2:'15'}],['circle',{cx:'18',cy:'6',r:'3'}],['circle',{cx:'6',cy:'18',r:'3'}],['path',{d:'M18 9a9 9 0 0 1-9 9'}]],
+  'globe':         [['circle',{cx:'12',cy:'12',r:'10'}],['line',{x1:'2',y1:'12',x2:'22',y2:'12'}],['path',{d:'M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'}]],
+  'grid':          [['rect',{x:'3',y:'3',width:'7',height:'7'}],['rect',{x:'14',y:'3',width:'7',height:'7'}],['rect',{x:'14',y:'14',width:'7',height:'7'}],['rect',{x:'3',y:'14',width:'7',height:'7'}]],
+  'heart':         [['path',{d:'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z'}]],
+  'help-circle':   [['circle',{cx:'12',cy:'12',r:'10'}],['path',{d:'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3'}],['line',{x1:'12',y1:'17',x2:'12.01',y2:'17'}]],
+  'home':          [['path',{d:'M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'}],['polyline',{points:'9 22 9 12 15 12 15 22'}]],
+  'info':          [['circle',{cx:'12',cy:'12',r:'10'}],['line',{x1:'12',y1:'16',x2:'12',y2:'12'}],['line',{x1:'12',y1:'8',x2:'12.01',y2:'8'}]],
+  'layers':        [['polygon',{points:'12 2 2 7 12 12 22 7 12 2'}],['polyline',{points:'2 17 12 22 22 17'}],['polyline',{points:'2 12 12 17 22 12'}]],
+  'link':          [['path',{d:'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'}],['path',{d:'M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'}]],
+  'list':          [['line',{x1:'8',y1:'6',x2:'21',y2:'6'}],['line',{x1:'8',y1:'12',x2:'21',y2:'12'}],['line',{x1:'8',y1:'18',x2:'21',y2:'18'}],['line',{x1:'3',y1:'6',x2:'3.01',y2:'6'}],['line',{x1:'3',y1:'12',x2:'3.01',y2:'12'}],['line',{x1:'3',y1:'18',x2:'3.01',y2:'18'}]],
+  'lock':          [['rect',{x:'3',y:'11',width:'18',height:'11',rx:'2',ry:'2'}],['path',{d:'M7 11V7a5 5 0 0 1 10 0v4'}]],
+  'mail':          [['path',{d:'M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z'}],['polyline',{points:'22 6 12 13 2 6'}]],
+  'map':           [['polygon',{points:'1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6'}],['line',{x1:'8',y1:'2',x2:'8',y2:'18'}],['line',{x1:'16',y1:'6',x2:'16',y2:'22'}]],
+  'message-circle':[['path',{d:'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'}]],
+  'moon':          [['path',{d:'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'}]],
+  'package':       [['path',{d:'M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'}],['polyline',{points:'3.27 6.96 12 12.01 20.73 6.96'}],['line',{x1:'12',y1:'22.08',x2:'12',y2:'12'}]],
+  'pencil':        [['path',{d:'M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z'}]],
+  'phone':         [['path',{d:'M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.56 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z'}]],
+  'pie-chart':     [['path',{d:'M21.21 15.89A10 10 0 1 1 8 2.83'}],['path',{d:'M22 12A10 10 0 0 0 12 2v10z'}]],
+  'plug':          [['path',{d:'M18.36 6.64a9 9 0 1 1-12.73 0'}],['line',{x1:'12',y1:'2',x2:'12',y2:'12'}]],
+  'refresh-cw':    [['polyline',{points:'23 4 23 10 17 10'}],['polyline',{points:'1 20 1 14 7 14'}],['path',{d:'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15'}]],
+  'search':        [['circle',{cx:'11',cy:'11',r:'8'}],['line',{x1:'21',y1:'21',x2:'16.65',y2:'16.65'}]],
+  'server':        [['rect',{x:'2',y:'2',width:'20',height:'8',rx:'2',ry:'2'}],['rect',{x:'2',y:'14',width:'20',height:'8',rx:'2',ry:'2'}],['line',{x1:'6',y1:'6',x2:'6.01',y2:'6'}],['line',{x1:'6',y1:'18',x2:'6.01',y2:'18'}]],
+  'settings':      [['circle',{cx:'12',cy:'12',r:'3'}],['path',{d:'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z'}]],
+  'share':         [['circle',{cx:'18',cy:'5',r:'3'}],['circle',{cx:'6',cy:'12',r:'3'}],['circle',{cx:'18',cy:'19',r:'3'}],['line',{x1:'8.59',y1:'13.51',x2:'15.42',y2:'17.49'}],['line',{x1:'15.41',y1:'6.51',x2:'8.59',y2:'10.49'}]],
+  'shield':        [['path',{d:'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'}]],
+  'star':          [['polygon',{points:'12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2'}]],
+  'sun':           [['circle',{cx:'12',cy:'12',r:'5'}],['line',{x1:'12',y1:'1',x2:'12',y2:'3'}],['line',{x1:'12',y1:'21',x2:'12',y2:'23'}],['line',{x1:'4.22',y1:'4.22',x2:'5.64',y2:'5.64'}],['line',{x1:'18.36',y1:'18.36',x2:'19.78',y2:'19.78'}],['line',{x1:'1',y1:'12',x2:'3',y2:'12'}],['line',{x1:'21',y1:'12',x2:'23',y2:'12'}]],
+  'tag':           [['path',{d:'M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z'}],['line',{x1:'7',y1:'7',x2:'7.01',y2:'7'}]],
+  'target':        [['circle',{cx:'12',cy:'12',r:'10'}],['circle',{cx:'12',cy:'12',r:'6'}],['circle',{cx:'12',cy:'12',r:'2'}]],
+  'terminal':      [['polyline',{points:'4 17 10 11 4 5'}],['line',{x1:'12',y1:'19',x2:'20',y2:'19'}]],
+  'trash':         [['polyline',{points:'3 6 5 6 21 6'}],['path',{d:'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'}]],
+  'trending-up':   [['polyline',{points:'23 6 13.5 15.5 8.5 10.5 1 18'}],['polyline',{points:'17 6 23 6 23 12'}]],
+  'upload':        [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'17 8 12 3 7 8'}],['line',{x1:'12',y1:'3',x2:'12',y2:'15'}]],
+  'user':          [['path',{d:'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'}],['circle',{cx:'12',cy:'7',r:'4'}]],
+  'users':         [['path',{d:'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2'}],['circle',{cx:'9',cy:'7',r:'4'}],['path',{d:'M23 21v-2a4 4 0 0 0-3-3.87'}],['path',{d:'M16 3.13a4 4 0 0 1 0 7.75'}]],
+  'wifi':          [['path',{d:'M5 12.55a11 11 0 0 1 14.08 0'}],['path',{d:'M1.42 9a16 16 0 0 1 21.16 0'}],['path',{d:'M8.53 16.11a6 6 0 0 1 6.95 0'}],['line',{x1:'12',y1:'20',x2:'12.01',y2:'20'}]],
+  'zap':           [['polygon',{points:'13 2 3 14 12 14 11 22 21 10 12 10 13 2'}]],
+};
+const ICON_IDS = Object.keys(ICONS).sort(); // exactly 64
+
+// ── Name-based identity helpers ───────────────────────────────────────────────
+const NAME_IDS = ['__name_1__','__name_2__','__name_words__'];
+function isNameId(id) { return NAME_IDS.includes(id); }
+function isNoneId(id) { return id === '__none__'; }
+function getNameText(iconId, name) {
+  const n = name || '?';
+  if (iconId === '__name_1__') return n[0].toUpperCase();
+  if (iconId === '__name_2__') return n.slice(0,2).toUpperCase();
+  if (iconId === '__name_words__') {
+    const words = n.trim().split(/\s+/);
+    return words.length >= 2 ? (words[0][0]+words[1][0]).toUpperCase() : n.slice(0,2).toUpperCase();
+  }
+  return n[0].toUpperCase();
+}
+
+// ── Icon renderer ─────────────────────────────────────────────────────────────
+function Icon({ id, size=16, color='currentColor', sw=1.75 }) {
+  const d = ICONS[id]; if (!d) return null;
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none"
+      stroke={color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+      {d.map(([tag,p],i)=>React.createElement(tag,{key:i,...p}))}
+    </svg>
+  );
+}
+
+// ── Badge (shared, used in sidebar + settings) ────────────────────────────────
+function Badge({ identity, name, shape='square', size=26 }) {
+  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  const r = shape==='circle' ? '50%' : Math.round(size*0.26)+'px';
+  const nameText = getNameText(identity.iconId, name);
+  return (
+    <div style={{
+      width:size, height:size, borderRadius:r, background:color.hex, flexShrink:0,
+      display:'flex', alignItems:'center', justifyContent:'center',
+      transition:'background 0.15s',
+    }}>
+      {isNameId(identity.iconId)
+        ? <span style={{fontSize:Math.round(size*(nameText.length>1?0.37:0.52)),fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:nameText.length>1?'-0.5px':'0'}}>{nameText}</span>
+        : isNoneId(identity.iconId) ? null
+        : <Icon id={identity.iconId} size={Math.round(size*0.54)} color="rgba(255,255,255,0.95)" sw={2}/>
+      }
+    </div>
+  );
+}
+
+// ── Compact Identity Picker (popover content) ─────────────────────────────────
+function IdentityPicker({ identity, name, shape, onChange }) {
+  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  const letter = (name||'?')[0].toUpperCase();
+
+  const ColorBtn = ({ c }) => {
+    const [hov,setHov]=useState(false);
+    const sel = c.id===identity.colorId;
+    return (
+      <button onClick={()=>onChange({...identity,colorId:c.id})} title={c.id}
+        onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+        style={{
+          width:24,height:24,borderRadius:'50%',background:c.hex,border:'none',
+          outline:'none',cursor:'pointer',position:'relative',
+          transform:hov&&!sel?'scale(1.18)':'scale(1)',
+          boxShadow:sel?`0 0 0 2px ${T.bg2}, 0 0 0 3.5px ${c.hex}`:'none',
+          transition:'transform 0.1s, box-shadow 0.1s',
+        }}>
+        {sel&&<svg viewBox="0 0 24 24" width={10} height={10} fill="none" stroke="rgba(255,255,255,.9)" strokeWidth={3.2} strokeLinecap="round" strokeLinejoin="round" style={{position:'absolute',inset:0,margin:'auto'}}><polyline points="20 6 9 17 4 12"/></svg>}
+      </button>
+    );
+  };
+
+  const IconCell = ({ id }) => {
+    const [hov,setHov]=useState(false);
+    const sel = identity.iconId===id && identity.iconId!=='__name__';
+    return (
+      <button onClick={()=>onChange({...identity,iconId:id})} title={id}
+        onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+        style={{
+          width:34,height:34,border:'none',borderRadius:6,cursor:'pointer',
+          display:'flex',alignItems:'center',justifyContent:'center',
+          background:sel?color.hex:hov?T.bg4:'transparent',
+          outline:sel?`2px solid ${color.hex}44`:'none',outlineOffset:1,
+          transition:'background 0.08s',
+        }}>
+        <Icon id={id} size={17} color={sel?'#fff':hov?T.text1:T.text2} sw={1.75}/>
+      </button>
+    );
+  };
+
+  return (
+    <div style={{
+      width:312, background:T.bg2, border:`1px solid ${T.border}`,
+      borderRadius:10, boxShadow:'0 12px 32px rgba(0,0,0,.5)', overflow:'hidden',
+    }}>
+      {/* Colors */}
+      <div style={{padding:'11px 12px 10px',borderBottom:`1px solid ${T.border}`}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:9,justifyItems:'center'}}>
+          {COLORS.map(c=><ColorBtn key={c.id} c={c}/>)}
+        </div>
+      </div>
+
+      {/* Name options — 3 variants */}
+      <div style={{padding:'9px 12px 6px',display:'flex',gap:6}}>
+        {[
+          {id:'__none__',     label:'None'},
+          {id:'__name_1__',   label:'1 letter'},
+          {id:'__name_2__',   label:'2 letters'},
+          {id:'__name_words__',label:'1 + 1 words'},
+        ].map(opt=>{
+  const txt = opt.id === '__none__' ? '' : getNameText(opt.id, name);
+          const sel = identity.iconId===opt.id;
+          return (
+            <button key={opt.id} onClick={()=>onChange({...identity,iconId:opt.id})}
+              style={{
+                flex:1, padding:'8px 4px 7px',
+                border:`1px solid ${sel?color.hex:T.border2}`,
+                borderRadius:8, background:sel?`${color.hex}18`:T.bg3,
+                cursor:'pointer', display:'flex', flexDirection:'column', alignItems:'center', gap:7,
+                transition:'border-color 0.1s, background 0.1s',
+              }}>
+              <div style={{
+                width:28,height:28,borderRadius:shape==='circle'?'50%':'7px',
+                background: opt.id==='__none__' ? 'transparent' : color.hex,
+                border: opt.id==='__none__' ? `1.5px dashed ${T.border}` : 'none',
+                display:'flex',alignItems:'center',justifyContent:'center',
+              }}>
+                {opt.id !== '__none__' && (
+                  <span style={{fontSize:txt.length>1?11:14,fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:txt.length>1?'-0.5px':'0'}}>{txt}</span>
+                )}
+              </div>
+              <span style={{fontSize:10,color:sel?color.hex:T.text3,fontWeight:500,textAlign:'center',lineHeight:1.2}}>{opt.label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Icon grid */}
+      <div style={{padding:'6px 12px 10px'}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:2}}>
+          {ICON_IDS.map(id=><IconCell key={id} id={id}/>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Identity trigger (small badge + ▾ ) ───────────────────────────────────────
+function IdentityTrigger({ identity, name, shape, open, onClick }) {
+  const [hov,setHov]=useState(false);
+  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  return (
+    <button onClick={onClick}
+      onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+      style={{
+        position:'relative', background:'none', border:'none', padding:0,
+        outline:open||hov?`2px solid ${color.hex}88`:'none',
+        borderRadius:shape==='circle'?'50%':'8px', outlineOffset:2,
+        transition:'outline 0.1s',
+      }}>
+      <div style={{
+        width:28,height:28,borderRadius:shape==='circle'?'50%':'7px',
+        background:color.hex, display:'flex', alignItems:'center', justifyContent:'center',
+        filter:hov||open?'brightness(1.12)':'none', transition:'filter 0.1s',
+      }}>
+        {isNameId(identity.iconId)
+          ? <span style={{fontSize:getNameText(identity.iconId,name).length>1?11:14,fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:getNameText(identity.iconId,name).length>1?'-0.5px':'0'}}>{getNameText(identity.iconId,name)}</span>
+          : isNoneId(identity.iconId) ? null
+          : <Icon id={identity.iconId} size={15} color="rgba(255,255,255,0.95)" sw={2}/>
+        }
+      </div>
+      {/* Chevron pip */}
+      <div style={{
+        position:'absolute', bottom:-3, right:-3, width:13, height:13, borderRadius:'50%',
+        background:T.bg1, border:`1.5px solid ${T.border}`,
+        display:'flex', alignItems:'center', justifyContent:'center',
+      }}>
+        <svg viewBox="0 0 24 24" width={7} height={7} fill="none" stroke={T.text2} strokeWidth={3} strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+    </button>
+  );
+}
+
+// ── Identity Widget (trigger + popover) ───────────────────────────────────────
+function IdentityWidget({ identity, name, shape, onChange }) {
+  const [open,setOpen]=useState(false);
+  const [pos,setPos]=useState({top:0,left:0});
+  const triggerRef=useRef(null);
+  const popoverRef=useRef(null);
+  const PICKER_W=312;
+
+  useEffect(()=>{
+    if(!open) return;
+    const fn=(e)=>{
+      if(triggerRef.current?.contains(e.target)) return;
+      if(popoverRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown',fn);
+    return()=>document.removeEventListener('mousedown',fn);
+  },[open]);
+
+  const handleOpen=()=>{
+    if(triggerRef.current){
+      const r=triggerRef.current.getBoundingClientRect();
+      let left=r.left;
+      if(left+PICKER_W>window.innerWidth-8) left=window.innerWidth-PICKER_W-8;
+      if(left<8) left=8;
+      setPos({top:r.bottom+8, left});
+    }
+    setOpen(o=>!o);
+  };
+
+  return (
+    <>
+      <div ref={triggerRef} style={{display:'inline-block'}}>
+        <IdentityTrigger identity={identity} name={name} shape={shape} open={open} onClick={handleOpen}/>
+      </div>
+      {open && ReactDOM.createPortal(
+        <div ref={popoverRef} style={{position:'fixed',top:pos.top,left:pos.left,zIndex:9999}}>
+          <IdentityPicker identity={identity} name={name} shape={shape} onChange={v=>onChange(v)}/>
+        </div>,
+        document.body
+      )}
+    </> 
+  );
+}
+
+// ── Mock field label ──────────────────────────────────────────────────────────
+const FL = ({children})=>(
+  <div style={{fontSize:11,fontWeight:600,letterSpacing:'.6px',color:T.text3,textTransform:'uppercase',marginBottom:6}}>
+    {children}
+  </div>
+);
+
+// ── Settings Panel ────────────────────────────────────────────────────────────
+function SettingsPanel({ identity, name, onChange }) {
+  return (
+    <div style={{
+      width:280, height:'100%', background:T.bg1,
+      borderLeft:`1px solid ${T.border}`,
+      display:'flex', flexDirection:'column', overflowY:'auto', flexShrink:0,
+    }}>
+      {/* Header */}
+      <div style={{
+        padding:'14px 16px', borderBottom:`1px solid ${T.border}`,
+        display:'flex', alignItems:'center', gap:10, flexShrink:0,
+      }}>
+        <Badge identity={identity} name={name} shape="square" size={24}/>
+        <span style={{fontSize:14,fontWeight:600,color:T.text1,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
+        <button style={{background:'none',border:'none',color:T.text3,padding:2}}>
+          <Icon id="edit" size={14} color={T.text3}/>
+        </button>
+      </div>
+
+      <div style={{padding:'16px',display:'flex',flexDirection:'column',gap:20}}>
+        {/* Identity field */}
+        <div>
+          <FL>Identity</FL>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <IdentityWidget identity={identity} name={name} shape="square" onChange={onChange}/>
+          </div>
+        </div>
+
+        {/* Mock: Name */}
+        <div>
+          <FL>Name</FL>
+          <div style={{
+            padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,
+            borderRadius:6,fontSize:13,color:T.text2,
+          }}>{name}</div>
+        </div>
+
+        {/* Mock: Dates */}
+        <div>
+          <FL>Date range</FL>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <div style={{flex:1,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text2}}>Dec 1, 2026</div>
+            <span style={{color:T.text3,fontSize:12}}>→</span>
+            <div style={{flex:1,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text2}}>Jan 15, 2027</div>
+          </div>
+        </div>
+
+        {/* Mock: Team */}
+        <div>
+          <FL>Team</FL>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6}}>
+            <div style={{width:20,height:20,borderRadius:'50%',background:'#A855F7',display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <span style={{fontSize:10,fontWeight:700,color:'#fff'}}>P</span>
+            </div>
+            <span style={{fontSize:13,color:T.text2}}>Product Marketing</span>
+          </div>
+        </div>
+
+        {/* Mock: Description */}
+        <div>
+          <FL>Description</FL>
+          <div style={{padding:'8px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text3,minHeight:60}}>
+            Optional description…
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+const SB_TIMELINES = [
+  {name:'Q1 2027 Roadmap',  iconId:'zap',         colorId:'teal',   shape:'square'},
+  {name:'New Logo GTM',     active:true},
+  {name:'Q4 2026 Roadmap',  iconId:'trending-up', colorId:'orange', shape:'square'},
+  {name:'Project Pinky',    iconId:'heart',       colorId:'rose',   shape:'square'},
+];
+
+function Sidebar({ identity, name }) {
+  return (
+    <div style={{width:220,height:'100%',background:T.bg1,borderRight:`1px solid ${T.border}`,flexShrink:0,overflowY:'auto'}}>
+      {/* Logo */}
+      <div style={{padding:'14px 16px',borderBottom:`1px solid ${T.border}`,display:'flex',alignItems:'center',gap:8}}>
+        <div style={{width:24,height:24,borderRadius:5,background:T.accent,display:'flex',alignItems:'center',justifyContent:'center'}}>
+          <Icon id="layers" size={13} color="#fff" sw={2}/>
+        </div>
+        <span style={{fontSize:15,fontWeight:600,color:T.text1}}>draba</span>
+      </div>
+
+      <div style={{padding:'16px 12px 8px'}}>
+        {/* Team */}
+        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,paddingLeft:4}}>Team</div>
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'5px 8px',borderRadius:6,marginBottom:10}}>
+          <div style={{width:22,height:22,borderRadius:'50%',background:'#A855F7',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+            <span style={{fontSize:11,fontWeight:700,color:'#fff'}}>P</span>
+          </div>
+          <span style={{fontSize:13,fontWeight:500,color:T.text1}}>Product Marketing</span>
+        </div>
+
+        {/* Members */}
+        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,paddingLeft:4}}>Members</div>
+        {[['LK','#22C55E','Lindsay K.'],['JD','#6366F1','John Doe'],['SM','#F97316','Sarah M.']].map(([ini,bg,n])=>(
+          <div key={n} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 8px',borderRadius:6}}>
+            <div style={{width:22,height:22,borderRadius:'50%',background:bg,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <span style={{fontSize:10,fontWeight:700,color:'#fff'}}>{ini}</span>
+            </div>
+            <span style={{fontSize:13,color:T.text2}}>{n}</span>
+          </div>
+        ))}
+
+        {/* Timelines */}
+        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,marginTop:16,paddingLeft:4}}>Timeline</div>
+        {SB_TIMELINES.map(tl=>(
+          <div key={tl.name} style={{
+            display:'flex',alignItems:'center',gap:8,padding:'5px 8px',borderRadius:6,
+            background:tl.active?T.bg3:'transparent',
+          }}>
+            {tl.active
+              ? <Badge identity={identity} name={name} shape="square" size={22}/>
+              : <div style={{width:22,height:22,borderRadius:'5px',background:COLORS.find(c=>c.id===tl.colorId)?.hex||'#64748B',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                  <Icon id={tl.iconId} size={12} color="rgba(255,255,255,0.9)" sw={2}/>
+                </div>
+            }
+            <span style={{fontSize:13,fontWeight:tl.active?500:400,color:tl.active?T.text1:T.text2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{tl.name}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [identity, setIdentity] = useState({ iconId:'zap', colorId:'violet' });
+  const name = 'New Logo GTM';
+
+  return (
+    <div style={{height:'100vh',display:'flex',background:T.bg0}}>
+      <Sidebar identity={identity} name={name}/>
+      {/* Main content placeholder */}
+      <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:12,opacity:.35}}>
+        <Icon id="bar-chart" size={48} color={T.text3} sw={1.25}/>
+        <span style={{fontSize:13,color:T.text3}}>Gantt view · New Logo GTM</span>
+      </div>
+      <SettingsPanel identity={identity} name={name} onChange={setIdentity}/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
+````
+
+## File: docs/design/assets/IDENTITY_WIDGET_HANDOFF.md
+````markdown
+# Handoff: Identity Widget — Draba
+
+## Overview
+
+The Identity Widget lets users assign a visual identity to an entity (a timeline, project, or member) — a combination of a **color** and either a **Lucide icon** or **name-derived initials**. It appears anywhere an entity needs a badge: sidebar rows, settings panels, member lists, and modal headers.
+
+## About the Design Files
+
+The files in this bundle are **HTML design prototypes** — not production code. Your task is to **recreate this component inside the existing Draba codebase** using its established React patterns, design tokens, and libraries.
+
+## Fidelity
+
+**High-fidelity.** Exact colors, spacing, typography, and interaction states are specified. Recreate pixel-closely using Draba's existing token system.
+
+---
+
+## Components Overview
+
+There are four related components that form the system:
+
+| Component | Purpose |
+|---|---|
+| `<Badge>` | Read-only display of an identity — used everywhere an entity appears |
+| `<IdentityTrigger>` | Clickable version of Badge — small badge + chevron pip to open picker |
+| `<IdentityPicker>` | The popover panel — color grid + name options + icon grid |
+| `<IdentityWidget>` | Composed component — trigger + popover with positioning logic |
+
+---
+
+## Data Model
+
+```ts
+interface Identity {
+  iconId:  string;   // Lucide icon id, OR one of the special name/none ids below
+  colorId: string;   // one of the 16 color ids
+}
+
+// Special iconId values:
+// '__name_1__'     → show first letter of name (e.g. "N")
+// '__name_2__'     → show first 2 letters (e.g. "NL")
+// '__name_words__' → show first letter of each word (e.g. "NL" for "New Logo")
+// '__none__'       → show nothing (empty badge)
+```
+
+### Color palette (16 colors)
+
+| ID | Hex |
+|---|---|
+| teal | #288C9B |
+| cyan | #06B6D4 |
+| blue | #3B82F6 |
+| indigo | #6366F1 |
+| violet | #8B5CF6 |
+| purple | #A855F7 |
+| pink | #EC4899 |
+| rose | #F43F5E |
+| red | #EF4444 |
+| orange | #F97316 |
+| amber | #F59E0B |
+| yellow | #EAB308 |
+| lime | #84CC16 |
+| green | #22C55E |
+| slate | #64748B |
+| stone | #78716C |
+
+---
+
+## `<Badge>` — Read-only display
+
+Used anywhere an entity's identity needs to be shown without the ability to edit it.
+
+### Props
+
+```ts
+interface BadgeProps {
+  identity: Identity;
+  name:     string;       // used to derive initials for name-based icons
+  shape:    'square' | 'circle';
+  size:     number;       // px — typically 22–40px
+}
+```
+
+### Layout & Style
+
+| Property | Value |
+|---|---|
+| Width / Height | `size` × `size` px |
+| Border radius | `shape === 'circle'` → `50%`; `shape === 'square'` → `size * 0.26` px (rounded) |
+| Background | The color's hex value |
+| Transition | `background 0.15s` |
+
+**Icon rendering (inside badge):**
+- If `iconId` is a name id → render a `<span>` with initials text
+  - Font size: `size * (text.length > 1 ? 0.37 : 0.52)` px
+  - Font weight: 700
+  - Color: `rgba(255,255,255,0.95)`
+  - Letter spacing: `text.length > 1 ? '-0.5px' : '0'`
+- If `iconId === '__none__'` → render nothing
+- Otherwise → render the Lucide icon SVG
+  - Size: `size * 0.54` px
+  - Color: `rgba(255,255,255,0.95)`
+  - Stroke width: 2
+
+---
+
+## `<IdentityTrigger>` — Clickable badge
+
+The badge as an interactive trigger button.
+
+### Anatomy
+
+```
+[ Badge (28×28) ]
+  └── [ Chevron pip (13×13, bottom-right, absolute) ]
+```
+
+### Pip style
+
+| Property | Value |
+|---|---|
+| Size | 13×13px |
+| Position | `bottom: -3px; right: -3px` |
+| Border radius | 50% |
+| Background | `#161b22` (bg1) |
+| Border | `1.5px solid #30363d` |
+| Icon | 7px chevron-down, stroke `#8b949e`, strokeWidth 3 |
+
+### States
+
+| State | Effect |
+|---|---|
+| Default | No outline |
+| Hover | `outline: 2px solid {color.hex}88`; outline-offset: 2px; badge `filter: brightness(1.12)` |
+| Open | Same outline as hover |
+
+---
+
+## `<IdentityPicker>` — Popover panel
+
+Rendered inside a portal, positioned below the trigger.
+
+### Panel container
+
+| Property | Value |
+|---|---|
+| Width | 312px |
+| Background | `#21262d` (bg2) |
+| Border | `1px solid #30363d` |
+| Border radius | 10px |
+| Box shadow | `0 12px 32px rgba(0,0,0,.5)` |
+| Overflow | hidden |
+
+### Section 1 — Color grid
+
+Padding: `11px 12px 10px`. Border-bottom: `1px solid #30363d`.
+
+16 color buttons in an 8-column CSS grid, gap 9px, centered.
+
+**Color button:**
+- 24×24px circle
+- Hover: `transform: scale(1.18)`
+- Selected: `box-shadow: 0 0 0 2px {bg2}, 0 0 0 3.5px {color.hex}` + white checkmark (10px, strokeWidth 3.2)
+- Transition: `transform 0.1s, box-shadow 0.1s`
+
+### Section 2 — Name options
+
+Padding: `9px 12px 6px`. 4 options in a flex row with gap 6px.
+
+| Option ID | Label | Preview text |
+|---|---|---|
+| `__none__` | None | *(empty dashed circle)* |
+| `__name_1__` | 1 letter | First letter of name |
+| `__name_2__` | 2 letters | First 2 letters |
+| `__name_words__` | 1 + 1 words | First letter of each word |
+
+**Option card:**
+- `flex: 1`, padding `8px 4px 7px`
+- Border: `1px solid {border2}` (default) → `1px solid {color.hex}` (selected)
+- Background: `bg3` (default) → `{color.hex}18` (selected)
+- Border radius: 8px
+- Contents: mini badge preview (28×28, matches `shape` prop) + label text below
+
+Label text: 10px, weight 500, color `text3` (default) → `color.hex` (selected)
+
+`__none__` preview: transparent bg, `1.5px dashed #30363d` border
+
+### Section 3 — Icon grid
+
+Padding: `6px 12px 10px`. 64 Lucide icons in an 8-column CSS grid, gap 2px.
+
+**Icon cell (34×34px):**
+- Border radius: 6px
+- Default bg: transparent
+- Hover bg: `#373e47` (bg4)
+- Selected bg: `{color.hex}`; outline: `2px solid {color.hex}44`; outline-offset: 1px
+- Icon size: 17px; stroke 1.75
+- Icon color: `#8b949e` (default) → `#e6edf3` (hover) → `#fff` (selected)
+- Transition: `background 0.08s`
+
+---
+
+## `<IdentityWidget>` — Full composed component
+
+Wraps trigger + popover. Handles open/close, portal rendering, and positioning.
+
+### Positioning logic
+
+1. Get trigger's `getBoundingClientRect()`
+2. Position popover at `top: rect.bottom + 8px`, `left: rect.left`
+3. Clamp left: if `left + 312 > window.innerWidth - 8`, set `left = window.innerWidth - 320`; if `left < 8`, set `left = 8`
+4. Render into `document.body` via portal
+
+### Close behavior
+
+- Click outside both trigger and popover → close
+- No close-on-select (user may want to continue adjusting)
+
+---
+
+## Where `<Badge>` appears (read-only contexts)
+
+- **Sidebar** — each timeline/project row uses a 22px square badge
+- **Member list** — each member row uses a circle badge
+- **Modal headers** — 40px badge next to entity name
+- **Settings panel header** — 24px square badge
+
+In all these locations, the badge is **not** wrapped in `<IdentityWidget>` — it's just `<Badge>` for display only.
+
+## Where `<IdentityWidget>` appears (editable contexts)
+
+- **Settings / edit panel** — "Identity" field row, typically 28–32px trigger
+- **Modal edit header** — next to the entity name when in edit mode
+
+---
+
+## Interactions & Behavior
+
+- Clicking the trigger toggles the popover
+- Color changes apply **immediately** (live preview — badge updates in real time)
+- Icon/name option changes apply **immediately**
+- No save/cancel — changes commit on selection; caller persists via `onChange`
+- `onChange(newIdentity)` is called on every color or icon selection
+
+---
+
+## Design Tokens Used
+
+| Token | Value | Usage |
+|---|---|---|
+| bg0 | `#0d1117` | App background |
+| bg1 | `#161b22` | Sidebar, settings panel bg |
+| bg2 | `#21262d` | Picker panel bg, modal bg |
+| bg3 | `#2d333b` | Field inputs, name option bg |
+| bg4 | `#373e47` | Icon cell hover bg |
+| border | `#30363d` | Panel borders, dividers |
+| border2 | `#21262d` | Name option default border |
+| text1 | `#e6edf3` | Primary text |
+| text2 | `#8b949e` | Secondary text, icons |
+| text3 | `#484f58` | Labels, subtle text |
+| accent | `#288C9B` | Draba teal |
+| Font | `'Inter'` | All text in this widget |
+
+> **Note:** The main Draba app uses `'Open Sans'`. This widget currently uses `'Inter'`. Align to whichever the codebase uses.
+
+---
+
+## Icon Library
+
+The prototype uses **64 hand-picked Lucide icons** rendered as inline SVG. In production, use the `lucide-react` package and reference icons by their exact Lucide IDs:
+
+```
+activity, archive, award, bar-chart, bell, bookmark, briefcase, calendar,
+check-circle, clipboard, clock, cloud, code, coffee, compass, cpu, database,
+download, edit, eye, file-text, filter, flag, folder, git-branch, globe, grid,
+heart, help-circle, home, info, layers, link, list, lock, mail, map,
+message-circle, moon, package, pencil, phone, pie-chart, plug, refresh-cw,
+search, server, settings, share, shield, star, sun, tag, target, terminal,
+trash, trending-up, upload, user, users, wifi, zap
+```
+
+---
+
+## Files
+
+| File | Description |
+|---|---|
+| `Icon Color Picker.html` | Full interactive prototype. Shows the widget in a realistic 3-panel layout: sidebar (badge-only) + placeholder gantt + settings panel (editable). Change color or icon and watch all three update live. |
+
+Open in any browser. The settings panel is on the right — click the badge to open the picker.
+````
+
+## File: docs/design/assets/identity-widget-prototype.html
+````html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Identity Widget — Draba</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #0d1117; font-family: 'Inter', system-ui, sans-serif; color: #e6edf3; overflow: hidden; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 99px; }
+  button { font-family: inherit; cursor: pointer; }
+  input { font-family: inherit; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useMemo } = React;
+
+// ── Tokens ────────────────────────────────────────────────────────────────────
+const T = {
+  bg0:'#0d1117', bg1:'#161b22', bg2:'#21262d', bg3:'#2d333b', bg4:'#373e47',
+  border:'#30363d', border2:'#21262d',
+  text1:'#e6edf3', text2:'#8b949e', text3:'#484f58',
+  accent:'#288C9B',
+};
+
+// ── 16 colors ─────────────────────────────────────────────────────────────────
+const COLORS = [
+  {id:'teal',   hex:'#288C9B'},{id:'cyan',   hex:'#06B6D4'},
+  {id:'blue',   hex:'#3B82F6'},{id:'indigo', hex:'#6366F1'},
+  {id:'violet', hex:'#8B5CF6'},{id:'purple', hex:'#A855F7'},
+  {id:'pink',   hex:'#EC4899'},{id:'rose',   hex:'#F43F5E'},
+  {id:'red',    hex:'#EF4444'},{id:'orange', hex:'#F97316'},
+  {id:'amber',  hex:'#F59E0B'},{id:'yellow', hex:'#EAB308'},
+  {id:'lime',   hex:'#84CC16'},{id:'green',  hex:'#22C55E'},
+  {id:'slate',  hex:'#64748B'},{id:'stone',  hex:'#78716C'},
+];
+
+// ── 64 Lucide icons ───────────────────────────────────────────────────────────
+const ICONS = {
+  'activity':      [['polyline',{points:'22 12 18 12 15 21 9 3 6 12 2 12'}]],
+  'archive':       [['polyline',{points:'21 8 21 21 3 21 3 8'}],['rect',{x:'1',y:'3',width:'22',height:'5'}],['line',{x1:'10',y1:'12',x2:'14',y2:'12'}]],
+  'award':         [['circle',{cx:'12',cy:'8',r:'7'}],['polyline',{points:'8.21 13.89 7 23 12 20 17 23 15.79 13.88'}]],
+  'bar-chart':     [['line',{x1:'18',y1:'20',x2:'18',y2:'10'}],['line',{x1:'12',y1:'20',x2:'12',y2:'4'}],['line',{x1:'6',y1:'20',x2:'6',y2:'14'}]],
+  'bell':          [['path',{d:'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9'}],['path',{d:'M13.73 21a2 2 0 0 1-3.46 0'}]],
+  'bookmark':      [['path',{d:'M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'}]],
+  'briefcase':     [['rect',{x:'2',y:'7',width:'20',height:'14',rx:'2',ry:'2'}],['path',{d:'M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16'}]],
+  'calendar':      [['rect',{x:'3',y:'4',width:'18',height:'18',rx:'2',ry:'2'}],['line',{x1:'16',y1:'2',x2:'16',y2:'6'}],['line',{x1:'8',y1:'2',x2:'8',y2:'6'}],['line',{x1:'3',y1:'10',x2:'21',y2:'10'}]],
+  'check-circle':  [['path',{d:'M22 11.08V12a10 10 0 1 1-5.93-9.14'}],['polyline',{points:'22 4 12 14.01 9 11.01'}]],
+  'clipboard':     [['path',{d:'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2'}],['rect',{x:'8',y:'2',width:'8',height:'4',rx:'1',ry:'1'}]],
+  'clock':         [['circle',{cx:'12',cy:'12',r:'10'}],['polyline',{points:'12 6 12 12 16 14'}]],
+  'cloud':         [['path',{d:'M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z'}]],
+  'code':          [['polyline',{points:'16 18 22 12 16 6'}],['polyline',{points:'8 6 2 12 8 18'}]],
+  'coffee':        [['path',{d:'M18 8h1a4 4 0 0 1 0 8h-1'}],['path',{d:'M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z'}],['line',{x1:'6',y1:'1',x2:'6',y2:'4'}],['line',{x1:'10',y1:'1',x2:'10',y2:'4'}],['line',{x1:'14',y1:'1',x2:'14',y2:'4'}]],
+  'compass':       [['circle',{cx:'12',cy:'12',r:'10'}],['polygon',{points:'16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76'}]],
+  'cpu':           [['rect',{x:'4',y:'4',width:'16',height:'16',rx:'2',ry:'2'}],['rect',{x:'9',y:'9',width:'6',height:'6'}],['line',{x1:'9',y1:'1',x2:'9',y2:'4'}],['line',{x1:'15',y1:'1',x2:'15',y2:'4'}],['line',{x1:'9',y1:'20',x2:'9',y2:'23'}],['line',{x1:'15',y1:'20',x2:'15',y2:'23'}],['line',{x1:'20',y1:'9',x2:'23',y2:'9'}],['line',{x1:'1',y1:'9',x2:'4',y2:'9'}]],
+  'database':      [['ellipse',{cx:'12',cy:'5',rx:'9',ry:'3'}],['path',{d:'M21 12c0 1.66-4 3-9 3s-9-1.34-9-3'}],['path',{d:'M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5'}]],
+  'download':      [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'7 10 12 15 17 10'}],['line',{x1:'12',y1:'15',x2:'12',y2:'3'}]],
+  'edit':          [['path',{d:'M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7'}],['path',{d:'M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z'}]],
+  'eye':           [['path',{d:'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z'}],['circle',{cx:'12',cy:'12',r:'3'}]],
+  'file-text':     [['path',{d:'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'}],['polyline',{points:'14 2 14 8 20 8'}],['line',{x1:'16',y1:'13',x2:'8',y2:'13'}],['line',{x1:'16',y1:'17',x2:'8',y2:'17'}]],
+  'filter':        [['polygon',{points:'22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3'}]],
+  'flag':          [['path',{d:'M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z'}],['line',{x1:'4',y1:'22',x2:'4',y2:'15'}]],
+  'folder':        [['path',{d:'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'}]],
+  'git-branch':    [['line',{x1:'6',y1:'3',x2:'6',y2:'15'}],['circle',{cx:'18',cy:'6',r:'3'}],['circle',{cx:'6',cy:'18',r:'3'}],['path',{d:'M18 9a9 9 0 0 1-9 9'}]],
+  'globe':         [['circle',{cx:'12',cy:'12',r:'10'}],['line',{x1:'2',y1:'12',x2:'22',y2:'12'}],['path',{d:'M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'}]],
+  'grid':          [['rect',{x:'3',y:'3',width:'7',height:'7'}],['rect',{x:'14',y:'3',width:'7',height:'7'}],['rect',{x:'14',y:'14',width:'7',height:'7'}],['rect',{x:'3',y:'14',width:'7',height:'7'}]],
+  'heart':         [['path',{d:'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z'}]],
+  'help-circle':   [['circle',{cx:'12',cy:'12',r:'10'}],['path',{d:'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3'}],['line',{x1:'12',y1:'17',x2:'12.01',y2:'17'}]],
+  'home':          [['path',{d:'M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'}],['polyline',{points:'9 22 9 12 15 12 15 22'}]],
+  'info':          [['circle',{cx:'12',cy:'12',r:'10'}],['line',{x1:'12',y1:'16',x2:'12',y2:'12'}],['line',{x1:'12',y1:'8',x2:'12.01',y2:'8'}]],
+  'layers':        [['polygon',{points:'12 2 2 7 12 12 22 7 12 2'}],['polyline',{points:'2 17 12 22 22 17'}],['polyline',{points:'2 12 12 17 22 12'}]],
+  'link':          [['path',{d:'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'}],['path',{d:'M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'}]],
+  'list':          [['line',{x1:'8',y1:'6',x2:'21',y2:'6'}],['line',{x1:'8',y1:'12',x2:'21',y2:'12'}],['line',{x1:'8',y1:'18',x2:'21',y2:'18'}],['line',{x1:'3',y1:'6',x2:'3.01',y2:'6'}],['line',{x1:'3',y1:'12',x2:'3.01',y2:'12'}],['line',{x1:'3',y1:'18',x2:'3.01',y2:'18'}]],
+  'lock':          [['rect',{x:'3',y:'11',width:'18',height:'11',rx:'2',ry:'2'}],['path',{d:'M7 11V7a5 5 0 0 1 10 0v4'}]],
+  'mail':          [['path',{d:'M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z'}],['polyline',{points:'22 6 12 13 2 6'}]],
+  'map':           [['polygon',{points:'1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6'}],['line',{x1:'8',y1:'2',x2:'8',y2:'18'}],['line',{x1:'16',y1:'6',x2:'16',y2:'22'}]],
+  'message-circle':[['path',{d:'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'}]],
+  'moon':          [['path',{d:'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'}]],
+  'package':       [['path',{d:'M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'}],['polyline',{points:'3.27 6.96 12 12.01 20.73 6.96'}],['line',{x1:'12',y1:'22.08',x2:'12',y2:'12'}]],
+  'pencil':        [['path',{d:'M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z'}]],
+  'phone':         [['path',{d:'M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.56 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z'}]],
+  'pie-chart':     [['path',{d:'M21.21 15.89A10 10 0 1 1 8 2.83'}],['path',{d:'M22 12A10 10 0 0 0 12 2v10z'}]],
+  'plug':          [['path',{d:'M18.36 6.64a9 9 0 1 1-12.73 0'}],['line',{x1:'12',y1:'2',x2:'12',y2:'12'}]],
+  'refresh-cw':    [['polyline',{points:'23 4 23 10 17 10'}],['polyline',{points:'1 20 1 14 7 14'}],['path',{d:'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15'}]],
+  'search':        [['circle',{cx:'11',cy:'11',r:'8'}],['line',{x1:'21',y1:'21',x2:'16.65',y2:'16.65'}]],
+  'server':        [['rect',{x:'2',y:'2',width:'20',height:'8',rx:'2',ry:'2'}],['rect',{x:'2',y:'14',width:'20',height:'8',rx:'2',ry:'2'}],['line',{x1:'6',y1:'6',x2:'6.01',y2:'6'}],['line',{x1:'6',y1:'18',x2:'6.01',y2:'18'}]],
+  'settings':      [['circle',{cx:'12',cy:'12',r:'3'}],['path',{d:'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z'}]],
+  'share':         [['circle',{cx:'18',cy:'5',r:'3'}],['circle',{cx:'6',cy:'12',r:'3'}],['circle',{cx:'18',cy:'19',r:'3'}],['line',{x1:'8.59',y1:'13.51',x2:'15.42',y2:'17.49'}],['line',{x1:'15.41',y1:'6.51',x2:'8.59',y2:'10.49'}]],
+  'shield':        [['path',{d:'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'}]],
+  'star':          [['polygon',{points:'12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2'}]],
+  'sun':           [['circle',{cx:'12',cy:'12',r:'5'}],['line',{x1:'12',y1:'1',x2:'12',y2:'3'}],['line',{x1:'12',y1:'21',x2:'12',y2:'23'}],['line',{x1:'4.22',y1:'4.22',x2:'5.64',y2:'5.64'}],['line',{x1:'18.36',y1:'18.36',x2:'19.78',y2:'19.78'}],['line',{x1:'1',y1:'12',x2:'3',y2:'12'}],['line',{x1:'21',y1:'12',x2:'23',y2:'12'}]],
+  'tag':           [['path',{d:'M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z'}],['line',{x1:'7',y1:'7',x2:'7.01',y2:'7'}]],
+  'target':        [['circle',{cx:'12',cy:'12',r:'10'}],['circle',{cx:'12',cy:'12',r:'6'}],['circle',{cx:'12',cy:'12',r:'2'}]],
+  'terminal':      [['polyline',{points:'4 17 10 11 4 5'}],['line',{x1:'12',y1:'19',x2:'20',y2:'19'}]],
+  'trash':         [['polyline',{points:'3 6 5 6 21 6'}],['path',{d:'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'}]],
+  'trending-up':   [['polyline',{points:'23 6 13.5 15.5 8.5 10.5 1 18'}],['polyline',{points:'17 6 23 6 23 12'}]],
+  'upload':        [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'17 8 12 3 7 8'}],['line',{x1:'12',y1:'3',x2:'12',y2:'15'}]],
+  'user':          [['path',{d:'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'}],['circle',{cx:'12',cy:'7',r:'4'}]],
+  'users':         [['path',{d:'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2'}],['circle',{cx:'9',cy:'7',r:'4'}],['path',{d:'M23 21v-2a4 4 0 0 0-3-3.87'}],['path',{d:'M16 3.13a4 4 0 0 1 0 7.75'}]],
+  'wifi':          [['path',{d:'M5 12.55a11 11 0 0 1 14.08 0'}],['path',{d:'M1.42 9a16 16 0 0 1 21.16 0'}],['path',{d:'M8.53 16.11a6 6 0 0 1 6.95 0'}],['line',{x1:'12',y1:'20',x2:'12.01',y2:'20'}]],
+  'zap':           [['polygon',{points:'13 2 3 14 12 14 11 22 21 10 12 10 13 2'}]],
+};
+const ICON_IDS = Object.keys(ICONS).sort(); // exactly 64
+
+// ── Name-based identity helpers ───────────────────────────────────────────────
+const NAME_IDS = ['__name_1__','__name_2__','__name_words__'];
+function isNameId(id) { return NAME_IDS.includes(id); }
+function isNoneId(id) { return id === '__none__'; }
+function getNameText(iconId, name) {
+  const n = name || '?';
+  if (iconId === '__name_1__') return n[0].toUpperCase();
+  if (iconId === '__name_2__') return n.slice(0,2).toUpperCase();
+  if (iconId === '__name_words__') {
+    const words = n.trim().split(/\s+/);
+    return words.length >= 2 ? (words[0][0]+words[1][0]).toUpperCase() : n.slice(0,2).toUpperCase();
+  }
+  return n[0].toUpperCase();
+}
+
+// ── Icon renderer ─────────────────────────────────────────────────────────────
+function Icon({ id, size=16, color='currentColor', sw=1.75 }) {
+  const d = ICONS[id]; if (!d) return null;
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none"
+      stroke={color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+      {d.map(([tag,p],i)=>React.createElement(tag,{key:i,...p}))}
+    </svg>
+  );
+}
+
+// ── Badge (shared, used in sidebar + settings) ────────────────────────────────
+function Badge({ identity, name, shape='square', size=26 }) {
+  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  const r = shape==='circle' ? '50%' : Math.round(size*0.26)+'px';
+  const nameText = getNameText(identity.iconId, name);
+  return (
+    <div style={{
+      width:size, height:size, borderRadius:r, background:color.hex, flexShrink:0,
+      display:'flex', alignItems:'center', justifyContent:'center',
+      transition:'background 0.15s',
+    }}>
+      {isNameId(identity.iconId)
+        ? <span style={{fontSize:Math.round(size*(nameText.length>1?0.37:0.52)),fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:nameText.length>1?'-0.5px':'0'}}>{nameText}</span>
+        : isNoneId(identity.iconId) ? null
+        : <Icon id={identity.iconId} size={Math.round(size*0.54)} color="rgba(255,255,255,0.95)" sw={2}/>
+      }
+    </div>
+  );
+}
+
+// ── Compact Identity Picker (popover content) ─────────────────────────────────
+function IdentityPicker({ identity, name, shape, onChange }) {
+  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  const letter = (name||'?')[0].toUpperCase();
+
+  const ColorBtn = ({ c }) => {
+    const [hov,setHov]=useState(false);
+    const sel = c.id===identity.colorId;
+    return (
+      <button onClick={()=>onChange({...identity,colorId:c.id})} title={c.id}
+        onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+        style={{
+          width:24,height:24,borderRadius:'50%',background:c.hex,border:'none',
+          outline:'none',cursor:'pointer',position:'relative',
+          transform:hov&&!sel?'scale(1.18)':'scale(1)',
+          boxShadow:sel?`0 0 0 2px ${T.bg2}, 0 0 0 3.5px ${c.hex}`:'none',
+          transition:'transform 0.1s, box-shadow 0.1s',
+        }}>
+        {sel&&<svg viewBox="0 0 24 24" width={10} height={10} fill="none" stroke="rgba(255,255,255,.9)" strokeWidth={3.2} strokeLinecap="round" strokeLinejoin="round" style={{position:'absolute',inset:0,margin:'auto'}}><polyline points="20 6 9 17 4 12"/></svg>}
+      </button>
+    );
+  };
+
+  const IconCell = ({ id }) => {
+    const [hov,setHov]=useState(false);
+    const sel = identity.iconId===id && identity.iconId!=='__name__';
+    return (
+      <button onClick={()=>onChange({...identity,iconId:id})} title={id}
+        onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+        style={{
+          width:34,height:34,border:'none',borderRadius:6,cursor:'pointer',
+          display:'flex',alignItems:'center',justifyContent:'center',
+          background:sel?color.hex:hov?T.bg4:'transparent',
+          outline:sel?`2px solid ${color.hex}44`:'none',outlineOffset:1,
+          transition:'background 0.08s',
+        }}>
+        <Icon id={id} size={17} color={sel?'#fff':hov?T.text1:T.text2} sw={1.75}/>
+      </button>
+    );
+  };
+
+  return (
+    <div style={{
+      width:312, background:T.bg2, border:`1px solid ${T.border}`,
+      borderRadius:10, boxShadow:'0 12px 32px rgba(0,0,0,.5)', overflow:'hidden',
+    }}>
+      {/* Colors */}
+      <div style={{padding:'11px 12px 10px',borderBottom:`1px solid ${T.border}`}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:9,justifyItems:'center'}}>
+          {COLORS.map(c=><ColorBtn key={c.id} c={c}/>)}
+        </div>
+      </div>
+
+      {/* Name options — 3 variants */}
+      <div style={{padding:'9px 12px 6px',display:'flex',gap:6}}>
+        {[
+          {id:'__none__',     label:'None'},
+          {id:'__name_1__',   label:'1 letter'},
+          {id:'__name_2__',   label:'2 letters'},
+          {id:'__name_words__',label:'1 + 1 words'},
+        ].map(opt=>{
+  const txt = opt.id === '__none__' ? '' : getNameText(opt.id, name);
+          const sel = identity.iconId===opt.id;
+          return (
+            <button key={opt.id} onClick={()=>onChange({...identity,iconId:opt.id})}
+              style={{
+                flex:1, padding:'8px 4px 7px',
+                border:`1px solid ${sel?color.hex:T.border2}`,
+                borderRadius:8, background:sel?`${color.hex}18`:T.bg3,
+                cursor:'pointer', display:'flex', flexDirection:'column', alignItems:'center', gap:7,
+                transition:'border-color 0.1s, background 0.1s',
+              }}>
+              <div style={{
+                width:28,height:28,borderRadius:shape==='circle'?'50%':'7px',
+                background: opt.id==='__none__' ? 'transparent' : color.hex,
+                border: opt.id==='__none__' ? `1.5px dashed ${T.border}` : 'none',
+                display:'flex',alignItems:'center',justifyContent:'center',
+              }}>
+                {opt.id !== '__none__' && (
+                  <span style={{fontSize:txt.length>1?11:14,fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:txt.length>1?'-0.5px':'0'}}>{txt}</span>
+                )}
+              </div>
+              <span style={{fontSize:10,color:sel?color.hex:T.text3,fontWeight:500,textAlign:'center',lineHeight:1.2}}>{opt.label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Icon grid */}
+      <div style={{padding:'6px 12px 10px'}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:2}}>
+          {ICON_IDS.map(id=><IconCell key={id} id={id}/>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Identity trigger (small badge + ▾ ) ───────────────────────────────────────
+function IdentityTrigger({ identity, name, shape, open, onClick }) {
+  const [hov,setHov]=useState(false);
+  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
+  return (
+    <button onClick={onClick}
+      onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+      style={{
+        position:'relative', background:'none', border:'none', padding:0,
+        outline:open||hov?`2px solid ${color.hex}88`:'none',
+        borderRadius:shape==='circle'?'50%':'8px', outlineOffset:2,
+        transition:'outline 0.1s',
+      }}>
+      <div style={{
+        width:28,height:28,borderRadius:shape==='circle'?'50%':'7px',
+        background:color.hex, display:'flex', alignItems:'center', justifyContent:'center',
+        filter:hov||open?'brightness(1.12)':'none', transition:'filter 0.1s',
+      }}>
+        {isNameId(identity.iconId)
+          ? <span style={{fontSize:getNameText(identity.iconId,name).length>1?11:14,fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:getNameText(identity.iconId,name).length>1?'-0.5px':'0'}}>{getNameText(identity.iconId,name)}</span>
+          : isNoneId(identity.iconId) ? null
+          : <Icon id={identity.iconId} size={15} color="rgba(255,255,255,0.95)" sw={2}/>
+        }
+      </div>
+      {/* Chevron pip */}
+      <div style={{
+        position:'absolute', bottom:-3, right:-3, width:13, height:13, borderRadius:'50%',
+        background:T.bg1, border:`1.5px solid ${T.border}`,
+        display:'flex', alignItems:'center', justifyContent:'center',
+      }}>
+        <svg viewBox="0 0 24 24" width={7} height={7} fill="none" stroke={T.text2} strokeWidth={3} strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+    </button>
+  );
+}
+
+// ── Identity Widget (trigger + popover) ───────────────────────────────────────
+function IdentityWidget({ identity, name, shape, onChange }) {
+  const [open,setOpen]=useState(false);
+  const [pos,setPos]=useState({top:0,left:0});
+  const triggerRef=useRef(null);
+  const popoverRef=useRef(null);
+  const PICKER_W=312;
+
+  useEffect(()=>{
+    if(!open) return;
+    const fn=(e)=>{
+      if(triggerRef.current?.contains(e.target)) return;
+      if(popoverRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown',fn);
+    return()=>document.removeEventListener('mousedown',fn);
+  },[open]);
+
+  const handleOpen=()=>{
+    if(triggerRef.current){
+      const r=triggerRef.current.getBoundingClientRect();
+      let left=r.left;
+      if(left+PICKER_W>window.innerWidth-8) left=window.innerWidth-PICKER_W-8;
+      if(left<8) left=8;
+      setPos({top:r.bottom+8, left});
+    }
+    setOpen(o=>!o);
+  };
+
+  return (
+    <>
+      <div ref={triggerRef} style={{display:'inline-block'}}>
+        <IdentityTrigger identity={identity} name={name} shape={shape} open={open} onClick={handleOpen}/>
+      </div>
+      {open && ReactDOM.createPortal(
+        <div ref={popoverRef} style={{position:'fixed',top:pos.top,left:pos.left,zIndex:9999}}>
+          <IdentityPicker identity={identity} name={name} shape={shape} onChange={v=>onChange(v)}/>
+        </div>,
+        document.body
+      )}
+    </> 
+  );
+}
+
+// ── Mock field label ──────────────────────────────────────────────────────────
+const FL = ({children})=>(
+  <div style={{fontSize:11,fontWeight:600,letterSpacing:'.6px',color:T.text3,textTransform:'uppercase',marginBottom:6}}>
+    {children}
+  </div>
+);
+
+// ── Settings Panel ────────────────────────────────────────────────────────────
+function SettingsPanel({ identity, name, onChange }) {
+  return (
+    <div style={{
+      width:280, height:'100%', background:T.bg1,
+      borderLeft:`1px solid ${T.border}`,
+      display:'flex', flexDirection:'column', overflowY:'auto', flexShrink:0,
+    }}>
+      {/* Header */}
+      <div style={{
+        padding:'14px 16px', borderBottom:`1px solid ${T.border}`,
+        display:'flex', alignItems:'center', gap:10, flexShrink:0,
+      }}>
+        <Badge identity={identity} name={name} shape="square" size={24}/>
+        <span style={{fontSize:14,fontWeight:600,color:T.text1,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
+        <button style={{background:'none',border:'none',color:T.text3,padding:2}}>
+          <Icon id="edit" size={14} color={T.text3}/>
+        </button>
+      </div>
+
+      <div style={{padding:'16px',display:'flex',flexDirection:'column',gap:20}}>
+        {/* Identity field */}
+        <div>
+          <FL>Identity</FL>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <IdentityWidget identity={identity} name={name} shape="square" onChange={onChange}/>
+          </div>
+        </div>
+
+        {/* Mock: Name */}
+        <div>
+          <FL>Name</FL>
+          <div style={{
+            padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,
+            borderRadius:6,fontSize:13,color:T.text2,
+          }}>{name}</div>
+        </div>
+
+        {/* Mock: Dates */}
+        <div>
+          <FL>Date range</FL>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <div style={{flex:1,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text2}}>Dec 1, 2026</div>
+            <span style={{color:T.text3,fontSize:12}}>→</span>
+            <div style={{flex:1,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text2}}>Jan 15, 2027</div>
+          </div>
+        </div>
+
+        {/* Mock: Team */}
+        <div>
+          <FL>Team</FL>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6}}>
+            <div style={{width:20,height:20,borderRadius:'50%',background:'#A855F7',display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <span style={{fontSize:10,fontWeight:700,color:'#fff'}}>P</span>
+            </div>
+            <span style={{fontSize:13,color:T.text2}}>Product Marketing</span>
+          </div>
+        </div>
+
+        {/* Mock: Description */}
+        <div>
+          <FL>Description</FL>
+          <div style={{padding:'8px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text3,minHeight:60}}>
+            Optional description…
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+const SB_TIMELINES = [
+  {name:'Q1 2027 Roadmap',  iconId:'zap',         colorId:'teal',   shape:'square'},
+  {name:'New Logo GTM',     active:true},
+  {name:'Q4 2026 Roadmap',  iconId:'trending-up', colorId:'orange', shape:'square'},
+  {name:'Project Pinky',    iconId:'heart',       colorId:'rose',   shape:'square'},
+];
+
+function Sidebar({ identity, name }) {
+  return (
+    <div style={{width:220,height:'100%',background:T.bg1,borderRight:`1px solid ${T.border}`,flexShrink:0,overflowY:'auto'}}>
+      {/* Logo */}
+      <div style={{padding:'14px 16px',borderBottom:`1px solid ${T.border}`,display:'flex',alignItems:'center',gap:8}}>
+        <div style={{width:24,height:24,borderRadius:5,background:T.accent,display:'flex',alignItems:'center',justifyContent:'center'}}>
+          <Icon id="layers" size={13} color="#fff" sw={2}/>
+        </div>
+        <span style={{fontSize:15,fontWeight:600,color:T.text1}}>draba</span>
+      </div>
+
+      <div style={{padding:'16px 12px 8px'}}>
+        {/* Team */}
+        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,paddingLeft:4}}>Team</div>
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'5px 8px',borderRadius:6,marginBottom:10}}>
+          <div style={{width:22,height:22,borderRadius:'50%',background:'#A855F7',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+            <span style={{fontSize:11,fontWeight:700,color:'#fff'}}>P</span>
+          </div>
+          <span style={{fontSize:13,fontWeight:500,color:T.text1}}>Product Marketing</span>
+        </div>
+
+        {/* Members */}
+        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,paddingLeft:4}}>Members</div>
+        {[['LK','#22C55E','Lindsay K.'],['JD','#6366F1','John Doe'],['SM','#F97316','Sarah M.']].map(([ini,bg,n])=>(
+          <div key={n} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 8px',borderRadius:6}}>
+            <div style={{width:22,height:22,borderRadius:'50%',background:bg,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <span style={{fontSize:10,fontWeight:700,color:'#fff'}}>{ini}</span>
+            </div>
+            <span style={{fontSize:13,color:T.text2}}>{n}</span>
+          </div>
+        ))}
+
+        {/* Timelines */}
+        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,marginTop:16,paddingLeft:4}}>Timeline</div>
+        {SB_TIMELINES.map(tl=>(
+          <div key={tl.name} style={{
+            display:'flex',alignItems:'center',gap:8,padding:'5px 8px',borderRadius:6,
+            background:tl.active?T.bg3:'transparent',
+          }}>
+            {tl.active
+              ? <Badge identity={identity} name={name} shape="square" size={22}/>
+              : <div style={{width:22,height:22,borderRadius:'5px',background:COLORS.find(c=>c.id===tl.colorId)?.hex||'#64748B',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                  <Icon id={tl.iconId} size={12} color="rgba(255,255,255,0.9)" sw={2}/>
+                </div>
+            }
+            <span style={{fontSize:13,fontWeight:tl.active?500:400,color:tl.active?T.text1:T.text2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{tl.name}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [identity, setIdentity] = useState({ iconId:'zap', colorId:'violet' });
+  const name = 'New Logo GTM';
+
+  return (
+    <div style={{height:'100vh',display:'flex',background:T.bg0}}>
+      <Sidebar identity={identity} name={name}/>
+      {/* Main content placeholder */}
+      <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:12,opacity:.35}}>
+        <Icon id="bar-chart" size={48} color={T.text3} sw={1.25}/>
+        <span style={{fontSize:13,color:T.text3}}>Gantt view · New Logo GTM</span>
+      </div>
+      <SettingsPanel identity={identity} name={name} onChange={setIdentity}/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
+````
+
 ## File: docs/design/preview/colors-brand.html
 ````html
 <!DOCTYPE html>
@@ -1096,6 +2399,544 @@ jobs:
   <div class="row"><div class="meta">700 · Bold</div><div><div class="specimen" style="font-weight:700">Open Sans Bold</div><div class="sub">Page titles, primary headings</div></div></div>
 </body>
 </html>
+````
+
+## File: docs/design/DESIGN_SYSTEM.md
+````markdown
+# Design System
+
+## Foundation
+- **Component library:** shadcn/ui (copy-paste — components live in `packages/web/src/components/ui/`)
+- **Styling:** Tailwind CSS v4
+- **Theming:** CSS custom properties (HSL channel values) in `packages/web/src/index.css`
+- **Dark mode:** class-based — `dark` class on `<html>` element
+
+shadcn stores colors as bare HSL channels (no `hsl()` wrapper), e.g. `--primary: 188 59% 38%`. Tailwind then references them as `hsl(var(--primary))`. All token values below follow this convention.
+
+---
+
+## Logo
+
+All variants are in `docs/design/assets/logo/`.
+
+### Variants
+
+| File | Description |
+|------|-------------|
+| `icon-color.svg` | Full color — teal header, orange pegs, light gray body. Use on white/off-white only. |
+| `icon-black.svg` | Solid black icon, no background. |
+| `icon-orange.svg` | Solid orange (`#F17B2B`) icon, no background. |
+| `icon-teal.svg` | Solid teal (`#1A97A2`) icon, no background. |
+| `icon-white-on-black-circle.svg` | White icon on filled black circle. Works on any background. |
+| `icon-knockout-black-circle.svg` | Black-filled circle with icon knocked out (transparent). Page/background color shows through the icon shape. |
+| `icon-knockout-orange-circle.svg` | Orange-filled circle with icon knocked out. |
+| `icon-knockout-teal-circle.svg` | Teal-filled circle with icon knocked out. |
+
+### Usage by background
+
+| Background | Recommended variants |
+|------------|---------------------|
+| White / off-white | `icon-color`, `icon-black`, `icon-teal`, `icon-knockout-black-circle`, `icon-knockout-orange-circle`, `icon-knockout-teal-circle` |
+| Teal (`#288C9B`) | `icon-black`, `icon-orange`, `icon-knockout-black-circle`, `icon-knockout-orange-circle` |
+| Dark / charcoal | `icon-white-on-black-circle`, `icon-orange`, `icon-knockout-orange-circle`, `icon-knockout-teal-circle` |
+| Any | `icon-white-on-black-circle` |
+
+> Teal column confirmed 2026-04-29. Other columns are best-guess — verify during implementation.
+
+---
+
+## Color Palette
+
+### Brand Colors (Source)
+
+| Name | Hex | HSL | Role |
+|------|-----|-----|------|
+| Teal | `#288C9B` | `188 59% 38%` | Primary — actions, active states, links |
+| Amber | `#F29E4C` | `30 87% 62%` | Secondary — highlights, energy, badges |
+| Charcoal | `#343A40` | `210 10% 23%` | Text, dark backgrounds |
+| Off-White | `#F8F9FA` | `210 17% 98%` | Page background, light surfaces |
+| Sky Blue | `#5BC0DE` | `194 67% 61%` | Accent — CTAs, hover highlights |
+
+---
+
+## CSS Tokens
+
+Copy this into `packages/web/src/index.css` after `shadcn init`:
+
+```css
+@layer base {
+  :root {
+    --background:             210 17% 98%;   /* #F8F9FA — page background */
+    --foreground:             210 10% 23%;   /* #343A40 — default text */
+
+    --card:                   0 0% 100%;     /* white — card/panel surface */
+    --card-foreground:        210 10% 23%;
+
+    --popover:                0 0% 100%;
+    --popover-foreground:     210 10% 23%;
+
+    --primary:                188 59% 38%;   /* #288C9B — teal */
+    --primary-foreground:     0 0% 100%;     /* white text on teal */
+
+    --secondary:              30 87% 62%;    /* #F29E4C — amber */
+    --secondary-foreground:   210 10% 23%;   /* charcoal text on amber */
+
+    --muted:                  210 14% 93%;   /* light gray — subtle backgrounds */
+    --muted-foreground:       210 10% 45%;   /* mid-gray — captions, placeholders */
+
+    --accent:                 194 67% 61%;   /* #5BC0DE — sky blue */
+    --accent-foreground:      210 10% 23%;
+
+    --destructive:            0 72% 51%;     /* red — delete, errors */
+    --destructive-foreground: 0 0% 100%;
+
+    --success:                145 63% 42%;   /* green — confirmations */
+    --success-foreground:     0 0% 100%;
+
+    --warning:                38 92% 50%;    /* yellow-orange — caution */
+    --warning-foreground:     210 10% 23%;
+
+    --border:                 210 14% 89%;
+    --input:                  210 14% 89%;
+    --ring:                   188 59% 38%;   /* teal focus ring */
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background:             210 15% 11%;   /* deep charcoal — page background */
+    --foreground:             210 17% 93%;   /* near-white — default text */
+
+    --card:                   210 15% 15%;   /* slightly lighter than background */
+    --card-foreground:        210 17% 93%;
+
+    --popover:                210 15% 15%;
+    --popover-foreground:     210 17% 93%;
+
+    --primary:                188 55% 52%;   /* teal — lightened to pop on dark */
+    --primary-foreground:     210 15% 10%;   /* very dark text on bright teal */
+
+    --secondary:              30 80% 60%;    /* amber — slightly muted in dark */
+    --secondary-foreground:   210 15% 10%;
+
+    --muted:                  210 15% 20%;
+    --muted-foreground:       210 15% 58%;
+
+    --accent:                 194 60% 55%;   /* sky blue — muted slightly for dark */
+    --accent-foreground:      210 15% 10%;
+
+    --destructive:            0 63% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success:                145 55% 40%;
+    --success-foreground:     0 0% 100%;
+
+    --warning:                38 85% 55%;
+    --warning-foreground:     210 15% 10%;
+
+    --border:                 210 15% 22%;
+    --input:                  210 15% 22%;
+    --ring:                   188 55% 52%;
+  }
+}
+```
+
+---
+
+## Identity Color Palette (Phase 9.6+)
+
+Every major entity (Activity, Timeline, Team, Team Member) carries an **Identity** — a color + icon pair. Colors are stored as IDs (e.g. `"teal"`), not hex values. The `Badge` component resolves an ID to its hex for rendering.
+
+> Full spec: [`docs/design/IDENTITY_SYSTEM.md`](IDENTITY_SYSTEM.md).
+> Component API: `src/components/identity/`.
+
+16 colors, all ≥3:1 contrast ratio against both light and dark backgrounds with white text overlay:
+
+| ID | Name | Hex | Notes |
+|----|------|-----|-------|
+| `teal` | Teal | `#288C9B` | Brand primary |
+| `cyan` | Cyan | `#06B6D4` | |
+| `blue` | Blue | `#3B82F6` | |
+| `indigo` | Indigo | `#6366F1` | |
+| `violet` | Violet | `#8B5CF6` | |
+| `purple` | Purple | `#A855F7` | |
+| `pink` | Pink | `#EC4899` | |
+| `rose` | Rose | `#F43F5E` | |
+| `red` | Red | `#EF4444` | |
+| `orange` | Orange | `#F97316` | |
+| `amber` | Amber | `#F59E0B` | |
+| `yellow` | Yellow | `#EAB308` | |
+| `lime` | Lime | `#84CC16` | |
+| `green` | Green | `#22C55E` | |
+| `slate` | Slate | `#64748B` | Neutral cool |
+| `stone` | Stone | `#78716C` | Neutral warm |
+
+---
+
+## Typography
+
+### Font Family
+**Open Sans** — humanist sans-serif; clean, readable, professional.
+
+```css
+/* packages/web/src/index.css */
+/* Option A: Self-hosted (recommended for self-hosted product — no Google dependency) */
+/* Download from fonts.google.com and place in packages/web/public/fonts/ */
+@font-face {
+  font-family: 'Open Sans';
+  src: url('/fonts/OpenSans-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+/* Repeat for weights 300, 600, 700 */
+
+/* Option B: Google Fonts CDN (simpler, requires internet) */
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap');
+
+/* Apply via Tailwind config */
+--font-sans: 'Open Sans', ui-sans-serif, system-ui, sans-serif;
+```
+
+> Recommendation: self-host the font. draba is a self-hosted product — loading a Google font defeats the point for privacy-conscious users.
+
+### Weights in Use
+| Weight | Class | Use |
+|--------|-------|-----|
+| 300 Light | `font-light` | Subtle labels, secondary captions |
+| 400 Regular | `font-normal` | Body text, descriptions, form inputs |
+| 600 SemiBold | `font-semibold` | Headings, important labels, nav items |
+| 700 Bold | `font-bold` | Page titles, primary headings, emphasis |
+
+### Type Scale
+| Use | Tailwind | Size | Weight |
+|-----|----------|------|--------|
+| Page heading | `text-2xl font-bold` | 24px | 700 |
+| Section heading | `text-lg font-semibold` | 18px | 600 |
+| Card / panel title | `text-base font-semibold` | 16px | 600 |
+| Body text | `text-sm font-normal` | 14px | 400 |
+| Caption / metadata | `text-xs font-normal` | 12px | 400 |
+| Tag / badge label | `text-xs font-semibold` | 12px | 600 |
+| Timeline block label | `text-xs font-semibold` | 12px | 600 |
+
+### Color on Typography
+- Default body text: `text-foreground` (charcoal / off-white in dark mode)
+- Secondary / metadata: `text-muted-foreground`
+- Links and interactive: `text-primary` (teal)
+- Destructive / error: `text-destructive`
+- Headings: `text-foreground` — rely on weight and size, not color, for hierarchy
+
+---
+
+## Spacing
+
+Tailwind's 4px base grid throughout.
+
+| Context | Tailwind | px |
+|---------|----------|-----|
+| Tight inline gaps (icon + label) | `gap-1.5` | 6px |
+| Component internal padding (compact) | `p-2` | 8px |
+| Component internal padding (standard) | `p-3` or `p-4` | 12–16px |
+| Between related elements | `gap-3` | 12px |
+| Between sections | `gap-6` | 24px |
+| Page-level horizontal margins | `px-6` | 24px |
+| Page-level vertical padding | `py-8` | 32px |
+| Timeline lane height | TBD during implementation | — |
+| Event block vertical padding | TBD during implementation | — |
+
+---
+
+## Border Radius
+
+Base `--radius: 0.5rem` (8px). shadcn derives sm/md/lg/xl from this.
+
+| Element | Class | Notes |
+|---------|-------|-------|
+| Buttons, inputs | `rounded-md` (6px) | shadcn default |
+| Cards, panels, dialogs | `rounded-lg` (8px) | shadcn default |
+| Event blocks on timeline | `rounded-md` | Pill-ish but not fully rounded |
+| Kanban cards | `rounded-md` | |
+| Badges, tags | `rounded-full` | Fully rounded for compact labels |
+| Avatars | `rounded-full` | |
+
+---
+
+## Shadows
+
+Keep shadows subtle — the UI should feel clean and flat, not heavily layered.
+
+| Use | Class |
+|-----|-------|
+| Cards, panels | `shadow-sm` |
+| Popovers, dropdowns | `shadow-md` |
+| Modals / dialogs | `shadow-lg` |
+| Timeline blocks | `shadow-sm` |
+| No elevation | `shadow-none` |
+
+---
+
+## Icons
+
+- **Library:** `lucide-react` (shadcn's default peer dependency — already installed)
+- **Sizes:** `size-4` (16px) inline with text; `size-5` (20px) standalone/buttons; `size-6` (24px) feature/section icons
+- **Color:** inherit from text color by default (`currentColor`)
+- **Event block icons:** emoji or Lucide subset — TBD during event detail implementation
+- **Stroke width:** Lucide default (1.5) — do not override unless a specific component calls for it
+
+---
+
+## Dark Mode
+
+- Supported from day one via shadcn's class-based system
+- Toggle stored in `localStorage`; respects `prefers-color-scheme` on first visit
+- Implementation: `next-themes` or a simple custom hook — TBD during web scaffold
+- All semantic tokens have dark overrides in `index.css` (defined above)
+- Member colors are fixed hex values — test contrast on both `--background` values before finalizing
+
+---
+
+## shadcn Components
+
+Install via:
+```bash
+pnpm dlx shadcn@latest add <component>
+```
+
+| Component | Used for | Status |
+|-----------|---------|--------|
+| button | Actions, CTAs | — |
+| input | Form fields | — |
+| dialog | Confirmations, destructive warnings | — |
+| sheet | Event detail slide-in panel | — |
+| popover | Date pickers, color pickers, tooltips | — |
+| calendar | Date range picker in event detail | — |
+| select | Status dropdown, view switcher | — |
+| badge | Tags on event cards and blocks | — |
+| avatar | Team member display | — |
+| tooltip | Block hover info, truncated labels | — |
+| sonner | Toast notifications (replaces toast) | — |
+| dropdown-menu | Context menus, action menus | — |
+| separator | Visual dividers | — |
+| skeleton | Loading placeholders | — |
+| switch | Toggle settings (dark mode, visibility) | — |
+| tabs | Settings pages, secondary navigation | — |
+
+> Mark status as **added** when installed. Add new rows as new components are needed.
+
+---
+
+## Custom Components (Not from shadcn)
+
+Built from scratch with Tailwind — no shadcn equivalent:
+
+| Component | Notes |
+|-----------|-------|
+| `TimelineGrid` | Core horizontal timeline canvas; handles pan and zoom |
+| `TimelineBlock` | Individual event block; drag to move/resize |
+| `TimelineLane` | Person row in the timeline |
+| `KanbanBoard` | Status columns + event card layout |
+| `KanbanCard` | Event card in Kanban view; color = member color |
+| `CalendarGrid` | Weekly/daily/monthly calendar layout |
+| `MemberColorDot` | Small circular color indicator for assignees |
+| `ViewSwitcher` | Timeline / Calendar / List / Kanban toggle |
+| `ConnectionStatusDot` | WebSocket live connection indicator |
+````
+
+## File: docs/design/IDENTITY_SYSTEM.md
+````markdown
+# Identity System
+
+An **Identity** is a visual fingerprint — a color + icon pair — assigned to any major entity in draba. It provides instant visual recognition across every surface (sidebar, Gantt bars, settings panels, modals, shares).
+
+> Design prototype: `docs/design/assets/identity-widget-prototype.html` (open in any browser).
+> Full handoff spec: `docs/design/assets/IDENTITY_WIDGET_HANDOFF.md`.
+
+---
+
+## Data Model
+
+```ts
+interface Identity {
+  iconId:  string;   // Lucide icon id, or a special name/none id (see below)
+  colorId: string;   // one of the 16 identity color ids
+}
+
+// Special iconId values:
+// '__name_1__'     → first letter of name (e.g. "N")
+// '__name_2__'     → first two letters (e.g. "NE")
+// '__name_words__' → first letter of each word (e.g. "NL" for "New Logo")
+// '__none__'       → empty badge (color only, no content)
+```
+
+### Who gets an Identity
+
+| Entity | Shape | Default iconId | Default colorId |
+|--------|-------|---------------|-----------------|
+| Activity | square | `'__none__'` | `'teal'` |
+| Timeline | square | `'__none__'` | `'teal'` |
+| Team | square | `'__name_2__'` | `'teal'` |
+| Team Member | circle | `'__name_words__'` | auto-assigned from palette |
+
+---
+
+## Color Palette (16 colors)
+
+Replaces the previous 8-color `MEMBER_COLORS` and `ACTIVITY_COLORS` arrays with a single unified palette used by all entities.
+
+| ID | Name | Hex | Notes |
+|----|------|-----|-------|
+| `teal` | Teal | `#288C9B` | Brand primary |
+| `cyan` | Cyan | `#06B6D4` | |
+| `blue` | Blue | `#3B82F6` | |
+| `indigo` | Indigo | `#6366F1` | |
+| `violet` | Violet | `#8B5CF6` | |
+| `purple` | Purple | `#A855F7` | |
+| `pink` | Pink | `#EC4899` | |
+| `rose` | Rose | `#F43F5E` | |
+| `red` | Red | `#EF4444` | |
+| `orange` | Orange | `#F97316` | |
+| `amber` | Amber | `#F59E0B` | |
+| `yellow` | Yellow | `#EAB308` | |
+| `lime` | Lime | `#84CC16` | |
+| `green` | Green | `#22C55E` | |
+| `slate` | Slate | `#64748B` | Neutral cool |
+| `stone` | Stone | `#78716C` | Neutral warm |
+
+All 16 colors maintain ≥3:1 contrast ratio against both light and dark backgrounds with white text overlay.
+
+### Migration from legacy palettes
+
+The old 8-color palettes (`MEMBER_COLORS`, `ACTIVITY_COLORS`) stored raw hex values. The new system stores **color IDs** (e.g. `"teal"`, `"violet"`). A mapping function converts legacy hex values to the nearest identity color ID for existing data.
+
+| Legacy hex | → Identity color ID |
+|-----------|-------------------|
+| `#288C9B` | `teal` |
+| `#F29E4C` | `amber` |
+| `#5BC0DE` | `cyan` |
+| `#2ECC71` | `green` |
+| `#9B59B6` | `violet` |
+| `#E74C3C` | `rose` |
+| `#5C6BC0` | `indigo` |
+| `#8BC34A` | `lime` |
+
+---
+
+## Icon Library
+
+64 hand-picked Lucide icons that cover common project/team concepts. Rendered via `lucide-react` (already installed).
+
+```
+activity, archive, award, bar-chart, bell, bookmark, briefcase, calendar,
+check-circle, clipboard, clock, cloud, code, coffee, compass, cpu, database,
+download, edit, eye, file-text, filter, flag, folder, git-branch, globe, grid,
+heart, help-circle, home, info, layers, link, list, lock, mail, map,
+message-circle, moon, package, pencil, phone, pie-chart, plug, refresh-cw,
+search, server, settings, share, shield, star, sun, tag, target, terminal,
+trash, trending-up, upload, user, users, wifi, zap
+```
+
+---
+
+## Component Architecture
+
+Four components, layered from display-only to fully interactive:
+
+### `<Badge>` — read-only display
+
+Shows an entity's identity anywhere it appears. No interactivity.
+
+```tsx
+<Badge identity={identity} name={name} shape="circle" size={22} />
+```
+
+| Prop | Type | Notes |
+|------|------|-------|
+| `identity` | `Identity` | The color + icon to display |
+| `name` | `string` | Used to derive initials for name-based icons |
+| `shape` | `'square' \| 'circle'` | Circle for members, square for everything else |
+| `size` | `number` | px — typically 22–40px |
+
+**Rendering rules:**
+- Border radius: circle → `50%`, square → `size * 0.26` px
+- Name-based icon: bold white initials, font size scales with badge size
+- Lucide icon: `size * 0.54` px, white, stroke-width 2
+- `__none__`: color only, no content
+
+### `<IdentityTrigger>` — clickable badge
+
+A `<Badge>` wrapped in a button with a chevron pip indicator.
+
+- Fixed 28×28 badge
+- 13×13 chevron pip at bottom-right
+- Hover/open: colored outline ring + brightness boost
+
+### `<IdentityPicker>` — popover panel
+
+The picker rendered inside a popover. Three sections:
+
+1. **Color grid** — 16 colors in an 8×2 grid; selected color shows checkmark + ring
+2. **Name options** — None / 1 letter / 2 letters / 1+1 words; mini badge preview per option
+3. **Icon grid** — 64 Lucide icons in an 8×8 grid; selected icon highlighted with identity color
+
+All changes fire `onChange(newIdentity)` immediately — no save/cancel flow.
+
+### `<IdentityWidget>` — composed component
+
+Wraps `<IdentityTrigger>` + `<IdentityPicker>` in a popover with positioning logic. This is what form UIs render.
+
+```tsx
+<IdentityWidget
+  identity={activity.identity}
+  name={activity.title}
+  shape="square"
+  onChange={handleIdentityChange}
+/>
+```
+
+---
+
+## Where components appear
+
+### Badge (read-only)
+
+| Surface | Size | Shape |
+|---------|------|-------|
+| Sidebar timeline rows | 22px | square |
+| Sidebar member rows | 22px | circle |
+| Gantt bar label column | 20px | square |
+| Activity detail panel header | 24px | square |
+| Modal headers | 40px | varies |
+
+### IdentityWidget (editable)
+
+| Surface | Context |
+|---------|---------|
+| ActivityDetailPanel | Replaces the current icon stub + color picker |
+| Settings — Members tab | Member identity editing (Phase 10.1) |
+| Settings — General tab | Team identity editing (Phase 10.1) |
+| Timeline create/edit | Timeline identity editing (Phase 10.3) |
+
+---
+
+## Schema Changes
+
+### Activities — already have `icon` and `color` columns
+No migration needed. The `icon` column stores the `iconId`; the `color` column currently stores hex but will store `colorId` after migration.
+
+### Team Members — have `color`, need `icon`
+- Add `icon TEXT` column to `team_members` (nullable, default NULL)
+
+### Teams — need both `color` and `icon`
+- Add `color TEXT` column to `teams` (nullable, default NULL)
+- Add `icon TEXT` column to `teams` (nullable, default NULL)
+
+### Timelines — need both `color` and `icon`
+- Add `color TEXT` column to `timelines` (nullable, default NULL)
+- Add `icon TEXT` column to `timelines` (nullable, default NULL)
+
+### Data migration
+- Convert existing `activities.color` hex values → color IDs using the mapping table
+- Convert existing `team_members.color` hex values → color IDs using the mapping table
 ````
 
 ## File: docs/design/RBAC_REFACTOR.md
@@ -2685,6 +4526,39 @@ ALTER TABLE activity_tags RENAME COLUMN event_id TO activity_id;
 ALTER TABLE activity_assignments RENAME COLUMN event_id TO activity_id;
 ````
 
+## File: packages/api/internal/db/migrations/006_identity_fields.sql
+````sql
+-- Add identity (color + icon) columns to teams, timelines, and team_members.
+-- Also converts existing legacy hex color values in activities and team_members
+-- to their corresponding identity color IDs so all color values are uniform.
+
+ALTER TABLE team_members ADD COLUMN icon  TEXT;
+ALTER TABLE teams        ADD COLUMN color TEXT;
+ALTER TABLE teams        ADD COLUMN icon  TEXT;
+ALTER TABLE timelines    ADD COLUMN color TEXT;
+ALTER TABLE timelines    ADD COLUMN icon  TEXT;
+
+-- Convert activities.color from legacy hex to identity color ID.
+UPDATE activities SET color = 'teal'   WHERE color = '#288C9B';
+UPDATE activities SET color = 'amber'  WHERE color = '#F29E4C';
+UPDATE activities SET color = 'cyan'   WHERE color = '#5BC0DE';
+UPDATE activities SET color = 'green'  WHERE color = '#2ECC71';
+UPDATE activities SET color = 'violet' WHERE color = '#9B59B6';
+UPDATE activities SET color = 'rose'   WHERE color = '#E74C3C';
+UPDATE activities SET color = 'indigo' WHERE color = '#5C6BC0';
+UPDATE activities SET color = 'lime'   WHERE color = '#8BC34A';
+
+-- Convert team_members.color from legacy hex to identity color ID.
+UPDATE team_members SET color = 'teal'   WHERE color = '#288C9B';
+UPDATE team_members SET color = 'amber'  WHERE color = '#F29E4C';
+UPDATE team_members SET color = 'cyan'   WHERE color = '#5BC0DE';
+UPDATE team_members SET color = 'green'  WHERE color = '#2ECC71';
+UPDATE team_members SET color = 'violet' WHERE color = '#9B59B6';
+UPDATE team_members SET color = 'rose'   WHERE color = '#E74C3C';
+UPDATE team_members SET color = 'indigo' WHERE color = '#5C6BC0';
+UPDATE team_members SET color = 'lime'   WHERE color = '#8BC34A';
+````
+
 ## File: packages/api/internal/db/api_token_repo.go
 ````go
 package db
@@ -3776,56 +5650,6 @@ DRABA_BASE_URL=                 # public URL of the server (used for OAuth callb
 ## Conventions
 See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
 See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
-````
-
-## File: packages/api/Dockerfile
-````
-# ── Web builder ──
-FROM node:22-alpine AS web-builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
-WORKDIR /workspace
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/web/package.json packages/web/
-COPY packages/shared/package.json packages/shared/
-RUN pnpm install --frozen-lockfile
-COPY packages/web packages/web
-COPY packages/shared packages/shared
-RUN pnpm --filter @draba/web build
-
-# ── Go dependency cache ──
-FROM golang:1.25-alpine AS go-deps
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-
-# ── Production builder — embeds web dist into the Go binary ──
-FROM go-deps AS builder
-COPY packages/api/ .
-COPY --from=web-builder /workspace/packages/web/dist ./ui/static
-RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
-
-# ── Dev stage (used by docker-compose for hot reload) ──
-# Source is provided by the docker-compose volume mount, not baked in here —
-# baking it in caused Air to see a spurious "change" on first mount and restart.
-FROM golang:1.25-alpine AS dev
-RUN go install github.com/air-verse/air@latest
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-CMD ["air", "-c", ".air.toml"]
-
-# ── Production stage ──
-FROM alpine:3.21 AS prod
-RUN apk add --no-cache ca-certificates \
-    && addgroup -g 1000 draba \
-    && adduser -u 1000 -G draba -s /bin/sh -D draba \
-    && mkdir -p /data \
-    && chown draba:draba /data
-COPY --from=builder /draba /usr/local/bin/draba
-WORKDIR /data
-USER draba
-EXPOSE 8080
-CMD ["draba"]
 ````
 
 ## File: packages/shared/CLAUDE.md
@@ -5157,6 +6981,280 @@ export type RefreshResponse = Schemas["RefreshResponse"];
 export type ApiError = Schemas["ApiError"];
 ````
 
+## File: packages/web/src/index.css
+````css
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+/*
+ * Draba Design System — Colors & Typography
+ * Single source of truth for CSS custom properties.
+ */
+
+/* ─── Base Tokens ───────────────────────────────────────────────────────────── */
+:root {
+  /* Brand palette */
+  --color-teal:       #288C9B;
+  --color-teal-light: #5BC0DE;
+  --color-amber:      #F29E4C;
+  --color-charcoal:   #343A40;
+  --color-off-white:  #F8F9FA;
+
+  /* Identity palette — 16 colors; mirrors IDENTITY_COLORS in identity-constants.ts */
+  --identity-teal:    #288C9B;
+  --identity-cyan:    #06B6D4;
+  --identity-blue:    #3B82F6;
+  --identity-indigo:  #6366F1;
+  --identity-violet:  #8B5CF6;
+  --identity-purple:  #A855F7;
+  --identity-pink:    #EC4899;
+  --identity-rose:    #F43F5E;
+  --identity-red:     #EF4444;
+  --identity-orange:  #F97316;
+  --identity-amber:   #F59E0B;
+  --identity-yellow:  #EAB308;
+  --identity-lime:    #84CC16;
+  --identity-green:   #22C55E;
+  --identity-slate:   #64748B;
+  --identity-stone:   #78716C;
+
+  /* ── Semantic light-mode tokens (shadcn HSL convention) ── */
+  --background:             hsl(210 17% 98%);   /* #F8F9FA */
+  --foreground:             hsl(210 10% 23%);   /* #343A40 */
+
+  --card:                   hsl(0 0% 100%);
+  --card-foreground:        hsl(210 10% 23%);
+
+  --popover:                hsl(0 0% 100%);
+  --popover-foreground:     hsl(210 10% 23%);
+
+  --primary:                hsl(188 59% 38%);   /* #288C9B */
+  --primary-foreground:     hsl(0 0% 100%);
+
+  --secondary:              hsl(30 87% 62%);    /* #F29E4C */
+  --secondary-foreground:   hsl(210 10% 23%);
+
+  --muted:                  hsl(210 14% 93%);
+  --muted-foreground:       hsl(210 10% 45%);
+
+  --accent:                 hsl(194 67% 61%);   /* #5BC0DE */
+  --accent-foreground:      hsl(210 10% 23%);
+
+  --destructive:            hsl(0 72% 51%);
+  --destructive-foreground: hsl(0 0% 100%);
+
+  --success:                hsl(145 63% 42%);
+  --success-foreground:     hsl(0 0% 100%);
+
+  --warning:                hsl(38 92% 50%);
+  --warning-foreground:     hsl(210 10% 23%);
+
+  --border:                 hsl(210 14% 89%);
+  --input:                  hsl(210 14% 89%);
+  --ring:                   hsl(188 59% 38%);
+
+  /* ── Radius ── */
+  --radius:    8px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+
+  /* ── Shadows ── */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+  --shadow-md: 0 4px 8px -1px rgb(0 0 0 / 0.10), 0 2px 4px -1px rgb(0 0 0 / 0.06);
+  --shadow-lg: 0 10px 24px -3px rgb(0 0 0 / 0.12), 0 4px 8px -2px rgb(0 0 0 / 0.06);
+
+  /* ── Spacing scale (4px base grid) ── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ── Typography ── */
+  --font-sans: 'Open Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'Fira Code', monospace;
+
+  --font-weight-light:    300;
+  --font-weight-regular:  400;
+  --font-weight-semibold: 600;
+  --font-weight-bold:     700;
+
+  /* Type scale */
+  --text-xs:   12px;
+  --text-sm:   14px;
+  --text-base: 16px;
+  --text-lg:   18px;
+  --text-xl:   20px;
+  --text-2xl:  24px;
+  --text-3xl:  30px;
+
+  --leading-tight:   1.25;
+  --leading-normal:  1.5;
+  --leading-relaxed: 1.625;
+
+  /* ── Layout ── */
+  --sidebar-w: 220px;
+  --topbar-h:  52px;
+}
+
+/* ─── Dark Mode ─────────────────────────────────────────────────────────────── */
+.dark {
+  --background:             hsl(210 15% 11%);
+  --foreground:             hsl(210 17% 93%);
+
+  --card:                   hsl(210 15% 15%);
+  --card-foreground:        hsl(210 17% 93%);
+
+  --popover:                hsl(210 15% 15%);
+  --popover-foreground:     hsl(210 17% 93%);
+
+  --primary:                hsl(188 55% 52%);
+  --primary-foreground:     hsl(210 15% 10%);
+
+  --secondary:              hsl(30 80% 60%);
+  --secondary-foreground:   hsl(210 15% 10%);
+
+  --muted:                  hsl(210 15% 20%);
+  --muted-foreground:       hsl(210 15% 58%);
+
+  --accent:                 hsl(194 60% 55%);
+  --accent-foreground:      hsl(210 15% 10%);
+
+  --destructive:            hsl(0 63% 45%);
+  --destructive-foreground: hsl(0 0% 100%);
+
+  --success:                hsl(145 55% 40%);
+  --success-foreground:     hsl(0 0% 100%);
+
+  --warning:                hsl(38 85% 55%);
+  --warning-foreground:     hsl(210 15% 10%);
+
+  --border:                 hsl(210 15% 22%);
+  --input:                  hsl(210 15% 22%);
+  --ring:                   hsl(188 55% 52%);
+}
+
+/* ─── Base Element Styles ───────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--leading-normal);
+  color: var(--foreground);
+  background-color: var(--background);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  margin: 0;
+}
+
+h1 {
+  font-size: var(--text-2xl);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--leading-tight);
+  color: var(--foreground);
+  margin: 0;
+}
+
+h2 {
+  font-size: var(--text-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--leading-tight);
+  color: var(--foreground);
+  margin: 0;
+}
+
+h3 {
+  font-size: var(--text-base);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--leading-tight);
+  color: var(--foreground);
+  margin: 0;
+}
+
+p {
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--leading-relaxed);
+  color: var(--foreground);
+  margin: 0;
+}
+
+small {
+  font-size: var(--text-xs);
+  font-weight: var(--font-weight-regular);
+  color: var(--muted-foreground);
+}
+
+a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+code, pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+/* ─── Find (in-view) ─────────────────────────────────────────────────────── */
+
+@keyframes find-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px #F29E4C, 0 0 0 5px rgba(242, 158, 76, 0.4); }
+  50%       { box-shadow: 0 0 0 2px #F29E4C, 0 0 0 10px rgba(242, 158, 76, 0.65); }
+}
+
+/* Applied to the active (parked) Gantt event bar during a find session. */
+.find-active-bar {
+  animation: find-pulse 1.2s ease-in-out infinite;
+}
+
+/* Applied to a matching (non-active) Gantt event bar during a find session. */
+.find-match-bar {
+  box-shadow: 0 0 0 2px #F29E4C !important;
+}
+````
+
 ## File: packages/web/src/main.tsx
 ````typescript
 import React from 'react'
@@ -6435,1309 +8533,6 @@ jobs:
 
       - name: Build
         run: pnpm --filter @draba/web build
-````
-
-## File: docs/design/assets/Icon Color Picker.html
-````html
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<title>Identity Widget — Draba</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
-<style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; background: #0d1117; font-family: 'Inter', system-ui, sans-serif; color: #e6edf3; overflow: hidden; }
-  ::-webkit-scrollbar { width: 4px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 99px; }
-  button { font-family: inherit; cursor: pointer; }
-  input { font-family: inherit; }
-</style>
-<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
-</head>
-<body>
-<div id="root"></div>
-<script type="text/babel">
-const { useState, useRef, useEffect, useMemo } = React;
-
-// ── Tokens ────────────────────────────────────────────────────────────────────
-const T = {
-  bg0:'#0d1117', bg1:'#161b22', bg2:'#21262d', bg3:'#2d333b', bg4:'#373e47',
-  border:'#30363d', border2:'#21262d',
-  text1:'#e6edf3', text2:'#8b949e', text3:'#484f58',
-  accent:'#288C9B',
-};
-
-// ── 16 colors ─────────────────────────────────────────────────────────────────
-const COLORS = [
-  {id:'teal',   hex:'#288C9B'},{id:'cyan',   hex:'#06B6D4'},
-  {id:'blue',   hex:'#3B82F6'},{id:'indigo', hex:'#6366F1'},
-  {id:'violet', hex:'#8B5CF6'},{id:'purple', hex:'#A855F7'},
-  {id:'pink',   hex:'#EC4899'},{id:'rose',   hex:'#F43F5E'},
-  {id:'red',    hex:'#EF4444'},{id:'orange', hex:'#F97316'},
-  {id:'amber',  hex:'#F59E0B'},{id:'yellow', hex:'#EAB308'},
-  {id:'lime',   hex:'#84CC16'},{id:'green',  hex:'#22C55E'},
-  {id:'slate',  hex:'#64748B'},{id:'stone',  hex:'#78716C'},
-];
-
-// ── 64 Lucide icons ───────────────────────────────────────────────────────────
-const ICONS = {
-  'activity':      [['polyline',{points:'22 12 18 12 15 21 9 3 6 12 2 12'}]],
-  'archive':       [['polyline',{points:'21 8 21 21 3 21 3 8'}],['rect',{x:'1',y:'3',width:'22',height:'5'}],['line',{x1:'10',y1:'12',x2:'14',y2:'12'}]],
-  'award':         [['circle',{cx:'12',cy:'8',r:'7'}],['polyline',{points:'8.21 13.89 7 23 12 20 17 23 15.79 13.88'}]],
-  'bar-chart':     [['line',{x1:'18',y1:'20',x2:'18',y2:'10'}],['line',{x1:'12',y1:'20',x2:'12',y2:'4'}],['line',{x1:'6',y1:'20',x2:'6',y2:'14'}]],
-  'bell':          [['path',{d:'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9'}],['path',{d:'M13.73 21a2 2 0 0 1-3.46 0'}]],
-  'bookmark':      [['path',{d:'M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'}]],
-  'briefcase':     [['rect',{x:'2',y:'7',width:'20',height:'14',rx:'2',ry:'2'}],['path',{d:'M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16'}]],
-  'calendar':      [['rect',{x:'3',y:'4',width:'18',height:'18',rx:'2',ry:'2'}],['line',{x1:'16',y1:'2',x2:'16',y2:'6'}],['line',{x1:'8',y1:'2',x2:'8',y2:'6'}],['line',{x1:'3',y1:'10',x2:'21',y2:'10'}]],
-  'check-circle':  [['path',{d:'M22 11.08V12a10 10 0 1 1-5.93-9.14'}],['polyline',{points:'22 4 12 14.01 9 11.01'}]],
-  'clipboard':     [['path',{d:'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2'}],['rect',{x:'8',y:'2',width:'8',height:'4',rx:'1',ry:'1'}]],
-  'clock':         [['circle',{cx:'12',cy:'12',r:'10'}],['polyline',{points:'12 6 12 12 16 14'}]],
-  'cloud':         [['path',{d:'M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z'}]],
-  'code':          [['polyline',{points:'16 18 22 12 16 6'}],['polyline',{points:'8 6 2 12 8 18'}]],
-  'coffee':        [['path',{d:'M18 8h1a4 4 0 0 1 0 8h-1'}],['path',{d:'M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z'}],['line',{x1:'6',y1:'1',x2:'6',y2:'4'}],['line',{x1:'10',y1:'1',x2:'10',y2:'4'}],['line',{x1:'14',y1:'1',x2:'14',y2:'4'}]],
-  'compass':       [['circle',{cx:'12',cy:'12',r:'10'}],['polygon',{points:'16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76'}]],
-  'cpu':           [['rect',{x:'4',y:'4',width:'16',height:'16',rx:'2',ry:'2'}],['rect',{x:'9',y:'9',width:'6',height:'6'}],['line',{x1:'9',y1:'1',x2:'9',y2:'4'}],['line',{x1:'15',y1:'1',x2:'15',y2:'4'}],['line',{x1:'9',y1:'20',x2:'9',y2:'23'}],['line',{x1:'15',y1:'20',x2:'15',y2:'23'}],['line',{x1:'20',y1:'9',x2:'23',y2:'9'}],['line',{x1:'1',y1:'9',x2:'4',y2:'9'}]],
-  'database':      [['ellipse',{cx:'12',cy:'5',rx:'9',ry:'3'}],['path',{d:'M21 12c0 1.66-4 3-9 3s-9-1.34-9-3'}],['path',{d:'M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5'}]],
-  'download':      [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'7 10 12 15 17 10'}],['line',{x1:'12',y1:'15',x2:'12',y2:'3'}]],
-  'edit':          [['path',{d:'M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7'}],['path',{d:'M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z'}]],
-  'eye':           [['path',{d:'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z'}],['circle',{cx:'12',cy:'12',r:'3'}]],
-  'file-text':     [['path',{d:'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'}],['polyline',{points:'14 2 14 8 20 8'}],['line',{x1:'16',y1:'13',x2:'8',y2:'13'}],['line',{x1:'16',y1:'17',x2:'8',y2:'17'}]],
-  'filter':        [['polygon',{points:'22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3'}]],
-  'flag':          [['path',{d:'M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z'}],['line',{x1:'4',y1:'22',x2:'4',y2:'15'}]],
-  'folder':        [['path',{d:'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'}]],
-  'git-branch':    [['line',{x1:'6',y1:'3',x2:'6',y2:'15'}],['circle',{cx:'18',cy:'6',r:'3'}],['circle',{cx:'6',cy:'18',r:'3'}],['path',{d:'M18 9a9 9 0 0 1-9 9'}]],
-  'globe':         [['circle',{cx:'12',cy:'12',r:'10'}],['line',{x1:'2',y1:'12',x2:'22',y2:'12'}],['path',{d:'M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'}]],
-  'grid':          [['rect',{x:'3',y:'3',width:'7',height:'7'}],['rect',{x:'14',y:'3',width:'7',height:'7'}],['rect',{x:'14',y:'14',width:'7',height:'7'}],['rect',{x:'3',y:'14',width:'7',height:'7'}]],
-  'heart':         [['path',{d:'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z'}]],
-  'help-circle':   [['circle',{cx:'12',cy:'12',r:'10'}],['path',{d:'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3'}],['line',{x1:'12',y1:'17',x2:'12.01',y2:'17'}]],
-  'home':          [['path',{d:'M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'}],['polyline',{points:'9 22 9 12 15 12 15 22'}]],
-  'info':          [['circle',{cx:'12',cy:'12',r:'10'}],['line',{x1:'12',y1:'16',x2:'12',y2:'12'}],['line',{x1:'12',y1:'8',x2:'12.01',y2:'8'}]],
-  'layers':        [['polygon',{points:'12 2 2 7 12 12 22 7 12 2'}],['polyline',{points:'2 17 12 22 22 17'}],['polyline',{points:'2 12 12 17 22 12'}]],
-  'link':          [['path',{d:'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'}],['path',{d:'M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'}]],
-  'list':          [['line',{x1:'8',y1:'6',x2:'21',y2:'6'}],['line',{x1:'8',y1:'12',x2:'21',y2:'12'}],['line',{x1:'8',y1:'18',x2:'21',y2:'18'}],['line',{x1:'3',y1:'6',x2:'3.01',y2:'6'}],['line',{x1:'3',y1:'12',x2:'3.01',y2:'12'}],['line',{x1:'3',y1:'18',x2:'3.01',y2:'18'}]],
-  'lock':          [['rect',{x:'3',y:'11',width:'18',height:'11',rx:'2',ry:'2'}],['path',{d:'M7 11V7a5 5 0 0 1 10 0v4'}]],
-  'mail':          [['path',{d:'M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z'}],['polyline',{points:'22 6 12 13 2 6'}]],
-  'map':           [['polygon',{points:'1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6'}],['line',{x1:'8',y1:'2',x2:'8',y2:'18'}],['line',{x1:'16',y1:'6',x2:'16',y2:'22'}]],
-  'message-circle':[['path',{d:'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'}]],
-  'moon':          [['path',{d:'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'}]],
-  'package':       [['path',{d:'M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'}],['polyline',{points:'3.27 6.96 12 12.01 20.73 6.96'}],['line',{x1:'12',y1:'22.08',x2:'12',y2:'12'}]],
-  'pencil':        [['path',{d:'M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z'}]],
-  'phone':         [['path',{d:'M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.56 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z'}]],
-  'pie-chart':     [['path',{d:'M21.21 15.89A10 10 0 1 1 8 2.83'}],['path',{d:'M22 12A10 10 0 0 0 12 2v10z'}]],
-  'plug':          [['path',{d:'M18.36 6.64a9 9 0 1 1-12.73 0'}],['line',{x1:'12',y1:'2',x2:'12',y2:'12'}]],
-  'refresh-cw':    [['polyline',{points:'23 4 23 10 17 10'}],['polyline',{points:'1 20 1 14 7 14'}],['path',{d:'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15'}]],
-  'search':        [['circle',{cx:'11',cy:'11',r:'8'}],['line',{x1:'21',y1:'21',x2:'16.65',y2:'16.65'}]],
-  'server':        [['rect',{x:'2',y:'2',width:'20',height:'8',rx:'2',ry:'2'}],['rect',{x:'2',y:'14',width:'20',height:'8',rx:'2',ry:'2'}],['line',{x1:'6',y1:'6',x2:'6.01',y2:'6'}],['line',{x1:'6',y1:'18',x2:'6.01',y2:'18'}]],
-  'settings':      [['circle',{cx:'12',cy:'12',r:'3'}],['path',{d:'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z'}]],
-  'share':         [['circle',{cx:'18',cy:'5',r:'3'}],['circle',{cx:'6',cy:'12',r:'3'}],['circle',{cx:'18',cy:'19',r:'3'}],['line',{x1:'8.59',y1:'13.51',x2:'15.42',y2:'17.49'}],['line',{x1:'15.41',y1:'6.51',x2:'8.59',y2:'10.49'}]],
-  'shield':        [['path',{d:'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'}]],
-  'star':          [['polygon',{points:'12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2'}]],
-  'sun':           [['circle',{cx:'12',cy:'12',r:'5'}],['line',{x1:'12',y1:'1',x2:'12',y2:'3'}],['line',{x1:'12',y1:'21',x2:'12',y2:'23'}],['line',{x1:'4.22',y1:'4.22',x2:'5.64',y2:'5.64'}],['line',{x1:'18.36',y1:'18.36',x2:'19.78',y2:'19.78'}],['line',{x1:'1',y1:'12',x2:'3',y2:'12'}],['line',{x1:'21',y1:'12',x2:'23',y2:'12'}]],
-  'tag':           [['path',{d:'M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z'}],['line',{x1:'7',y1:'7',x2:'7.01',y2:'7'}]],
-  'target':        [['circle',{cx:'12',cy:'12',r:'10'}],['circle',{cx:'12',cy:'12',r:'6'}],['circle',{cx:'12',cy:'12',r:'2'}]],
-  'terminal':      [['polyline',{points:'4 17 10 11 4 5'}],['line',{x1:'12',y1:'19',x2:'20',y2:'19'}]],
-  'trash':         [['polyline',{points:'3 6 5 6 21 6'}],['path',{d:'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'}]],
-  'trending-up':   [['polyline',{points:'23 6 13.5 15.5 8.5 10.5 1 18'}],['polyline',{points:'17 6 23 6 23 12'}]],
-  'upload':        [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'17 8 12 3 7 8'}],['line',{x1:'12',y1:'3',x2:'12',y2:'15'}]],
-  'user':          [['path',{d:'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'}],['circle',{cx:'12',cy:'7',r:'4'}]],
-  'users':         [['path',{d:'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2'}],['circle',{cx:'9',cy:'7',r:'4'}],['path',{d:'M23 21v-2a4 4 0 0 0-3-3.87'}],['path',{d:'M16 3.13a4 4 0 0 1 0 7.75'}]],
-  'wifi':          [['path',{d:'M5 12.55a11 11 0 0 1 14.08 0'}],['path',{d:'M1.42 9a16 16 0 0 1 21.16 0'}],['path',{d:'M8.53 16.11a6 6 0 0 1 6.95 0'}],['line',{x1:'12',y1:'20',x2:'12.01',y2:'20'}]],
-  'zap':           [['polygon',{points:'13 2 3 14 12 14 11 22 21 10 12 10 13 2'}]],
-};
-const ICON_IDS = Object.keys(ICONS).sort(); // exactly 64
-
-// ── Name-based identity helpers ───────────────────────────────────────────────
-const NAME_IDS = ['__name_1__','__name_2__','__name_words__'];
-function isNameId(id) { return NAME_IDS.includes(id); }
-function isNoneId(id) { return id === '__none__'; }
-function getNameText(iconId, name) {
-  const n = name || '?';
-  if (iconId === '__name_1__') return n[0].toUpperCase();
-  if (iconId === '__name_2__') return n.slice(0,2).toUpperCase();
-  if (iconId === '__name_words__') {
-    const words = n.trim().split(/\s+/);
-    return words.length >= 2 ? (words[0][0]+words[1][0]).toUpperCase() : n.slice(0,2).toUpperCase();
-  }
-  return n[0].toUpperCase();
-}
-
-// ── Icon renderer ─────────────────────────────────────────────────────────────
-function Icon({ id, size=16, color='currentColor', sw=1.75 }) {
-  const d = ICONS[id]; if (!d) return null;
-  return (
-    <svg viewBox="0 0 24 24" width={size} height={size} fill="none"
-      stroke={color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
-      {d.map(([tag,p],i)=>React.createElement(tag,{key:i,...p}))}
-    </svg>
-  );
-}
-
-// ── Badge (shared, used in sidebar + settings) ────────────────────────────────
-function Badge({ identity, name, shape='square', size=26 }) {
-  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
-  const r = shape==='circle' ? '50%' : Math.round(size*0.26)+'px';
-  const nameText = getNameText(identity.iconId, name);
-  return (
-    <div style={{
-      width:size, height:size, borderRadius:r, background:color.hex, flexShrink:0,
-      display:'flex', alignItems:'center', justifyContent:'center',
-      transition:'background 0.15s',
-    }}>
-      {isNameId(identity.iconId)
-        ? <span style={{fontSize:Math.round(size*(nameText.length>1?0.37:0.52)),fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:nameText.length>1?'-0.5px':'0'}}>{nameText}</span>
-        : isNoneId(identity.iconId) ? null
-        : <Icon id={identity.iconId} size={Math.round(size*0.54)} color="rgba(255,255,255,0.95)" sw={2}/>
-      }
-    </div>
-  );
-}
-
-// ── Compact Identity Picker (popover content) ─────────────────────────────────
-function IdentityPicker({ identity, name, shape, onChange }) {
-  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
-  const letter = (name||'?')[0].toUpperCase();
-
-  const ColorBtn = ({ c }) => {
-    const [hov,setHov]=useState(false);
-    const sel = c.id===identity.colorId;
-    return (
-      <button onClick={()=>onChange({...identity,colorId:c.id})} title={c.id}
-        onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
-        style={{
-          width:24,height:24,borderRadius:'50%',background:c.hex,border:'none',
-          outline:'none',cursor:'pointer',position:'relative',
-          transform:hov&&!sel?'scale(1.18)':'scale(1)',
-          boxShadow:sel?`0 0 0 2px ${T.bg2}, 0 0 0 3.5px ${c.hex}`:'none',
-          transition:'transform 0.1s, box-shadow 0.1s',
-        }}>
-        {sel&&<svg viewBox="0 0 24 24" width={10} height={10} fill="none" stroke="rgba(255,255,255,.9)" strokeWidth={3.2} strokeLinecap="round" strokeLinejoin="round" style={{position:'absolute',inset:0,margin:'auto'}}><polyline points="20 6 9 17 4 12"/></svg>}
-      </button>
-    );
-  };
-
-  const IconCell = ({ id }) => {
-    const [hov,setHov]=useState(false);
-    const sel = identity.iconId===id && identity.iconId!=='__name__';
-    return (
-      <button onClick={()=>onChange({...identity,iconId:id})} title={id}
-        onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
-        style={{
-          width:34,height:34,border:'none',borderRadius:6,cursor:'pointer',
-          display:'flex',alignItems:'center',justifyContent:'center',
-          background:sel?color.hex:hov?T.bg4:'transparent',
-          outline:sel?`2px solid ${color.hex}44`:'none',outlineOffset:1,
-          transition:'background 0.08s',
-        }}>
-        <Icon id={id} size={17} color={sel?'#fff':hov?T.text1:T.text2} sw={1.75}/>
-      </button>
-    );
-  };
-
-  return (
-    <div style={{
-      width:312, background:T.bg2, border:`1px solid ${T.border}`,
-      borderRadius:10, boxShadow:'0 12px 32px rgba(0,0,0,.5)', overflow:'hidden',
-    }}>
-      {/* Colors */}
-      <div style={{padding:'11px 12px 10px',borderBottom:`1px solid ${T.border}`}}>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:9,justifyItems:'center'}}>
-          {COLORS.map(c=><ColorBtn key={c.id} c={c}/>)}
-        </div>
-      </div>
-
-      {/* Name options — 3 variants */}
-      <div style={{padding:'9px 12px 6px',display:'flex',gap:6}}>
-        {[
-          {id:'__none__',     label:'None'},
-          {id:'__name_1__',   label:'1 letter'},
-          {id:'__name_2__',   label:'2 letters'},
-          {id:'__name_words__',label:'1 + 1 words'},
-        ].map(opt=>{
-  const txt = opt.id === '__none__' ? '' : getNameText(opt.id, name);
-          const sel = identity.iconId===opt.id;
-          return (
-            <button key={opt.id} onClick={()=>onChange({...identity,iconId:opt.id})}
-              style={{
-                flex:1, padding:'8px 4px 7px',
-                border:`1px solid ${sel?color.hex:T.border2}`,
-                borderRadius:8, background:sel?`${color.hex}18`:T.bg3,
-                cursor:'pointer', display:'flex', flexDirection:'column', alignItems:'center', gap:7,
-                transition:'border-color 0.1s, background 0.1s',
-              }}>
-              <div style={{
-                width:28,height:28,borderRadius:shape==='circle'?'50%':'7px',
-                background: opt.id==='__none__' ? 'transparent' : color.hex,
-                border: opt.id==='__none__' ? `1.5px dashed ${T.border}` : 'none',
-                display:'flex',alignItems:'center',justifyContent:'center',
-              }}>
-                {opt.id !== '__none__' && (
-                  <span style={{fontSize:txt.length>1?11:14,fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:txt.length>1?'-0.5px':'0'}}>{txt}</span>
-                )}
-              </div>
-              <span style={{fontSize:10,color:sel?color.hex:T.text3,fontWeight:500,textAlign:'center',lineHeight:1.2}}>{opt.label}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Icon grid */}
-      <div style={{padding:'6px 12px 10px'}}>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:2}}>
-          {ICON_IDS.map(id=><IconCell key={id} id={id}/>)}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Identity trigger (small badge + ▾ ) ───────────────────────────────────────
-function IdentityTrigger({ identity, name, shape, open, onClick }) {
-  const [hov,setHov]=useState(false);
-  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
-  return (
-    <button onClick={onClick}
-      onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
-      style={{
-        position:'relative', background:'none', border:'none', padding:0,
-        outline:open||hov?`2px solid ${color.hex}88`:'none',
-        borderRadius:shape==='circle'?'50%':'8px', outlineOffset:2,
-        transition:'outline 0.1s',
-      }}>
-      <div style={{
-        width:28,height:28,borderRadius:shape==='circle'?'50%':'7px',
-        background:color.hex, display:'flex', alignItems:'center', justifyContent:'center',
-        filter:hov||open?'brightness(1.12)':'none', transition:'filter 0.1s',
-      }}>
-        {isNameId(identity.iconId)
-          ? <span style={{fontSize:getNameText(identity.iconId,name).length>1?11:14,fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:getNameText(identity.iconId,name).length>1?'-0.5px':'0'}}>{getNameText(identity.iconId,name)}</span>
-          : isNoneId(identity.iconId) ? null
-          : <Icon id={identity.iconId} size={15} color="rgba(255,255,255,0.95)" sw={2}/>
-        }
-      </div>
-      {/* Chevron pip */}
-      <div style={{
-        position:'absolute', bottom:-3, right:-3, width:13, height:13, borderRadius:'50%',
-        background:T.bg1, border:`1.5px solid ${T.border}`,
-        display:'flex', alignItems:'center', justifyContent:'center',
-      }}>
-        <svg viewBox="0 0 24 24" width={7} height={7} fill="none" stroke={T.text2} strokeWidth={3} strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="6 9 12 15 18 9"/>
-        </svg>
-      </div>
-    </button>
-  );
-}
-
-// ── Identity Widget (trigger + popover) ───────────────────────────────────────
-function IdentityWidget({ identity, name, shape, onChange }) {
-  const [open,setOpen]=useState(false);
-  const [pos,setPos]=useState({top:0,left:0});
-  const triggerRef=useRef(null);
-  const popoverRef=useRef(null);
-  const PICKER_W=312;
-
-  useEffect(()=>{
-    if(!open) return;
-    const fn=(e)=>{
-      if(triggerRef.current?.contains(e.target)) return;
-      if(popoverRef.current?.contains(e.target)) return;
-      setOpen(false);
-    };
-    document.addEventListener('mousedown',fn);
-    return()=>document.removeEventListener('mousedown',fn);
-  },[open]);
-
-  const handleOpen=()=>{
-    if(triggerRef.current){
-      const r=triggerRef.current.getBoundingClientRect();
-      let left=r.left;
-      if(left+PICKER_W>window.innerWidth-8) left=window.innerWidth-PICKER_W-8;
-      if(left<8) left=8;
-      setPos({top:r.bottom+8, left});
-    }
-    setOpen(o=>!o);
-  };
-
-  return (
-    <>
-      <div ref={triggerRef} style={{display:'inline-block'}}>
-        <IdentityTrigger identity={identity} name={name} shape={shape} open={open} onClick={handleOpen}/>
-      </div>
-      {open && ReactDOM.createPortal(
-        <div ref={popoverRef} style={{position:'fixed',top:pos.top,left:pos.left,zIndex:9999}}>
-          <IdentityPicker identity={identity} name={name} shape={shape} onChange={v=>onChange(v)}/>
-        </div>,
-        document.body
-      )}
-    </> 
-  );
-}
-
-// ── Mock field label ──────────────────────────────────────────────────────────
-const FL = ({children})=>(
-  <div style={{fontSize:11,fontWeight:600,letterSpacing:'.6px',color:T.text3,textTransform:'uppercase',marginBottom:6}}>
-    {children}
-  </div>
-);
-
-// ── Settings Panel ────────────────────────────────────────────────────────────
-function SettingsPanel({ identity, name, onChange }) {
-  return (
-    <div style={{
-      width:280, height:'100%', background:T.bg1,
-      borderLeft:`1px solid ${T.border}`,
-      display:'flex', flexDirection:'column', overflowY:'auto', flexShrink:0,
-    }}>
-      {/* Header */}
-      <div style={{
-        padding:'14px 16px', borderBottom:`1px solid ${T.border}`,
-        display:'flex', alignItems:'center', gap:10, flexShrink:0,
-      }}>
-        <Badge identity={identity} name={name} shape="square" size={24}/>
-        <span style={{fontSize:14,fontWeight:600,color:T.text1,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
-        <button style={{background:'none',border:'none',color:T.text3,padding:2}}>
-          <Icon id="edit" size={14} color={T.text3}/>
-        </button>
-      </div>
-
-      <div style={{padding:'16px',display:'flex',flexDirection:'column',gap:20}}>
-        {/* Identity field */}
-        <div>
-          <FL>Identity</FL>
-          <div style={{display:'flex',alignItems:'center',gap:10}}>
-            <IdentityWidget identity={identity} name={name} shape="square" onChange={onChange}/>
-          </div>
-        </div>
-
-        {/* Mock: Name */}
-        <div>
-          <FL>Name</FL>
-          <div style={{
-            padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,
-            borderRadius:6,fontSize:13,color:T.text2,
-          }}>{name}</div>
-        </div>
-
-        {/* Mock: Dates */}
-        <div>
-          <FL>Date range</FL>
-          <div style={{display:'flex',alignItems:'center',gap:8}}>
-            <div style={{flex:1,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text2}}>Dec 1, 2026</div>
-            <span style={{color:T.text3,fontSize:12}}>→</span>
-            <div style={{flex:1,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text2}}>Jan 15, 2027</div>
-          </div>
-        </div>
-
-        {/* Mock: Team */}
-        <div>
-          <FL>Team</FL>
-          <div style={{display:'flex',alignItems:'center',gap:8,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6}}>
-            <div style={{width:20,height:20,borderRadius:'50%',background:'#A855F7',display:'flex',alignItems:'center',justifyContent:'center'}}>
-              <span style={{fontSize:10,fontWeight:700,color:'#fff'}}>P</span>
-            </div>
-            <span style={{fontSize:13,color:T.text2}}>Product Marketing</span>
-          </div>
-        </div>
-
-        {/* Mock: Description */}
-        <div>
-          <FL>Description</FL>
-          <div style={{padding:'8px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text3,minHeight:60}}>
-            Optional description…
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Sidebar ───────────────────────────────────────────────────────────────────
-const SB_TIMELINES = [
-  {name:'Q1 2027 Roadmap',  iconId:'zap',         colorId:'teal',   shape:'square'},
-  {name:'New Logo GTM',     active:true},
-  {name:'Q4 2026 Roadmap',  iconId:'trending-up', colorId:'orange', shape:'square'},
-  {name:'Project Pinky',    iconId:'heart',       colorId:'rose',   shape:'square'},
-];
-
-function Sidebar({ identity, name }) {
-  return (
-    <div style={{width:220,height:'100%',background:T.bg1,borderRight:`1px solid ${T.border}`,flexShrink:0,overflowY:'auto'}}>
-      {/* Logo */}
-      <div style={{padding:'14px 16px',borderBottom:`1px solid ${T.border}`,display:'flex',alignItems:'center',gap:8}}>
-        <div style={{width:24,height:24,borderRadius:5,background:T.accent,display:'flex',alignItems:'center',justifyContent:'center'}}>
-          <Icon id="layers" size={13} color="#fff" sw={2}/>
-        </div>
-        <span style={{fontSize:15,fontWeight:600,color:T.text1}}>draba</span>
-      </div>
-
-      <div style={{padding:'16px 12px 8px'}}>
-        {/* Team */}
-        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,paddingLeft:4}}>Team</div>
-        <div style={{display:'flex',alignItems:'center',gap:8,padding:'5px 8px',borderRadius:6,marginBottom:10}}>
-          <div style={{width:22,height:22,borderRadius:'50%',background:'#A855F7',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
-            <span style={{fontSize:11,fontWeight:700,color:'#fff'}}>P</span>
-          </div>
-          <span style={{fontSize:13,fontWeight:500,color:T.text1}}>Product Marketing</span>
-        </div>
-
-        {/* Members */}
-        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,paddingLeft:4}}>Members</div>
-        {[['LK','#22C55E','Lindsay K.'],['JD','#6366F1','John Doe'],['SM','#F97316','Sarah M.']].map(([ini,bg,n])=>(
-          <div key={n} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 8px',borderRadius:6}}>
-            <div style={{width:22,height:22,borderRadius:'50%',background:bg,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
-              <span style={{fontSize:10,fontWeight:700,color:'#fff'}}>{ini}</span>
-            </div>
-            <span style={{fontSize:13,color:T.text2}}>{n}</span>
-          </div>
-        ))}
-
-        {/* Timelines */}
-        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,marginTop:16,paddingLeft:4}}>Timeline</div>
-        {SB_TIMELINES.map(tl=>(
-          <div key={tl.name} style={{
-            display:'flex',alignItems:'center',gap:8,padding:'5px 8px',borderRadius:6,
-            background:tl.active?T.bg3:'transparent',
-          }}>
-            {tl.active
-              ? <Badge identity={identity} name={name} shape="square" size={22}/>
-              : <div style={{width:22,height:22,borderRadius:'5px',background:COLORS.find(c=>c.id===tl.colorId)?.hex||'#64748B',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
-                  <Icon id={tl.iconId} size={12} color="rgba(255,255,255,0.9)" sw={2}/>
-                </div>
-            }
-            <span style={{fontSize:13,fontWeight:tl.active?500:400,color:tl.active?T.text1:T.text2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{tl.name}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── App ───────────────────────────────────────────────────────────────────────
-function App() {
-  const [identity, setIdentity] = useState({ iconId:'zap', colorId:'violet' });
-  const name = 'New Logo GTM';
-
-  return (
-    <div style={{height:'100vh',display:'flex',background:T.bg0}}>
-      <Sidebar identity={identity} name={name}/>
-      {/* Main content placeholder */}
-      <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:12,opacity:.35}}>
-        <Icon id="bar-chart" size={48} color={T.text3} sw={1.25}/>
-        <span style={{fontSize:13,color:T.text3}}>Gantt view · New Logo GTM</span>
-      </div>
-      <SettingsPanel identity={identity} name={name} onChange={setIdentity}/>
-    </div>
-  );
-}
-
-ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
-</script>
-</body>
-</html>
-````
-
-## File: docs/design/assets/IDENTITY_WIDGET_HANDOFF.md
-````markdown
-# Handoff: Identity Widget — Draba
-
-## Overview
-
-The Identity Widget lets users assign a visual identity to an entity (a timeline, project, or member) — a combination of a **color** and either a **Lucide icon** or **name-derived initials**. It appears anywhere an entity needs a badge: sidebar rows, settings panels, member lists, and modal headers.
-
-## About the Design Files
-
-The files in this bundle are **HTML design prototypes** — not production code. Your task is to **recreate this component inside the existing Draba codebase** using its established React patterns, design tokens, and libraries.
-
-## Fidelity
-
-**High-fidelity.** Exact colors, spacing, typography, and interaction states are specified. Recreate pixel-closely using Draba's existing token system.
-
----
-
-## Components Overview
-
-There are four related components that form the system:
-
-| Component | Purpose |
-|---|---|
-| `<Badge>` | Read-only display of an identity — used everywhere an entity appears |
-| `<IdentityTrigger>` | Clickable version of Badge — small badge + chevron pip to open picker |
-| `<IdentityPicker>` | The popover panel — color grid + name options + icon grid |
-| `<IdentityWidget>` | Composed component — trigger + popover with positioning logic |
-
----
-
-## Data Model
-
-```ts
-interface Identity {
-  iconId:  string;   // Lucide icon id, OR one of the special name/none ids below
-  colorId: string;   // one of the 16 color ids
-}
-
-// Special iconId values:
-// '__name_1__'     → show first letter of name (e.g. "N")
-// '__name_2__'     → show first 2 letters (e.g. "NL")
-// '__name_words__' → show first letter of each word (e.g. "NL" for "New Logo")
-// '__none__'       → show nothing (empty badge)
-```
-
-### Color palette (16 colors)
-
-| ID | Hex |
-|---|---|
-| teal | #288C9B |
-| cyan | #06B6D4 |
-| blue | #3B82F6 |
-| indigo | #6366F1 |
-| violet | #8B5CF6 |
-| purple | #A855F7 |
-| pink | #EC4899 |
-| rose | #F43F5E |
-| red | #EF4444 |
-| orange | #F97316 |
-| amber | #F59E0B |
-| yellow | #EAB308 |
-| lime | #84CC16 |
-| green | #22C55E |
-| slate | #64748B |
-| stone | #78716C |
-
----
-
-## `<Badge>` — Read-only display
-
-Used anywhere an entity's identity needs to be shown without the ability to edit it.
-
-### Props
-
-```ts
-interface BadgeProps {
-  identity: Identity;
-  name:     string;       // used to derive initials for name-based icons
-  shape:    'square' | 'circle';
-  size:     number;       // px — typically 22–40px
-}
-```
-
-### Layout & Style
-
-| Property | Value |
-|---|---|
-| Width / Height | `size` × `size` px |
-| Border radius | `shape === 'circle'` → `50%`; `shape === 'square'` → `size * 0.26` px (rounded) |
-| Background | The color's hex value |
-| Transition | `background 0.15s` |
-
-**Icon rendering (inside badge):**
-- If `iconId` is a name id → render a `<span>` with initials text
-  - Font size: `size * (text.length > 1 ? 0.37 : 0.52)` px
-  - Font weight: 700
-  - Color: `rgba(255,255,255,0.95)`
-  - Letter spacing: `text.length > 1 ? '-0.5px' : '0'`
-- If `iconId === '__none__'` → render nothing
-- Otherwise → render the Lucide icon SVG
-  - Size: `size * 0.54` px
-  - Color: `rgba(255,255,255,0.95)`
-  - Stroke width: 2
-
----
-
-## `<IdentityTrigger>` — Clickable badge
-
-The badge as an interactive trigger button.
-
-### Anatomy
-
-```
-[ Badge (28×28) ]
-  └── [ Chevron pip (13×13, bottom-right, absolute) ]
-```
-
-### Pip style
-
-| Property | Value |
-|---|---|
-| Size | 13×13px |
-| Position | `bottom: -3px; right: -3px` |
-| Border radius | 50% |
-| Background | `#161b22` (bg1) |
-| Border | `1.5px solid #30363d` |
-| Icon | 7px chevron-down, stroke `#8b949e`, strokeWidth 3 |
-
-### States
-
-| State | Effect |
-|---|---|
-| Default | No outline |
-| Hover | `outline: 2px solid {color.hex}88`; outline-offset: 2px; badge `filter: brightness(1.12)` |
-| Open | Same outline as hover |
-
----
-
-## `<IdentityPicker>` — Popover panel
-
-Rendered inside a portal, positioned below the trigger.
-
-### Panel container
-
-| Property | Value |
-|---|---|
-| Width | 312px |
-| Background | `#21262d` (bg2) |
-| Border | `1px solid #30363d` |
-| Border radius | 10px |
-| Box shadow | `0 12px 32px rgba(0,0,0,.5)` |
-| Overflow | hidden |
-
-### Section 1 — Color grid
-
-Padding: `11px 12px 10px`. Border-bottom: `1px solid #30363d`.
-
-16 color buttons in an 8-column CSS grid, gap 9px, centered.
-
-**Color button:**
-- 24×24px circle
-- Hover: `transform: scale(1.18)`
-- Selected: `box-shadow: 0 0 0 2px {bg2}, 0 0 0 3.5px {color.hex}` + white checkmark (10px, strokeWidth 3.2)
-- Transition: `transform 0.1s, box-shadow 0.1s`
-
-### Section 2 — Name options
-
-Padding: `9px 12px 6px`. 4 options in a flex row with gap 6px.
-
-| Option ID | Label | Preview text |
-|---|---|---|
-| `__none__` | None | *(empty dashed circle)* |
-| `__name_1__` | 1 letter | First letter of name |
-| `__name_2__` | 2 letters | First 2 letters |
-| `__name_words__` | 1 + 1 words | First letter of each word |
-
-**Option card:**
-- `flex: 1`, padding `8px 4px 7px`
-- Border: `1px solid {border2}` (default) → `1px solid {color.hex}` (selected)
-- Background: `bg3` (default) → `{color.hex}18` (selected)
-- Border radius: 8px
-- Contents: mini badge preview (28×28, matches `shape` prop) + label text below
-
-Label text: 10px, weight 500, color `text3` (default) → `color.hex` (selected)
-
-`__none__` preview: transparent bg, `1.5px dashed #30363d` border
-
-### Section 3 — Icon grid
-
-Padding: `6px 12px 10px`. 64 Lucide icons in an 8-column CSS grid, gap 2px.
-
-**Icon cell (34×34px):**
-- Border radius: 6px
-- Default bg: transparent
-- Hover bg: `#373e47` (bg4)
-- Selected bg: `{color.hex}`; outline: `2px solid {color.hex}44`; outline-offset: 1px
-- Icon size: 17px; stroke 1.75
-- Icon color: `#8b949e` (default) → `#e6edf3` (hover) → `#fff` (selected)
-- Transition: `background 0.08s`
-
----
-
-## `<IdentityWidget>` — Full composed component
-
-Wraps trigger + popover. Handles open/close, portal rendering, and positioning.
-
-### Positioning logic
-
-1. Get trigger's `getBoundingClientRect()`
-2. Position popover at `top: rect.bottom + 8px`, `left: rect.left`
-3. Clamp left: if `left + 312 > window.innerWidth - 8`, set `left = window.innerWidth - 320`; if `left < 8`, set `left = 8`
-4. Render into `document.body` via portal
-
-### Close behavior
-
-- Click outside both trigger and popover → close
-- No close-on-select (user may want to continue adjusting)
-
----
-
-## Where `<Badge>` appears (read-only contexts)
-
-- **Sidebar** — each timeline/project row uses a 22px square badge
-- **Member list** — each member row uses a circle badge
-- **Modal headers** — 40px badge next to entity name
-- **Settings panel header** — 24px square badge
-
-In all these locations, the badge is **not** wrapped in `<IdentityWidget>` — it's just `<Badge>` for display only.
-
-## Where `<IdentityWidget>` appears (editable contexts)
-
-- **Settings / edit panel** — "Identity" field row, typically 28–32px trigger
-- **Modal edit header** — next to the entity name when in edit mode
-
----
-
-## Interactions & Behavior
-
-- Clicking the trigger toggles the popover
-- Color changes apply **immediately** (live preview — badge updates in real time)
-- Icon/name option changes apply **immediately**
-- No save/cancel — changes commit on selection; caller persists via `onChange`
-- `onChange(newIdentity)` is called on every color or icon selection
-
----
-
-## Design Tokens Used
-
-| Token | Value | Usage |
-|---|---|---|
-| bg0 | `#0d1117` | App background |
-| bg1 | `#161b22` | Sidebar, settings panel bg |
-| bg2 | `#21262d` | Picker panel bg, modal bg |
-| bg3 | `#2d333b` | Field inputs, name option bg |
-| bg4 | `#373e47` | Icon cell hover bg |
-| border | `#30363d` | Panel borders, dividers |
-| border2 | `#21262d` | Name option default border |
-| text1 | `#e6edf3` | Primary text |
-| text2 | `#8b949e` | Secondary text, icons |
-| text3 | `#484f58` | Labels, subtle text |
-| accent | `#288C9B` | Draba teal |
-| Font | `'Inter'` | All text in this widget |
-
-> **Note:** The main Draba app uses `'Open Sans'`. This widget currently uses `'Inter'`. Align to whichever the codebase uses.
-
----
-
-## Icon Library
-
-The prototype uses **64 hand-picked Lucide icons** rendered as inline SVG. In production, use the `lucide-react` package and reference icons by their exact Lucide IDs:
-
-```
-activity, archive, award, bar-chart, bell, bookmark, briefcase, calendar,
-check-circle, clipboard, clock, cloud, code, coffee, compass, cpu, database,
-download, edit, eye, file-text, filter, flag, folder, git-branch, globe, grid,
-heart, help-circle, home, info, layers, link, list, lock, mail, map,
-message-circle, moon, package, pencil, phone, pie-chart, plug, refresh-cw,
-search, server, settings, share, shield, star, sun, tag, target, terminal,
-trash, trending-up, upload, user, users, wifi, zap
-```
-
----
-
-## Files
-
-| File | Description |
-|---|---|
-| `Icon Color Picker.html` | Full interactive prototype. Shows the widget in a realistic 3-panel layout: sidebar (badge-only) + placeholder gantt + settings panel (editable). Change color or icon and watch all three update live. |
-
-Open in any browser. The settings panel is on the right — click the badge to open the picker.
-````
-
-## File: docs/design/assets/identity-widget-prototype.html
-````html
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<title>Identity Widget — Draba</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
-<style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; background: #0d1117; font-family: 'Inter', system-ui, sans-serif; color: #e6edf3; overflow: hidden; }
-  ::-webkit-scrollbar { width: 4px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 99px; }
-  button { font-family: inherit; cursor: pointer; }
-  input { font-family: inherit; }
-</style>
-<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
-</head>
-<body>
-<div id="root"></div>
-<script type="text/babel">
-const { useState, useRef, useEffect, useMemo } = React;
-
-// ── Tokens ────────────────────────────────────────────────────────────────────
-const T = {
-  bg0:'#0d1117', bg1:'#161b22', bg2:'#21262d', bg3:'#2d333b', bg4:'#373e47',
-  border:'#30363d', border2:'#21262d',
-  text1:'#e6edf3', text2:'#8b949e', text3:'#484f58',
-  accent:'#288C9B',
-};
-
-// ── 16 colors ─────────────────────────────────────────────────────────────────
-const COLORS = [
-  {id:'teal',   hex:'#288C9B'},{id:'cyan',   hex:'#06B6D4'},
-  {id:'blue',   hex:'#3B82F6'},{id:'indigo', hex:'#6366F1'},
-  {id:'violet', hex:'#8B5CF6'},{id:'purple', hex:'#A855F7'},
-  {id:'pink',   hex:'#EC4899'},{id:'rose',   hex:'#F43F5E'},
-  {id:'red',    hex:'#EF4444'},{id:'orange', hex:'#F97316'},
-  {id:'amber',  hex:'#F59E0B'},{id:'yellow', hex:'#EAB308'},
-  {id:'lime',   hex:'#84CC16'},{id:'green',  hex:'#22C55E'},
-  {id:'slate',  hex:'#64748B'},{id:'stone',  hex:'#78716C'},
-];
-
-// ── 64 Lucide icons ───────────────────────────────────────────────────────────
-const ICONS = {
-  'activity':      [['polyline',{points:'22 12 18 12 15 21 9 3 6 12 2 12'}]],
-  'archive':       [['polyline',{points:'21 8 21 21 3 21 3 8'}],['rect',{x:'1',y:'3',width:'22',height:'5'}],['line',{x1:'10',y1:'12',x2:'14',y2:'12'}]],
-  'award':         [['circle',{cx:'12',cy:'8',r:'7'}],['polyline',{points:'8.21 13.89 7 23 12 20 17 23 15.79 13.88'}]],
-  'bar-chart':     [['line',{x1:'18',y1:'20',x2:'18',y2:'10'}],['line',{x1:'12',y1:'20',x2:'12',y2:'4'}],['line',{x1:'6',y1:'20',x2:'6',y2:'14'}]],
-  'bell':          [['path',{d:'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9'}],['path',{d:'M13.73 21a2 2 0 0 1-3.46 0'}]],
-  'bookmark':      [['path',{d:'M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'}]],
-  'briefcase':     [['rect',{x:'2',y:'7',width:'20',height:'14',rx:'2',ry:'2'}],['path',{d:'M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16'}]],
-  'calendar':      [['rect',{x:'3',y:'4',width:'18',height:'18',rx:'2',ry:'2'}],['line',{x1:'16',y1:'2',x2:'16',y2:'6'}],['line',{x1:'8',y1:'2',x2:'8',y2:'6'}],['line',{x1:'3',y1:'10',x2:'21',y2:'10'}]],
-  'check-circle':  [['path',{d:'M22 11.08V12a10 10 0 1 1-5.93-9.14'}],['polyline',{points:'22 4 12 14.01 9 11.01'}]],
-  'clipboard':     [['path',{d:'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2'}],['rect',{x:'8',y:'2',width:'8',height:'4',rx:'1',ry:'1'}]],
-  'clock':         [['circle',{cx:'12',cy:'12',r:'10'}],['polyline',{points:'12 6 12 12 16 14'}]],
-  'cloud':         [['path',{d:'M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z'}]],
-  'code':          [['polyline',{points:'16 18 22 12 16 6'}],['polyline',{points:'8 6 2 12 8 18'}]],
-  'coffee':        [['path',{d:'M18 8h1a4 4 0 0 1 0 8h-1'}],['path',{d:'M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z'}],['line',{x1:'6',y1:'1',x2:'6',y2:'4'}],['line',{x1:'10',y1:'1',x2:'10',y2:'4'}],['line',{x1:'14',y1:'1',x2:'14',y2:'4'}]],
-  'compass':       [['circle',{cx:'12',cy:'12',r:'10'}],['polygon',{points:'16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76'}]],
-  'cpu':           [['rect',{x:'4',y:'4',width:'16',height:'16',rx:'2',ry:'2'}],['rect',{x:'9',y:'9',width:'6',height:'6'}],['line',{x1:'9',y1:'1',x2:'9',y2:'4'}],['line',{x1:'15',y1:'1',x2:'15',y2:'4'}],['line',{x1:'9',y1:'20',x2:'9',y2:'23'}],['line',{x1:'15',y1:'20',x2:'15',y2:'23'}],['line',{x1:'20',y1:'9',x2:'23',y2:'9'}],['line',{x1:'1',y1:'9',x2:'4',y2:'9'}]],
-  'database':      [['ellipse',{cx:'12',cy:'5',rx:'9',ry:'3'}],['path',{d:'M21 12c0 1.66-4 3-9 3s-9-1.34-9-3'}],['path',{d:'M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5'}]],
-  'download':      [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'7 10 12 15 17 10'}],['line',{x1:'12',y1:'15',x2:'12',y2:'3'}]],
-  'edit':          [['path',{d:'M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7'}],['path',{d:'M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z'}]],
-  'eye':           [['path',{d:'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z'}],['circle',{cx:'12',cy:'12',r:'3'}]],
-  'file-text':     [['path',{d:'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'}],['polyline',{points:'14 2 14 8 20 8'}],['line',{x1:'16',y1:'13',x2:'8',y2:'13'}],['line',{x1:'16',y1:'17',x2:'8',y2:'17'}]],
-  'filter':        [['polygon',{points:'22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3'}]],
-  'flag':          [['path',{d:'M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z'}],['line',{x1:'4',y1:'22',x2:'4',y2:'15'}]],
-  'folder':        [['path',{d:'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'}]],
-  'git-branch':    [['line',{x1:'6',y1:'3',x2:'6',y2:'15'}],['circle',{cx:'18',cy:'6',r:'3'}],['circle',{cx:'6',cy:'18',r:'3'}],['path',{d:'M18 9a9 9 0 0 1-9 9'}]],
-  'globe':         [['circle',{cx:'12',cy:'12',r:'10'}],['line',{x1:'2',y1:'12',x2:'22',y2:'12'}],['path',{d:'M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'}]],
-  'grid':          [['rect',{x:'3',y:'3',width:'7',height:'7'}],['rect',{x:'14',y:'3',width:'7',height:'7'}],['rect',{x:'14',y:'14',width:'7',height:'7'}],['rect',{x:'3',y:'14',width:'7',height:'7'}]],
-  'heart':         [['path',{d:'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z'}]],
-  'help-circle':   [['circle',{cx:'12',cy:'12',r:'10'}],['path',{d:'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3'}],['line',{x1:'12',y1:'17',x2:'12.01',y2:'17'}]],
-  'home':          [['path',{d:'M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'}],['polyline',{points:'9 22 9 12 15 12 15 22'}]],
-  'info':          [['circle',{cx:'12',cy:'12',r:'10'}],['line',{x1:'12',y1:'16',x2:'12',y2:'12'}],['line',{x1:'12',y1:'8',x2:'12.01',y2:'8'}]],
-  'layers':        [['polygon',{points:'12 2 2 7 12 12 22 7 12 2'}],['polyline',{points:'2 17 12 22 22 17'}],['polyline',{points:'2 12 12 17 22 12'}]],
-  'link':          [['path',{d:'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'}],['path',{d:'M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'}]],
-  'list':          [['line',{x1:'8',y1:'6',x2:'21',y2:'6'}],['line',{x1:'8',y1:'12',x2:'21',y2:'12'}],['line',{x1:'8',y1:'18',x2:'21',y2:'18'}],['line',{x1:'3',y1:'6',x2:'3.01',y2:'6'}],['line',{x1:'3',y1:'12',x2:'3.01',y2:'12'}],['line',{x1:'3',y1:'18',x2:'3.01',y2:'18'}]],
-  'lock':          [['rect',{x:'3',y:'11',width:'18',height:'11',rx:'2',ry:'2'}],['path',{d:'M7 11V7a5 5 0 0 1 10 0v4'}]],
-  'mail':          [['path',{d:'M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z'}],['polyline',{points:'22 6 12 13 2 6'}]],
-  'map':           [['polygon',{points:'1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6'}],['line',{x1:'8',y1:'2',x2:'8',y2:'18'}],['line',{x1:'16',y1:'6',x2:'16',y2:'22'}]],
-  'message-circle':[['path',{d:'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'}]],
-  'moon':          [['path',{d:'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'}]],
-  'package':       [['path',{d:'M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'}],['polyline',{points:'3.27 6.96 12 12.01 20.73 6.96'}],['line',{x1:'12',y1:'22.08',x2:'12',y2:'12'}]],
-  'pencil':        [['path',{d:'M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z'}]],
-  'phone':         [['path',{d:'M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.56 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z'}]],
-  'pie-chart':     [['path',{d:'M21.21 15.89A10 10 0 1 1 8 2.83'}],['path',{d:'M22 12A10 10 0 0 0 12 2v10z'}]],
-  'plug':          [['path',{d:'M18.36 6.64a9 9 0 1 1-12.73 0'}],['line',{x1:'12',y1:'2',x2:'12',y2:'12'}]],
-  'refresh-cw':    [['polyline',{points:'23 4 23 10 17 10'}],['polyline',{points:'1 20 1 14 7 14'}],['path',{d:'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15'}]],
-  'search':        [['circle',{cx:'11',cy:'11',r:'8'}],['line',{x1:'21',y1:'21',x2:'16.65',y2:'16.65'}]],
-  'server':        [['rect',{x:'2',y:'2',width:'20',height:'8',rx:'2',ry:'2'}],['rect',{x:'2',y:'14',width:'20',height:'8',rx:'2',ry:'2'}],['line',{x1:'6',y1:'6',x2:'6.01',y2:'6'}],['line',{x1:'6',y1:'18',x2:'6.01',y2:'18'}]],
-  'settings':      [['circle',{cx:'12',cy:'12',r:'3'}],['path',{d:'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z'}]],
-  'share':         [['circle',{cx:'18',cy:'5',r:'3'}],['circle',{cx:'6',cy:'12',r:'3'}],['circle',{cx:'18',cy:'19',r:'3'}],['line',{x1:'8.59',y1:'13.51',x2:'15.42',y2:'17.49'}],['line',{x1:'15.41',y1:'6.51',x2:'8.59',y2:'10.49'}]],
-  'shield':        [['path',{d:'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'}]],
-  'star':          [['polygon',{points:'12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2'}]],
-  'sun':           [['circle',{cx:'12',cy:'12',r:'5'}],['line',{x1:'12',y1:'1',x2:'12',y2:'3'}],['line',{x1:'12',y1:'21',x2:'12',y2:'23'}],['line',{x1:'4.22',y1:'4.22',x2:'5.64',y2:'5.64'}],['line',{x1:'18.36',y1:'18.36',x2:'19.78',y2:'19.78'}],['line',{x1:'1',y1:'12',x2:'3',y2:'12'}],['line',{x1:'21',y1:'12',x2:'23',y2:'12'}]],
-  'tag':           [['path',{d:'M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z'}],['line',{x1:'7',y1:'7',x2:'7.01',y2:'7'}]],
-  'target':        [['circle',{cx:'12',cy:'12',r:'10'}],['circle',{cx:'12',cy:'12',r:'6'}],['circle',{cx:'12',cy:'12',r:'2'}]],
-  'terminal':      [['polyline',{points:'4 17 10 11 4 5'}],['line',{x1:'12',y1:'19',x2:'20',y2:'19'}]],
-  'trash':         [['polyline',{points:'3 6 5 6 21 6'}],['path',{d:'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'}]],
-  'trending-up':   [['polyline',{points:'23 6 13.5 15.5 8.5 10.5 1 18'}],['polyline',{points:'17 6 23 6 23 12'}]],
-  'upload':        [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'17 8 12 3 7 8'}],['line',{x1:'12',y1:'3',x2:'12',y2:'15'}]],
-  'user':          [['path',{d:'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'}],['circle',{cx:'12',cy:'7',r:'4'}]],
-  'users':         [['path',{d:'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2'}],['circle',{cx:'9',cy:'7',r:'4'}],['path',{d:'M23 21v-2a4 4 0 0 0-3-3.87'}],['path',{d:'M16 3.13a4 4 0 0 1 0 7.75'}]],
-  'wifi':          [['path',{d:'M5 12.55a11 11 0 0 1 14.08 0'}],['path',{d:'M1.42 9a16 16 0 0 1 21.16 0'}],['path',{d:'M8.53 16.11a6 6 0 0 1 6.95 0'}],['line',{x1:'12',y1:'20',x2:'12.01',y2:'20'}]],
-  'zap':           [['polygon',{points:'13 2 3 14 12 14 11 22 21 10 12 10 13 2'}]],
-};
-const ICON_IDS = Object.keys(ICONS).sort(); // exactly 64
-
-// ── Name-based identity helpers ───────────────────────────────────────────────
-const NAME_IDS = ['__name_1__','__name_2__','__name_words__'];
-function isNameId(id) { return NAME_IDS.includes(id); }
-function isNoneId(id) { return id === '__none__'; }
-function getNameText(iconId, name) {
-  const n = name || '?';
-  if (iconId === '__name_1__') return n[0].toUpperCase();
-  if (iconId === '__name_2__') return n.slice(0,2).toUpperCase();
-  if (iconId === '__name_words__') {
-    const words = n.trim().split(/\s+/);
-    return words.length >= 2 ? (words[0][0]+words[1][0]).toUpperCase() : n.slice(0,2).toUpperCase();
-  }
-  return n[0].toUpperCase();
-}
-
-// ── Icon renderer ─────────────────────────────────────────────────────────────
-function Icon({ id, size=16, color='currentColor', sw=1.75 }) {
-  const d = ICONS[id]; if (!d) return null;
-  return (
-    <svg viewBox="0 0 24 24" width={size} height={size} fill="none"
-      stroke={color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
-      {d.map(([tag,p],i)=>React.createElement(tag,{key:i,...p}))}
-    </svg>
-  );
-}
-
-// ── Badge (shared, used in sidebar + settings) ────────────────────────────────
-function Badge({ identity, name, shape='square', size=26 }) {
-  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
-  const r = shape==='circle' ? '50%' : Math.round(size*0.26)+'px';
-  const nameText = getNameText(identity.iconId, name);
-  return (
-    <div style={{
-      width:size, height:size, borderRadius:r, background:color.hex, flexShrink:0,
-      display:'flex', alignItems:'center', justifyContent:'center',
-      transition:'background 0.15s',
-    }}>
-      {isNameId(identity.iconId)
-        ? <span style={{fontSize:Math.round(size*(nameText.length>1?0.37:0.52)),fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:nameText.length>1?'-0.5px':'0'}}>{nameText}</span>
-        : isNoneId(identity.iconId) ? null
-        : <Icon id={identity.iconId} size={Math.round(size*0.54)} color="rgba(255,255,255,0.95)" sw={2}/>
-      }
-    </div>
-  );
-}
-
-// ── Compact Identity Picker (popover content) ─────────────────────────────────
-function IdentityPicker({ identity, name, shape, onChange }) {
-  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
-  const letter = (name||'?')[0].toUpperCase();
-
-  const ColorBtn = ({ c }) => {
-    const [hov,setHov]=useState(false);
-    const sel = c.id===identity.colorId;
-    return (
-      <button onClick={()=>onChange({...identity,colorId:c.id})} title={c.id}
-        onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
-        style={{
-          width:24,height:24,borderRadius:'50%',background:c.hex,border:'none',
-          outline:'none',cursor:'pointer',position:'relative',
-          transform:hov&&!sel?'scale(1.18)':'scale(1)',
-          boxShadow:sel?`0 0 0 2px ${T.bg2}, 0 0 0 3.5px ${c.hex}`:'none',
-          transition:'transform 0.1s, box-shadow 0.1s',
-        }}>
-        {sel&&<svg viewBox="0 0 24 24" width={10} height={10} fill="none" stroke="rgba(255,255,255,.9)" strokeWidth={3.2} strokeLinecap="round" strokeLinejoin="round" style={{position:'absolute',inset:0,margin:'auto'}}><polyline points="20 6 9 17 4 12"/></svg>}
-      </button>
-    );
-  };
-
-  const IconCell = ({ id }) => {
-    const [hov,setHov]=useState(false);
-    const sel = identity.iconId===id && identity.iconId!=='__name__';
-    return (
-      <button onClick={()=>onChange({...identity,iconId:id})} title={id}
-        onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
-        style={{
-          width:34,height:34,border:'none',borderRadius:6,cursor:'pointer',
-          display:'flex',alignItems:'center',justifyContent:'center',
-          background:sel?color.hex:hov?T.bg4:'transparent',
-          outline:sel?`2px solid ${color.hex}44`:'none',outlineOffset:1,
-          transition:'background 0.08s',
-        }}>
-        <Icon id={id} size={17} color={sel?'#fff':hov?T.text1:T.text2} sw={1.75}/>
-      </button>
-    );
-  };
-
-  return (
-    <div style={{
-      width:312, background:T.bg2, border:`1px solid ${T.border}`,
-      borderRadius:10, boxShadow:'0 12px 32px rgba(0,0,0,.5)', overflow:'hidden',
-    }}>
-      {/* Colors */}
-      <div style={{padding:'11px 12px 10px',borderBottom:`1px solid ${T.border}`}}>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:9,justifyItems:'center'}}>
-          {COLORS.map(c=><ColorBtn key={c.id} c={c}/>)}
-        </div>
-      </div>
-
-      {/* Name options — 3 variants */}
-      <div style={{padding:'9px 12px 6px',display:'flex',gap:6}}>
-        {[
-          {id:'__none__',     label:'None'},
-          {id:'__name_1__',   label:'1 letter'},
-          {id:'__name_2__',   label:'2 letters'},
-          {id:'__name_words__',label:'1 + 1 words'},
-        ].map(opt=>{
-  const txt = opt.id === '__none__' ? '' : getNameText(opt.id, name);
-          const sel = identity.iconId===opt.id;
-          return (
-            <button key={opt.id} onClick={()=>onChange({...identity,iconId:opt.id})}
-              style={{
-                flex:1, padding:'8px 4px 7px',
-                border:`1px solid ${sel?color.hex:T.border2}`,
-                borderRadius:8, background:sel?`${color.hex}18`:T.bg3,
-                cursor:'pointer', display:'flex', flexDirection:'column', alignItems:'center', gap:7,
-                transition:'border-color 0.1s, background 0.1s',
-              }}>
-              <div style={{
-                width:28,height:28,borderRadius:shape==='circle'?'50%':'7px',
-                background: opt.id==='__none__' ? 'transparent' : color.hex,
-                border: opt.id==='__none__' ? `1.5px dashed ${T.border}` : 'none',
-                display:'flex',alignItems:'center',justifyContent:'center',
-              }}>
-                {opt.id !== '__none__' && (
-                  <span style={{fontSize:txt.length>1?11:14,fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:txt.length>1?'-0.5px':'0'}}>{txt}</span>
-                )}
-              </div>
-              <span style={{fontSize:10,color:sel?color.hex:T.text3,fontWeight:500,textAlign:'center',lineHeight:1.2}}>{opt.label}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Icon grid */}
-      <div style={{padding:'6px 12px 10px'}}>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:2}}>
-          {ICON_IDS.map(id=><IconCell key={id} id={id}/>)}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Identity trigger (small badge + ▾ ) ───────────────────────────────────────
-function IdentityTrigger({ identity, name, shape, open, onClick }) {
-  const [hov,setHov]=useState(false);
-  const color = COLORS.find(c=>c.id===identity.colorId)||COLORS[0];
-  return (
-    <button onClick={onClick}
-      onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
-      style={{
-        position:'relative', background:'none', border:'none', padding:0,
-        outline:open||hov?`2px solid ${color.hex}88`:'none',
-        borderRadius:shape==='circle'?'50%':'8px', outlineOffset:2,
-        transition:'outline 0.1s',
-      }}>
-      <div style={{
-        width:28,height:28,borderRadius:shape==='circle'?'50%':'7px',
-        background:color.hex, display:'flex', alignItems:'center', justifyContent:'center',
-        filter:hov||open?'brightness(1.12)':'none', transition:'filter 0.1s',
-      }}>
-        {isNameId(identity.iconId)
-          ? <span style={{fontSize:getNameText(identity.iconId,name).length>1?11:14,fontWeight:700,color:'rgba(255,255,255,0.95)',lineHeight:1,letterSpacing:getNameText(identity.iconId,name).length>1?'-0.5px':'0'}}>{getNameText(identity.iconId,name)}</span>
-          : isNoneId(identity.iconId) ? null
-          : <Icon id={identity.iconId} size={15} color="rgba(255,255,255,0.95)" sw={2}/>
-        }
-      </div>
-      {/* Chevron pip */}
-      <div style={{
-        position:'absolute', bottom:-3, right:-3, width:13, height:13, borderRadius:'50%',
-        background:T.bg1, border:`1.5px solid ${T.border}`,
-        display:'flex', alignItems:'center', justifyContent:'center',
-      }}>
-        <svg viewBox="0 0 24 24" width={7} height={7} fill="none" stroke={T.text2} strokeWidth={3} strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="6 9 12 15 18 9"/>
-        </svg>
-      </div>
-    </button>
-  );
-}
-
-// ── Identity Widget (trigger + popover) ───────────────────────────────────────
-function IdentityWidget({ identity, name, shape, onChange }) {
-  const [open,setOpen]=useState(false);
-  const [pos,setPos]=useState({top:0,left:0});
-  const triggerRef=useRef(null);
-  const popoverRef=useRef(null);
-  const PICKER_W=312;
-
-  useEffect(()=>{
-    if(!open) return;
-    const fn=(e)=>{
-      if(triggerRef.current?.contains(e.target)) return;
-      if(popoverRef.current?.contains(e.target)) return;
-      setOpen(false);
-    };
-    document.addEventListener('mousedown',fn);
-    return()=>document.removeEventListener('mousedown',fn);
-  },[open]);
-
-  const handleOpen=()=>{
-    if(triggerRef.current){
-      const r=triggerRef.current.getBoundingClientRect();
-      let left=r.left;
-      if(left+PICKER_W>window.innerWidth-8) left=window.innerWidth-PICKER_W-8;
-      if(left<8) left=8;
-      setPos({top:r.bottom+8, left});
-    }
-    setOpen(o=>!o);
-  };
-
-  return (
-    <>
-      <div ref={triggerRef} style={{display:'inline-block'}}>
-        <IdentityTrigger identity={identity} name={name} shape={shape} open={open} onClick={handleOpen}/>
-      </div>
-      {open && ReactDOM.createPortal(
-        <div ref={popoverRef} style={{position:'fixed',top:pos.top,left:pos.left,zIndex:9999}}>
-          <IdentityPicker identity={identity} name={name} shape={shape} onChange={v=>onChange(v)}/>
-        </div>,
-        document.body
-      )}
-    </> 
-  );
-}
-
-// ── Mock field label ──────────────────────────────────────────────────────────
-const FL = ({children})=>(
-  <div style={{fontSize:11,fontWeight:600,letterSpacing:'.6px',color:T.text3,textTransform:'uppercase',marginBottom:6}}>
-    {children}
-  </div>
-);
-
-// ── Settings Panel ────────────────────────────────────────────────────────────
-function SettingsPanel({ identity, name, onChange }) {
-  return (
-    <div style={{
-      width:280, height:'100%', background:T.bg1,
-      borderLeft:`1px solid ${T.border}`,
-      display:'flex', flexDirection:'column', overflowY:'auto', flexShrink:0,
-    }}>
-      {/* Header */}
-      <div style={{
-        padding:'14px 16px', borderBottom:`1px solid ${T.border}`,
-        display:'flex', alignItems:'center', gap:10, flexShrink:0,
-      }}>
-        <Badge identity={identity} name={name} shape="square" size={24}/>
-        <span style={{fontSize:14,fontWeight:600,color:T.text1,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
-        <button style={{background:'none',border:'none',color:T.text3,padding:2}}>
-          <Icon id="edit" size={14} color={T.text3}/>
-        </button>
-      </div>
-
-      <div style={{padding:'16px',display:'flex',flexDirection:'column',gap:20}}>
-        {/* Identity field */}
-        <div>
-          <FL>Identity</FL>
-          <div style={{display:'flex',alignItems:'center',gap:10}}>
-            <IdentityWidget identity={identity} name={name} shape="square" onChange={onChange}/>
-          </div>
-        </div>
-
-        {/* Mock: Name */}
-        <div>
-          <FL>Name</FL>
-          <div style={{
-            padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,
-            borderRadius:6,fontSize:13,color:T.text2,
-          }}>{name}</div>
-        </div>
-
-        {/* Mock: Dates */}
-        <div>
-          <FL>Date range</FL>
-          <div style={{display:'flex',alignItems:'center',gap:8}}>
-            <div style={{flex:1,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text2}}>Dec 1, 2026</div>
-            <span style={{color:T.text3,fontSize:12}}>→</span>
-            <div style={{flex:1,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text2}}>Jan 15, 2027</div>
-          </div>
-        </div>
-
-        {/* Mock: Team */}
-        <div>
-          <FL>Team</FL>
-          <div style={{display:'flex',alignItems:'center',gap:8,padding:'7px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6}}>
-            <div style={{width:20,height:20,borderRadius:'50%',background:'#A855F7',display:'flex',alignItems:'center',justifyContent:'center'}}>
-              <span style={{fontSize:10,fontWeight:700,color:'#fff'}}>P</span>
-            </div>
-            <span style={{fontSize:13,color:T.text2}}>Product Marketing</span>
-          </div>
-        </div>
-
-        {/* Mock: Description */}
-        <div>
-          <FL>Description</FL>
-          <div style={{padding:'8px 10px',background:T.bg3,border:`1px solid ${T.border}`,borderRadius:6,fontSize:12,color:T.text3,minHeight:60}}>
-            Optional description…
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Sidebar ───────────────────────────────────────────────────────────────────
-const SB_TIMELINES = [
-  {name:'Q1 2027 Roadmap',  iconId:'zap',         colorId:'teal',   shape:'square'},
-  {name:'New Logo GTM',     active:true},
-  {name:'Q4 2026 Roadmap',  iconId:'trending-up', colorId:'orange', shape:'square'},
-  {name:'Project Pinky',    iconId:'heart',       colorId:'rose',   shape:'square'},
-];
-
-function Sidebar({ identity, name }) {
-  return (
-    <div style={{width:220,height:'100%',background:T.bg1,borderRight:`1px solid ${T.border}`,flexShrink:0,overflowY:'auto'}}>
-      {/* Logo */}
-      <div style={{padding:'14px 16px',borderBottom:`1px solid ${T.border}`,display:'flex',alignItems:'center',gap:8}}>
-        <div style={{width:24,height:24,borderRadius:5,background:T.accent,display:'flex',alignItems:'center',justifyContent:'center'}}>
-          <Icon id="layers" size={13} color="#fff" sw={2}/>
-        </div>
-        <span style={{fontSize:15,fontWeight:600,color:T.text1}}>draba</span>
-      </div>
-
-      <div style={{padding:'16px 12px 8px'}}>
-        {/* Team */}
-        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,paddingLeft:4}}>Team</div>
-        <div style={{display:'flex',alignItems:'center',gap:8,padding:'5px 8px',borderRadius:6,marginBottom:10}}>
-          <div style={{width:22,height:22,borderRadius:'50%',background:'#A855F7',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
-            <span style={{fontSize:11,fontWeight:700,color:'#fff'}}>P</span>
-          </div>
-          <span style={{fontSize:13,fontWeight:500,color:T.text1}}>Product Marketing</span>
-        </div>
-
-        {/* Members */}
-        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,paddingLeft:4}}>Members</div>
-        {[['LK','#22C55E','Lindsay K.'],['JD','#6366F1','John Doe'],['SM','#F97316','Sarah M.']].map(([ini,bg,n])=>(
-          <div key={n} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 8px',borderRadius:6}}>
-            <div style={{width:22,height:22,borderRadius:'50%',background:bg,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
-              <span style={{fontSize:10,fontWeight:700,color:'#fff'}}>{ini}</span>
-            </div>
-            <span style={{fontSize:13,color:T.text2}}>{n}</span>
-          </div>
-        ))}
-
-        {/* Timelines */}
-        <div style={{fontSize:10,fontWeight:600,letterSpacing:'.7px',color:T.text3,textTransform:'uppercase',marginBottom:6,marginTop:16,paddingLeft:4}}>Timeline</div>
-        {SB_TIMELINES.map(tl=>(
-          <div key={tl.name} style={{
-            display:'flex',alignItems:'center',gap:8,padding:'5px 8px',borderRadius:6,
-            background:tl.active?T.bg3:'transparent',
-          }}>
-            {tl.active
-              ? <Badge identity={identity} name={name} shape="square" size={22}/>
-              : <div style={{width:22,height:22,borderRadius:'5px',background:COLORS.find(c=>c.id===tl.colorId)?.hex||'#64748B',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
-                  <Icon id={tl.iconId} size={12} color="rgba(255,255,255,0.9)" sw={2}/>
-                </div>
-            }
-            <span style={{fontSize:13,fontWeight:tl.active?500:400,color:tl.active?T.text1:T.text2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{tl.name}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── App ───────────────────────────────────────────────────────────────────────
-function App() {
-  const [identity, setIdentity] = useState({ iconId:'zap', colorId:'violet' });
-  const name = 'New Logo GTM';
-
-  return (
-    <div style={{height:'100vh',display:'flex',background:T.bg0}}>
-      <Sidebar identity={identity} name={name}/>
-      {/* Main content placeholder */}
-      <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:12,opacity:.35}}>
-        <Icon id="bar-chart" size={48} color={T.text3} sw={1.25}/>
-        <span style={{fontSize:13,color:T.text3}}>Gantt view · New Logo GTM</span>
-      </div>
-      <SettingsPanel identity={identity} name={name} onChange={setIdentity}/>
-    </div>
-  );
-}
-
-ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
-</script>
-</body>
-</html>
 ````
 
 ## File: docs/design/handoffs/filter-dropdown-redesign/design_handoff_filter_dropdown/Filter Dropdown.html
@@ -10387,544 +11182,6 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </html>
 ````
 
-## File: docs/design/DESIGN_SYSTEM.md
-````markdown
-# Design System
-
-## Foundation
-- **Component library:** shadcn/ui (copy-paste — components live in `packages/web/src/components/ui/`)
-- **Styling:** Tailwind CSS v4
-- **Theming:** CSS custom properties (HSL channel values) in `packages/web/src/index.css`
-- **Dark mode:** class-based — `dark` class on `<html>` element
-
-shadcn stores colors as bare HSL channels (no `hsl()` wrapper), e.g. `--primary: 188 59% 38%`. Tailwind then references them as `hsl(var(--primary))`. All token values below follow this convention.
-
----
-
-## Logo
-
-All variants are in `docs/design/assets/logo/`.
-
-### Variants
-
-| File | Description |
-|------|-------------|
-| `icon-color.svg` | Full color — teal header, orange pegs, light gray body. Use on white/off-white only. |
-| `icon-black.svg` | Solid black icon, no background. |
-| `icon-orange.svg` | Solid orange (`#F17B2B`) icon, no background. |
-| `icon-teal.svg` | Solid teal (`#1A97A2`) icon, no background. |
-| `icon-white-on-black-circle.svg` | White icon on filled black circle. Works on any background. |
-| `icon-knockout-black-circle.svg` | Black-filled circle with icon knocked out (transparent). Page/background color shows through the icon shape. |
-| `icon-knockout-orange-circle.svg` | Orange-filled circle with icon knocked out. |
-| `icon-knockout-teal-circle.svg` | Teal-filled circle with icon knocked out. |
-
-### Usage by background
-
-| Background | Recommended variants |
-|------------|---------------------|
-| White / off-white | `icon-color`, `icon-black`, `icon-teal`, `icon-knockout-black-circle`, `icon-knockout-orange-circle`, `icon-knockout-teal-circle` |
-| Teal (`#288C9B`) | `icon-black`, `icon-orange`, `icon-knockout-black-circle`, `icon-knockout-orange-circle` |
-| Dark / charcoal | `icon-white-on-black-circle`, `icon-orange`, `icon-knockout-orange-circle`, `icon-knockout-teal-circle` |
-| Any | `icon-white-on-black-circle` |
-
-> Teal column confirmed 2026-04-29. Other columns are best-guess — verify during implementation.
-
----
-
-## Color Palette
-
-### Brand Colors (Source)
-
-| Name | Hex | HSL | Role |
-|------|-----|-----|------|
-| Teal | `#288C9B` | `188 59% 38%` | Primary — actions, active states, links |
-| Amber | `#F29E4C` | `30 87% 62%` | Secondary — highlights, energy, badges |
-| Charcoal | `#343A40` | `210 10% 23%` | Text, dark backgrounds |
-| Off-White | `#F8F9FA` | `210 17% 98%` | Page background, light surfaces |
-| Sky Blue | `#5BC0DE` | `194 67% 61%` | Accent — CTAs, hover highlights |
-
----
-
-## CSS Tokens
-
-Copy this into `packages/web/src/index.css` after `shadcn init`:
-
-```css
-@layer base {
-  :root {
-    --background:             210 17% 98%;   /* #F8F9FA — page background */
-    --foreground:             210 10% 23%;   /* #343A40 — default text */
-
-    --card:                   0 0% 100%;     /* white — card/panel surface */
-    --card-foreground:        210 10% 23%;
-
-    --popover:                0 0% 100%;
-    --popover-foreground:     210 10% 23%;
-
-    --primary:                188 59% 38%;   /* #288C9B — teal */
-    --primary-foreground:     0 0% 100%;     /* white text on teal */
-
-    --secondary:              30 87% 62%;    /* #F29E4C — amber */
-    --secondary-foreground:   210 10% 23%;   /* charcoal text on amber */
-
-    --muted:                  210 14% 93%;   /* light gray — subtle backgrounds */
-    --muted-foreground:       210 10% 45%;   /* mid-gray — captions, placeholders */
-
-    --accent:                 194 67% 61%;   /* #5BC0DE — sky blue */
-    --accent-foreground:      210 10% 23%;
-
-    --destructive:            0 72% 51%;     /* red — delete, errors */
-    --destructive-foreground: 0 0% 100%;
-
-    --success:                145 63% 42%;   /* green — confirmations */
-    --success-foreground:     0 0% 100%;
-
-    --warning:                38 92% 50%;    /* yellow-orange — caution */
-    --warning-foreground:     210 10% 23%;
-
-    --border:                 210 14% 89%;
-    --input:                  210 14% 89%;
-    --ring:                   188 59% 38%;   /* teal focus ring */
-
-    --radius: 0.5rem;
-  }
-
-  .dark {
-    --background:             210 15% 11%;   /* deep charcoal — page background */
-    --foreground:             210 17% 93%;   /* near-white — default text */
-
-    --card:                   210 15% 15%;   /* slightly lighter than background */
-    --card-foreground:        210 17% 93%;
-
-    --popover:                210 15% 15%;
-    --popover-foreground:     210 17% 93%;
-
-    --primary:                188 55% 52%;   /* teal — lightened to pop on dark */
-    --primary-foreground:     210 15% 10%;   /* very dark text on bright teal */
-
-    --secondary:              30 80% 60%;    /* amber — slightly muted in dark */
-    --secondary-foreground:   210 15% 10%;
-
-    --muted:                  210 15% 20%;
-    --muted-foreground:       210 15% 58%;
-
-    --accent:                 194 60% 55%;   /* sky blue — muted slightly for dark */
-    --accent-foreground:      210 15% 10%;
-
-    --destructive:            0 63% 45%;
-    --destructive-foreground: 0 0% 100%;
-
-    --success:                145 55% 40%;
-    --success-foreground:     0 0% 100%;
-
-    --warning:                38 85% 55%;
-    --warning-foreground:     210 15% 10%;
-
-    --border:                 210 15% 22%;
-    --input:                  210 15% 22%;
-    --ring:                   188 55% 52%;
-  }
-}
-```
-
----
-
-## Identity Color Palette (Phase 9.6+)
-
-Every major entity (Activity, Timeline, Team, Team Member) carries an **Identity** — a color + icon pair. Colors are stored as IDs (e.g. `"teal"`), not hex values. The `Badge` component resolves an ID to its hex for rendering.
-
-> Full spec: [`docs/design/IDENTITY_SYSTEM.md`](IDENTITY_SYSTEM.md).
-> Component API: `src/components/identity/`.
-
-16 colors, all ≥3:1 contrast ratio against both light and dark backgrounds with white text overlay:
-
-| ID | Name | Hex | Notes |
-|----|------|-----|-------|
-| `teal` | Teal | `#288C9B` | Brand primary |
-| `cyan` | Cyan | `#06B6D4` | |
-| `blue` | Blue | `#3B82F6` | |
-| `indigo` | Indigo | `#6366F1` | |
-| `violet` | Violet | `#8B5CF6` | |
-| `purple` | Purple | `#A855F7` | |
-| `pink` | Pink | `#EC4899` | |
-| `rose` | Rose | `#F43F5E` | |
-| `red` | Red | `#EF4444` | |
-| `orange` | Orange | `#F97316` | |
-| `amber` | Amber | `#F59E0B` | |
-| `yellow` | Yellow | `#EAB308` | |
-| `lime` | Lime | `#84CC16` | |
-| `green` | Green | `#22C55E` | |
-| `slate` | Slate | `#64748B` | Neutral cool |
-| `stone` | Stone | `#78716C` | Neutral warm |
-
----
-
-## Typography
-
-### Font Family
-**Open Sans** — humanist sans-serif; clean, readable, professional.
-
-```css
-/* packages/web/src/index.css */
-/* Option A: Self-hosted (recommended for self-hosted product — no Google dependency) */
-/* Download from fonts.google.com and place in packages/web/public/fonts/ */
-@font-face {
-  font-family: 'Open Sans';
-  src: url('/fonts/OpenSans-Regular.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-/* Repeat for weights 300, 600, 700 */
-
-/* Option B: Google Fonts CDN (simpler, requires internet) */
-@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap');
-
-/* Apply via Tailwind config */
---font-sans: 'Open Sans', ui-sans-serif, system-ui, sans-serif;
-```
-
-> Recommendation: self-host the font. draba is a self-hosted product — loading a Google font defeats the point for privacy-conscious users.
-
-### Weights in Use
-| Weight | Class | Use |
-|--------|-------|-----|
-| 300 Light | `font-light` | Subtle labels, secondary captions |
-| 400 Regular | `font-normal` | Body text, descriptions, form inputs |
-| 600 SemiBold | `font-semibold` | Headings, important labels, nav items |
-| 700 Bold | `font-bold` | Page titles, primary headings, emphasis |
-
-### Type Scale
-| Use | Tailwind | Size | Weight |
-|-----|----------|------|--------|
-| Page heading | `text-2xl font-bold` | 24px | 700 |
-| Section heading | `text-lg font-semibold` | 18px | 600 |
-| Card / panel title | `text-base font-semibold` | 16px | 600 |
-| Body text | `text-sm font-normal` | 14px | 400 |
-| Caption / metadata | `text-xs font-normal` | 12px | 400 |
-| Tag / badge label | `text-xs font-semibold` | 12px | 600 |
-| Timeline block label | `text-xs font-semibold` | 12px | 600 |
-
-### Color on Typography
-- Default body text: `text-foreground` (charcoal / off-white in dark mode)
-- Secondary / metadata: `text-muted-foreground`
-- Links and interactive: `text-primary` (teal)
-- Destructive / error: `text-destructive`
-- Headings: `text-foreground` — rely on weight and size, not color, for hierarchy
-
----
-
-## Spacing
-
-Tailwind's 4px base grid throughout.
-
-| Context | Tailwind | px |
-|---------|----------|-----|
-| Tight inline gaps (icon + label) | `gap-1.5` | 6px |
-| Component internal padding (compact) | `p-2` | 8px |
-| Component internal padding (standard) | `p-3` or `p-4` | 12–16px |
-| Between related elements | `gap-3` | 12px |
-| Between sections | `gap-6` | 24px |
-| Page-level horizontal margins | `px-6` | 24px |
-| Page-level vertical padding | `py-8` | 32px |
-| Timeline lane height | TBD during implementation | — |
-| Event block vertical padding | TBD during implementation | — |
-
----
-
-## Border Radius
-
-Base `--radius: 0.5rem` (8px). shadcn derives sm/md/lg/xl from this.
-
-| Element | Class | Notes |
-|---------|-------|-------|
-| Buttons, inputs | `rounded-md` (6px) | shadcn default |
-| Cards, panels, dialogs | `rounded-lg` (8px) | shadcn default |
-| Event blocks on timeline | `rounded-md` | Pill-ish but not fully rounded |
-| Kanban cards | `rounded-md` | |
-| Badges, tags | `rounded-full` | Fully rounded for compact labels |
-| Avatars | `rounded-full` | |
-
----
-
-## Shadows
-
-Keep shadows subtle — the UI should feel clean and flat, not heavily layered.
-
-| Use | Class |
-|-----|-------|
-| Cards, panels | `shadow-sm` |
-| Popovers, dropdowns | `shadow-md` |
-| Modals / dialogs | `shadow-lg` |
-| Timeline blocks | `shadow-sm` |
-| No elevation | `shadow-none` |
-
----
-
-## Icons
-
-- **Library:** `lucide-react` (shadcn's default peer dependency — already installed)
-- **Sizes:** `size-4` (16px) inline with text; `size-5` (20px) standalone/buttons; `size-6` (24px) feature/section icons
-- **Color:** inherit from text color by default (`currentColor`)
-- **Event block icons:** emoji or Lucide subset — TBD during event detail implementation
-- **Stroke width:** Lucide default (1.5) — do not override unless a specific component calls for it
-
----
-
-## Dark Mode
-
-- Supported from day one via shadcn's class-based system
-- Toggle stored in `localStorage`; respects `prefers-color-scheme` on first visit
-- Implementation: `next-themes` or a simple custom hook — TBD during web scaffold
-- All semantic tokens have dark overrides in `index.css` (defined above)
-- Member colors are fixed hex values — test contrast on both `--background` values before finalizing
-
----
-
-## shadcn Components
-
-Install via:
-```bash
-pnpm dlx shadcn@latest add <component>
-```
-
-| Component | Used for | Status |
-|-----------|---------|--------|
-| button | Actions, CTAs | — |
-| input | Form fields | — |
-| dialog | Confirmations, destructive warnings | — |
-| sheet | Event detail slide-in panel | — |
-| popover | Date pickers, color pickers, tooltips | — |
-| calendar | Date range picker in event detail | — |
-| select | Status dropdown, view switcher | — |
-| badge | Tags on event cards and blocks | — |
-| avatar | Team member display | — |
-| tooltip | Block hover info, truncated labels | — |
-| sonner | Toast notifications (replaces toast) | — |
-| dropdown-menu | Context menus, action menus | — |
-| separator | Visual dividers | — |
-| skeleton | Loading placeholders | — |
-| switch | Toggle settings (dark mode, visibility) | — |
-| tabs | Settings pages, secondary navigation | — |
-
-> Mark status as **added** when installed. Add new rows as new components are needed.
-
----
-
-## Custom Components (Not from shadcn)
-
-Built from scratch with Tailwind — no shadcn equivalent:
-
-| Component | Notes |
-|-----------|-------|
-| `TimelineGrid` | Core horizontal timeline canvas; handles pan and zoom |
-| `TimelineBlock` | Individual event block; drag to move/resize |
-| `TimelineLane` | Person row in the timeline |
-| `KanbanBoard` | Status columns + event card layout |
-| `KanbanCard` | Event card in Kanban view; color = member color |
-| `CalendarGrid` | Weekly/daily/monthly calendar layout |
-| `MemberColorDot` | Small circular color indicator for assignees |
-| `ViewSwitcher` | Timeline / Calendar / List / Kanban toggle |
-| `ConnectionStatusDot` | WebSocket live connection indicator |
-````
-
-## File: docs/design/IDENTITY_SYSTEM.md
-````markdown
-# Identity System
-
-An **Identity** is a visual fingerprint — a color + icon pair — assigned to any major entity in draba. It provides instant visual recognition across every surface (sidebar, Gantt bars, settings panels, modals, shares).
-
-> Design prototype: `docs/design/assets/identity-widget-prototype.html` (open in any browser).
-> Full handoff spec: `docs/design/assets/IDENTITY_WIDGET_HANDOFF.md`.
-
----
-
-## Data Model
-
-```ts
-interface Identity {
-  iconId:  string;   // Lucide icon id, or a special name/none id (see below)
-  colorId: string;   // one of the 16 identity color ids
-}
-
-// Special iconId values:
-// '__name_1__'     → first letter of name (e.g. "N")
-// '__name_2__'     → first two letters (e.g. "NE")
-// '__name_words__' → first letter of each word (e.g. "NL" for "New Logo")
-// '__none__'       → empty badge (color only, no content)
-```
-
-### Who gets an Identity
-
-| Entity | Shape | Default iconId | Default colorId |
-|--------|-------|---------------|-----------------|
-| Activity | square | `'__none__'` | `'teal'` |
-| Timeline | square | `'__none__'` | `'teal'` |
-| Team | square | `'__name_2__'` | `'teal'` |
-| Team Member | circle | `'__name_words__'` | auto-assigned from palette |
-
----
-
-## Color Palette (16 colors)
-
-Replaces the previous 8-color `MEMBER_COLORS` and `ACTIVITY_COLORS` arrays with a single unified palette used by all entities.
-
-| ID | Name | Hex | Notes |
-|----|------|-----|-------|
-| `teal` | Teal | `#288C9B` | Brand primary |
-| `cyan` | Cyan | `#06B6D4` | |
-| `blue` | Blue | `#3B82F6` | |
-| `indigo` | Indigo | `#6366F1` | |
-| `violet` | Violet | `#8B5CF6` | |
-| `purple` | Purple | `#A855F7` | |
-| `pink` | Pink | `#EC4899` | |
-| `rose` | Rose | `#F43F5E` | |
-| `red` | Red | `#EF4444` | |
-| `orange` | Orange | `#F97316` | |
-| `amber` | Amber | `#F59E0B` | |
-| `yellow` | Yellow | `#EAB308` | |
-| `lime` | Lime | `#84CC16` | |
-| `green` | Green | `#22C55E` | |
-| `slate` | Slate | `#64748B` | Neutral cool |
-| `stone` | Stone | `#78716C` | Neutral warm |
-
-All 16 colors maintain ≥3:1 contrast ratio against both light and dark backgrounds with white text overlay.
-
-### Migration from legacy palettes
-
-The old 8-color palettes (`MEMBER_COLORS`, `ACTIVITY_COLORS`) stored raw hex values. The new system stores **color IDs** (e.g. `"teal"`, `"violet"`). A mapping function converts legacy hex values to the nearest identity color ID for existing data.
-
-| Legacy hex | → Identity color ID |
-|-----------|-------------------|
-| `#288C9B` | `teal` |
-| `#F29E4C` | `amber` |
-| `#5BC0DE` | `cyan` |
-| `#2ECC71` | `green` |
-| `#9B59B6` | `violet` |
-| `#E74C3C` | `rose` |
-| `#5C6BC0` | `indigo` |
-| `#8BC34A` | `lime` |
-
----
-
-## Icon Library
-
-64 hand-picked Lucide icons that cover common project/team concepts. Rendered via `lucide-react` (already installed).
-
-```
-activity, archive, award, bar-chart, bell, bookmark, briefcase, calendar,
-check-circle, clipboard, clock, cloud, code, coffee, compass, cpu, database,
-download, edit, eye, file-text, filter, flag, folder, git-branch, globe, grid,
-heart, help-circle, home, info, layers, link, list, lock, mail, map,
-message-circle, moon, package, pencil, phone, pie-chart, plug, refresh-cw,
-search, server, settings, share, shield, star, sun, tag, target, terminal,
-trash, trending-up, upload, user, users, wifi, zap
-```
-
----
-
-## Component Architecture
-
-Four components, layered from display-only to fully interactive:
-
-### `<Badge>` — read-only display
-
-Shows an entity's identity anywhere it appears. No interactivity.
-
-```tsx
-<Badge identity={identity} name={name} shape="circle" size={22} />
-```
-
-| Prop | Type | Notes |
-|------|------|-------|
-| `identity` | `Identity` | The color + icon to display |
-| `name` | `string` | Used to derive initials for name-based icons |
-| `shape` | `'square' \| 'circle'` | Circle for members, square for everything else |
-| `size` | `number` | px — typically 22–40px |
-
-**Rendering rules:**
-- Border radius: circle → `50%`, square → `size * 0.26` px
-- Name-based icon: bold white initials, font size scales with badge size
-- Lucide icon: `size * 0.54` px, white, stroke-width 2
-- `__none__`: color only, no content
-
-### `<IdentityTrigger>` — clickable badge
-
-A `<Badge>` wrapped in a button with a chevron pip indicator.
-
-- Fixed 28×28 badge
-- 13×13 chevron pip at bottom-right
-- Hover/open: colored outline ring + brightness boost
-
-### `<IdentityPicker>` — popover panel
-
-The picker rendered inside a popover. Three sections:
-
-1. **Color grid** — 16 colors in an 8×2 grid; selected color shows checkmark + ring
-2. **Name options** — None / 1 letter / 2 letters / 1+1 words; mini badge preview per option
-3. **Icon grid** — 64 Lucide icons in an 8×8 grid; selected icon highlighted with identity color
-
-All changes fire `onChange(newIdentity)` immediately — no save/cancel flow.
-
-### `<IdentityWidget>` — composed component
-
-Wraps `<IdentityTrigger>` + `<IdentityPicker>` in a popover with positioning logic. This is what form UIs render.
-
-```tsx
-<IdentityWidget
-  identity={activity.identity}
-  name={activity.title}
-  shape="square"
-  onChange={handleIdentityChange}
-/>
-```
-
----
-
-## Where components appear
-
-### Badge (read-only)
-
-| Surface | Size | Shape |
-|---------|------|-------|
-| Sidebar timeline rows | 22px | square |
-| Sidebar member rows | 22px | circle |
-| Gantt bar label column | 20px | square |
-| Activity detail panel header | 24px | square |
-| Modal headers | 40px | varies |
-
-### IdentityWidget (editable)
-
-| Surface | Context |
-|---------|---------|
-| ActivityDetailPanel | Replaces the current icon stub + color picker |
-| Settings — Members tab | Member identity editing (Phase 10.1) |
-| Settings — General tab | Team identity editing (Phase 10.1) |
-| Timeline create/edit | Timeline identity editing (Phase 10.3) |
-
----
-
-## Schema Changes
-
-### Activities — already have `icon` and `color` columns
-No migration needed. The `icon` column stores the `iconId`; the `color` column currently stores hex but will store `colorId` after migration.
-
-### Team Members — have `color`, need `icon`
-- Add `icon TEXT` column to `team_members` (nullable, default NULL)
-
-### Teams — need both `color` and `icon`
-- Add `color TEXT` column to `teams` (nullable, default NULL)
-- Add `icon TEXT` column to `teams` (nullable, default NULL)
-
-### Timelines — need both `color` and `icon`
-- Add `color TEXT` column to `timelines` (nullable, default NULL)
-- Add `icon TEXT` column to `timelines` (nullable, default NULL)
-
-### Data migration
-- Convert existing `activities.color` hex values → color IDs using the mapping table
-- Convert existing `team_members.color` hex values → color IDs using the mapping table
-````
-
 ## File: docs/ARCHITECTURE.md
 ````markdown
 # Architecture
@@ -11940,39 +12197,6 @@ type PatchStatusTemplateItemJSONBody struct {
 }
 ````
 
-## File: packages/api/internal/db/migrations/006_identity_fields.sql
-````sql
--- Add identity (color + icon) columns to teams, timelines, and team_members.
--- Also converts existing legacy hex color values in activities and team_members
--- to their corresponding identity color IDs so all color values are uniform.
-
-ALTER TABLE team_members ADD COLUMN icon  TEXT;
-ALTER TABLE teams        ADD COLUMN color TEXT;
-ALTER TABLE teams        ADD COLUMN icon  TEXT;
-ALTER TABLE timelines    ADD COLUMN color TEXT;
-ALTER TABLE timelines    ADD COLUMN icon  TEXT;
-
--- Convert activities.color from legacy hex to identity color ID.
-UPDATE activities SET color = 'teal'   WHERE color = '#288C9B';
-UPDATE activities SET color = 'amber'  WHERE color = '#F29E4C';
-UPDATE activities SET color = 'cyan'   WHERE color = '#5BC0DE';
-UPDATE activities SET color = 'green'  WHERE color = '#2ECC71';
-UPDATE activities SET color = 'violet' WHERE color = '#9B59B6';
-UPDATE activities SET color = 'rose'   WHERE color = '#E74C3C';
-UPDATE activities SET color = 'indigo' WHERE color = '#5C6BC0';
-UPDATE activities SET color = 'lime'   WHERE color = '#8BC34A';
-
--- Convert team_members.color from legacy hex to identity color ID.
-UPDATE team_members SET color = 'teal'   WHERE color = '#288C9B';
-UPDATE team_members SET color = 'amber'  WHERE color = '#F29E4C';
-UPDATE team_members SET color = 'cyan'   WHERE color = '#5BC0DE';
-UPDATE team_members SET color = 'green'  WHERE color = '#2ECC71';
-UPDATE team_members SET color = 'violet' WHERE color = '#9B59B6';
-UPDATE team_members SET color = 'rose'   WHERE color = '#E74C3C';
-UPDATE team_members SET color = 'indigo' WHERE color = '#5C6BC0';
-UPDATE team_members SET color = 'lime'   WHERE color = '#8BC34A';
-````
-
 ## File: packages/api/internal/db/migrations/007_hex_colors.sql
 ````sql
 -- Convert identity color IDs (stored by migration 006) back to hex values.
@@ -12957,6 +13181,60 @@ See `docs/SAMPLE_DATA.md` for the full dataset specification and identity rules.
 All user passwords: `password`
 ````
 
+## File: packages/api/Dockerfile
+````
+# ── Web builder ──
+FROM node:22-alpine AS web-builder
+RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /workspace
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/web/package.json packages/web/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install --frozen-lockfile
+COPY packages/web packages/web
+COPY packages/shared packages/shared
+RUN pnpm --filter @draba/web build
+
+# ── Go dependency cache ──
+FROM golang:1.25-alpine AS go-deps
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+
+# ── Production builder — embeds web dist into the Go binary ──
+FROM go-deps AS builder
+COPY packages/api/ .
+COPY --from=web-builder /workspace/packages/web/dist ./ui/static
+RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
+
+# ── Dev stage (used by docker-compose for hot reload) ──
+# Source is provided by the docker-compose volume mount, not baked in here —
+# baking it in caused Air to see a spurious "change" on first mount and restart.
+FROM golang:1.25-alpine AS dev
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+RUN go install github.com/air-verse/air@latest
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+CMD ["air", "-c", ".air.toml"]
+
+# ── Production stage ──
+FROM alpine:3.21 AS prod
+RUN apk add --no-cache ca-certificates musl-locales \
+    && addgroup -g 1000 draba \
+    && adduser -u 1000 -G draba -s /bin/sh -D draba \
+    && mkdir -p /data \
+    && chown draba:draba /data
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+COPY --from=builder /draba /usr/local/bin/draba
+WORKDIR /data
+USER draba
+EXPOSE 8080
+CMD ["draba"]
+````
+
 ## File: packages/api/go.mod
 ````
 module github.com/I0-1O/draba/packages/api
@@ -13036,6 +13314,599 @@ describe('filterOpenActivities', () => {
     expect(result).toHaveLength(0)
   })
 })
+````
+
+## File: packages/web/src/components/identity/Badge.tsx
+````typescript
+/**
+ * Badge — read-only identity display component.
+ *
+ * Renders an entity's color + icon. The hex color becomes the background;
+ * icon controls the content:
+ *   - Lucide icon name (kebab-case) → the corresponding icon
+ *   - '__name_1__' / '__name_2__' / '__name_words__' → text initials from name
+ *   - '__none__' or absent → color-only, no content
+ */
+
+import * as LucideIcons from 'lucide-react';
+import type { Identity } from './identity-constants';
+import { resolveColorHex, iconIdToPascal, getNameText } from './identity-constants';
+
+interface Props {
+  identity: Identity;
+  /** Entity name — used to derive initials for name-based icons. */
+  name: string;
+  shape?: 'square' | 'circle';
+  /** Size in px. Typically 20–40. */
+  size?: number;
+  className?: string;
+}
+
+export function Badge({ identity, name, shape = 'square', size = 24, className }: Props) {
+  const bg = resolveColorHex(identity.color);
+  const radius = shape === 'circle' ? '50%' : `${Math.round(size * 0.26)}px`;
+  const { icon } = identity;
+
+  let content: React.ReactNode = null;
+
+  if (icon && icon !== '__none__') {
+    const nameText = getNameText(icon, name);
+    if (nameText) {
+      const chars = nameText.length;
+      // Scale font down when there are 3 characters.
+      const fontSize = chars >= 3 ? Math.round(size * 0.29) : Math.round(size * 0.38);
+      content = (
+        <span style={{ fontSize, fontWeight: 700, lineHeight: 1, color: 'white', userSelect: 'none', fontFamily: 'var(--font-sans)' }}>
+          {nameText}
+        </span>
+      );
+    } else {
+      const pascalName = iconIdToPascal(icon) as keyof typeof LucideIcons;
+      const IconComponent = LucideIcons[pascalName] as React.ComponentType<{ size: number; color: string; strokeWidth: number }> | undefined;
+      if (IconComponent) {
+        content = <IconComponent size={Math.round(size * 0.54)} color="white" strokeWidth={2} />;
+      }
+    }
+  }
+
+  return (
+    <div
+      className={className}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: radius,
+        background: bg,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+        userSelect: 'none',
+      }}
+    >
+      {content}
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/identity/identity-constants.ts
+````typescript
+/**
+ * Identity system constants — the single source of truth for the 16-color palette,
+ * 64-icon library, and color resolution helpers.
+ *
+ * Colors are stored as hex values (e.g. '#288C9B') in the DB and throughout the
+ * system. The palette names are UI-only — swapping a palette color never requires
+ * a DB migration, only a change here.
+ */
+
+/** A color + icon pair that visually identifies an entity. */
+export interface Identity {
+  /** Hex color string, e.g. '#288C9B'. */
+  color: string;
+  /**
+   * Lucide icon id (kebab-case), OR one of the special name tokens:
+   *   '__name_1__'     → first letter of entity name
+   *   '__name_2__'     → first two letters
+   *   '__name_words__' → first letter of each word
+   *   '__none__'       → color only, no content
+   */
+  icon: string;
+}
+
+export interface IdentityColor {
+  id: string;
+  name: string;
+  hex: string;
+}
+
+/** 16-color unified palette. All colors have ≥3:1 contrast against white. */
+export const IDENTITY_COLORS: IdentityColor[] = [
+  { id: 'teal',   name: 'Teal',   hex: '#288C9B' },
+  { id: 'cyan',   name: 'Cyan',   hex: '#06B6D4' },
+  { id: 'blue',   name: 'Blue',   hex: '#3B82F6' },
+  { id: 'indigo', name: 'Indigo', hex: '#6366F1' },
+  { id: 'violet', name: 'Violet', hex: '#8B5CF6' },
+  { id: 'purple', name: 'Purple', hex: '#A855F7' },
+  { id: 'pink',   name: 'Pink',   hex: '#EC4899' },
+  { id: 'rose',   name: 'Rose',   hex: '#F43F5E' },
+  { id: 'red',    name: 'Red',    hex: '#EF4444' },
+  { id: 'orange', name: 'Orange', hex: '#F97316' },
+  { id: 'amber',  name: 'Amber',  hex: '#F59E0B' },
+  { id: 'yellow', name: 'Yellow', hex: '#EAB308' },
+  { id: 'lime',   name: 'Lime',   hex: '#84CC16' },
+  { id: 'green',  name: 'Green',  hex: '#22C55E' },
+  { id: 'slate',  name: 'Slate',  hex: '#64748B' },
+  { id: 'stone',  name: 'Stone',  hex: '#78716C' },
+];
+
+/** 64 Lucide icon IDs available in the identity picker. */
+export const IDENTITY_ICONS: string[] = [
+  'activity',    'archive',      'award',       'bar-chart',
+  'bell',        'bookmark',     'briefcase',   'calendar',
+  'check-circle','clipboard',    'clock',       'cloud',
+  'code',        'coffee',       'compass',     'cpu',
+  'database',    'download',     'edit',        'eye',
+  'file-text',   'filter',       'flag',        'folder',
+  'git-branch',  'globe',        'grid',        'heart',
+  'help-circle', 'home',         'info',        'layers',
+  'link',        'list',         'lock',        'mail',
+  'map',         'message-circle','moon',       'package',
+  'pencil',      'phone',        'pie-chart',   'plug',
+  'refresh-cw',  'search',       'server',      'settings',
+  'share',       'shield',       'star',        'sun',
+  'tag',         'target',       'terminal',    'trash',
+  'trending-up', 'upload',       'user',        'users',
+  'wifi',        'zap',          'alert-circle','copy',
+];
+
+/** Special icon IDs that render name-derived text instead of a Lucide icon. */
+export const SPECIAL_ICON_IDS = ['__none__', '__name_1__', '__name_2__', '__name_words__'] as const;
+export type SpecialIconId = typeof SPECIAL_ICON_IDS[number];
+
+// ── Default identities per entity type ────────────────────────────────────────
+
+export const DEFAULT_ACTIVITY_IDENTITY: Identity  = { color: '#288C9B', icon: '__none__' };
+export const DEFAULT_TIMELINE_IDENTITY: Identity  = { color: '#288C9B', icon: '__none__' };
+export const DEFAULT_TEAM_IDENTITY: Identity      = { color: '#288C9B', icon: '__name_2__' };
+export const DEFAULT_MEMBER_IDENTITY: Identity    = { color: '#288C9B', icon: '__name_words__' };
+
+// ── Color resolution ──────────────────────────────────────────────────────────
+
+/** Palette name → hex lookup for resolving legacy colorId strings. */
+const COLOR_BY_ID: Record<string, string> = Object.fromEntries(
+  IDENTITY_COLORS.map(c => [c.id, c.hex]),
+);
+
+/**
+ * Resolves a color value to a hex string safe to use as CSS background-color.
+ * Accepts hex values (pass-through), palette name IDs (backward compat for
+ * any rows written before migration 007), and null/undefined (falls back to teal).
+ */
+export function resolveColorHex(colorOrId: string | null | undefined): string {
+  const fallback = '#288C9B';
+  if (!colorOrId) return fallback;
+  if (colorOrId.startsWith('#')) return colorOrId;
+  return COLOR_BY_ID[colorOrId] ?? fallback;
+}
+
+// ── Icon name helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Converts a kebab-case Lucide icon ID to the PascalCase component name used
+ * by lucide-react (e.g. "bar-chart" → "BarChart").
+ */
+export function iconIdToPascal(iconId: string): string {
+  return iconId
+    .split('-')
+    .map(s => s.charAt(0).toUpperCase() + s.slice(1))
+    .join('');
+}
+
+/**
+ * Derives the text content that should appear inside a name-based badge.
+ * Returns an empty string for Lucide icons or '__none__'.
+ */
+export function getNameText(icon: string, name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (icon === '__name_1__') return (words[0]?.[0] ?? '').toUpperCase();
+  if (icon === '__name_2__') return name.slice(0, 2).toUpperCase();
+  if (icon === '__name_words__') {
+    return words.map(w => w[0]).join('').toUpperCase().slice(0, 3);
+  }
+  return '';
+}
+
+// ── ACTIVITY_COLORS / MEMBER_COLORS re-exports ────────────────────────────────
+
+/** Activity color palette as hex strings, in IDENTITY_COLORS order. */
+export const ACTIVITY_COLORS: string[] = IDENTITY_COLORS.map(c => c.hex);
+
+/** Member color palette as hex strings, in IDENTITY_COLORS order. */
+export const MEMBER_COLORS: string[] = IDENTITY_COLORS.map(c => c.hex);
+````
+
+## File: packages/web/src/components/identity/IdentityPicker.tsx
+````typescript
+/**
+ * IdentityPicker — popover content panel with three sections.
+ *
+ * Section 1: Color grid — 16 colors in an 8×2 grid.
+ * Section 2: Name options — None / 1 letter / 2 letters / 1+1 words (mini badge previews).
+ * Section 3: Icon grid — 64 Lucide icons in an 8×8 grid.
+ *
+ * All changes fire onChange immediately — no save/cancel.
+ * onChange receives hex color values (e.g. '#288C9B'), not palette name IDs.
+ */
+
+import * as LucideIcons from 'lucide-react';
+import { Check } from 'lucide-react';
+import { Badge } from './Badge';
+import type { Identity } from './identity-constants';
+import {
+  IDENTITY_COLORS,
+  IDENTITY_ICONS,
+  iconIdToPascal,
+} from './identity-constants';
+
+interface Props {
+  identity: Identity;
+  name: string;
+  shape?: 'square' | 'circle';
+  onChange: (next: Identity) => void;
+}
+
+const NAME_OPTIONS = [
+  { icon: '__none__',       label: 'None' },
+  { icon: '__name_1__',     label: '1 letter' },
+  { icon: '__name_2__',     label: '2 letters' },
+  { icon: '__name_words__', label: '1+1 words' },
+] as const;
+
+const SEC_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.08em',
+  marginBottom: 8,
+};
+
+export function IdentityPicker({ identity, name, shape = 'square', onChange }: Props) {
+  const isNameOption = NAME_OPTIONS.some(o => o.icon === identity.icon);
+  const isIconOption = !isNameOption && identity.icon !== '__none__';
+
+  function setColor(hex: string) {
+    onChange({ ...identity, color: hex });
+  }
+
+  function setIcon(icon: string) {
+    onChange({ ...identity, icon });
+  }
+
+  return (
+    <div
+      style={{
+        padding: 14,
+        width: 240,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+        background: 'var(--popover)',
+        color: 'var(--popover-foreground)',
+      }}
+    >
+      {/* ── Section 1: Color grid ── */}
+      <div>
+        <div style={SEC_LABEL}>Color</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 4 }}>
+          {IDENTITY_COLORS.map(c => {
+            const selected = identity.color === c.hex;
+            return (
+              <button
+                key={c.id}
+                type="button"
+                title={c.name}
+                onClick={() => setColor(c.hex)}
+                style={{
+                  width: 22,
+                  height: 22,
+                  borderRadius: 4,
+                  background: c.hex,
+                  border: selected ? `2px solid var(--foreground)` : '2px solid transparent',
+                  cursor: 'pointer',
+                  padding: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'transform 0.1s',
+                  position: 'relative',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.transform = 'scale(1.15)')}
+                onMouseLeave={e => (e.currentTarget.style.transform = '')}
+              >
+                {selected && <Check size={12} color="white" strokeWidth={3} />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Section 2: Name options ── */}
+      <div>
+        <div style={SEC_LABEL}>Label</div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {NAME_OPTIONS.map(opt => {
+            const selected = identity.icon === opt.icon;
+            const accentHex = identity.color;
+            return (
+              <button
+                key={opt.icon}
+                type="button"
+                title={opt.label}
+                onClick={() => setIcon(opt.icon)}
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: 4,
+                  padding: '6px 4px',
+                  borderRadius: 6,
+                  border: selected ? `1.5px solid ${accentHex}` : '1.5px solid var(--border)',
+                  background: selected ? `${accentHex}18` : 'var(--background)',
+                  cursor: 'pointer',
+                  transition: 'border-color 0.1s, background 0.1s',
+                }}
+              >
+                <Badge
+                  identity={{ color: identity.color, icon: opt.icon }}
+                  name={name}
+                  shape={shape}
+                  size={20}
+                />
+                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', fontFamily: 'var(--font-sans)' }}>
+                  {opt.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Section 3: Icon grid ── */}
+      <div>
+        <div style={SEC_LABEL}>Icon</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 3 }}>
+          {IDENTITY_ICONS.map((iconId, i) => {
+            const pascalName = iconIdToPascal(iconId) as keyof typeof LucideIcons;
+            const IconComponent = LucideIcons[pascalName] as React.ComponentType<{ size: number; strokeWidth: number }> | undefined;
+            if (!IconComponent) return null;
+
+            const selected = identity.icon === iconId && isIconOption;
+            const accentHex = identity.color;
+            return (
+              <button
+                key={`${iconId}-${i}`}
+                type="button"
+                title={iconId}
+                onClick={() => setIcon(iconId)}
+                style={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: 4,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  border: 'none',
+                  background: selected ? accentHex : 'transparent',
+                  color: selected ? 'white' : 'var(--muted-foreground)',
+                  cursor: 'pointer',
+                  transition: 'background 0.1s, color 0.1s',
+                }}
+                onMouseEnter={e => {
+                  if (!selected) {
+                    e.currentTarget.style.background = 'var(--muted)';
+                    e.currentTarget.style.color = 'var(--foreground)';
+                  }
+                }}
+                onMouseLeave={e => {
+                  if (!selected) {
+                    e.currentTarget.style.background = 'transparent';
+                    e.currentTarget.style.color = 'var(--muted-foreground)';
+                  }
+                }}
+              >
+                <IconComponent size={13} strokeWidth={1.8} />
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/identity/IdentityTrigger.tsx
+````typescript
+/**
+ * IdentityTrigger — a clickable identity badge with a chevron pip.
+ *
+ * Fixed 28×28 badge with a small chevron indicator at the bottom-right.
+ * Shows a colored ring on hover and when the picker is open.
+ */
+
+import { ChevronDown } from 'lucide-react';
+import { Badge } from './Badge';
+import type { Identity } from './identity-constants';
+
+interface Props {
+  identity: Identity;
+  name: string;
+  shape?: 'square' | 'circle';
+  open?: boolean;
+  onClick?: () => void;
+}
+
+export function IdentityTrigger({ identity, name, shape = 'square', open = false, onClick }: Props) {
+  const accentColor = identity.color;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title="Change color and icon"
+      style={{
+        position: 'relative',
+        background: 'none',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: shape === 'circle' ? '50%' : 6,
+        outline: open ? `2px solid ${accentColor}` : 'none',
+        outlineOffset: 2,
+        transition: 'outline 0.1s',
+        flexShrink: 0,
+      }}
+      onMouseEnter={e => { if (!open) e.currentTarget.style.outline = `2px solid ${accentColor}`; e.currentTarget.style.outlineOffset = '2px'; }}
+      onMouseLeave={e => { if (!open) e.currentTarget.style.outline = 'none'; }}
+    >
+      <Badge identity={identity} name={name} shape={shape} size={28} />
+      {/* Chevron pip — bottom-right corner */}
+      <div
+        style={{
+          position: 'absolute',
+          bottom: -2,
+          right: -2,
+          width: 13,
+          height: 13,
+          borderRadius: '50%',
+          background: 'var(--card)',
+          border: '1px solid var(--border)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          pointerEvents: 'none',
+        }}
+      >
+        <ChevronDown size={8} strokeWidth={2.5} color="var(--muted-foreground)" />
+      </div>
+    </button>
+  );
+}
+````
+
+## File: packages/web/src/components/identity/IdentityWidget.tsx
+````typescript
+/**
+ * IdentityWidget — composed trigger + popover for editing an entity's identity.
+ *
+ * Renders an IdentityTrigger; clicking it opens an IdentityPicker in a portal-
+ * positioned popover. All changes fire onChange immediately (no save/cancel).
+ * Click-outside closes the picker.
+ */
+
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
+import { IdentityTrigger } from './IdentityTrigger';
+import { IdentityPicker } from './IdentityPicker';
+import type { Identity } from './identity-constants';
+
+interface Props {
+  identity: Identity;
+  name: string;
+  shape?: 'square' | 'circle';
+  onChange: (next: Identity) => void;
+}
+
+export function IdentityWidget({ identity, name, shape = 'square', onChange }: Props) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const [pickerStyle, setPickerStyle] = useState<React.CSSProperties>({});
+
+  const positionPicker = useCallback(() => {
+    if (!triggerRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    const pickerW = 240;
+    const pickerH = 320;
+    const gap = 6;
+
+    // Prefer opening below the trigger; flip up if it would clip the viewport bottom.
+    let top = rect.bottom + gap + window.scrollY;
+    let left = rect.left + window.scrollX;
+
+    if (top + pickerH > window.innerHeight + window.scrollY) {
+      top = rect.top - pickerH - gap + window.scrollY;
+    }
+    if (left + pickerW > window.innerWidth) {
+      left = window.innerWidth - pickerW - 8;
+    }
+
+    setPickerStyle({ position: 'fixed', top: top - window.scrollY, left });
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    positionPicker();
+    window.addEventListener('resize', positionPicker);
+    return () => window.removeEventListener('resize', positionPicker);
+  }, [open, positionPicker]);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleClick(e: MouseEvent) {
+      if (
+        triggerRef.current?.contains(e.target as Node) ||
+        pickerRef.current?.contains(e.target as Node)
+      ) return;
+      setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [open]);
+
+  return (
+    <>
+      <div ref={triggerRef} style={{ display: 'inline-flex' }}>
+        <IdentityTrigger
+          identity={identity}
+          name={name}
+          shape={shape}
+          open={open}
+          onClick={() => setOpen(o => !o)}
+        />
+      </div>
+
+      {open && createPortal(
+        <div
+          ref={pickerRef}
+          style={{
+            ...pickerStyle,
+            zIndex: 9999,
+            boxShadow: 'var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.15))',
+            borderRadius: 10,
+            border: '1px solid var(--border)',
+            overflow: 'hidden',
+          }}
+        >
+          <IdentityPicker
+            identity={identity}
+            name={name}
+            shape={shape}
+            onChange={onChange}
+          />
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
 ````
 
 ## File: packages/web/src/components/shared/ConfirmDialog.tsx
@@ -13174,6 +14045,53 @@ const InlineEditableTitle = forwardRef<HTMLInputElement, Props>(
 )
 
 export default InlineEditableTitle
+````
+
+## File: packages/web/src/components/MemberAvatar.tsx
+````typescript
+/**
+ * MemberAvatar — circular member badge using the identity system.
+ *
+ * Delegates to Badge internally so it inherits all identity rendering rules
+ * (name initials, Lucide icons, color resolution). The external prop API is
+ * unchanged so all existing call sites continue to work without modification.
+ */
+
+import { Badge } from './identity/Badge';
+import type { Member } from '../types';
+
+interface Props {
+  member: Member | undefined;
+  size?: number;
+  className?: string;
+}
+
+export default function MemberAvatar({ member, size = 28, className }: Props) {
+  if (!member) {
+    return (
+      <div
+        className={className}
+        style={{
+          width: size,
+          height: size,
+          borderRadius: '50%',
+          background: 'var(--muted)',
+          flexShrink: 0,
+        }}
+      />
+    );
+  }
+
+  return (
+    <Badge
+      identity={{ color: member.color, icon: '__name_words__' }}
+      name={member.name}
+      shape="circle"
+      size={size}
+      className={className}
+    />
+  );
+}
 ````
 
 ## File: packages/web/src/components/RoleDropdown.tsx
@@ -14917,278 +15835,54 @@ export default function SetupPage() {
 }
 ````
 
-## File: packages/web/src/index.css
-````css
-@import "tailwindcss";
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-success: var(--success);
-  --color-success-foreground: var(--success-foreground);
-  --color-warning: var(--warning);
-  --color-warning-foreground: var(--warning-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-mono);
-}
-
-/*
- * Draba Design System — Colors & Typography
- * Single source of truth for CSS custom properties.
+## File: packages/web/src/types/index.ts
+````typescript
+/**
+ * Local UI types and design-token palettes.
+ *
+ * Wire-format API types come from generated definitions in `packages/shared/`.
+ * Only view-state types (computed from API data) live here.
+ *
+ * ACTIVITY_COLORS and MEMBER_COLORS are now re-exported from identity-constants
+ * so there is a single source of truth for the 16-color palette.
  */
 
-/* ─── Base Tokens ───────────────────────────────────────────────────────────── */
-:root {
-  /* Brand palette */
-  --color-teal:       #288C9B;
-  --color-teal-light: #5BC0DE;
-  --color-amber:      #F29E4C;
-  --color-charcoal:   #343A40;
-  --color-off-white:  #F8F9FA;
+export { ACTIVITY_COLORS, MEMBER_COLORS } from '@/components/identity/identity-constants';
 
-  /* Identity palette — 16 colors; mirrors IDENTITY_COLORS in identity-constants.ts */
-  --identity-teal:    #288C9B;
-  --identity-cyan:    #06B6D4;
-  --identity-blue:    #3B82F6;
-  --identity-indigo:  #6366F1;
-  --identity-violet:  #8B5CF6;
-  --identity-purple:  #A855F7;
-  --identity-pink:    #EC4899;
-  --identity-rose:    #F43F5E;
-  --identity-red:     #EF4444;
-  --identity-orange:  #F97316;
-  --identity-amber:   #F59E0B;
-  --identity-yellow:  #EAB308;
-  --identity-lime:    #84CC16;
-  --identity-green:   #22C55E;
-  --identity-slate:   #64748B;
-  --identity-stone:   #78716C;
-
-  /* ── Semantic light-mode tokens (shadcn HSL convention) ── */
-  --background:             hsl(210 17% 98%);   /* #F8F9FA */
-  --foreground:             hsl(210 10% 23%);   /* #343A40 */
-
-  --card:                   hsl(0 0% 100%);
-  --card-foreground:        hsl(210 10% 23%);
-
-  --popover:                hsl(0 0% 100%);
-  --popover-foreground:     hsl(210 10% 23%);
-
-  --primary:                hsl(188 59% 38%);   /* #288C9B */
-  --primary-foreground:     hsl(0 0% 100%);
-
-  --secondary:              hsl(30 87% 62%);    /* #F29E4C */
-  --secondary-foreground:   hsl(210 10% 23%);
-
-  --muted:                  hsl(210 14% 93%);
-  --muted-foreground:       hsl(210 10% 45%);
-
-  --accent:                 hsl(194 67% 61%);   /* #5BC0DE */
-  --accent-foreground:      hsl(210 10% 23%);
-
-  --destructive:            hsl(0 72% 51%);
-  --destructive-foreground: hsl(0 0% 100%);
-
-  --success:                hsl(145 63% 42%);
-  --success-foreground:     hsl(0 0% 100%);
-
-  --warning:                hsl(38 92% 50%);
-  --warning-foreground:     hsl(210 10% 23%);
-
-  --border:                 hsl(210 14% 89%);
-  --input:                  hsl(210 14% 89%);
-  --ring:                   hsl(188 59% 38%);
-
-  /* ── Radius ── */
-  --radius:    8px;
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 12px;
-  --radius-full: 9999px;
-
-  /* ── Shadows ── */
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.06);
-  --shadow-md: 0 4px 8px -1px rgb(0 0 0 / 0.10), 0 2px 4px -1px rgb(0 0 0 / 0.06);
-  --shadow-lg: 0 10px 24px -3px rgb(0 0 0 / 0.12), 0 4px 8px -2px rgb(0 0 0 / 0.06);
-
-  /* ── Spacing scale (4px base grid) ── */
-  --space-1:  4px;
-  --space-2:  8px;
-  --space-3:  12px;
-  --space-4:  16px;
-  --space-5:  20px;
-  --space-6:  24px;
-  --space-8:  32px;
-  --space-10: 40px;
-  --space-12: 48px;
-
-  /* ── Typography ── */
-  --font-sans: 'Open Sans', ui-sans-serif, system-ui, sans-serif;
-  --font-mono: ui-monospace, 'SFMono-Regular', 'Fira Code', monospace;
-
-  --font-weight-light:    300;
-  --font-weight-regular:  400;
-  --font-weight-semibold: 600;
-  --font-weight-bold:     700;
-
-  /* Type scale */
-  --text-xs:   12px;
-  --text-sm:   14px;
-  --text-base: 16px;
-  --text-lg:   18px;
-  --text-xl:   20px;
-  --text-2xl:  24px;
-  --text-3xl:  30px;
-
-  --leading-tight:   1.25;
-  --leading-normal:  1.5;
-  --leading-relaxed: 1.625;
-
-  /* ── Layout ── */
-  --sidebar-w: 220px;
-  --topbar-h:  52px;
+/** A person who can be assigned to events on a timeline. */
+export interface Member {
+  id: string;
+  name: string;
+  initials: string;
+  /** Hex color for display (e.g. '#288C9B'). Falls back to palette slot when not set. */
+  color: string;
 }
 
-/* ─── Dark Mode ─────────────────────────────────────────────────────────────── */
-.dark {
-  --background:             hsl(210 15% 11%);
-  --foreground:             hsl(210 17% 93%);
+// ── Legacy types — kept for ActivityPanel until Phase 8.2 rewrites it ──────────
 
-  --card:                   hsl(210 15% 15%);
-  --card-foreground:        hsl(210 17% 93%);
+/** @deprecated Phase 8.2 will replace this with the API Activity type. */
+export type ActivityStatus = 'planned' | 'in-progress' | 'done';
 
-  --popover:                hsl(210 15% 15%);
-  --popover-foreground:     hsl(210 17% 93%);
-
-  --primary:                hsl(188 55% 52%);
-  --primary-foreground:     hsl(210 15% 10%);
-
-  --secondary:              hsl(30 80% 60%);
-  --secondary-foreground:   hsl(210 15% 10%);
-
-  --muted:                  hsl(210 15% 20%);
-  --muted-foreground:       hsl(210 15% 58%);
-
-  --accent:                 hsl(194 60% 55%);
-  --accent-foreground:      hsl(210 15% 10%);
-
-  --destructive:            hsl(0 63% 45%);
-  --destructive-foreground: hsl(0 0% 100%);
-
-  --success:                hsl(145 55% 40%);
-  --success-foreground:     hsl(0 0% 100%);
-
-  --warning:                hsl(38 85% 55%);
-  --warning-foreground:     hsl(210 15% 10%);
-
-  --border:                 hsl(210 15% 22%);
-  --input:                  hsl(210 15% 22%);
-  --ring:                   hsl(188 55% 52%);
+/** @deprecated Phase 8.2 will replace this with the API Activity type. */
+export interface DrabaActivity {
+  id: string;
+  title: string;
+  memberId: string;
+  startDate: string;
+  endDate: string;
+  startCol: number;
+  span: number;
+  color: string;
+  status: ActivityStatus;
+  notes?: string;
 }
 
-/* ─── Base Element Styles ───────────────────────────────────────────────────── */
-*, *::before, *::after {
-  box-sizing: border-box;
-}
-
-body {
-  font-family: var(--font-sans);
-  font-size: var(--text-sm);
-  font-weight: var(--font-weight-regular);
-  line-height: var(--leading-normal);
-  color: var(--foreground);
-  background-color: var(--background);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  margin: 0;
-}
-
-h1 {
-  font-size: var(--text-2xl);
-  font-weight: var(--font-weight-bold);
-  line-height: var(--leading-tight);
-  color: var(--foreground);
-  margin: 0;
-}
-
-h2 {
-  font-size: var(--text-lg);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--leading-tight);
-  color: var(--foreground);
-  margin: 0;
-}
-
-h3 {
-  font-size: var(--text-base);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--leading-tight);
-  color: var(--foreground);
-  margin: 0;
-}
-
-p {
-  font-size: var(--text-sm);
-  font-weight: var(--font-weight-regular);
-  line-height: var(--leading-relaxed);
-  color: var(--foreground);
-  margin: 0;
-}
-
-small {
-  font-size: var(--text-xs);
-  font-weight: var(--font-weight-regular);
-  color: var(--muted-foreground);
-}
-
-a {
-  color: var(--primary);
-  text-decoration: none;
-}
-
-a:hover {
-  text-decoration: underline;
-}
-
-code, pre {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-}
-
-/* ─── Find (in-view) ─────────────────────────────────────────────────────── */
-
-@keyframes find-pulse {
-  0%, 100% { box-shadow: 0 0 0 2px #F29E4C, 0 0 0 5px rgba(242, 158, 76, 0.4); }
-  50%       { box-shadow: 0 0 0 2px #F29E4C, 0 0 0 10px rgba(242, 158, 76, 0.65); }
-}
-
-/* Applied to the active (parked) Gantt event bar during a find session. */
-.find-active-bar {
-  animation: find-pulse 1.2s ease-in-out infinite;
-}
-
-/* Applied to a matching (non-active) Gantt event bar during a find session. */
-.find-match-bar {
-  box-shadow: 0 0 0 2px #F29E4C !important;
-}
+/** @deprecated Phase 8.2 will replace this with resolved team_statuses labels. */
+export const STATUS_LABELS: Record<ActivityStatus, string> = {
+  'planned':     'Planned',
+  'in-progress': 'In progress',
+  'done':        'Done',
+};
 ````
 
 ## File: CLAUDE.md
@@ -17701,599 +18395,6 @@ export function autoFitGranularity(
 }
 ````
 
-## File: packages/web/src/components/identity/Badge.tsx
-````typescript
-/**
- * Badge — read-only identity display component.
- *
- * Renders an entity's color + icon. The hex color becomes the background;
- * icon controls the content:
- *   - Lucide icon name (kebab-case) → the corresponding icon
- *   - '__name_1__' / '__name_2__' / '__name_words__' → text initials from name
- *   - '__none__' or absent → color-only, no content
- */
-
-import * as LucideIcons from 'lucide-react';
-import type { Identity } from './identity-constants';
-import { resolveColorHex, iconIdToPascal, getNameText } from './identity-constants';
-
-interface Props {
-  identity: Identity;
-  /** Entity name — used to derive initials for name-based icons. */
-  name: string;
-  shape?: 'square' | 'circle';
-  /** Size in px. Typically 20–40. */
-  size?: number;
-  className?: string;
-}
-
-export function Badge({ identity, name, shape = 'square', size = 24, className }: Props) {
-  const bg = resolveColorHex(identity.color);
-  const radius = shape === 'circle' ? '50%' : `${Math.round(size * 0.26)}px`;
-  const { icon } = identity;
-
-  let content: React.ReactNode = null;
-
-  if (icon && icon !== '__none__') {
-    const nameText = getNameText(icon, name);
-    if (nameText) {
-      const chars = nameText.length;
-      // Scale font down when there are 3 characters.
-      const fontSize = chars >= 3 ? Math.round(size * 0.29) : Math.round(size * 0.38);
-      content = (
-        <span style={{ fontSize, fontWeight: 700, lineHeight: 1, color: 'white', userSelect: 'none', fontFamily: 'var(--font-sans)' }}>
-          {nameText}
-        </span>
-      );
-    } else {
-      const pascalName = iconIdToPascal(icon) as keyof typeof LucideIcons;
-      const IconComponent = LucideIcons[pascalName] as React.ComponentType<{ size: number; color: string; strokeWidth: number }> | undefined;
-      if (IconComponent) {
-        content = <IconComponent size={Math.round(size * 0.54)} color="white" strokeWidth={2} />;
-      }
-    }
-  }
-
-  return (
-    <div
-      className={className}
-      style={{
-        width: size,
-        height: size,
-        borderRadius: radius,
-        background: bg,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flexShrink: 0,
-        userSelect: 'none',
-      }}
-    >
-      {content}
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/identity/identity-constants.ts
-````typescript
-/**
- * Identity system constants — the single source of truth for the 16-color palette,
- * 64-icon library, and color resolution helpers.
- *
- * Colors are stored as hex values (e.g. '#288C9B') in the DB and throughout the
- * system. The palette names are UI-only — swapping a palette color never requires
- * a DB migration, only a change here.
- */
-
-/** A color + icon pair that visually identifies an entity. */
-export interface Identity {
-  /** Hex color string, e.g. '#288C9B'. */
-  color: string;
-  /**
-   * Lucide icon id (kebab-case), OR one of the special name tokens:
-   *   '__name_1__'     → first letter of entity name
-   *   '__name_2__'     → first two letters
-   *   '__name_words__' → first letter of each word
-   *   '__none__'       → color only, no content
-   */
-  icon: string;
-}
-
-export interface IdentityColor {
-  id: string;
-  name: string;
-  hex: string;
-}
-
-/** 16-color unified palette. All colors have ≥3:1 contrast against white. */
-export const IDENTITY_COLORS: IdentityColor[] = [
-  { id: 'teal',   name: 'Teal',   hex: '#288C9B' },
-  { id: 'cyan',   name: 'Cyan',   hex: '#06B6D4' },
-  { id: 'blue',   name: 'Blue',   hex: '#3B82F6' },
-  { id: 'indigo', name: 'Indigo', hex: '#6366F1' },
-  { id: 'violet', name: 'Violet', hex: '#8B5CF6' },
-  { id: 'purple', name: 'Purple', hex: '#A855F7' },
-  { id: 'pink',   name: 'Pink',   hex: '#EC4899' },
-  { id: 'rose',   name: 'Rose',   hex: '#F43F5E' },
-  { id: 'red',    name: 'Red',    hex: '#EF4444' },
-  { id: 'orange', name: 'Orange', hex: '#F97316' },
-  { id: 'amber',  name: 'Amber',  hex: '#F59E0B' },
-  { id: 'yellow', name: 'Yellow', hex: '#EAB308' },
-  { id: 'lime',   name: 'Lime',   hex: '#84CC16' },
-  { id: 'green',  name: 'Green',  hex: '#22C55E' },
-  { id: 'slate',  name: 'Slate',  hex: '#64748B' },
-  { id: 'stone',  name: 'Stone',  hex: '#78716C' },
-];
-
-/** 64 Lucide icon IDs available in the identity picker. */
-export const IDENTITY_ICONS: string[] = [
-  'activity',    'archive',      'award',       'bar-chart',
-  'bell',        'bookmark',     'briefcase',   'calendar',
-  'check-circle','clipboard',    'clock',       'cloud',
-  'code',        'coffee',       'compass',     'cpu',
-  'database',    'download',     'edit',        'eye',
-  'file-text',   'filter',       'flag',        'folder',
-  'git-branch',  'globe',        'grid',        'heart',
-  'help-circle', 'home',         'info',        'layers',
-  'link',        'list',         'lock',        'mail',
-  'map',         'message-circle','moon',       'package',
-  'pencil',      'phone',        'pie-chart',   'plug',
-  'refresh-cw',  'search',       'server',      'settings',
-  'share',       'shield',       'star',        'sun',
-  'tag',         'target',       'terminal',    'trash',
-  'trending-up', 'upload',       'user',        'users',
-  'wifi',        'zap',          'alert-circle','copy',
-];
-
-/** Special icon IDs that render name-derived text instead of a Lucide icon. */
-export const SPECIAL_ICON_IDS = ['__none__', '__name_1__', '__name_2__', '__name_words__'] as const;
-export type SpecialIconId = typeof SPECIAL_ICON_IDS[number];
-
-// ── Default identities per entity type ────────────────────────────────────────
-
-export const DEFAULT_ACTIVITY_IDENTITY: Identity  = { color: '#288C9B', icon: '__none__' };
-export const DEFAULT_TIMELINE_IDENTITY: Identity  = { color: '#288C9B', icon: '__none__' };
-export const DEFAULT_TEAM_IDENTITY: Identity      = { color: '#288C9B', icon: '__name_2__' };
-export const DEFAULT_MEMBER_IDENTITY: Identity    = { color: '#288C9B', icon: '__name_words__' };
-
-// ── Color resolution ──────────────────────────────────────────────────────────
-
-/** Palette name → hex lookup for resolving legacy colorId strings. */
-const COLOR_BY_ID: Record<string, string> = Object.fromEntries(
-  IDENTITY_COLORS.map(c => [c.id, c.hex]),
-);
-
-/**
- * Resolves a color value to a hex string safe to use as CSS background-color.
- * Accepts hex values (pass-through), palette name IDs (backward compat for
- * any rows written before migration 007), and null/undefined (falls back to teal).
- */
-export function resolveColorHex(colorOrId: string | null | undefined): string {
-  const fallback = '#288C9B';
-  if (!colorOrId) return fallback;
-  if (colorOrId.startsWith('#')) return colorOrId;
-  return COLOR_BY_ID[colorOrId] ?? fallback;
-}
-
-// ── Icon name helpers ─────────────────────────────────────────────────────────
-
-/**
- * Converts a kebab-case Lucide icon ID to the PascalCase component name used
- * by lucide-react (e.g. "bar-chart" → "BarChart").
- */
-export function iconIdToPascal(iconId: string): string {
-  return iconId
-    .split('-')
-    .map(s => s.charAt(0).toUpperCase() + s.slice(1))
-    .join('');
-}
-
-/**
- * Derives the text content that should appear inside a name-based badge.
- * Returns an empty string for Lucide icons or '__none__'.
- */
-export function getNameText(icon: string, name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  if (icon === '__name_1__') return (words[0]?.[0] ?? '').toUpperCase();
-  if (icon === '__name_2__') return name.slice(0, 2).toUpperCase();
-  if (icon === '__name_words__') {
-    return words.map(w => w[0]).join('').toUpperCase().slice(0, 3);
-  }
-  return '';
-}
-
-// ── ACTIVITY_COLORS / MEMBER_COLORS re-exports ────────────────────────────────
-
-/** Activity color palette as hex strings, in IDENTITY_COLORS order. */
-export const ACTIVITY_COLORS: string[] = IDENTITY_COLORS.map(c => c.hex);
-
-/** Member color palette as hex strings, in IDENTITY_COLORS order. */
-export const MEMBER_COLORS: string[] = IDENTITY_COLORS.map(c => c.hex);
-````
-
-## File: packages/web/src/components/identity/IdentityPicker.tsx
-````typescript
-/**
- * IdentityPicker — popover content panel with three sections.
- *
- * Section 1: Color grid — 16 colors in an 8×2 grid.
- * Section 2: Name options — None / 1 letter / 2 letters / 1+1 words (mini badge previews).
- * Section 3: Icon grid — 64 Lucide icons in an 8×8 grid.
- *
- * All changes fire onChange immediately — no save/cancel.
- * onChange receives hex color values (e.g. '#288C9B'), not palette name IDs.
- */
-
-import * as LucideIcons from 'lucide-react';
-import { Check } from 'lucide-react';
-import { Badge } from './Badge';
-import type { Identity } from './identity-constants';
-import {
-  IDENTITY_COLORS,
-  IDENTITY_ICONS,
-  iconIdToPascal,
-} from './identity-constants';
-
-interface Props {
-  identity: Identity;
-  name: string;
-  shape?: 'square' | 'circle';
-  onChange: (next: Identity) => void;
-}
-
-const NAME_OPTIONS = [
-  { icon: '__none__',       label: 'None' },
-  { icon: '__name_1__',     label: '1 letter' },
-  { icon: '__name_2__',     label: '2 letters' },
-  { icon: '__name_words__', label: '1+1 words' },
-] as const;
-
-const SEC_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 700,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  marginBottom: 8,
-};
-
-export function IdentityPicker({ identity, name, shape = 'square', onChange }: Props) {
-  const isNameOption = NAME_OPTIONS.some(o => o.icon === identity.icon);
-  const isIconOption = !isNameOption && identity.icon !== '__none__';
-
-  function setColor(hex: string) {
-    onChange({ ...identity, color: hex });
-  }
-
-  function setIcon(icon: string) {
-    onChange({ ...identity, icon });
-  }
-
-  return (
-    <div
-      style={{
-        padding: 14,
-        width: 240,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 16,
-        background: 'var(--popover)',
-        color: 'var(--popover-foreground)',
-      }}
-    >
-      {/* ── Section 1: Color grid ── */}
-      <div>
-        <div style={SEC_LABEL}>Color</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 4 }}>
-          {IDENTITY_COLORS.map(c => {
-            const selected = identity.color === c.hex;
-            return (
-              <button
-                key={c.id}
-                type="button"
-                title={c.name}
-                onClick={() => setColor(c.hex)}
-                style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: 4,
-                  background: c.hex,
-                  border: selected ? `2px solid var(--foreground)` : '2px solid transparent',
-                  cursor: 'pointer',
-                  padding: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  transition: 'transform 0.1s',
-                  position: 'relative',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.transform = 'scale(1.15)')}
-                onMouseLeave={e => (e.currentTarget.style.transform = '')}
-              >
-                {selected && <Check size={12} color="white" strokeWidth={3} />}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ── Section 2: Name options ── */}
-      <div>
-        <div style={SEC_LABEL}>Label</div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {NAME_OPTIONS.map(opt => {
-            const selected = identity.icon === opt.icon;
-            const accentHex = identity.color;
-            return (
-              <button
-                key={opt.icon}
-                type="button"
-                title={opt.label}
-                onClick={() => setIcon(opt.icon)}
-                style={{
-                  flex: 1,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  gap: 4,
-                  padding: '6px 4px',
-                  borderRadius: 6,
-                  border: selected ? `1.5px solid ${accentHex}` : '1.5px solid var(--border)',
-                  background: selected ? `${accentHex}18` : 'var(--background)',
-                  cursor: 'pointer',
-                  transition: 'border-color 0.1s, background 0.1s',
-                }}
-              >
-                <Badge
-                  identity={{ color: identity.color, icon: opt.icon }}
-                  name={name}
-                  shape={shape}
-                  size={20}
-                />
-                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', fontFamily: 'var(--font-sans)' }}>
-                  {opt.label}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ── Section 3: Icon grid ── */}
-      <div>
-        <div style={SEC_LABEL}>Icon</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 3 }}>
-          {IDENTITY_ICONS.map((iconId, i) => {
-            const pascalName = iconIdToPascal(iconId) as keyof typeof LucideIcons;
-            const IconComponent = LucideIcons[pascalName] as React.ComponentType<{ size: number; strokeWidth: number }> | undefined;
-            if (!IconComponent) return null;
-
-            const selected = identity.icon === iconId && isIconOption;
-            const accentHex = identity.color;
-            return (
-              <button
-                key={`${iconId}-${i}`}
-                type="button"
-                title={iconId}
-                onClick={() => setIcon(iconId)}
-                style={{
-                  width: 24,
-                  height: 24,
-                  borderRadius: 4,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  border: 'none',
-                  background: selected ? accentHex : 'transparent',
-                  color: selected ? 'white' : 'var(--muted-foreground)',
-                  cursor: 'pointer',
-                  transition: 'background 0.1s, color 0.1s',
-                }}
-                onMouseEnter={e => {
-                  if (!selected) {
-                    e.currentTarget.style.background = 'var(--muted)';
-                    e.currentTarget.style.color = 'var(--foreground)';
-                  }
-                }}
-                onMouseLeave={e => {
-                  if (!selected) {
-                    e.currentTarget.style.background = 'transparent';
-                    e.currentTarget.style.color = 'var(--muted-foreground)';
-                  }
-                }}
-              >
-                <IconComponent size={13} strokeWidth={1.8} />
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/identity/IdentityTrigger.tsx
-````typescript
-/**
- * IdentityTrigger — a clickable identity badge with a chevron pip.
- *
- * Fixed 28×28 badge with a small chevron indicator at the bottom-right.
- * Shows a colored ring on hover and when the picker is open.
- */
-
-import { ChevronDown } from 'lucide-react';
-import { Badge } from './Badge';
-import type { Identity } from './identity-constants';
-
-interface Props {
-  identity: Identity;
-  name: string;
-  shape?: 'square' | 'circle';
-  open?: boolean;
-  onClick?: () => void;
-}
-
-export function IdentityTrigger({ identity, name, shape = 'square', open = false, onClick }: Props) {
-  const accentColor = identity.color;
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title="Change color and icon"
-      style={{
-        position: 'relative',
-        background: 'none',
-        border: 'none',
-        padding: 0,
-        cursor: 'pointer',
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        borderRadius: shape === 'circle' ? '50%' : 6,
-        outline: open ? `2px solid ${accentColor}` : 'none',
-        outlineOffset: 2,
-        transition: 'outline 0.1s',
-        flexShrink: 0,
-      }}
-      onMouseEnter={e => { if (!open) e.currentTarget.style.outline = `2px solid ${accentColor}`; e.currentTarget.style.outlineOffset = '2px'; }}
-      onMouseLeave={e => { if (!open) e.currentTarget.style.outline = 'none'; }}
-    >
-      <Badge identity={identity} name={name} shape={shape} size={28} />
-      {/* Chevron pip — bottom-right corner */}
-      <div
-        style={{
-          position: 'absolute',
-          bottom: -2,
-          right: -2,
-          width: 13,
-          height: 13,
-          borderRadius: '50%',
-          background: 'var(--card)',
-          border: '1px solid var(--border)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          pointerEvents: 'none',
-        }}
-      >
-        <ChevronDown size={8} strokeWidth={2.5} color="var(--muted-foreground)" />
-      </div>
-    </button>
-  );
-}
-````
-
-## File: packages/web/src/components/identity/IdentityWidget.tsx
-````typescript
-/**
- * IdentityWidget — composed trigger + popover for editing an entity's identity.
- *
- * Renders an IdentityTrigger; clicking it opens an IdentityPicker in a portal-
- * positioned popover. All changes fire onChange immediately (no save/cancel).
- * Click-outside closes the picker.
- */
-
-import { useState, useRef, useEffect, useCallback } from 'react';
-import { createPortal } from 'react-dom';
-import { IdentityTrigger } from './IdentityTrigger';
-import { IdentityPicker } from './IdentityPicker';
-import type { Identity } from './identity-constants';
-
-interface Props {
-  identity: Identity;
-  name: string;
-  shape?: 'square' | 'circle';
-  onChange: (next: Identity) => void;
-}
-
-export function IdentityWidget({ identity, name, shape = 'square', onChange }: Props) {
-  const [open, setOpen] = useState(false);
-  const triggerRef = useRef<HTMLDivElement>(null);
-  const pickerRef = useRef<HTMLDivElement>(null);
-  const [pickerStyle, setPickerStyle] = useState<React.CSSProperties>({});
-
-  const positionPicker = useCallback(() => {
-    if (!triggerRef.current) return;
-    const rect = triggerRef.current.getBoundingClientRect();
-    const pickerW = 240;
-    const pickerH = 320;
-    const gap = 6;
-
-    // Prefer opening below the trigger; flip up if it would clip the viewport bottom.
-    let top = rect.bottom + gap + window.scrollY;
-    let left = rect.left + window.scrollX;
-
-    if (top + pickerH > window.innerHeight + window.scrollY) {
-      top = rect.top - pickerH - gap + window.scrollY;
-    }
-    if (left + pickerW > window.innerWidth) {
-      left = window.innerWidth - pickerW - 8;
-    }
-
-    setPickerStyle({ position: 'fixed', top: top - window.scrollY, left });
-  }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    positionPicker();
-    window.addEventListener('resize', positionPicker);
-    return () => window.removeEventListener('resize', positionPicker);
-  }, [open, positionPicker]);
-
-  useEffect(() => {
-    if (!open) return;
-    function handleClick(e: MouseEvent) {
-      if (
-        triggerRef.current?.contains(e.target as Node) ||
-        pickerRef.current?.contains(e.target as Node)
-      ) return;
-      setOpen(false);
-    }
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [open]);
-
-  return (
-    <>
-      <div ref={triggerRef} style={{ display: 'inline-flex' }}>
-        <IdentityTrigger
-          identity={identity}
-          name={name}
-          shape={shape}
-          open={open}
-          onClick={() => setOpen(o => !o)}
-        />
-      </div>
-
-      {open && createPortal(
-        <div
-          ref={pickerRef}
-          style={{
-            ...pickerStyle,
-            zIndex: 9999,
-            boxShadow: 'var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.15))',
-            borderRadius: 10,
-            border: '1px solid var(--border)',
-            overflow: 'hidden',
-          }}
-        >
-          <IdentityPicker
-            identity={identity}
-            name={name}
-            shape={shape}
-            onChange={onChange}
-          />
-        </div>,
-        document.body,
-      )}
-    </>
-  );
-}
-````
-
 ## File: packages/web/src/components/BrandingSync.tsx
 ````typescript
 /**
@@ -18346,53 +18447,6 @@ export default function BrandingSync() {
   }, [data])
 
   return null
-}
-````
-
-## File: packages/web/src/components/MemberAvatar.tsx
-````typescript
-/**
- * MemberAvatar — circular member badge using the identity system.
- *
- * Delegates to Badge internally so it inherits all identity rendering rules
- * (name initials, Lucide icons, color resolution). The external prop API is
- * unchanged so all existing call sites continue to work without modification.
- */
-
-import { Badge } from './identity/Badge';
-import type { Member } from '../types';
-
-interface Props {
-  member: Member | undefined;
-  size?: number;
-  className?: string;
-}
-
-export default function MemberAvatar({ member, size = 28, className }: Props) {
-  if (!member) {
-    return (
-      <div
-        className={className}
-        style={{
-          width: size,
-          height: size,
-          borderRadius: '50%',
-          background: 'var(--muted)',
-          flexShrink: 0,
-        }}
-      />
-    );
-  }
-
-  return (
-    <Badge
-      identity={{ color: member.color, icon: '__name_words__' }}
-      name={member.name}
-      shape="circle"
-      size={size}
-      className={className}
-    />
-  );
 }
 ````
 
@@ -19532,56 +19586,6 @@ export default function TokensPage() {
     </div>
   )
 }
-````
-
-## File: packages/web/src/types/index.ts
-````typescript
-/**
- * Local UI types and design-token palettes.
- *
- * Wire-format API types come from generated definitions in `packages/shared/`.
- * Only view-state types (computed from API data) live here.
- *
- * ACTIVITY_COLORS and MEMBER_COLORS are now re-exported from identity-constants
- * so there is a single source of truth for the 16-color palette.
- */
-
-export { ACTIVITY_COLORS, MEMBER_COLORS } from '@/components/identity/identity-constants';
-
-/** A person who can be assigned to events on a timeline. */
-export interface Member {
-  id: string;
-  name: string;
-  initials: string;
-  /** Hex color for display (e.g. '#288C9B'). Falls back to palette slot when not set. */
-  color: string;
-}
-
-// ── Legacy types — kept for ActivityPanel until Phase 8.2 rewrites it ──────────
-
-/** @deprecated Phase 8.2 will replace this with the API Activity type. */
-export type ActivityStatus = 'planned' | 'in-progress' | 'done';
-
-/** @deprecated Phase 8.2 will replace this with the API Activity type. */
-export interface DrabaActivity {
-  id: string;
-  title: string;
-  memberId: string;
-  startDate: string;
-  endDate: string;
-  startCol: number;
-  span: number;
-  color: string;
-  status: ActivityStatus;
-  notes?: string;
-}
-
-/** @deprecated Phase 8.2 will replace this with resolved team_statuses labels. */
-export const STATUS_LABELS: Record<ActivityStatus, string> = {
-  'planned':     'Planned',
-  'in-progress': 'In progress',
-  'done':        'Done',
-};
 ````
 
 ## File: .repomixignore
@@ -22399,6 +22403,1272 @@ func newRepoID() string {
 }
 ````
 
+## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
+````typescript
+/**
+ * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
+ *
+ * Defaults come from the drag selection: start/end date and the lane member.
+ * Submits via POST /timelines/:id/activities.
+ */
+
+import { useState, useEffect } from 'react'
+import { X, ArrowRight, Loader2 } from 'lucide-react'
+import MemberAvatar from '@/components/MemberAvatar'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useCreateActivity } from '@/hooks/useTeamActivities'
+import type { Member } from '@/types'
+
+const PANEL_WIDTH = 300
+
+interface Props {
+  open: boolean
+  teamId: string
+  timelineId: string
+  members: Member[]
+  defaultStart: string
+  defaultEnd: string
+  defaultMemberId?: string | null
+  onClose: () => void
+}
+
+const LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.07em',
+  marginBottom: 4,
+}
+
+export default function ActivityCreatePanel({
+  open,
+  teamId,
+  timelineId,
+  members,
+  defaultStart,
+  defaultEnd,
+  defaultMemberId,
+  onClose,
+}: Props) {
+  const createMutation = useCreateActivity(teamId, timelineId)
+
+  const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
+  const [startDate, setStartDate] = useState(defaultStart)
+  const [endDate, setEndDate] = useState(defaultEnd)
+  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
+  const [assignedIds, setAssignedIds] = useState<string[]>(
+    defaultMemberId ? [defaultMemberId] : [],
+  )
+
+  // Reset all fields to defaults each time the panel opens so re-opening
+  // the panel always shows a blank form rather than the previous session's data.
+  useEffect(() => {
+    if (!open) return
+    setTitle('')
+    setDescription('')
+    setStartDate(defaultStart)
+    setEndDate(defaultEnd)
+    setIdentity({ color: '#288C9B', icon: '__none__' })
+    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const creating = createMutation.isPending
+  const titleTrimmed = title.trim()
+
+  function toggleAssignee(memberId: string) {
+    setAssignedIds(prev =>
+      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
+    )
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!titleTrimmed) return
+    createMutation.mutate(
+      {
+        title: titleTrimmed,
+        startAt: `${startDate}T00:00:00Z`,
+        endAt: `${endDate}T00:00:00Z`,
+        description: description.trim() || null,
+        color: identity.color,
+        icon: identity.icon,
+        assignedMemberIds: assignedIds,
+      },
+      { onSuccess: onClose },
+    )
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Header */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 12px',
+          height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
+        <button
+          onClick={onClose}
+          style={{
+            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', color: 'var(--muted-foreground)',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+        >
+          <X size={14} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* Form */}
+      <form onSubmit={handleSubmit} style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+        {/* Identity + Title — mirrors the modal header pattern: badge on left, editable name on right */}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <div style={{ marginTop: 2, flexShrink: 0 }}>
+            <IdentityWidget
+              identity={identity}
+              name={title || 'New Activity'}
+              shape="square"
+              onChange={setIdentity}
+            />
+          </div>
+          <input
+            autoFocus
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            placeholder="Activity title…"
+            style={{
+              flex: 1, fontSize: 13, fontWeight: 600,
+              color: 'var(--foreground)', border: '1px solid transparent',
+              borderRadius: 'var(--radius-md)', padding: '5px 6px',
+              outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
+            }}
+            onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
+            onBlur={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
+          />
+        </div>
+
+        {/* Date range */}
+        <div>
+          <div style={LABEL}>Date range</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="date"
+              value={startDate}
+              onChange={e => {
+                setStartDate(e.target.value)
+                if (e.target.value > endDate) setEndDate(e.target.value)
+              }}
+              style={{
+                flex: 1, fontSize: 12, color: 'var(--foreground)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                padding: '6px 8px', outline: 'none', background: 'var(--background)',
+                fontFamily: 'var(--font-sans)', cursor: 'pointer',
+              }}
+            />
+            <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
+            <input
+              type="date"
+              value={endDate}
+              min={startDate}
+              onChange={e => setEndDate(e.target.value)}
+              style={{
+                flex: 1, fontSize: 12, color: 'var(--foreground)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                padding: '6px 8px', outline: 'none', background: 'var(--background)',
+                fontFamily: 'var(--font-sans)', cursor: 'pointer',
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Description */}
+        <div>
+          <div style={LABEL}>Description</div>
+          <input
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            placeholder="Optional description…"
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              fontSize: 12, color: 'var(--foreground)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+              padding: '6px 8px', outline: 'none', background: 'var(--background)',
+              fontFamily: 'var(--font-sans)',
+            }}
+            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+          />
+        </div>
+
+        {/* Assignees */}
+        {members.length > 0 && (
+          <div>
+            <div style={LABEL}>Assignees</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {members.map(m => {
+                const assigned = assignedIds.includes(m.id)
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => toggleAssignee(m.id)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '5px 8px',
+                      border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
+                      borderRadius: 'var(--radius-md)',
+                      background: assigned ? `${m.color}18` : 'var(--background)',
+                      cursor: 'pointer', textAlign: 'left',
+                      transition: 'background 0.1s, border-color 0.1s',
+                    }}
+                  >
+                    <MemberAvatar member={m} size={18} />
+                    <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
+                    {assigned && (
+                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Spacer pushes submit to bottom */}
+        <div style={{ flex: 1 }} />
+      </form>
+
+      {/* Footer */}
+      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+        <button
+          type="submit"
+          form=""
+          onClick={handleSubmit}
+          disabled={!titleTrimmed || creating}
+          style={{
+            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
+            borderRadius: 'var(--radius-md)', border: 'none',
+            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
+            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
+            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
+            fontFamily: 'var(--font-sans)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            transition: 'background 0.1s',
+          }}
+        >
+          {creating && <Loader2 size={13} className="animate-spin" />}
+          Create activity
+        </button>
+      </div>
+    </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/components/gantt/GanttGrid.tsx
+````typescript
+/**
+ * GanttGrid — presentational Gantt chart.
+ *
+ * Renders a sticky header row of column labels, then one row per GanttRow
+ * entry. Rows are either group-header dividers or event bars. All data
+ * preparation (grouping, sorting, date math) lives in the parent GanttView.
+ *
+ * Drag on an empty lane cell to select a date range; onLaneDrag fires on
+ * mouseup with the resolved start/end dates and the lane's memberId.
+ *
+ * Drag on an event bar's left/right 8px edge to resize it, or on its body to
+ * move it. onBarDrag fires on mouseup with the resolved new dates.
+ *
+ * When findState is provided with a non-empty query, non-matching event rows
+ * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
+ * the active (parked) match gets a stronger amber outline with a pulse
+ * animation. Stepping to a new active match auto-scrolls both axes to center
+ * the bar in the viewport.
+ */
+
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
+import MemberAvatar from '../MemberAvatar';
+import { Badge } from '../identity/Badge';
+import EmptyState from '../shared/EmptyState';
+import type { Member } from '../../types';
+import type { ColumnDef, TimeGranularity } from './granularity';
+import { addDays, snapDivisorFor } from './granularity';
+
+export const DEFAULT_LABEL_COL_W = 240;
+const MIN_LABEL_COL_W = 140;
+const MAX_LABEL_COL_W = 400;
+const HEADER_H = 36;
+const ROW_H = 44;
+const GROUP_H = 30;
+const COL_W = 80;
+const EDGE_W = 8; // px hit zone for resize handles
+
+/** A positioned activity bar ready for rendering. */
+export interface GanttActivity {
+  id: string;
+  title: string;
+  /** Fractional column start (0-based). */
+  startCol: number;
+  /** Fractional column span. */
+  span: number;
+  /** Hex color for bar background and badge. */
+  color: string;
+  /** Icon ID from the activity's identity, if set. */
+  icon?: string;
+  members: Member[];
+  isChild: boolean;
+}
+
+export type GanttRow =
+  | { kind: 'group'; id: string; label: string; color: string; count: number }
+  | { kind: 'activity'; event: GanttActivity };
+
+/** Visual state for the in-view Find feature. Passed from GanttView. */
+export interface FindState {
+  hasQuery: boolean;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
+  matchReasons: Map<string, string[]>;
+  filtersActive: boolean;
+  matchCount: number;
+}
+
+interface DragState {
+  rowIdx: number;
+  memberId: string | null;
+  startCol: number;
+  currentCol: number;
+}
+
+type BarDragZone = 'left' | 'right' | 'body';
+
+interface BarDragState {
+  eventId: string;
+  zone: BarDragZone;
+  /** Fractional column of the event's visual start when drag began. */
+  initStartCol: number;
+  /** Fractional column of the event's visual end (startCol + span) when drag began. */
+  initEndCol: number;
+  /** Lane-relative x of the mouse when drag began. */
+  initMouseX: number;
+  /** Page-relative left edge of the lane div. */
+  laneLeft: number;
+  /** Current snapped start column (integer). */
+  snapStartCol: number;
+  /** Current snapped end column (integer, exclusive — col after last occupied). */
+  snapEndCol: number;
+}
+
+interface TooltipState {
+  text: string;
+  /** Viewport-relative x for tooltip positioning. */
+  x: number;
+  /** Viewport-relative y for tooltip positioning. */
+  y: number;
+}
+
+/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
+interface MatchTooltipState {
+  reasons: string[];
+  x: number;
+  y: number;
+}
+
+interface Props {
+  rows: GanttRow[];
+  columns: ColumnDef[];
+  /** Fractional column index of today (-1 if outside range). */
+  todayIndex: number;
+  selectedActivityId: string | null;
+  onSelectActivity: (id: string | null) => void;
+  /** Called when the user drags on an empty lane cell to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called when the user drags a bar edge or body to resize/move it. */
+  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
+  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Resolved granularity — used to compute the finer snap divisor during drag. */
+  resolvedGranularity?: TimeGranularity | 'auto';
+  /** Find state from GanttView; absent when the find bar is closed/idle. */
+  findState?: FindState;
+  /** Called when the user clicks "Clear filters" in the no-matches callout. */
+  onClearFilters?: () => void;
+  /** Current label column width in px — lifts state to the parent so it survives view switches. */
+  labelColW?: number;
+  /** Called when the user drags the column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+}
+
+// ── Bar drag helpers ─────────────────────────────────────────────────────────
+
+function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
+  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
+  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
+  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
+}
+
+// ── Date helpers (support fractional column positions) ───────────────────────
+
+// Maps a fractional column position to a calendar Date by interpolating within
+// the column's day range. Fractional positions enable finer snap granularities.
+function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
+  let remaining = Math.max(0, colFrac);
+  for (const col of columns) {
+    if (remaining <= 1) {
+      return addDays(col.start, Math.round(remaining * col.days));
+    }
+    remaining -= 1;
+  }
+  return columns[columns.length - 1].end;
+}
+
+function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
+  return colFracToDate(Math.max(0, colFrac), columns);
+}
+
+// endColFrac is exclusive (the fractional col just past the last occupied day).
+function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
+  // The last included date is 1 day before the date at the exclusive end.
+  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
+}
+
+
+function formatDragDate(d: Date): string {
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+export default function GanttGrid({
+  rows,
+  columns,
+  todayIndex,
+  selectedActivityId,
+  onSelectActivity,
+  onLaneDrag,
+  onBarDrag,
+  onBarDragProgress,
+  resolvedGranularity,
+  findState,
+  onClearFilters,
+  labelColW: labelColWProp,
+  onLabelColWChange,
+}: Props) {
+  // ── Resizable label column ─────────────────────────────────────────────────
+  // When the parent passes labelColW + onLabelColWChange the column is
+  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
+  // When neither is provided we fall back to internal state.
+  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
+  const labelColW = labelColWProp ?? internalLabelColW;
+  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
+
+  const totalW = useMemo(
+    () => labelColW + columns.length * COL_W,
+    [labelColW, columns.length],
+  );
+
+  const labelColWRef = useRef(labelColW);
+  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
+
+  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = labelColWRef.current;
+
+    function onMouseMove(mv: MouseEvent) {
+      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
+      setLabelColW(next);
+    }
+    function onMouseUp() {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Integer column index that contains today (for background highlight)
+  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
+
+  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Always-current rows ref so the active-match scroll effect doesn't go stale
+  const rowsRef = useRef(rows);
+  useEffect(() => { rowsRef.current = rows; });
+
+  // ── Drag-to-create state ──────────────────────────────────────────────────
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+
+  // ── Bar drag state ────────────────────────────────────────────────────────
+  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
+  const barDragRef = useRef<BarDragState | null>(null);
+  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
+
+  // ── "Why matched" hover tooltip ───────────────────────────────────────────
+  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
+
+  const colFromX = useCallback((laneX: number) => {
+    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
+  }, [columns.length]);
+
+  // ── Auto-scroll to active find match ─────────────────────────────────────
+  useEffect(() => {
+    const activeId = findState?.activeMatchId;
+    if (!activeId || !scrollContainerRef.current) return;
+    const container = scrollContainerRef.current;
+    const currentRows = rowsRef.current;
+
+    let y = HEADER_H;
+    let matchedActivity: GanttActivity | null = null;
+    for (const row of currentRows) {
+      if (row.kind === 'activity' && row.event.id === activeId) {
+        matchedActivity = row.event;
+        break;
+      }
+      y += row.kind === 'group' ? GROUP_H : ROW_H;
+    }
+    if (!matchedActivity) return;
+
+    const viewH = container.clientHeight;
+    const viewW = container.clientWidth;
+    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
+    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
+    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
+
+    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
+  // Only re-run when the active match changes, not when rows or columns change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findState?.activeMatchId]);
+
+  const handleLaneMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    rowIdx: number,
+    memberId: string | null,
+  ) => {
+    if (!onLaneDrag) return;
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const col = colFromX(e.clientX - rect.left);
+    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
+    dragRef.current = state;
+    setDrag(state);
+
+    function onMouseMove(mv: MouseEvent) {
+      if (!dragRef.current) return;
+      const col2 = colFromX(mv.clientX - rect.left);
+      const next = { ...dragRef.current, currentCol: col2 };
+      dragRef.current = next;
+      setDrag({ ...next });
+    }
+
+    function onMouseUp() {
+      const s = dragRef.current;
+      if (s && onLaneDrag && columns.length > 0) {
+        const lo = Math.min(s.startCol, s.currentCol);
+        const hi = Math.max(s.startCol, s.currentCol);
+        const startDate = columns[lo]?.start ?? columns[0].start;
+        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
+        onLaneDrag(startDate, endDate, s.memberId);
+      }
+      dragRef.current = null;
+      setDrag(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [colFromX, columns, onLaneDrag]);
+
+  // ── Bar drag handler ──────────────────────────────────────────────────────
+
+  const handleBarMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    ev: GanttActivity,
+    zone: BarDragZone,
+  ) => {
+    if (!onBarDrag) return;
+    // Only allow drag/resize when the bar is already selected.
+    if (ev.id !== selectedActivityId) return;
+    e.preventDefault();
+    e.stopPropagation(); // prevent lane-drag from firing
+
+    // The bar's parent is the lane div (position: relative, flex: 1).
+    const laneEl = e.currentTarget.parentElement;
+    if (!laneEl) return;
+    const laneRect = laneEl.getBoundingClientRect();
+
+    const initStartCol = ev.startCol;
+    const initEndCol = ev.startCol + ev.span;
+    const initMouseX = e.clientX - laneRect.left;
+    // Snap initial positions using finer step.
+    const div = snapDivisorFor(resolvedGranularity ?? 'auto');
+    const step = 1 / div;
+    const snapInit = (x: number) => Math.round(x / step) * step;
+    const initSnapStart = snapInit(initStartCol);
+    const initSnapEnd = snapInit(initEndCol);
+
+    const state: BarDragState = {
+      eventId: ev.id,
+      zone,
+      initStartCol,
+      initEndCol,
+      initMouseX,
+      laneLeft: laneRect.left,
+      snapStartCol: initSnapStart,
+      snapEndCol: Math.max(initSnapEnd, initSnapStart + step),
+    };
+    barDragRef.current = state;
+    setBarDrag(state);
+
+    // Initial tooltip
+    const startDate = colToStartDate(state.snapStartCol, columns);
+    const endDate = colToEndDate(state.snapEndCol, columns);
+    setDragTooltip({
+      text: tooltipText(zone, startDate, endDate),
+      x: e.clientX,
+      y: e.clientY,
+    });
+
+    function onMouseMove(mv: MouseEvent) {
+      const s = barDragRef.current;
+      if (!s) return;
+
+      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
+      const n = columns.length;
+      // Finer snap: snap one granularity level below the active zoom.
+      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
+      const step = 1 / div;
+      const snap = (x: number) => Math.round(x / step) * step;
+
+      let nextStart = s.snapStartCol;
+      let nextEnd = s.snapEndCol;
+
+      if (s.zone === 'left') {
+        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.snapEndCol - step));
+      } else if (s.zone === 'right') {
+        nextEnd = Math.max(s.snapStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
+      } else {
+        // body: preserve span, shift both
+        const span = Math.max(step, snap(s.initEndCol - s.initStartCol));
+        const shift = snap(deltaCol);
+        nextStart = Math.max(0, Math.min(snap(s.initStartCol) + shift, n - span));
+        nextEnd = nextStart + span;
+      }
+
+      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
+      barDragRef.current = next;
+      setBarDrag(next);
+
+      const sd = colToStartDate(nextStart, columns);
+      const ed = colToEndDate(nextEnd, columns);
+      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
+      onBarDragProgress?.(s.eventId, sd, ed);
+    }
+
+    function onMouseUp() {
+      const s = barDragRef.current;
+      if (s && onBarDrag) {
+        const sd = colToStartDate(s.snapStartCol, columns);
+        const ed = colToEndDate(s.snapEndCol, columns);
+        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
+      }
+      barDragRef.current = null;
+      setBarDrag(null);
+      setDragTooltip(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [columns, onBarDrag]);
+
+  // Header cells are shared between the empty-state path and the unified scroll path.
+  const headerContent = (
+    <>
+      <div
+        style={{
+          width: labelColW,
+          flexShrink: 0,
+          padding: '0 16px',
+          display: 'flex',
+          alignItems: 'center',
+          borderRight: '1px solid var(--border)',
+          fontSize: 11,
+          fontWeight: 600,
+          color: 'var(--muted-foreground)',
+          textTransform: 'uppercase' as const,
+          letterSpacing: '0.06em',
+          position: 'sticky' as const,
+          left: 0,
+          zIndex: 6,
+          background: 'var(--card)',
+          userSelect: 'none',
+        }}
+      >
+        Activity
+        {/* Drag handle — resize the label column */}
+        <div
+          onMouseDown={handleColumnResizeMouseDown}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: 6,
+            cursor: 'col-resize',
+            zIndex: 10,
+          }}
+        />
+      </div>
+
+      {columns.map((col, i) => {
+        const isToday = i === todayCol;
+        return (
+          <div
+            key={i}
+            style={{
+              width: COL_W,
+              flexShrink: 0,
+              height: HEADER_H,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '0 4px 8px',
+              gap: 2,
+              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+              position: 'relative',
+              overflow: 'hidden',
+            }}
+          >
+            <span style={{
+              fontSize: col.sublabel ? 10 : 11,
+              fontWeight: isToday ? 700 : 600,
+              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
+              lineHeight: 1.2,
+              textAlign: 'center',
+            }}>
+              {col.label}
+            </span>
+            {col.sublabel && (
+              <span style={{
+                fontSize: 9,
+                fontWeight: 500,
+                color: 'var(--muted-foreground)',
+                lineHeight: 1,
+                opacity: isToday ? 1 : 0.75,
+              }}>
+                {col.sublabel}
+              </span>
+            )}
+            {isToday && (
+              <div
+                style={{
+                  position: 'absolute',
+                  bottom: 2,
+                  left: `${((todayIndex - todayCol) * 100)}%`,
+                  transform: 'translateX(-50%)',
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: 'var(--secondary)',
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+
+  // ── Find helpers ──────────────────────────────────────────────────────────
+
+  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
+
+  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
+  function isActive(id: string) { return activeMatchId === id; }
+
+  // Non-title reasons to surface in the "why matched" tooltip
+  function nonTitleReasons(id: string): string[] {
+    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
+  }
+
+  // ── Empty state: header + centered placeholder ──────────────────────────────
+  if (rows.length === 0) {
+    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
+    return (
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
+          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+        </div>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+          <EmptyState message="No viewable activities" />
+          {showNoMatchCallout && findState.filtersActive && (
+            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Unified scroll: header sticky inside the single container ──────────────
+  return (
+    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
+        <div style={{ width: totalW }}>
+
+          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
+          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+
+          {rows.map((row, rowIdx) => {
+            if (row.kind === 'group') {
+              return (
+                <div
+                  key={row.id}
+                  style={{
+                    display: 'flex',
+                    height: GROUP_H,
+                    background: 'var(--muted)',
+                    borderBottom: '1px solid var(--border)',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: labelColW,
+                      flexShrink: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 7,
+                      padding: '0 14px',
+                      position: 'sticky',
+                      left: 0,
+                      background: 'var(--muted)',
+                      zIndex: 3,
+                      borderRight: '1px solid var(--border)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 9,
+                        height: 9,
+                        borderRadius: 2,
+                        background: row.color,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: 'var(--foreground)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        flex: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.label}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: 'var(--muted-foreground)',
+                        flexShrink: 0,
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.count}
+                    </span>
+                  </div>
+                  <div style={{ flex: 1 }} />
+                </div>
+              );
+            }
+
+            const ev = row.event;
+            const selected = selectedActivityId === ev.id;
+            const indent = ev.isChild ? 20 : 0;
+            const evIsMatch = isMatch(ev.id);
+            const evIsActive = isActive(ev.id);
+            const dimmed = hasQuery && !evIsMatch;
+            const extraReasons = nonTitleReasons(ev.id);
+
+            return (
+              <div
+                key={`${ev.id}-${rowIdx}`}
+                style={{
+                  display: 'flex',
+                  height: ROW_H,
+                  borderBottom: '1px solid var(--border)',
+                  position: 'relative',
+                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                  opacity: dimmed ? 0.3 : 1,
+                  transition: 'opacity 0.15s',
+                }}
+              >
+                {/* Sticky label cell */}
+                <div
+                  style={{
+                    width: labelColW,
+                    flexShrink: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 7,
+                    paddingLeft: 14 + indent,
+                    paddingRight: 10,
+                    position: 'sticky',
+                    left: 0,
+                    background: selected ? 'var(--muted)' : 'var(--card)',
+                    zIndex: 6,
+                    borderRight: '1px solid var(--border)',
+                    cursor: 'pointer',
+                    transition: 'background 0.1s',
+                  }}
+                  onClick={() => onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = 'var(--muted)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
+                  }}
+                >
+                  <Badge
+                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
+                    name={ev.title}
+                    shape="square"
+                    size={20}
+                  />
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 500,
+                      color: 'var(--foreground)',
+                      flex: 1,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontFamily: 'var(--font-sans)',
+                    }}
+                  >
+                    {ev.title}
+                  </span>
+                  {ev.members.length > 0 && (
+                    <div style={{ display: 'flex', flexShrink: 0 }}>
+                      {ev.members.slice(0, 3).map((m, i) => (
+                        <div
+                          key={m.id}
+                          style={{ marginLeft: i === 0 ? 0 : -5 }}
+                          title={m.name}
+                        >
+                          <MemberAvatar member={m} size={20} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Lane — background columns + today line + event bar */}
+                <div
+                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: onLaneDrag ? 'crosshair' : 'default' }}
+                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
+                >
+                  {columns.map((_, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        width: COL_W,
+                        height: '100%',
+                        flexShrink: 0,
+                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+                        background:
+                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                      }}
+                    />
+                  ))}
+
+                  {/* Drag selection highlight */}
+                  {drag && drag.rowIdx === rowIdx && (() => {
+                    const lo = Math.min(drag.startCol, drag.currentCol);
+                    const hi = Math.max(drag.startCol, drag.currentCol);
+                    return (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 4,
+                          bottom: 4,
+                          left: lo * COL_W,
+                          width: (hi - lo + 1) * COL_W,
+                          background: 'hsl(188 59% 38% / .18)',
+                          border: '1.5px dashed var(--primary)',
+                          borderRadius: 4,
+                          pointerEvents: 'none',
+                          zIndex: 3,
+                        }}
+                      />
+                    );
+                  })()}
+
+                  {/* Today vertical line */}
+                  {todayIndex >= 0 && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        bottom: 0,
+                        left: todayIndex * COL_W,
+                        width: 2,
+                        background: 'var(--secondary)',
+                        opacity: 0.5,
+                        zIndex: 2,
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  )}
+
+                  {/* Event bar — live position overridden while dragging */}
+                  {(() => {
+                    const isDragging = barDrag?.eventId === ev.id;
+                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
+                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
+                    const left = startCol * COL_W + 2;
+                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
+                    // Only selected bars show grab/move cursors; unselected bars show pointer
+                    // to prevent accidental date changes when the user just wants to inspect.
+                    const grabCursor = isDragging
+                      ? 'grabbing'
+                      : (selected && onBarDrag) ? 'grab' : 'pointer';
+
+                    // Box shadow: find states take precedence over selection ring.
+                    // CSS classes (.find-active-bar, .find-match-bar) provide the
+                    // amber outline; we only set inline boxShadow for the selected ring.
+                    const boxShadow = (evIsActive || evIsMatch)
+                      ? undefined
+                      : selected
+                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
+                        : 'var(--shadow-sm)';
+
+                    return (
+                      <div
+                        onClick={() => {
+                          // Bar click always selects — use the label cell to deselect.
+                          if (!isDragging) onSelectActivity(ev.id);
+                        }}
+                        onMouseDown={e => {
+                          if (!onBarDrag) { e.stopPropagation(); return; }
+                          const barRect = e.currentTarget.getBoundingClientRect();
+                          const xInBar = e.clientX - barRect.left;
+                          let zone: BarDragZone;
+                          if (xInBar <= EDGE_W) zone = 'left';
+                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
+                          else zone = 'body';
+                          handleBarMouseDown(e, ev, zone);
+                        }}
+                        onMouseEnter={e => {
+                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
+                          // Show "why matched" tooltip for non-title matches
+                          if (extraReasons.length > 0) {
+                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
+                          }
+                        }}
+                        onMouseMove={e => {
+                          if (matchTooltip) {
+                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
+                          }
+                        }}
+                        onMouseLeave={e => {
+                          e.currentTarget.style.filter = '';
+                          setMatchTooltip(null);
+                        }}
+                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
+                        style={{
+                          position: 'absolute',
+                          top: 9,
+                          bottom: 9,
+                          left,
+                          width,
+                          background: ev.color,
+                          borderRadius: 5,
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: `0 ${EDGE_W + 2}px`,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          color: 'white',
+                          overflow: 'hidden',
+                          whiteSpace: 'nowrap',
+                          textOverflow: 'ellipsis',
+                          cursor: grabCursor,
+                          zIndex: 4,
+                          boxShadow,
+                          opacity: isDragging ? 0.85 : 1,
+                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
+                          fontFamily: 'var(--font-sans)',
+                          userSelect: 'none',
+                        }}
+                      >
+                        {/* Left resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '5px 0 0 5px',
+                            }}
+                          />
+                        )}
+                        {ev.title}
+                        {/* Right resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              right: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '0 5px 5px 0',
+                            }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* No-matches-in-view callout — rendered inside the scroll container */}
+          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
+            <div style={{
+              padding: '12px 16px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              borderTop: '1px solid var(--border)',
+            }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
+      {dragTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: dragTooltip.x + 14,
+            top: dragTooltip.y - 28,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontWeight: 600,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {dragTooltip.text}
+        </div>
+      )}
+
+      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
+      {matchTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: matchTooltip.x + 12,
+            top: matchTooltip.y - 36,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {matchTooltip.reasons.map(r => (
+            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/components/StatusTemplatesTab.tsx
 ````typescript
 /**
@@ -24095,1272 +25365,6 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-````
-
-## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
-````typescript
-/**
- * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
- *
- * Defaults come from the drag selection: start/end date and the lane member.
- * Submits via POST /timelines/:id/activities.
- */
-
-import { useState, useEffect } from 'react'
-import { X, ArrowRight, Loader2 } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useCreateActivity } from '@/hooks/useTeamActivities'
-import type { Member } from '@/types'
-
-const PANEL_WIDTH = 300
-
-interface Props {
-  open: boolean
-  teamId: string
-  timelineId: string
-  members: Member[]
-  defaultStart: string
-  defaultEnd: string
-  defaultMemberId?: string | null
-  onClose: () => void
-}
-
-const LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 4,
-}
-
-export default function ActivityCreatePanel({
-  open,
-  teamId,
-  timelineId,
-  members,
-  defaultStart,
-  defaultEnd,
-  defaultMemberId,
-  onClose,
-}: Props) {
-  const createMutation = useCreateActivity(teamId, timelineId)
-
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [startDate, setStartDate] = useState(defaultStart)
-  const [endDate, setEndDate] = useState(defaultEnd)
-  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
-  const [assignedIds, setAssignedIds] = useState<string[]>(
-    defaultMemberId ? [defaultMemberId] : [],
-  )
-
-  // Reset all fields to defaults each time the panel opens so re-opening
-  // the panel always shows a blank form rather than the previous session's data.
-  useEffect(() => {
-    if (!open) return
-    setTitle('')
-    setDescription('')
-    setStartDate(defaultStart)
-    setEndDate(defaultEnd)
-    setIdentity({ color: '#288C9B', icon: '__none__' })
-    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
-  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const creating = createMutation.isPending
-  const titleTrimmed = title.trim()
-
-  function toggleAssignee(memberId: string) {
-    setAssignedIds(prev =>
-      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
-    )
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!titleTrimmed) return
-    createMutation.mutate(
-      {
-        title: titleTrimmed,
-        startAt: `${startDate}T00:00:00Z`,
-        endAt: `${endDate}T00:00:00Z`,
-        description: description.trim() || null,
-        color: identity.color,
-        icon: identity.icon,
-        assignedMemberIds: assignedIds,
-      },
-      { onSuccess: onClose },
-    )
-  }
-
-  return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '0 12px',
-          height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)',
-          flexShrink: 0,
-        }}
-      >
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
-        <button
-          onClick={onClose}
-          style={{
-            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: 'pointer', color: 'var(--muted-foreground)',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-        >
-          <X size={14} strokeWidth={2} />
-        </button>
-      </div>
-
-      {/* Form */}
-      <form onSubmit={handleSubmit} style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
-
-        {/* Identity + Title — mirrors the modal header pattern: badge on left, editable name on right */}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-          <div style={{ marginTop: 2, flexShrink: 0 }}>
-            <IdentityWidget
-              identity={identity}
-              name={title || 'New Activity'}
-              shape="square"
-              onChange={setIdentity}
-            />
-          </div>
-          <input
-            autoFocus
-            value={title}
-            onChange={e => setTitle(e.target.value)}
-            placeholder="Activity title…"
-            style={{
-              flex: 1, fontSize: 13, fontWeight: 600,
-              color: 'var(--foreground)', border: '1px solid transparent',
-              borderRadius: 'var(--radius-md)', padding: '5px 6px',
-              outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-            onBlur={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-          />
-        </div>
-
-        {/* Date range */}
-        <div>
-          <div style={LABEL}>Date range</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type="date"
-              value={startDate}
-              onChange={e => {
-                setStartDate(e.target.value)
-                if (e.target.value > endDate) setEndDate(e.target.value)
-              }}
-              style={{
-                flex: 1, fontSize: 12, color: 'var(--foreground)',
-                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-                padding: '6px 8px', outline: 'none', background: 'var(--background)',
-                fontFamily: 'var(--font-sans)', cursor: 'pointer',
-              }}
-            />
-            <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-            <input
-              type="date"
-              value={endDate}
-              min={startDate}
-              onChange={e => setEndDate(e.target.value)}
-              style={{
-                flex: 1, fontSize: 12, color: 'var(--foreground)',
-                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-                padding: '6px 8px', outline: 'none', background: 'var(--background)',
-                fontFamily: 'var(--font-sans)', cursor: 'pointer',
-              }}
-            />
-          </div>
-        </div>
-
-        {/* Description */}
-        <div>
-          <div style={LABEL}>Description</div>
-          <input
-            value={description}
-            onChange={e => setDescription(e.target.value)}
-            placeholder="Optional description…"
-            style={{
-              width: '100%', boxSizing: 'border-box',
-              fontSize: 12, color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-              padding: '6px 8px', outline: 'none', background: 'var(--background)',
-              fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-          />
-        </div>
-
-        {/* Assignees */}
-        {members.length > 0 && (
-          <div>
-            <div style={LABEL}>Assignees</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {members.map(m => {
-                const assigned = assignedIds.includes(m.id)
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => toggleAssignee(m.id)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '5px 8px',
-                      border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
-                      borderRadius: 'var(--radius-md)',
-                      background: assigned ? `${m.color}18` : 'var(--background)',
-                      cursor: 'pointer', textAlign: 'left',
-                      transition: 'background 0.1s, border-color 0.1s',
-                    }}
-                  >
-                    <MemberAvatar member={m} size={18} />
-                    <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                    {assigned && (
-                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Spacer pushes submit to bottom */}
-        <div style={{ flex: 1 }} />
-      </form>
-
-      {/* Footer */}
-      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-        <button
-          type="submit"
-          form=""
-          onClick={handleSubmit}
-          disabled={!titleTrimmed || creating}
-          style={{
-            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
-            borderRadius: 'var(--radius-md)', border: 'none',
-            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
-            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
-            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
-            fontFamily: 'var(--font-sans)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            transition: 'background 0.1s',
-          }}
-        >
-          {creating && <Loader2 size={13} className="animate-spin" />}
-          Create activity
-        </button>
-      </div>
-    </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/components/gantt/GanttGrid.tsx
-````typescript
-/**
- * GanttGrid — presentational Gantt chart.
- *
- * Renders a sticky header row of column labels, then one row per GanttRow
- * entry. Rows are either group-header dividers or event bars. All data
- * preparation (grouping, sorting, date math) lives in the parent GanttView.
- *
- * Drag on an empty lane cell to select a date range; onLaneDrag fires on
- * mouseup with the resolved start/end dates and the lane's memberId.
- *
- * Drag on an event bar's left/right 8px edge to resize it, or on its body to
- * move it. onBarDrag fires on mouseup with the resolved new dates.
- *
- * When findState is provided with a non-empty query, non-matching event rows
- * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
- * the active (parked) match gets a stronger amber outline with a pulse
- * animation. Stepping to a new active match auto-scrolls both axes to center
- * the bar in the viewport.
- */
-
-import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
-import MemberAvatar from '../MemberAvatar';
-import { Badge } from '../identity/Badge';
-import EmptyState from '../shared/EmptyState';
-import type { Member } from '../../types';
-import type { ColumnDef, TimeGranularity } from './granularity';
-import { addDays, snapDivisorFor } from './granularity';
-
-export const DEFAULT_LABEL_COL_W = 240;
-const MIN_LABEL_COL_W = 140;
-const MAX_LABEL_COL_W = 400;
-const HEADER_H = 36;
-const ROW_H = 44;
-const GROUP_H = 30;
-const COL_W = 80;
-const EDGE_W = 8; // px hit zone for resize handles
-
-/** A positioned activity bar ready for rendering. */
-export interface GanttActivity {
-  id: string;
-  title: string;
-  /** Fractional column start (0-based). */
-  startCol: number;
-  /** Fractional column span. */
-  span: number;
-  /** Hex color for bar background and badge. */
-  color: string;
-  /** Icon ID from the activity's identity, if set. */
-  icon?: string;
-  members: Member[];
-  isChild: boolean;
-}
-
-export type GanttRow =
-  | { kind: 'group'; id: string; label: string; color: string; count: number }
-  | { kind: 'activity'; event: GanttActivity };
-
-/** Visual state for the in-view Find feature. Passed from GanttView. */
-export interface FindState {
-  hasQuery: boolean;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
-  matchReasons: Map<string, string[]>;
-  filtersActive: boolean;
-  matchCount: number;
-}
-
-interface DragState {
-  rowIdx: number;
-  memberId: string | null;
-  startCol: number;
-  currentCol: number;
-}
-
-type BarDragZone = 'left' | 'right' | 'body';
-
-interface BarDragState {
-  eventId: string;
-  zone: BarDragZone;
-  /** Fractional column of the event's visual start when drag began. */
-  initStartCol: number;
-  /** Fractional column of the event's visual end (startCol + span) when drag began. */
-  initEndCol: number;
-  /** Lane-relative x of the mouse when drag began. */
-  initMouseX: number;
-  /** Page-relative left edge of the lane div. */
-  laneLeft: number;
-  /** Current snapped start column (integer). */
-  snapStartCol: number;
-  /** Current snapped end column (integer, exclusive — col after last occupied). */
-  snapEndCol: number;
-}
-
-interface TooltipState {
-  text: string;
-  /** Viewport-relative x for tooltip positioning. */
-  x: number;
-  /** Viewport-relative y for tooltip positioning. */
-  y: number;
-}
-
-/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
-interface MatchTooltipState {
-  reasons: string[];
-  x: number;
-  y: number;
-}
-
-interface Props {
-  rows: GanttRow[];
-  columns: ColumnDef[];
-  /** Fractional column index of today (-1 if outside range). */
-  todayIndex: number;
-  selectedActivityId: string | null;
-  onSelectActivity: (id: string | null) => void;
-  /** Called when the user drags on an empty lane cell to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called when the user drags a bar edge or body to resize/move it. */
-  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
-  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Resolved granularity — used to compute the finer snap divisor during drag. */
-  resolvedGranularity?: TimeGranularity | 'auto';
-  /** Find state from GanttView; absent when the find bar is closed/idle. */
-  findState?: FindState;
-  /** Called when the user clicks "Clear filters" in the no-matches callout. */
-  onClearFilters?: () => void;
-  /** Current label column width in px — lifts state to the parent so it survives view switches. */
-  labelColW?: number;
-  /** Called when the user drags the column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-}
-
-// ── Bar drag helpers ─────────────────────────────────────────────────────────
-
-function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
-  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
-  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
-  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
-}
-
-// ── Date helpers (support fractional column positions) ───────────────────────
-
-// Maps a fractional column position to a calendar Date by interpolating within
-// the column's day range. Fractional positions enable finer snap granularities.
-function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
-  let remaining = Math.max(0, colFrac);
-  for (const col of columns) {
-    if (remaining <= 1) {
-      return addDays(col.start, Math.round(remaining * col.days));
-    }
-    remaining -= 1;
-  }
-  return columns[columns.length - 1].end;
-}
-
-function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
-  return colFracToDate(Math.max(0, colFrac), columns);
-}
-
-// endColFrac is exclusive (the fractional col just past the last occupied day).
-function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
-  // The last included date is 1 day before the date at the exclusive end.
-  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
-}
-
-
-function formatDragDate(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-export default function GanttGrid({
-  rows,
-  columns,
-  todayIndex,
-  selectedActivityId,
-  onSelectActivity,
-  onLaneDrag,
-  onBarDrag,
-  onBarDragProgress,
-  resolvedGranularity,
-  findState,
-  onClearFilters,
-  labelColW: labelColWProp,
-  onLabelColWChange,
-}: Props) {
-  // ── Resizable label column ─────────────────────────────────────────────────
-  // When the parent passes labelColW + onLabelColWChange the column is
-  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
-  // When neither is provided we fall back to internal state.
-  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
-  const labelColW = labelColWProp ?? internalLabelColW;
-  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
-
-  const totalW = useMemo(
-    () => labelColW + columns.length * COL_W,
-    [labelColW, columns.length],
-  );
-
-  const labelColWRef = useRef(labelColW);
-  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
-
-  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = labelColWRef.current;
-
-    function onMouseMove(mv: MouseEvent) {
-      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
-      setLabelColW(next);
-    }
-    function onMouseUp() {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Integer column index that contains today (for background highlight)
-  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
-
-  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-
-  // Always-current rows ref so the active-match scroll effect doesn't go stale
-  const rowsRef = useRef(rows);
-  useEffect(() => { rowsRef.current = rows; });
-
-  // ── Drag-to-create state ──────────────────────────────────────────────────
-  const [drag, setDrag] = useState<DragState | null>(null);
-  const dragRef = useRef<DragState | null>(null);
-
-  // ── Bar drag state ────────────────────────────────────────────────────────
-  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
-  const barDragRef = useRef<BarDragState | null>(null);
-  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
-
-  // ── "Why matched" hover tooltip ───────────────────────────────────────────
-  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
-
-  const colFromX = useCallback((laneX: number) => {
-    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
-  }, [columns.length]);
-
-  // ── Auto-scroll to active find match ─────────────────────────────────────
-  useEffect(() => {
-    const activeId = findState?.activeMatchId;
-    if (!activeId || !scrollContainerRef.current) return;
-    const container = scrollContainerRef.current;
-    const currentRows = rowsRef.current;
-
-    let y = HEADER_H;
-    let matchedActivity: GanttActivity | null = null;
-    for (const row of currentRows) {
-      if (row.kind === 'activity' && row.event.id === activeId) {
-        matchedActivity = row.event;
-        break;
-      }
-      y += row.kind === 'group' ? GROUP_H : ROW_H;
-    }
-    if (!matchedActivity) return;
-
-    const viewH = container.clientHeight;
-    const viewW = container.clientWidth;
-    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
-    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
-    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
-
-    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
-  // Only re-run when the active match changes, not when rows or columns change.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [findState?.activeMatchId]);
-
-  const handleLaneMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    rowIdx: number,
-    memberId: string | null,
-  ) => {
-    if (!onLaneDrag) return;
-    e.preventDefault();
-    const rect = e.currentTarget.getBoundingClientRect();
-    const col = colFromX(e.clientX - rect.left);
-    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
-    dragRef.current = state;
-    setDrag(state);
-
-    function onMouseMove(mv: MouseEvent) {
-      if (!dragRef.current) return;
-      const col2 = colFromX(mv.clientX - rect.left);
-      const next = { ...dragRef.current, currentCol: col2 };
-      dragRef.current = next;
-      setDrag({ ...next });
-    }
-
-    function onMouseUp() {
-      const s = dragRef.current;
-      if (s && onLaneDrag && columns.length > 0) {
-        const lo = Math.min(s.startCol, s.currentCol);
-        const hi = Math.max(s.startCol, s.currentCol);
-        const startDate = columns[lo]?.start ?? columns[0].start;
-        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
-        onLaneDrag(startDate, endDate, s.memberId);
-      }
-      dragRef.current = null;
-      setDrag(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [colFromX, columns, onLaneDrag]);
-
-  // ── Bar drag handler ──────────────────────────────────────────────────────
-
-  const handleBarMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    ev: GanttActivity,
-    zone: BarDragZone,
-  ) => {
-    if (!onBarDrag) return;
-    // Only allow drag/resize when the bar is already selected.
-    if (ev.id !== selectedActivityId) return;
-    e.preventDefault();
-    e.stopPropagation(); // prevent lane-drag from firing
-
-    // The bar's parent is the lane div (position: relative, flex: 1).
-    const laneEl = e.currentTarget.parentElement;
-    if (!laneEl) return;
-    const laneRect = laneEl.getBoundingClientRect();
-
-    const initStartCol = ev.startCol;
-    const initEndCol = ev.startCol + ev.span;
-    const initMouseX = e.clientX - laneRect.left;
-    // Snap initial positions using finer step.
-    const div = snapDivisorFor(resolvedGranularity ?? 'auto');
-    const step = 1 / div;
-    const snapInit = (x: number) => Math.round(x / step) * step;
-    const initSnapStart = snapInit(initStartCol);
-    const initSnapEnd = snapInit(initEndCol);
-
-    const state: BarDragState = {
-      eventId: ev.id,
-      zone,
-      initStartCol,
-      initEndCol,
-      initMouseX,
-      laneLeft: laneRect.left,
-      snapStartCol: initSnapStart,
-      snapEndCol: Math.max(initSnapEnd, initSnapStart + step),
-    };
-    barDragRef.current = state;
-    setBarDrag(state);
-
-    // Initial tooltip
-    const startDate = colToStartDate(state.snapStartCol, columns);
-    const endDate = colToEndDate(state.snapEndCol, columns);
-    setDragTooltip({
-      text: tooltipText(zone, startDate, endDate),
-      x: e.clientX,
-      y: e.clientY,
-    });
-
-    function onMouseMove(mv: MouseEvent) {
-      const s = barDragRef.current;
-      if (!s) return;
-
-      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
-      const n = columns.length;
-      // Finer snap: snap one granularity level below the active zoom.
-      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
-      const step = 1 / div;
-      const snap = (x: number) => Math.round(x / step) * step;
-
-      let nextStart = s.snapStartCol;
-      let nextEnd = s.snapEndCol;
-
-      if (s.zone === 'left') {
-        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.snapEndCol - step));
-      } else if (s.zone === 'right') {
-        nextEnd = Math.max(s.snapStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
-      } else {
-        // body: preserve span, shift both
-        const span = Math.max(step, snap(s.initEndCol - s.initStartCol));
-        const shift = snap(deltaCol);
-        nextStart = Math.max(0, Math.min(snap(s.initStartCol) + shift, n - span));
-        nextEnd = nextStart + span;
-      }
-
-      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
-      barDragRef.current = next;
-      setBarDrag(next);
-
-      const sd = colToStartDate(nextStart, columns);
-      const ed = colToEndDate(nextEnd, columns);
-      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
-      onBarDragProgress?.(s.eventId, sd, ed);
-    }
-
-    function onMouseUp() {
-      const s = barDragRef.current;
-      if (s && onBarDrag) {
-        const sd = colToStartDate(s.snapStartCol, columns);
-        const ed = colToEndDate(s.snapEndCol, columns);
-        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
-      }
-      barDragRef.current = null;
-      setBarDrag(null);
-      setDragTooltip(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [columns, onBarDrag]);
-
-  // Header cells are shared between the empty-state path and the unified scroll path.
-  const headerContent = (
-    <>
-      <div
-        style={{
-          width: labelColW,
-          flexShrink: 0,
-          padding: '0 16px',
-          display: 'flex',
-          alignItems: 'center',
-          borderRight: '1px solid var(--border)',
-          fontSize: 11,
-          fontWeight: 600,
-          color: 'var(--muted-foreground)',
-          textTransform: 'uppercase' as const,
-          letterSpacing: '0.06em',
-          position: 'sticky' as const,
-          left: 0,
-          zIndex: 6,
-          background: 'var(--card)',
-          userSelect: 'none',
-        }}
-      >
-        Activity
-        {/* Drag handle — resize the label column */}
-        <div
-          onMouseDown={handleColumnResizeMouseDown}
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: 0,
-            bottom: 0,
-            width: 6,
-            cursor: 'col-resize',
-            zIndex: 10,
-          }}
-        />
-      </div>
-
-      {columns.map((col, i) => {
-        const isToday = i === todayCol;
-        return (
-          <div
-            key={i}
-            style={{
-              width: COL_W,
-              flexShrink: 0,
-              height: HEADER_H,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '0 4px 8px',
-              gap: 2,
-              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-              position: 'relative',
-              overflow: 'hidden',
-            }}
-          >
-            <span style={{
-              fontSize: col.sublabel ? 10 : 11,
-              fontWeight: isToday ? 700 : 600,
-              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
-              lineHeight: 1.2,
-              textAlign: 'center',
-            }}>
-              {col.label}
-            </span>
-            {col.sublabel && (
-              <span style={{
-                fontSize: 9,
-                fontWeight: 500,
-                color: 'var(--muted-foreground)',
-                lineHeight: 1,
-                opacity: isToday ? 1 : 0.75,
-              }}>
-                {col.sublabel}
-              </span>
-            )}
-            {isToday && (
-              <div
-                style={{
-                  position: 'absolute',
-                  bottom: 2,
-                  left: `${((todayIndex - todayCol) * 100)}%`,
-                  transform: 'translateX(-50%)',
-                  width: 6,
-                  height: 6,
-                  borderRadius: '50%',
-                  background: 'var(--secondary)',
-                }}
-              />
-            )}
-          </div>
-        );
-      })}
-    </>
-  );
-
-  // ── Find helpers ──────────────────────────────────────────────────────────
-
-  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
-
-  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
-  function isActive(id: string) { return activeMatchId === id; }
-
-  // Non-title reasons to surface in the "why matched" tooltip
-  function nonTitleReasons(id: string): string[] {
-    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
-  }
-
-  // ── Empty state: header + centered placeholder ──────────────────────────────
-  if (rows.length === 0) {
-    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
-    return (
-      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
-          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-        </div>
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-          <EmptyState message="No viewable activities" />
-          {showNoMatchCallout && findState.filtersActive && (
-            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </p>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Unified scroll: header sticky inside the single container ──────────────
-  return (
-    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
-        <div style={{ width: totalW }}>
-
-          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
-          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-
-          {rows.map((row, rowIdx) => {
-            if (row.kind === 'group') {
-              return (
-                <div
-                  key={row.id}
-                  style={{
-                    display: 'flex',
-                    height: GROUP_H,
-                    background: 'var(--muted)',
-                    borderBottom: '1px solid var(--border)',
-                  }}
-                >
-                  <div
-                    style={{
-                      width: labelColW,
-                      flexShrink: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 7,
-                      padding: '0 14px',
-                      position: 'sticky',
-                      left: 0,
-                      background: 'var(--muted)',
-                      zIndex: 3,
-                      borderRight: '1px solid var(--border)',
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: 9,
-                        height: 9,
-                        borderRadius: 2,
-                        background: row.color,
-                        flexShrink: 0,
-                      }}
-                    />
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: 'var(--foreground)',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.05em',
-                        flex: 1,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.label}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 10,
-                        color: 'var(--muted-foreground)',
-                        flexShrink: 0,
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.count}
-                    </span>
-                  </div>
-                  <div style={{ flex: 1 }} />
-                </div>
-              );
-            }
-
-            const ev = row.event;
-            const selected = selectedActivityId === ev.id;
-            const indent = ev.isChild ? 20 : 0;
-            const evIsMatch = isMatch(ev.id);
-            const evIsActive = isActive(ev.id);
-            const dimmed = hasQuery && !evIsMatch;
-            const extraReasons = nonTitleReasons(ev.id);
-
-            return (
-              <div
-                key={`${ev.id}-${rowIdx}`}
-                style={{
-                  display: 'flex',
-                  height: ROW_H,
-                  borderBottom: '1px solid var(--border)',
-                  position: 'relative',
-                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                  opacity: dimmed ? 0.3 : 1,
-                  transition: 'opacity 0.15s',
-                }}
-              >
-                {/* Sticky label cell */}
-                <div
-                  style={{
-                    width: labelColW,
-                    flexShrink: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 7,
-                    paddingLeft: 14 + indent,
-                    paddingRight: 10,
-                    position: 'sticky',
-                    left: 0,
-                    background: selected ? 'var(--muted)' : 'var(--card)',
-                    zIndex: 6,
-                    borderRight: '1px solid var(--border)',
-                    cursor: 'pointer',
-                    transition: 'background 0.1s',
-                  }}
-                  onClick={() => onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
-                  onMouseEnter={e => {
-                    e.currentTarget.style.background = 'var(--muted)';
-                  }}
-                  onMouseLeave={e => {
-                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
-                  }}
-                >
-                  <Badge
-                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
-                    name={ev.title}
-                    shape="square"
-                    size={20}
-                  />
-                  <span
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 500,
-                      color: 'var(--foreground)',
-                      flex: 1,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      fontFamily: 'var(--font-sans)',
-                    }}
-                  >
-                    {ev.title}
-                  </span>
-                  {ev.members.length > 0 && (
-                    <div style={{ display: 'flex', flexShrink: 0 }}>
-                      {ev.members.slice(0, 3).map((m, i) => (
-                        <div
-                          key={m.id}
-                          style={{ marginLeft: i === 0 ? 0 : -5 }}
-                          title={m.name}
-                        >
-                          <MemberAvatar member={m} size={20} />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Lane — background columns + today line + event bar */}
-                <div
-                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: onLaneDrag ? 'crosshair' : 'default' }}
-                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
-                >
-                  {columns.map((_, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        width: COL_W,
-                        height: '100%',
-                        flexShrink: 0,
-                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-                        background:
-                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                      }}
-                    />
-                  ))}
-
-                  {/* Drag selection highlight */}
-                  {drag && drag.rowIdx === rowIdx && (() => {
-                    const lo = Math.min(drag.startCol, drag.currentCol);
-                    const hi = Math.max(drag.startCol, drag.currentCol);
-                    return (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: 4,
-                          bottom: 4,
-                          left: lo * COL_W,
-                          width: (hi - lo + 1) * COL_W,
-                          background: 'hsl(188 59% 38% / .18)',
-                          border: '1.5px dashed var(--primary)',
-                          borderRadius: 4,
-                          pointerEvents: 'none',
-                          zIndex: 3,
-                        }}
-                      />
-                    );
-                  })()}
-
-                  {/* Today vertical line */}
-                  {todayIndex >= 0 && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        bottom: 0,
-                        left: todayIndex * COL_W,
-                        width: 2,
-                        background: 'var(--secondary)',
-                        opacity: 0.5,
-                        zIndex: 2,
-                        pointerEvents: 'none',
-                      }}
-                    />
-                  )}
-
-                  {/* Event bar — live position overridden while dragging */}
-                  {(() => {
-                    const isDragging = barDrag?.eventId === ev.id;
-                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
-                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
-                    const left = startCol * COL_W + 2;
-                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
-                    // Only selected bars show grab/move cursors; unselected bars show pointer
-                    // to prevent accidental date changes when the user just wants to inspect.
-                    const grabCursor = isDragging
-                      ? 'grabbing'
-                      : (selected && onBarDrag) ? 'grab' : 'pointer';
-
-                    // Box shadow: find states take precedence over selection ring.
-                    // CSS classes (.find-active-bar, .find-match-bar) provide the
-                    // amber outline; we only set inline boxShadow for the selected ring.
-                    const boxShadow = (evIsActive || evIsMatch)
-                      ? undefined
-                      : selected
-                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
-                        : 'var(--shadow-sm)';
-
-                    return (
-                      <div
-                        onClick={() => {
-                          // Bar click always selects — use the label cell to deselect.
-                          if (!isDragging) onSelectActivity(ev.id);
-                        }}
-                        onMouseDown={e => {
-                          if (!onBarDrag) { e.stopPropagation(); return; }
-                          const barRect = e.currentTarget.getBoundingClientRect();
-                          const xInBar = e.clientX - barRect.left;
-                          let zone: BarDragZone;
-                          if (xInBar <= EDGE_W) zone = 'left';
-                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
-                          else zone = 'body';
-                          handleBarMouseDown(e, ev, zone);
-                        }}
-                        onMouseEnter={e => {
-                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
-                          // Show "why matched" tooltip for non-title matches
-                          if (extraReasons.length > 0) {
-                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
-                          }
-                        }}
-                        onMouseMove={e => {
-                          if (matchTooltip) {
-                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
-                          }
-                        }}
-                        onMouseLeave={e => {
-                          e.currentTarget.style.filter = '';
-                          setMatchTooltip(null);
-                        }}
-                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
-                        style={{
-                          position: 'absolute',
-                          top: 9,
-                          bottom: 9,
-                          left,
-                          width,
-                          background: ev.color,
-                          borderRadius: 5,
-                          display: 'flex',
-                          alignItems: 'center',
-                          padding: `0 ${EDGE_W + 2}px`,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: 'white',
-                          overflow: 'hidden',
-                          whiteSpace: 'nowrap',
-                          textOverflow: 'ellipsis',
-                          cursor: grabCursor,
-                          zIndex: 4,
-                          boxShadow,
-                          opacity: isDragging ? 0.85 : 1,
-                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
-                          fontFamily: 'var(--font-sans)',
-                          userSelect: 'none',
-                        }}
-                      >
-                        {/* Left resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              left: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '5px 0 0 5px',
-                            }}
-                          />
-                        )}
-                        {ev.title}
-                        {/* Right resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              right: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '0 5px 5px 0',
-                            }}
-                          />
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
-            );
-          })}
-
-          {/* No-matches-in-view callout — rendered inside the scroll container */}
-          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
-            <div style={{
-              padding: '12px 16px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              borderTop: '1px solid var(--border)',
-            }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </div>
-          )}
-
-        </div>
-      </div>
-
-      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
-      {dragTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: dragTooltip.x + 14,
-            top: dragTooltip.y - 28,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontWeight: 600,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {dragTooltip.text}
-        </div>
-      )}
-
-      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
-      {matchTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: matchTooltip.x + 12,
-            top: matchTooltip.y - 36,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {matchTooltip.reasons.map(r => (
-            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }
 ````
 
@@ -27189,193 +27193,6 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
- */
-
-import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
-
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
-
-const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
-
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-  const { theme: currentTheme, applyTheme } = useDarkMode()
-
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-    const savedTheme = prefMap['theme'] as string | undefined
-    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
-  }, [JSON.stringify(prefMap)])
-
-  function handleThemeChange(t: 'light' | 'dark') {
-    setTheme(t)
-    applyTheme(t)
-  }
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await Promise.all([
-        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
-        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
-        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
-        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
-      ])
-      setFeedback({ type: 'success', msg: 'Preferences saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Personal appearance and regional settings.
-      </p>
-
-      {/* Regional */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Regional
-        </h3>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Language</Label>
-          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Timezone</Label>
-          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Date format</Label>
-          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Appearance */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Appearance
-        </h3>
-        <div className="flex flex-col gap-1.5 mb-2">
-          <Label>Theme</Label>
-          <div className="flex gap-2">
-            {(['light', 'dark'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  theme === t
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground m-0">
-            Applies immediately. Persisted server-side so it syncs across devices.
-          </p>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <Button onClick={handleSave} disabled={upsert.isPending}>
-        {upsert.isPending ? 'Saving…' : 'Save preferences'}
-      </Button>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
 ````typescript
 /**
@@ -28033,6 +27850,193 @@ export default function ActivityDetailPanel({
 
         </>)}
       </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
+ */
+
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
+
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
+
+const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
+
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+  const { theme: currentTheme, applyTheme } = useDarkMode()
+
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+    const savedTheme = prefMap['theme'] as string | undefined
+    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
+  }, [JSON.stringify(prefMap)])
+
+  function handleThemeChange(t: 'light' | 'dark') {
+    setTheme(t)
+    applyTheme(t)
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
+        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
+        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
+        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Personal appearance and regional settings.
+      </p>
+
+      {/* Regional */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Regional
+        </h3>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Language</Label>
+          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Date format</Label>
+          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Appearance */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Appearance
+        </h3>
+        <div className="flex flex-col gap-1.5 mb-2">
+          <Label>Theme</Label>
+          <div className="flex gap-2">
+            {(['light', 'dark'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  theme === t
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground m-0">
+            Applies immediately. Persisted server-side so it syncs across devices.
+          </p>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
     </div>
   )
 }
@@ -28989,6 +28993,474 @@ export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
       client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
     },
   })
+}
+````
+
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+interface Props {
+  teamId: string;
+  /** Active timeline ID — activities are fetched scoped to this timeline. */
+  timelineId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  /** Set of status IDs that are marked is_closed. Used when the 'open' filter preset is active. */
+  closedStatusIds?: Set<string>;
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag completes (before the PATCH fires). */
+  onBarDragEnd?: () => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
+  labelColW?: number;
+  /** Called when the user drags the label column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+}
+
+/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
+function statusColorFromId(statusId: string | null | undefined): string {
+  if (!statusId) return '#6b7280';
+  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
+  let h = 0;
+  for (let i = 0; i < statusId.length; i++) {
+    h = statusId.charCodeAt(i) + ((h << 5) - h);
+    h |= 0;
+  }
+  return palette[Math.abs(h) % palette.length];
+}
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate type that carries original API fields alongside view-state. */
+interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+  }
+
+  if (groupBy === 'member') {
+    const buckets: Record<string, RichActivity[]> = {};
+    for (const ev of sorted) {
+      const key = ev.primaryMemberId ?? '__none__';
+      (buckets[key] ??= []).push(ev);
+    }
+
+    const rows: GanttRow[] = [];
+    for (const m of members) {
+      const evs = buckets[m.id];
+      if (!evs?.length) continue;
+      rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+    }
+    const unassigned = buckets['__none__'];
+    if (unassigned?.length) {
+      rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
+      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    const placed = new Set<string>();
+    const rows: GanttRow[] = [];
+
+    for (const ev of sorted) {
+      if (placed.has(ev.id) || ev.parentActivityId) continue;
+      placed.add(ev.id);
+      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+
+      for (const child of sorted) {
+        if (child.parentActivityId === ev.id) {
+          placed.add(child.id);
+          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
+        }
+      }
+    }
+
+    for (const ev of sorted) {
+      if (!placed.has(ev.id)) {
+        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
+      }
+    }
+
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+/**
+ * Returns only the activities whose status is not in closedStatusIds.
+ * Extracted as a named export so the 'open' filter preset logic can be
+ * unit-tested without mounting the full component.
+ */
+export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
+  activities: T[],
+  closedStatusIds: Set<string>,
+): T[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
+export default function GanttView({
+  teamId,
+  timelineId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  closedStatusIds,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onBarDragProgress,
+  onBarDragEnd,
+  onMembersLoaded,
+  onSelectApiActivity,
+  labelColW,
+  onLabelColWChange,
+}: Props) {
+  const updateActivity = useUpdateActivity(timelineId);
+  const today = todayMidnight();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  const hideClosedActive = activeFilter.kind === 'preset' && activeFilter.id === 'open'
+  const visibleActivities = useMemo(() => {
+    if (!hideClosedActive || !closedStatusIds?.size) return apiActivities
+    return filterOpenActivities(apiActivities, closedStatusIds)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiActivities, hideClosedActive, closedStatusIds])
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = visibleActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    onBarDragEnd?.();
+    updateActivity.mutate({
+      activityId,
+      patch: {
+        startAt: newStartDate.toISOString(),
+        endAt: newEndDate.toISOString(),
+      },
+    });
+  }, [updateActivity, onBarDragEnd]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={onLaneDrag}
+        onBarDrag={handleBarDrag}
+        onBarDragProgress={onBarDragProgress}
+        resolvedGranularity={resolvedGranularity}
+        onClearFilters={filtersActive ? () => {} : undefined}
+        labelColW={labelColW}
+        onLabelColWChange={onLabelColWChange}
+      />
+    </div>
+  );
 }
 ````
 
@@ -30597,474 +31069,6 @@ func flatten[T any](s []*T) []T {
 		}
 	}
 	return out
-}
-````
-
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { usePreferenceMap } from '@/hooks/usePreferences';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-interface Props {
-  teamId: string;
-  /** Active timeline ID — activities are fetched scoped to this timeline. */
-  timelineId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  /** Set of status IDs that are marked is_closed. Used when the 'open' filter preset is active. */
-  closedStatusIds?: Set<string>;
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called during a bar drag with live snapped dates — for sidebar preview. */
-  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
-  /** Called when a bar drag completes (before the PATCH fires). */
-  onBarDragEnd?: () => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
-  labelColW?: number;
-  /** Called when the user drags the label column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-}
-
-/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
-function statusColorFromId(statusId: string | null | undefined): string {
-  if (!statusId) return '#6b7280';
-  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
-  let h = 0;
-  for (let i = 0; i < statusId.length; i++) {
-    h = statusId.charCodeAt(i) + ((h << 5) - h);
-    h |= 0;
-  }
-  return palette[Math.abs(h) % palette.length];
-}
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate type that carries original API fields alongside view-state. */
-interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-  }
-
-  if (groupBy === 'member') {
-    const buckets: Record<string, RichActivity[]> = {};
-    for (const ev of sorted) {
-      const key = ev.primaryMemberId ?? '__none__';
-      (buckets[key] ??= []).push(ev);
-    }
-
-    const rows: GanttRow[] = [];
-    for (const m of members) {
-      const evs = buckets[m.id];
-      if (!evs?.length) continue;
-      rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-    }
-    const unassigned = buckets['__none__'];
-    if (unassigned?.length) {
-      rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
-      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    const placed = new Set<string>();
-    const rows: GanttRow[] = [];
-
-    for (const ev of sorted) {
-      if (placed.has(ev.id) || ev.parentActivityId) continue;
-      placed.add(ev.id);
-      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-
-      for (const child of sorted) {
-        if (child.parentActivityId === ev.id) {
-          placed.add(child.id);
-          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
-        }
-      }
-    }
-
-    for (const ev of sorted) {
-      if (!placed.has(ev.id)) {
-        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
-      }
-    }
-
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-/**
- * Returns only the activities whose status is not in closedStatusIds.
- * Extracted as a named export so the 'open' filter preset logic can be
- * unit-tested without mounting the full component.
- */
-export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
-  activities: T[],
-  closedStatusIds: Set<string>,
-): T[] {
-  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-}
-
-export default function GanttView({
-  teamId,
-  timelineId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  closedStatusIds,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onBarDragProgress,
-  onBarDragEnd,
-  onMembersLoaded,
-  onSelectApiActivity,
-  labelColW,
-  onLabelColWChange,
-}: Props) {
-  const updateActivity = useUpdateActivity(timelineId);
-  const today = todayMidnight();
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  const globalPrefs = usePreferenceMap();
-  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
-  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
-  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
-  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
-  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  const hideClosedActive = activeFilter.kind === 'preset' && activeFilter.id === 'open'
-  const visibleActivities = useMemo(() => {
-    if (!hideClosedActive || !closedStatusIds?.size) return apiActivities
-    return filterOpenActivities(apiActivities, closedStatusIds)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiActivities, hideClosedActive, closedStatusIds])
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    onBarDragEnd?.();
-    updateActivity.mutate({
-      activityId,
-      patch: {
-        startAt: newStartDate.toISOString(),
-        endAt: newEndDate.toISOString(),
-      },
-    });
-  }, [updateActivity, onBarDragEnd]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={onLaneDrag}
-        onBarDrag={handleBarDrag}
-        onBarDragProgress={onBarDragProgress}
-        resolvedGranularity={resolvedGranularity}
-        onClearFilters={filtersActive ? () => {} : undefined}
-        labelColW={labelColW}
-        onLabelColWChange={onLabelColWChange}
-      />
-    </div>
-  );
 }
 ````
 
