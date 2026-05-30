@@ -205,6 +205,7 @@ packages/
           ActivityDetailPanel.tsx
           GanttGrid.tsx
           GanttToolbar.tsx
+          GanttView.filter.test.ts
           GanttView.tsx
           granularity.test.ts
           granularity.ts
@@ -2659,6 +2660,31 @@ CREATE TABLE IF NOT EXISTS user_preferences (
 );
 ````
 
+## File: packages/api/internal/db/migrations/005_rename_events_to_activities.sql
+````sql
+-- Rename domain entity: events → activities.
+--
+-- This is a hard cutover — no aliases. SQLite 3.26+ automatically updates
+-- foreign-key references in other tables when a referenced table is renamed,
+-- so the FK in event_assignments pointing to events(id) becomes activities(id)
+-- after step 1, before we rename the child tables in steps 2 and 3.
+--
+-- Rollback SQL (if needed without a DB restore):
+--   ALTER TABLE activity_tags RENAME COLUMN activity_id TO event_id;
+--   ALTER TABLE activity_assignments RENAME COLUMN activity_id TO event_id;
+--   ALTER TABLE activities RENAME COLUMN parent_activity_id TO parent_event_id;
+--   ALTER TABLE activities RENAME TO events;
+--   ALTER TABLE activity_tags RENAME TO event_tags;
+--   ALTER TABLE activity_assignments RENAME TO event_assignments;
+
+ALTER TABLE events RENAME TO activities;
+ALTER TABLE event_tags RENAME TO activity_tags;
+ALTER TABLE event_assignments RENAME TO activity_assignments;
+ALTER TABLE activities RENAME COLUMN parent_event_id TO parent_activity_id;
+ALTER TABLE activity_tags RENAME COLUMN event_id TO activity_id;
+ALTER TABLE activity_assignments RENAME COLUMN event_id TO activity_id;
+````
+
 ## File: packages/api/internal/db/api_token_repo.go
 ````go
 package db
@@ -4376,6 +4402,330 @@ Label.displayName = LabelPrimitive.Root.displayName
 export { Label }
 ````
 
+## File: packages/web/src/components/ActivityPanel.tsx
+````typescript
+import { useEffect, useState } from 'react';
+import { X, ArrowRight, Trash2 } from 'lucide-react';
+import MemberAvatar from './MemberAvatar';
+import type { DrabaActivity, ActivityStatus, Member } from '../types';
+import { ACTIVITY_COLORS, STATUS_LABELS } from '../types';
+
+interface Props {
+  activity: DrabaActivity;
+  members: Member[];
+  onClose: () => void;
+  onChange: (patch: Partial<DrabaActivity>) => void;
+  onDelete?: () => void;
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.07em',
+  marginBottom: 4,
+};
+
+/**
+ * Right-side detail panel for a selected activity.
+ *
+ * Editing model:
+ *  - `title` and `notes` use local state and commit on blur, so we don't
+ *    fire an `onChange` for every keystroke.
+ *  - `status` and `color` commit immediately (single discrete choice).
+ *  - The effect resyncs local state when the selected activity changes
+ *    (keyed on `activity.id`), otherwise stale text would persist when the
+ *    user clicks a different activity.
+ */
+export default function ActivityPanel({ activity, members, onClose, onChange, onDelete }: Props) {
+  const member = members.find(m => m.id === activity.memberId);
+  const [title, setTitle] = useState(activity.title);
+  const [notes, setNotes] = useState(activity.notes ?? '');
+  const [status, setStatus] = useState<ActivityStatus>(activity.status);
+
+  // Reset local edits when the panel switches to a different activity.
+  useEffect(() => {
+    setTitle(activity.title);
+    setNotes(activity.notes ?? '');
+    setStatus(activity.status);
+  }, [activity.id]);
+
+  const handleStatusChange = (next: ActivityStatus) => {
+    setStatus(next);
+    onChange({ status: next });
+  };
+
+  return (
+    <div
+      style={{
+        width: 320,
+        flexShrink: 0,
+        borderLeft: '1px solid var(--border)',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        boxShadow: '-4px 0 16px rgb(0 0 0 / .06)',
+        zIndex: 20,
+        overflow: 'hidden',
+      }}
+    >
+      {/* Header */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '14px 16px',
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div
+            style={{
+              width: 12,
+              height: 12,
+              borderRadius: 3,
+              background: activity.color,
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--foreground)' }}>
+            Activity detail
+          </span>
+        </div>
+        <button
+          onClick={onClose}
+          style={{
+            width: 26,
+            height: 26,
+            border: 'none',
+            background: 'var(--muted)',
+            borderRadius: 6,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            color: 'var(--muted-foreground)',
+          }}
+        >
+          <X size={14} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* Body */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+        {/* Title */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={FIELD_LABEL}>Title</div>
+          <input
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            onBlur={() => onChange({ title })}
+            style={{
+              width: '100%',
+              fontSize: 14,
+              fontWeight: 600,
+              color: 'var(--foreground)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              padding: '7px 10px',
+              outline: 'none',
+              background: 'var(--background)',
+              fontFamily: 'var(--font-sans)',
+            }}
+            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+          />
+        </div>
+
+        {/* Assigned */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={FIELD_LABEL}>Assigned to</div>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '7px 10px',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--background)',
+            }}
+          >
+            <MemberAvatar member={member} size={22} />
+            <span style={{ fontSize: 13, color: 'var(--foreground)' }}>{member?.name}</span>
+          </div>
+        </div>
+
+        {/* Date range */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={FIELD_LABEL}>Date range</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div
+              style={{
+                flex: 1,
+                padding: '7px 10px',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-md)',
+                fontSize: 13,
+                color: 'var(--foreground)',
+                background: 'var(--background)',
+              }}
+            >
+              {activity.startDate}
+            </div>
+            <ArrowRight size={12} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
+            <div
+              style={{
+                flex: 1,
+                padding: '7px 10px',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-md)',
+                fontSize: 13,
+                color: 'var(--foreground)',
+                background: 'var(--background)',
+              }}
+            >
+              {activity.endDate}
+            </div>
+          </div>
+        </div>
+
+        {/* Status */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={FIELD_LABEL}>Status</div>
+          <select
+            value={status}
+            onChange={e => handleStatusChange(e.target.value as ActivityStatus)}
+            style={{
+              width: '100%',
+              fontSize: 13,
+              color: 'var(--foreground)',
+              padding: '7px 10px',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--background)',
+              outline: 'none',
+              fontFamily: 'var(--font-sans)',
+              cursor: 'pointer',
+            }}
+          >
+            {(Object.keys(STATUS_LABELS) as ActivityStatus[]).map(s => (
+              <option key={s} value={s}>{STATUS_LABELS[s]}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Color */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={FIELD_LABEL}>Color</div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {ACTIVITY_COLORS.map(c => (
+              <button
+                key={c}
+                onClick={() => onChange({ color: c })}
+                style={{
+                  width: 22,
+                  height: 22,
+                  borderRadius: 4,
+                  background: c,
+                  cursor: 'pointer',
+                  border: activity.color === c ? '2px solid var(--foreground)' : '2px solid transparent',
+                  transition: 'transform 0.1s',
+                  padding: 0,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.transform = 'scale(1.15)')}
+                onMouseLeave={e => (e.currentTarget.style.transform = '')}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Notes */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={FIELD_LABEL}>Notes</div>
+          <textarea
+            value={notes}
+            rows={4}
+            onChange={e => setNotes(e.target.value)}
+            onBlur={() => onChange({ notes })}
+            placeholder="Add notes…"
+            style={{
+              width: '100%',
+              fontSize: 13,
+              color: 'var(--foreground)',
+              padding: '8px 10px',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--background)',
+              outline: 'none',
+              resize: 'vertical',
+              lineHeight: 1.5,
+              fontFamily: 'var(--font-sans)',
+            }}
+            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+          />
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div
+        style={{
+          padding: '12px 16px',
+          borderTop: '1px solid var(--border)',
+          display: 'flex',
+          gap: 8,
+          flexShrink: 0,
+        }}
+      >
+        <button
+          onClick={onClose}
+          style={{
+            flex: 1,
+            fontSize: 13,
+            fontWeight: 600,
+            padding: 7,
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid var(--border)',
+            background: 'var(--card)',
+            color: 'var(--foreground)',
+            cursor: 'pointer',
+            fontFamily: 'var(--font-sans)',
+          }}
+        >
+          Done
+        </button>
+        {onDelete && (
+          <button
+            onClick={onDelete}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              fontSize: 13,
+              fontWeight: 600,
+              padding: '7px 14px',
+              borderRadius: 'var(--radius-md)',
+              border: 'none',
+              background: 'hsl(0 72% 95%)',
+              color: 'var(--destructive)',
+              cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+            }}
+          >
+            <Trash2 size={13} strokeWidth={2} />
+            Delete
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/components/DarkModeToggle.tsx
 ````typescript
 import { Moon, Sun } from 'lucide-react'
@@ -4779,6 +5129,32 @@ export default function RegisterPage() {
     </div>
   )
 }
+````
+
+## File: packages/web/src/types/api.ts
+````typescript
+/**
+ * Named re-exports of API wire-format types generated from packages/shared/openapi.yaml.
+ *
+ * Import these in components and hooks instead of reaching into the raw
+ * generated file — this layer insulates callers from openapi-typescript's
+ * internal schema path syntax.
+ */
+import type { components } from "@draba/shared";
+
+type Schemas = components["schemas"];
+
+export type User = Schemas["User"];
+export type Team = Schemas["Team"];
+export type TeamMember = Schemas["TeamMember"];
+/** Team member extended with user display fields (email, displayName, avatarUrl). */
+export type TeamMemberWithUser = Schemas["TeamMemberWithUser"];
+export type Invite = Schemas["Invite"];
+/** API activity — a scheduled work item assigned to a team. */
+export type Activity = Schemas["Activity"];
+export type AuthResponse = Schemas["AuthResponse"];
+export type RefreshResponse = Schemas["RefreshResponse"];
+export type ApiError = Schemas["ApiError"];
 ````
 
 ## File: packages/web/src/main.tsx
@@ -10773,6 +11149,212 @@ packages/api/
 - [TBD — GitHub Actions; build + test on PR; publish Docker image on tag]
 ````
 
+## File: docs/REQUIREMENTS.md
+````markdown
+# Requirements
+
+## Product Summary
+draba is a lightweight team coordination and planning tool. It answers one question — **"Who is working on what, and when?"** — without the overhead of a full project management suite. The primary interface is a horizontal timeline grouped by person, where work appears as blocks across time. Teams adopt it in minutes, not weeks.
+
+**Target users:** Small teams of 5–20 people. Marketing, creative, and product teams who need visibility across people and time without tickets, sprints, or dependencies.
+
+**Positioning:** Not a calendar replacement. Not a project management tool. A shared team timeline.
+
+---
+
+## Functional Requirements
+
+### Users and Auth
+- [ ] Admins can invite users to a team via email invite link
+- [ ] Invited users register by following the invite link and setting up an account (email + password)
+- [ ] Users have: display name, email, optional avatar
+- [ ] Four levels of participation:
+  - **Team Admins:** Manage the team overall. Can invite new people to the team and can create multiple teams.
+  - **Timeline Admins:** Scoped to specific timelines. Can configure those timelines and add/remove people (from the team) to their timelines.
+  - **Users:** Have a login. Can participate in timelines assigned to them.
+  - **Participants:** Do not have a login. Managed as team members (e.g. contractors) so they can be scheduled on timelines and assigned colors without needing account access.
+- [ ] Users can belong to multiple teams simultaneously
+- [ ] Password reset via email
+
+### API Access Tokens
+Programmatic access (CLI, webhooks, MCP) uses scoped API tokens rather than user passwords.
+
+- [ ] Admins and members can generate named API tokens for their account
+- [ ] Tokens have a configurable permission scope: read-only | add | edit/delete own | edit/delete all
+- [ ] Tokens can be revoked at any time
+- [ ] Token values are shown once at creation and never stored in plaintext (hashed at rest)
+- [ ] CLI, webhook consumers, and MCP integrations authenticate using these tokens
+
+### Teams
+- [ ] Admins can create teams with a name, description, notes, and identity (icon + color)
+- [ ] Admins can edit team name, description, notes, and identity
+- [ ] Admins can invite users to a team by email (one-time invite)
+- [ ] Admins can generate a reusable invite link for a team; anyone with the link can register and join
+- [ ] Admins can revoke or regenerate the reusable invite link
+- [ ] Admins can add existing registered users to a team
+- [ ] Admins can remove members from a team (cannot remove the last admin)
+- [ ] Admins can promote a member to team admin or demote to member
+- [ ] Admins can create participants (login-less team members) who can be assigned to activities but don't have draba accounts
+- [ ] Teams can be archived (hidden from active views, data preserved, restorable)
+- [ ] Teams have a name, description, notes, identity, and a list of members
+
+### Members
+- [ ] Each team member has a display name, identity (icon + color), and a role (admin, member, or participant)
+- [ ] Admins can edit any member's display name, identity, and role
+- [ ] Members can edit their own display name and identity
+- [ ] Members can be inactivated (access disabled, data preserved, reversible) — uses the same archive pattern as other entities but displayed as "Inactivate" in the UI
+- [ ] Inactivated members cannot log in; their activity assignments are preserved
+- [ ] Super admins can promote any non-participant member to super admin status
+- [ ] Super admins can inactivate or delete user accounts (delete only when no active activities and single team)
+- [ ] Each member has computed stats: timeline counts (active/archived), activity counts (past due, running, upcoming, unscheduled, archived) — date-relative, not status-relative
+
+### Activities
+Activities are the core data object — a block of time assigned to one or more people.
+
+- [ ] Activities have: title, start date/time, end date/time, description/notes, status, percent complete, tags, icon, color, assigned people (one or more)
+- [ ] Activities can have a parent activity (another event within the same team), enabling simple nesting (e.g., "Launch Week" contains "Design Review")
+- [ ] Activities store all standard CalDAV VEVENT fields natively (UID, DTSTART, DTEND, SUMMARY, DESCRIPTION, LOCATION, URL, RRULE, etc.) so no information is lost in sync
+- [ ] Activities support recurrence rules (RRULE) from CalDAV/Google
+- [ ] Activities are scoped to a team
+- [ ] Activities can be archived (hidden from active views but not deleted; recoverable)
+
+### Timelines
+Timelines are named viewing windows — a name and a date range — scoped to a team. They are not data containers; they are views over the team's activities.
+
+- [ ] Teams can create multiple timelines, including overlapping ones
+- [ ] Each timeline has: name, start date, end date
+- [ ] Team membership controls who can view a timeline by default; team admins implicitly access all timelines, members require an explicit access grant (see RBAC in Phase 8.0)
+- [ ] Timelines can be archived (removed from active list but preserved; recoverable)
+- [ ] External / public visibility is handled via the **Shares** model (below) — a timeline is not inherently "public" or "restricted"; it becomes externally visible only via a share link the team explicitly creates
+
+### Timeline Views
+The primary view is a Gantt chart. Additional views display the same underlying activities in different formats.
+
+- [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per activity, bars span their date range; see `docs/design/UX_PATTERNS.md`
+  - A **timeline sub-toolbar** sits between the top bar and the grid. It provides:
+    - **Zoom** — variable column width (day granularity, zoom in/out)
+    - **Group by** — controls how activity rows are organized:
+      - _None_ — flat list, sorted by the active sort key
+      - _Member_ — one labeled section per assigned team member; events with multiple assignees appear under their primary assignee
+      - _Parent activity_ — root activities shown first; child events (those with `parentActivityId` set) indented beneath their parent
+    - **Sort by** — Start date (default), End date, Title A–Z
+    - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
+- [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
+- [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of activities; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many activities at once.
+- [ ] **Kanban view** — read-only; columns = statuses (in the team's configured status order); cards = activities, color-coded by assigned person(s); multiple assignees shown as stacked color indicators. This is a viewing mode only — dragging cards to change status is out of scope for v1.
+- [ ] View switcher in the timeline header to toggle between available views
+- [ ] Each view persists its own toolbar state per timeline (group / sort / zoom / column visibility / filter preset) via user preferences
+
+> **Note:** Kanban is intentionally read-only in v1; drag-to-change-status is a later addition once the status model is proven.
+
+### Team Configuration
+Admins can customize team-level settings that apply to all members and views.
+
+**Statuses**
+- [ ] Each team has a configurable list of statuses (name + color)
+- [ ] Default statuses created when a team is created: `Planned`, `In Progress`, `Done`
+- [ ] Admins can add, rename, reorder, and delete statuses
+- [ ] Statuses have a display order that controls column order in Kanban view and sort order in dropdowns
+- [ ] At least one status must always exist (cannot delete the last one)
+- [ ] Deleting a status requires choosing a replacement status for any events currently using it
+- [ ] Status color is used as the column header color in Kanban view
+
+**Member Colors**
+- [ ] Each team member has a display color, used to color-code their events in Kanban view and any other person-first views
+- [ ] Admin can set member colors; members can also set their own
+- [ ] Default color is auto-assigned from a preset palette on invite acceptance
+
+### Real-Time Collaboration
+- [ ] Multiple users can view and edit the same timeline simultaneously
+- [ ] Changes (event create, update, delete) appear in real-time for all connected users
+- [ ] No last-write-wins data loss — changes are applied and broadcast immediately
+
+### Calendar Sync
+- [ ] Users can connect a personal Google Calendar account (OAuth 2.0) for two-way sync of their assigned events
+- [ ] Users can connect a personal CalDAV account (iOS/macOS Calendar, Fastmail, Thunderbird, etc.) for two-way sync
+- [ ] draba implements a built-in CalDAV endpoint — Apple Calendar users point their app directly at the draba server
+- [ ] Outbound sync: when an event is created/updated/deleted in draba, changes push to all connected personal calendars for assigned users
+- [ ] Inbound sync: changes made in Google Calendar trigger a webhook that updates draba
+- [ ] **Team read-only feed:** each timeline exposes a subscribable iCal/CalDAV URL that any calendar app can subscribe to for a read-only view of all team events in that timeline
+- [ ] Public iCal/Google Calendar feeds include only basic event info (title, date range, assigned people) — notes and internal fields are stripped
+- [ ] Microsoft/Outlook sync is explicitly out of scope for v1
+
+### External Connectors (e.g. Asana, Aha!)
+- [ ] Draba supports a one-way, read-only inbound feed from external systems of record.
+- [ ] Teams can generate unique inbound Webhook URLs to paste into Asana, Jira, etc.
+- [ ] External events appear alongside hand-crafted Draba events in the timeline and Gantt views.
+- [ ] Events generated via connectors are marked as "read-only" in Draba — users cannot change dates or properties via the Draba UI (they must change them in Asana).
+- [ ] The event card links back to the original source URL.
+
+### Sharing and Public Access
+Sharing in draba is a first-class entity, not a property of a timeline. A **Share** is a frozen pairing of `{ timeline + view type + view configuration + optional password + optional expiry }`. One timeline can have many shares, each tuned for a different audience.
+
+- [ ] A Share captures: the source timeline, the view type (Gantt / List / Calendar / Kanban), and a snapshot of the view's configuration at creation time (filter, sort, group, zoom, column visibility, etc.)
+- [ ] The view-config snapshot is **frozen** at creation — later edits to the live view do not retroactively change existing shares
+- [ ] A Share can optionally require a password to view (stored hashed; not retrievable)
+- [ ] A Share can optionally expire on a given date; expired shares return a clear "this link has expired" page
+- [ ] A Share can be revoked at any time by the creator or a team admin; revoked links are immediately unusable
+- [ ] A single timeline can host many independent shares simultaneously (e.g., a public Gantt for stakeholders + a password-protected List for contractors)
+- [ ] Share viewers see the chosen view in read-only mode — no drag, no inline edit, no create
+- [ ] Share URLs are unguessable (URL-safe random tokens); password-protected shares additionally rate-limit unlock attempts
+- [ ] Team admins can list, edit, and revoke any share for their team; members can only manage shares they created
+- [ ] Each timeline also exposes a public iCal feed URL (separate from the Share model) containing sanitized event data for calendar app subscription — see Calendar Sync
+
+### Data Portability
+Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visual** (one-way view exports for sharing offline — PDF / PNG / Markdown).
+
+**Tabular (round-trip):**
+- [ ] Events can be exported to CSV and Excel (.xlsx) from any timeline view
+- [ ] Events can be imported from a CSV or Excel file
+- [ ] A downloadable template file is provided showing the expected import format
+- [ ] Import shows a preview and validation errors before committing
+
+**Visual (view-shaped, one-way out):**
+- [ ] Gantt → PDF (landscape, paginated by date range) and PNG (single page)
+- [ ] Kanban → PDF (columns side-by-side, paginated when too wide for one page) and PNG
+- [ ] List → CSV, xlsx, Markdown table, and PDF
+- [ ] Calendar → PDF, one page per month / week / day depending on active sub-layout
+- [ ] All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description
+- [ ] All visual exports respect the active filter / sort / group at time of export — the deliverable is "what's on the screen right now"
+
+---
+
+## Non-Functional Requirements
+- [ ] API response time < 200ms for standard reads under normal load
+- [ ] Real-time updates delivered within 500ms of a change
+- [ ] Self-hosted: runs as a single Docker container with no external service dependencies
+- [ ] Direct binary install is also supported (for users who don't use Docker)
+- [ ] Database: SQLite by default; MySQL/MariaDB and Postgres are supported configuration options
+- [ ] Same Docker artifact deploys to self-hosted and any future cloud offering
+- [ ] All API endpoints are authenticated (except public timeline share links and public iCal feeds)
+- [ ] All secrets, calendar credentials, and API tokens stored encrypted/hashed at rest
+
+---
+
+## Constraints
+- Must run as a single Docker container with zero required external services (SQLite path)
+- No paid third-party services required for self-hosting
+- Calendar sync credentials and API tokens must never be stored in plaintext
+- No server-side rendering required
+
+---
+
+## Out of Scope (v1)
+- Microsoft / Outlook / Exchange calendar sync
+- Kanban drag-to-change-status (Kanban is in v1 as a read-only view; interactive status changes via drag are v2)
+- Gantt dependency arrows / critical-path visualization (parent–child grouping is in scope; visual dependency arrows are not)
+- Time tracking or billable hours
+- Task dependencies or critical path
+- Workload balancing or capacity planning
+- Billing or invoicing
+- Automation or rule-based triggers
+- Mobile native apps (web/PWA first)
+- Multi-tenant cloud hosting (self-hosted per-customer to start)
+- SSO / SAML / OAuth login (email + password only for v1)
+- MCP server integration (parking lot — token auth system is designed to support it when ready)
+- CLI binary (parking lot — token auth system is designed to support it when ready)
+````
+
 ## File: docs/SAMPLE_DATA.md
 ````markdown
 # Sample Data Procedure
@@ -11052,514 +11634,6 @@ invites — generated at runtime
 password_reset_tokens — generated at runtime
 user_preferences — set by users at runtime
 ```
-````
-
-## File: packages/api/internal/api/api_types.gen.go
-````go
-// Package api provides primitives to interact with the openapi HTTP API.
-//
-// Code generated by github.com/oapi-codegen/oapi-codegen/v2 version v2.7.0 DO NOT EDIT.
-package api
-
-import (
-	"time"
-
-	openapi_types "github.com/oapi-codegen/runtime/types"
-)
-
-const (
-	BearerAuthScopes bearerAuthContextKey = "bearerAuth.Scopes"
-)
-
-// Defines values for HealthResponseStatus.
-const (
-	Ok HealthResponseStatus = "ok"
-)
-
-// Valid indicates whether the value is a known member of the HealthResponseStatus enum.
-func (e HealthResponseStatus) Valid() bool {
-	switch e {
-	case Ok:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for InviteRole.
-const (
-	InviteRoleAdmin  InviteRole = "admin"
-	InviteRoleMember InviteRole = "member"
-)
-
-// Valid indicates whether the value is a known member of the InviteRole enum.
-func (e InviteRole) Valid() bool {
-	switch e {
-	case InviteRoleAdmin:
-		return true
-	case InviteRoleMember:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TeamMemberRole.
-const (
-	TeamMemberRoleAdmin  TeamMemberRole = "admin"
-	TeamMemberRoleMember TeamMemberRole = "member"
-	TeamMemberRoleOwner  TeamMemberRole = "owner"
-)
-
-// Valid indicates whether the value is a known member of the TeamMemberRole enum.
-func (e TeamMemberRole) Valid() bool {
-	switch e {
-	case TeamMemberRoleAdmin:
-		return true
-	case TeamMemberRoleMember:
-		return true
-	case TeamMemberRoleOwner:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TeamMemberWithUserRole.
-const (
-	TeamMemberWithUserRoleAdmin  TeamMemberWithUserRole = "admin"
-	TeamMemberWithUserRoleMember TeamMemberWithUserRole = "member"
-	TeamMemberWithUserRoleOwner  TeamMemberWithUserRole = "owner"
-)
-
-// Valid indicates whether the value is a known member of the TeamMemberWithUserRole enum.
-func (e TeamMemberWithUserRole) Valid() bool {
-	switch e {
-	case TeamMemberWithUserRoleAdmin:
-		return true
-	case TeamMemberWithUserRoleMember:
-		return true
-	case TeamMemberWithUserRoleOwner:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TimelineVisibility.
-const (
-	TimelineVisibilityPublic     TimelineVisibility = "public"
-	TimelineVisibilityRestricted TimelineVisibility = "restricted"
-)
-
-// Valid indicates whether the value is a known member of the TimelineVisibility enum.
-func (e TimelineVisibility) Valid() bool {
-	switch e {
-	case TimelineVisibilityPublic:
-		return true
-	case TimelineVisibilityRestricted:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for CreateInviteJSONBodyRole.
-const (
-	CreateInviteJSONBodyRoleAdmin  CreateInviteJSONBodyRole = "admin"
-	CreateInviteJSONBodyRoleMember CreateInviteJSONBodyRole = "member"
-)
-
-// Valid indicates whether the value is a known member of the CreateInviteJSONBodyRole enum.
-func (e CreateInviteJSONBodyRole) Valid() bool {
-	switch e {
-	case CreateInviteJSONBodyRoleAdmin:
-		return true
-	case CreateInviteJSONBodyRoleMember:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for CreateTimelineJSONBodyVisibility.
-const (
-	CreateTimelineJSONBodyVisibilityPublic     CreateTimelineJSONBodyVisibility = "public"
-	CreateTimelineJSONBodyVisibilityRestricted CreateTimelineJSONBodyVisibility = "restricted"
-)
-
-// Valid indicates whether the value is a known member of the CreateTimelineJSONBodyVisibility enum.
-func (e CreateTimelineJSONBodyVisibility) Valid() bool {
-	switch e {
-	case CreateTimelineJSONBodyVisibilityPublic:
-		return true
-	case CreateTimelineJSONBodyVisibilityRestricted:
-		return true
-	default:
-		return false
-	}
-}
-
-// ApiError defines model for ApiError.
-type ApiError struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-// AuthResponse defines model for AuthResponse.
-type AuthResponse struct {
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-	User         User   `json:"user"`
-}
-
-// Activity defines model for Activity.
-type Activity struct {
-	AllDay           bool       `json:"allDay"`
-	ArchivedAt       *time.Time `json:"archivedAt,omitempty"`
-	CaldavUid        *string    `json:"caldavUid,omitempty"`
-	Color            *string    `json:"color,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	CreatedBy        string     `json:"createdBy"`
-	Description      *string    `json:"description,omitempty"`
-	EndAt            time.Time  `json:"endAt"`
-	GoogleEventId    *string    `json:"googleEventId,omitempty"`
-	Icon             *string    `json:"icon,omitempty"`
-	Id               string     `json:"id"`
-	Location         *string    `json:"location,omitempty"`
-	ParentActivityId *string    `json:"parentActivityId,omitempty"`
-	PercentComplete  *int       `json:"percentComplete,omitempty"`
-	Rrule            *string    `json:"rrule,omitempty"`
-	StartAt          time.Time  `json:"startAt"`
-	StatusId         *string    `json:"statusId,omitempty"`
-	TeamId           string     `json:"teamId"`
-	Title            string     `json:"title"`
-	UpdatedAt        time.Time  `json:"updatedAt"`
-	Url              *string    `json:"url,omitempty"`
-}
-
-// HealthResponse defines model for HealthResponse.
-type HealthResponse struct {
-	Status HealthResponseStatus `json:"status"`
-}
-
-// HealthResponseStatus defines model for HealthResponse.Status.
-type HealthResponseStatus string
-
-// Invite defines model for Invite.
-type Invite struct {
-	AcceptedAt *time.Time `json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	Email      string     `json:"email"`
-	ExpiresAt  time.Time  `json:"expiresAt"`
-	Id         string     `json:"id"`
-	InvitedBy  string     `json:"invitedBy"`
-	Role       InviteRole `json:"role"`
-	TeamId     string     `json:"teamId"`
-	Token      string     `json:"token"`
-}
-
-// InviteRole defines model for Invite.Role.
-type InviteRole string
-
-// RefreshResponse defines model for RefreshResponse.
-type RefreshResponse struct {
-	AccessToken string `json:"accessToken"`
-}
-
-// UserPreference defines model for UserPreference.
-type UserPreference struct {
-	Id         string    `json:"id"`
-	UserId     string    `json:"userId"`
-	TimelineId string    `json:"timelineId,omitempty"`
-	Key        string    `json:"key"`
-	Value      string    `json:"value"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-}
-
-// UpsertPreferenceJSONBody defines parameters for UpsertPreference.
-type UpsertPreferenceJSONBody struct {
-	// Key Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
-	Key string `json:"key"`
-
-	// Value JSON-encoded preference value.
-	Value string `json:"value"`
-
-	// TimelineId Optional timeline scope. Omit or pass "" for a global preference.
-	TimelineId *string `json:"timelineId,omitempty"`
-}
-
-// UpsertPreferenceJSONRequestBody defines body for UpsertPreference for application/json ContentType.
-type UpsertPreferenceJSONRequestBody UpsertPreferenceJSONBody
-
-// SavedFilter defines model for SavedFilter.
-type SavedFilter struct {
-	CreatedAt time.Time `json:"createdAt"`
-
-	// Definition Opaque JSON filter spec (validated client-side).
-	Definition string    `json:"definition"`
-	Id         string    `json:"id"`
-	Name       string    `json:"name"`
-	TeamId     string    `json:"teamId"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	UserId     string    `json:"userId"`
-}
-
-// Team defines model for Team.
-type Team struct {
-	ArchivedAt  *time.Time `json:"archivedAt,omitempty"`
-	Color       *string    `json:"color,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	Description *string    `json:"description,omitempty"`
-	Icon        *string    `json:"icon,omitempty"`
-	Id          string     `json:"id"`
-	Name        string     `json:"name"`
-	Notes       *string    `json:"notes,omitempty"`
-	Slug        string     `json:"slug"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
-}
-
-// TeamMember defines model for TeamMember.
-type TeamMember struct {
-	Color    *string        `json:"color,omitempty"`
-	JoinedAt time.Time      `json:"joinedAt"`
-	Role     TeamMemberRole `json:"role"`
-	TeamId   string         `json:"teamId"`
-	UserId   string         `json:"userId"`
-}
-
-// TeamMemberRole defines model for TeamMember.Role.
-type TeamMemberRole string
-
-// TeamMemberWithUser defines model for TeamMemberWithUser.
-type TeamMemberWithUser struct {
-	AvatarUrl   *string                `json:"avatarUrl,omitempty"`
-	Color       *string                `json:"color,omitempty"`
-	DisplayName string                 `json:"displayName"`
-	Email       openapi_types.Email    `json:"email"`
-	JoinedAt    time.Time              `json:"joinedAt"`
-	Role        TeamMemberWithUserRole `json:"role"`
-	TeamId      string                 `json:"teamId"`
-	UserId      string                 `json:"userId"`
-}
-
-// TeamMemberWithUserRole defines model for TeamMemberWithUser.Role.
-type TeamMemberWithUserRole string
-
-// Timeline defines model for Timeline.
-type Timeline struct {
-	ArchivedAt *time.Time         `json:"archivedAt,omitempty"`
-	CreatedAt  time.Time          `json:"createdAt"`
-	CreatedBy  string             `json:"createdBy"`
-	EndDate    openapi_types.Date `json:"endDate"`
-	IcalToken  string             `json:"icalToken"`
-	Id         string             `json:"id"`
-	Name       string             `json:"name"`
-	ShareToken string             `json:"shareToken"`
-	StartDate  openapi_types.Date `json:"startDate"`
-	TeamId     string             `json:"teamId"`
-	UpdatedAt  time.Time          `json:"updatedAt"`
-	Visibility TimelineVisibility `json:"visibility"`
-}
-
-// TimelineVisibility defines model for Timeline.Visibility.
-type TimelineVisibility string
-
-// User defines model for User.
-type User struct {
-	AvatarUrl   *string             `json:"avatarUrl,omitempty"`
-	CreatedAt   time.Time           `json:"createdAt"`
-	DisplayName string              `json:"displayName"`
-	Email       openapi_types.Email `json:"email"`
-	Id          string              `json:"id"`
-	UpdatedAt   time.Time           `json:"updatedAt"`
-}
-
-// ActivityId defines model for activityId.
-type ActivityId = string
-
-// SavedFilterId defines model for savedFilterId.
-type SavedFilterId = string
-
-// ShareToken defines model for shareToken.
-type ShareToken = string
-
-// TeamId defines model for teamId.
-type TeamId = string
-
-// TimelineId defines model for timelineId.
-type TimelineId = string
-
-// BadRequest defines model for BadRequest.
-type BadRequest = ApiError
-
-// Forbidden defines model for Forbidden.
-type Forbidden = ApiError
-
-// InternalError defines model for InternalError.
-type InternalError = ApiError
-
-// NotFound defines model for NotFound.
-type NotFound = ApiError
-
-// PaymentRequired defines model for PaymentRequired.
-type PaymentRequired = ApiError
-
-// Unauthorized defines model for Unauthorized.
-type Unauthorized = ApiError
-
-// bearerAuthContextKey is the context key for bearerAuth security scheme
-type bearerAuthContextKey string
-
-// LoginJSONBody defines parameters for Login.
-type LoginJSONBody struct {
-	Email    openapi_types.Email `json:"email"`
-	Password string              `json:"password"`
-}
-
-// RefreshTokenJSONBody defines parameters for RefreshToken.
-type RefreshTokenJSONBody struct {
-	RefreshToken string `json:"refreshToken"`
-}
-
-// RegisterJSONBody defines parameters for Register.
-type RegisterJSONBody struct {
-	DisplayName string              `json:"displayName"`
-	Email       openapi_types.Email `json:"email"`
-	InviteToken *string             `json:"inviteToken,omitempty"`
-	Password    string              `json:"password"`
-}
-
-// UpdateActivityJSONBody defines parameters for UpdateActivity.
-type UpdateActivityJSONBody struct {
-	AllDay           *bool      `json:"allDay,omitempty"`
-	Color            *string    `json:"color,omitempty"`
-	Description      *string    `json:"description,omitempty"`
-	EndAt            *time.Time `json:"endAt,omitempty"`
-	Icon             *string    `json:"icon,omitempty"`
-	Location         *string    `json:"location,omitempty"`
-	ParentActivityId *string    `json:"parentActivityId,omitempty"`
-	PercentComplete  *int       `json:"percentComplete,omitempty"`
-	Rrule            *string    `json:"rrule,omitempty"`
-	StartAt          *time.Time `json:"startAt,omitempty"`
-	StatusId         *string    `json:"statusId,omitempty"`
-	Title            *string    `json:"title,omitempty"`
-	Url              *string    `json:"url,omitempty"`
-}
-
-// UpdateSavedFilterJSONBody defines parameters for UpdateSavedFilter.
-type UpdateSavedFilterJSONBody struct {
-	Definition *string `json:"definition,omitempty"`
-	Name       *string `json:"name,omitempty"`
-}
-
-// CreateTeamJSONBody defines parameters for CreateTeam.
-type CreateTeamJSONBody struct {
-	Name        string  `json:"name"`
-	Description *string `json:"description,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// UpdateTeamJSONBody defines parameters for UpdateTeam.
-type UpdateTeamJSONBody struct {
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// ListActivitiesParams defines parameters for ListActivities.
-type ListActivitiesParams struct {
-	// From Only return activities where startAt >= from (RFC 3339).
-	From *time.Time `form:"from,omitempty" json:"from,omitempty"`
-
-	// To Only return activities where startAt <= to (RFC 3339).
-	To *time.Time `form:"to,omitempty" json:"to,omitempty"`
-}
-
-// CreateActivityJSONBody defines parameters for CreateActivity.
-type CreateActivityJSONBody struct {
-	AllDay            *bool     `json:"allDay,omitempty"`
-	AssignedMemberIds *[]string `json:"assignedMemberIds,omitempty"`
-	Color             *string   `json:"color,omitempty"`
-	Description       *string   `json:"description,omitempty"`
-	EndAt             time.Time `json:"endAt"`
-	Icon              *string   `json:"icon,omitempty"`
-	Location          *string   `json:"location,omitempty"`
-	ParentActivityId  *string   `json:"parentActivityId,omitempty"`
-	PercentComplete   *int      `json:"percentComplete,omitempty"`
-	Rrule             *string   `json:"rrule,omitempty"`
-	StartAt           time.Time `json:"startAt"`
-	StatusId          *string   `json:"statusId,omitempty"`
-	Title             string    `json:"title"`
-	Url               *string   `json:"url,omitempty"`
-}
-
-// CreateInviteJSONBody defines parameters for CreateInvite.
-type CreateInviteJSONBody struct {
-	// Email If provided, the invite is scoped to this email address.
-	Email *openapi_types.Email      `json:"email,omitempty"`
-	Role  *CreateInviteJSONBodyRole `json:"role,omitempty"`
-}
-
-// CreateInviteJSONBodyRole defines parameters for CreateInvite.
-type CreateInviteJSONBodyRole string
-
-// CreateSavedFilterJSONBody defines parameters for CreateSavedFilter.
-type CreateSavedFilterJSONBody struct {
-	// Definition Opaque JSON filter spec (validated client-side).
-	Definition string `json:"definition"`
-	Name       string `json:"name"`
-}
-
-// CreateTimelineJSONBody defines parameters for CreateTimeline.
-type CreateTimelineJSONBody struct {
-	EndDate    openapi_types.Date                `json:"endDate"`
-	Name       string                            `json:"name"`
-	StartDate  openapi_types.Date                `json:"startDate"`
-	Visibility *CreateTimelineJSONBodyVisibility `json:"visibility,omitempty"`
-}
-
-// CreateTimelineJSONBodyVisibility defines parameters for CreateTimeline.
-type CreateTimelineJSONBodyVisibility string
-
-// LoginJSONRequestBody defines body for Login for application/json ContentType.
-type LoginJSONRequestBody LoginJSONBody
-
-// RefreshTokenJSONRequestBody defines body for RefreshToken for application/json ContentType.
-type RefreshTokenJSONRequestBody RefreshTokenJSONBody
-
-// RegisterJSONRequestBody defines body for Register for application/json ContentType.
-type RegisterJSONRequestBody RegisterJSONBody
-
-// UpdateActivityJSONRequestBody defines body for UpdateActivity for application/json ContentType.
-type UpdateActivityJSONRequestBody UpdateActivityJSONBody
-
-// UpdateSavedFilterJSONRequestBody defines body for UpdateSavedFilter for application/json ContentType.
-type UpdateSavedFilterJSONRequestBody UpdateSavedFilterJSONBody
-
-// CreateTeamJSONRequestBody defines body for CreateTeam for application/json ContentType.
-type CreateTeamJSONRequestBody CreateTeamJSONBody
-
-// UpdateTeamJSONRequestBody defines body for UpdateTeam for application/json ContentType.
-type UpdateTeamJSONRequestBody UpdateTeamJSONBody
-
-// CreateActivityJSONRequestBody defines body for CreateActivity for application/json ContentType.
-type CreateActivityJSONRequestBody CreateActivityJSONBody
-
-// CreateInviteJSONRequestBody defines body for CreateInvite for application/json ContentType.
-type CreateInviteJSONRequestBody CreateInviteJSONBody
-
-// CreateSavedFilterJSONRequestBody defines body for CreateSavedFilter for application/json ContentType.
-type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
-
-// CreateTimelineJSONRequestBody defines body for CreateTimeline for application/json ContentType.
-type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
 ## File: packages/api/internal/api/authz.go
@@ -11864,31 +11938,6 @@ type PatchStatusTemplateItemJSONBody struct {
 	IsClosed *bool   `json:"isClosed,omitempty"`
 	Position *int    `json:"position,omitempty"`
 }
-````
-
-## File: packages/api/internal/db/migrations/005_rename_events_to_activities.sql
-````sql
--- Rename domain entity: events → activities.
---
--- This is a hard cutover — no aliases. SQLite 3.26+ automatically updates
--- foreign-key references in other tables when a referenced table is renamed,
--- so the FK in event_assignments pointing to events(id) becomes activities(id)
--- after step 1, before we rename the child tables in steps 2 and 3.
---
--- Rollback SQL (if needed without a DB restore):
---   ALTER TABLE activity_tags RENAME COLUMN activity_id TO event_id;
---   ALTER TABLE activity_assignments RENAME COLUMN activity_id TO event_id;
---   ALTER TABLE activities RENAME COLUMN parent_activity_id TO parent_event_id;
---   ALTER TABLE activities RENAME TO events;
---   ALTER TABLE activity_tags RENAME TO event_tags;
---   ALTER TABLE activity_assignments RENAME TO event_assignments;
-
-ALTER TABLE events RENAME TO activities;
-ALTER TABLE event_tags RENAME TO activity_tags;
-ALTER TABLE event_assignments RENAME TO activity_assignments;
-ALTER TABLE activities RENAME COLUMN parent_event_id TO parent_activity_id;
-ALTER TABLE activity_tags RENAME COLUMN event_id TO activity_id;
-ALTER TABLE activity_assignments RENAME COLUMN event_id TO activity_id;
 ````
 
 ## File: packages/api/internal/db/migrations/006_identity_fields.sql
@@ -12942,320 +12991,51 @@ require (
 )
 ````
 
-## File: packages/web/src/components/gantt/granularity.test.ts
+## File: packages/web/src/components/gantt/GanttView.filter.test.ts
 ````typescript
 import { describe, it, expect } from 'vitest'
-import { generateColumns } from './granularity'
+import { filterOpenActivities } from './GanttView'
 
-// ── generateColumns — weekStart option ───────────────────────────────────────
+// ── filterOpenActivities — 'open' preset logic ────────────────────────────────
 
-// Jan 2026 layout:
-//   Mon Jan  5 (ISO week start)
-//   Sun Jan  4 (Sunday week start)
-//
-// Jan 1 2026 is a Thursday.
+describe('filterOpenActivities', () => {
+  const activities = [
+    { id: '1', statusId: 'closed-a' },
+    { id: '2', statusId: 'open-b' },
+    { id: '3', statusId: null },
+    { id: '4', statusId: undefined },
+    { id: '5', statusId: 'closed-c' },
+  ]
 
-const JAN1 = new Date(2026, 0, 1)   // Thu
-const JAN31 = new Date(2026, 0, 31) // Sat
-
-describe('generateColumns — weekStart', () => {
-  it('monday week start: first week column begins on Monday Dec 29', () => {
-    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
-    // Jan 1 is Thursday; Monday ISO week start = Dec 29 2025
-    expect(cols[0].start.getDay()).toBe(1) // 1 = Monday
-    expect(cols[0].start.getDate()).toBe(29)
+  it('removes activities whose statusId is in the closed set', () => {
+    const closed = new Set(['closed-a', 'closed-c'])
+    const result = filterOpenActivities(activities, closed)
+    expect(result.map(a => a.id)).toEqual(['2', '3', '4'])
   })
 
-  it('sunday week start: first week column begins on Sunday Dec 28', () => {
-    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'sunday' })
-    // Jan 1 is Thursday; Sunday week start = Dec 28 2025
-    expect(cols[0].start.getDay()).toBe(0) // 0 = Sunday
-    expect(cols[0].start.getDate()).toBe(28)
+  it('keeps activities with no status (null or undefined)', () => {
+    const closed = new Set(['closed-a'])
+    const result = filterOpenActivities(activities, closed)
+    const noStatusIds = result.filter(a => !a.statusId).map(a => a.id)
+    expect(noStatusIds).toContain('3')
+    expect(noStatusIds).toContain('4')
   })
 
-  it('default (no option) behaves like monday', () => {
-    const defaultCols = generateColumns(JAN1, JAN31, 'week')
-    const mondayCols  = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
-    expect(defaultCols[0].start.getTime()).toBe(mondayCols[0].start.getTime())
-  })
-})
-
-// ── generateColumns — locale option ──────────────────────────────────────────
-
-describe('generateColumns — locale', () => {
-  it('en-US: month column label contains English month name', () => {
-    const cols = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
-    expect(cols[0].label).toMatch(/Jan/)
+  it('returns all activities unchanged when closed set is empty', () => {
+    const result = filterOpenActivities(activities, new Set())
+    expect(result).toHaveLength(activities.length)
   })
 
-  it('en-GB: day column label shows day-first ordering (e.g. "1 Jan")', () => {
-    const cols = generateColumns(JAN1, JAN31, 'day', { locale: 'en-GB' })
-    // en-GB {month:'short', day:'numeric'} → "1 Jan"
-    expect(cols[0].label).toMatch(/Jan/)
-    // The day should come first in en-GB
-    expect(cols[0].label).toMatch(/^1/)
-  })
-
-  it('default locale behaves like en-US', () => {
-    const defaultCols = generateColumns(JAN1, JAN31, 'month')
-    const usCols      = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
-    expect(defaultCols[0].label).toBe(usCols[0].label)
+  it('returns empty array when all activities are closed', () => {
+    const closed = new Set(['closed-a', 'open-b', 'closed-c'])
+    const onlyClosed = [
+      { id: '1', statusId: 'closed-a' },
+      { id: '5', statusId: 'closed-c' },
+    ]
+    const result = filterOpenActivities(onlyClosed, closed)
+    expect(result).toHaveLength(0)
   })
 })
-````
-
-## File: packages/web/src/components/gantt/granularity.ts
-````typescript
-/**
- * Time-granularity helpers for the Gantt view.
- *
- * Generates column definitions and maps event date ranges to fractional
- * column positions at any granularity (day → year).
- */
-
-export type TimeGranularity = 'day' | 'week' | 'month' | 'quarter' | 'year';
-
-export interface ColumnDef {
-  label: string;
-  /** Secondary label rendered on a second line (used for week numbers). */
-  sublabel?: string;
-  start: Date;
-  end: Date;
-  /** Calendar days this column spans (varies for months, quarters, years). */
-  days: number;
-}
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function daysBetween(a: Date, b: Date): number {
-  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
-}
-
-function startOfDay(d: Date): Date {
-  const r = new Date(d);
-  r.setHours(0, 0, 0, 0);
-  return r;
-}
-
-function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
-  const r = startOfDay(d);
-  const day = r.getDay(); // 0=Sun, 1=Mon, …, 6=Sat
-  if (weekStart === 'sunday') {
-    r.setDate(r.getDate() - day);
-  } else {
-    // Monday = ISO week start
-    r.setDate(r.getDate() - ((day + 6) % 7));
-  }
-  return r;
-}
-
-function startOfMonth(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), 1);
-}
-
-function startOfQuarter(d: Date): Date {
-  const q = Math.floor(d.getMonth() / 3) * 3;
-  return new Date(d.getFullYear(), q, 1);
-}
-
-function startOfYear(d: Date): Date {
-  return new Date(d.getFullYear(), 0, 1);
-}
-
-export function addDays(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setDate(r.getDate() + n);
-  return r;
-}
-
-function addMonths(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setMonth(r.getMonth() + n);
-  return r;
-}
-
-function endOfPeriod(start: Date, gran: TimeGranularity): Date {
-  switch (gran) {
-    case 'day':     return addDays(start, 1);
-    case 'week':    return addDays(start, 7);
-    case 'month':   return addMonths(start, 1);
-    case 'quarter': return addMonths(start, 3);
-    case 'year':    return addMonths(start, 12);
-  }
-}
-
-function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sunday' = 'monday'): Date {
-  switch (gran) {
-    case 'day':     return startOfDay(d);
-    case 'week':    return startOfWeek(d, weekStart);
-    case 'month':   return startOfMonth(d);
-    case 'quarter': return startOfQuarter(d);
-    case 'year':    return startOfYear(d);
-  }
-}
-
-// ── Label formatting ────────────────────────────────────────────────────────
-
-/** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
-function isoWeekNumber(d: Date): number {
-  const date = new Date(d);
-  date.setHours(0, 0, 0, 0);
-  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
-  const week1 = new Date(date.getFullYear(), 0, 4);
-  return 1 + Math.round(
-    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getDay() + 6) % 7)) / 7,
-  );
-}
-
-function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
-  switch (gran) {
-    case 'day':
-      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
-    case 'week': {
-      const end = addDays(start, 6);
-      const sameMonth = start.getMonth() === end.getMonth();
-      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
-      const e = sameMonth
-        ? end.getDate().toString()
-        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
-      return `${s}–${e}`;
-    }
-    case 'month':
-      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric' });
-    case 'quarter': {
-      const q = Math.floor(start.getMonth() / 3) + 1;
-      return `Q${q} ${start.getFullYear()}`;
-    }
-    case 'year':
-      return start.getFullYear().toString();
-  }
-}
-
-// ── Column generation ───────────────────────────────────────────────────────
-
-export interface GenerateColumnsOptions {
-  /** Which day the week grid starts on. Defaults to 'monday' (ISO). */
-  weekStart?: 'monday' | 'sunday';
-  /** BCP 47 locale tag for month name formatting. Defaults to 'en-US'. */
-  locale?: string;
-}
-
-export function generateColumns(
-  viewStart: Date,
-  viewEnd: Date,
-  granularity: TimeGranularity,
-  options?: GenerateColumnsOptions,
-): ColumnDef[] {
-  const weekStart = options?.weekStart ?? 'monday';
-  const locale = options?.locale ?? 'en-US';
-  const columns: ColumnDef[] = [];
-  let cur = periodStart(viewStart, granularity, weekStart);
-
-  while (cur <= viewEnd) {
-    const next = endOfPeriod(cur, granularity);
-    // Clamp to view bounds for the first and last columns
-    const colStart = cur < viewStart ? viewStart : cur;
-    const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
-    columns.push({
-      label: formatLabel(cur, granularity, locale),
-      sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
-      start: cur,
-      end: next,
-      days: daysBetween(colStart, colEnd),
-    });
-    cur = next;
-  }
-
-  return columns;
-}
-
-// ── Event positioning ───────────────────────────────────────────────────────
-
-/** Fractional position within the column array. */
-export function positionInColumns(
-  eventStart: Date,
-  eventEnd: Date,
-  columns: ColumnDef[],
-): { startCol: number; span: number } {
-  if (columns.length === 0) return { startCol: 0, span: 0 };
-
-  const evStartMs = eventStart.getTime();
-  const evEndMs = eventEnd.getTime();
-
-  let startCol = 0;
-  let endCol = columns.length;
-
-  for (let i = 0; i < columns.length; i++) {
-    const col = columns[i];
-    const colStartMs = col.start.getTime();
-    const colEndMs = col.end.getTime();
-    const colSpanMs = colEndMs - colStartMs;
-
-    if (evStartMs >= colStartMs && evStartMs < colEndMs) {
-      startCol = i + (colSpanMs > 0 ? (evStartMs - colStartMs) / colSpanMs : 0);
-    }
-    // End is inclusive day, so add 1 day for positioning
-    const evEndNextDayMs = evEndMs + 86_400_000;
-    if (evEndNextDayMs > colStartMs && evEndNextDayMs <= colEndMs) {
-      endCol = i + (colSpanMs > 0 ? (evEndNextDayMs - colStartMs) / colSpanMs : 1);
-    }
-  }
-
-  const span = Math.max(endCol - startCol, 0.15);
-  return { startCol, span };
-}
-
-// ── Today position ──────────────────────────────────────────────────────────
-
-export function todayColumnPosition(columns: ColumnDef[]): number {
-  const now = startOfDay(new Date());
-  const nowMs = now.getTime();
-
-  for (let i = 0; i < columns.length; i++) {
-    const col = columns[i];
-    const colStartMs = col.start.getTime();
-    const colEndMs = col.end.getTime();
-    if (nowMs >= colStartMs && nowMs < colEndMs) {
-      const colSpanMs = colEndMs - colStartMs;
-      return i + (colSpanMs > 0 ? (nowMs - colStartMs) / colSpanMs : 0.5);
-    }
-  }
-  return -1;
-}
-
-// ── Auto-fit ────────────────────────────────────────────────────────────────
-
-const GRANULARITIES: TimeGranularity[] = ['day', 'week', 'month', 'quarter', 'year'];
-const BASE_COL_WIDTH = 80;
-
-export function autoFitGranularity(
-  viewStart: Date,
-  viewEnd: Date,
-  viewportWidth: number,
-): TimeGranularity {
-  const targetCols = Math.max(viewportWidth / BASE_COL_WIDTH, 2);
-
-  let best: TimeGranularity = 'month';
-  let bestDiff = Infinity;
-
-  for (const gran of GRANULARITIES) {
-    const cols = generateColumns(viewStart, viewEnd, gran).length;
-    if (cols < 2) continue;
-    // Prefer the finest granularity that fits within 50-150% of viewport
-    const ratio = cols / targetCols;
-    if (ratio >= 0.4 && ratio <= 1.5) {
-      // Within range — prefer finest (earliest in array)
-      return gran;
-    }
-    const diff = Math.abs(ratio - 1);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      best = gran;
-    }
-  }
-
-  return best;
-}
 ````
 
 ## File: packages/web/src/components/shared/ConfirmDialog.tsx
@@ -13394,330 +13174,6 @@ const InlineEditableTitle = forwardRef<HTMLInputElement, Props>(
 )
 
 export default InlineEditableTitle
-````
-
-## File: packages/web/src/components/ActivityPanel.tsx
-````typescript
-import { useEffect, useState } from 'react';
-import { X, ArrowRight, Trash2 } from 'lucide-react';
-import MemberAvatar from './MemberAvatar';
-import type { DrabaActivity, ActivityStatus, Member } from '../types';
-import { ACTIVITY_COLORS, STATUS_LABELS } from '../types';
-
-interface Props {
-  activity: DrabaActivity;
-  members: Member[];
-  onClose: () => void;
-  onChange: (patch: Partial<DrabaActivity>) => void;
-  onDelete?: () => void;
-}
-
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 4,
-};
-
-/**
- * Right-side detail panel for a selected activity.
- *
- * Editing model:
- *  - `title` and `notes` use local state and commit on blur, so we don't
- *    fire an `onChange` for every keystroke.
- *  - `status` and `color` commit immediately (single discrete choice).
- *  - The effect resyncs local state when the selected activity changes
- *    (keyed on `activity.id`), otherwise stale text would persist when the
- *    user clicks a different activity.
- */
-export default function ActivityPanel({ activity, members, onClose, onChange, onDelete }: Props) {
-  const member = members.find(m => m.id === activity.memberId);
-  const [title, setTitle] = useState(activity.title);
-  const [notes, setNotes] = useState(activity.notes ?? '');
-  const [status, setStatus] = useState<ActivityStatus>(activity.status);
-
-  // Reset local edits when the panel switches to a different activity.
-  useEffect(() => {
-    setTitle(activity.title);
-    setNotes(activity.notes ?? '');
-    setStatus(activity.status);
-  }, [activity.id]);
-
-  const handleStatusChange = (next: ActivityStatus) => {
-    setStatus(next);
-    onChange({ status: next });
-  };
-
-  return (
-    <div
-      style={{
-        width: 320,
-        flexShrink: 0,
-        borderLeft: '1px solid var(--border)',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        boxShadow: '-4px 0 16px rgb(0 0 0 / .06)',
-        zIndex: 20,
-        overflow: 'hidden',
-      }}
-    >
-      {/* Header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '14px 16px',
-          borderBottom: '1px solid var(--border)',
-          flexShrink: 0,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div
-            style={{
-              width: 12,
-              height: 12,
-              borderRadius: 3,
-              background: activity.color,
-              flexShrink: 0,
-            }}
-          />
-          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--foreground)' }}>
-            Activity detail
-          </span>
-        </div>
-        <button
-          onClick={onClose}
-          style={{
-            width: 26,
-            height: 26,
-            border: 'none',
-            background: 'var(--muted)',
-            borderRadius: 6,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-            color: 'var(--muted-foreground)',
-          }}
-        >
-          <X size={14} strokeWidth={2} />
-        </button>
-      </div>
-
-      {/* Body */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
-        {/* Title */}
-        <div style={{ marginBottom: 16 }}>
-          <div style={FIELD_LABEL}>Title</div>
-          <input
-            value={title}
-            onChange={e => setTitle(e.target.value)}
-            onBlur={() => onChange({ title })}
-            style={{
-              width: '100%',
-              fontSize: 14,
-              fontWeight: 600,
-              color: 'var(--foreground)',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-md)',
-              padding: '7px 10px',
-              outline: 'none',
-              background: 'var(--background)',
-              fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-          />
-        </div>
-
-        {/* Assigned */}
-        <div style={{ marginBottom: 16 }}>
-          <div style={FIELD_LABEL}>Assigned to</div>
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '7px 10px',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-md)',
-              background: 'var(--background)',
-            }}
-          >
-            <MemberAvatar member={member} size={22} />
-            <span style={{ fontSize: 13, color: 'var(--foreground)' }}>{member?.name}</span>
-          </div>
-        </div>
-
-        {/* Date range */}
-        <div style={{ marginBottom: 16 }}>
-          <div style={FIELD_LABEL}>Date range</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <div
-              style={{
-                flex: 1,
-                padding: '7px 10px',
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--radius-md)',
-                fontSize: 13,
-                color: 'var(--foreground)',
-                background: 'var(--background)',
-              }}
-            >
-              {activity.startDate}
-            </div>
-            <ArrowRight size={12} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-            <div
-              style={{
-                flex: 1,
-                padding: '7px 10px',
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--radius-md)',
-                fontSize: 13,
-                color: 'var(--foreground)',
-                background: 'var(--background)',
-              }}
-            >
-              {activity.endDate}
-            </div>
-          </div>
-        </div>
-
-        {/* Status */}
-        <div style={{ marginBottom: 16 }}>
-          <div style={FIELD_LABEL}>Status</div>
-          <select
-            value={status}
-            onChange={e => handleStatusChange(e.target.value as ActivityStatus)}
-            style={{
-              width: '100%',
-              fontSize: 13,
-              color: 'var(--foreground)',
-              padding: '7px 10px',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-md)',
-              background: 'var(--background)',
-              outline: 'none',
-              fontFamily: 'var(--font-sans)',
-              cursor: 'pointer',
-            }}
-          >
-            {(Object.keys(STATUS_LABELS) as ActivityStatus[]).map(s => (
-              <option key={s} value={s}>{STATUS_LABELS[s]}</option>
-            ))}
-          </select>
-        </div>
-
-        {/* Color */}
-        <div style={{ marginBottom: 16 }}>
-          <div style={FIELD_LABEL}>Color</div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {ACTIVITY_COLORS.map(c => (
-              <button
-                key={c}
-                onClick={() => onChange({ color: c })}
-                style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: 4,
-                  background: c,
-                  cursor: 'pointer',
-                  border: activity.color === c ? '2px solid var(--foreground)' : '2px solid transparent',
-                  transition: 'transform 0.1s',
-                  padding: 0,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.transform = 'scale(1.15)')}
-                onMouseLeave={e => (e.currentTarget.style.transform = '')}
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* Notes */}
-        <div style={{ marginBottom: 16 }}>
-          <div style={FIELD_LABEL}>Notes</div>
-          <textarea
-            value={notes}
-            rows={4}
-            onChange={e => setNotes(e.target.value)}
-            onBlur={() => onChange({ notes })}
-            placeholder="Add notes…"
-            style={{
-              width: '100%',
-              fontSize: 13,
-              color: 'var(--foreground)',
-              padding: '8px 10px',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-md)',
-              background: 'var(--background)',
-              outline: 'none',
-              resize: 'vertical',
-              lineHeight: 1.5,
-              fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-          />
-        </div>
-      </div>
-
-      {/* Footer */}
-      <div
-        style={{
-          padding: '12px 16px',
-          borderTop: '1px solid var(--border)',
-          display: 'flex',
-          gap: 8,
-          flexShrink: 0,
-        }}
-      >
-        <button
-          onClick={onClose}
-          style={{
-            flex: 1,
-            fontSize: 13,
-            fontWeight: 600,
-            padding: 7,
-            borderRadius: 'var(--radius-md)',
-            border: '1px solid var(--border)',
-            background: 'var(--card)',
-            color: 'var(--foreground)',
-            cursor: 'pointer',
-            fontFamily: 'var(--font-sans)',
-          }}
-        >
-          Done
-        </button>
-        {onDelete && (
-          <button
-            onClick={onDelete}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 5,
-              fontSize: 13,
-              fontWeight: 600,
-              padding: '7px 14px',
-              borderRadius: 'var(--radius-md)',
-              border: 'none',
-              background: 'hsl(0 72% 95%)',
-              color: 'var(--destructive)',
-              cursor: 'pointer',
-              fontFamily: 'var(--font-sans)',
-            }}
-          >
-            <Trash2 size={13} strokeWidth={2} />
-            Delete
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
 ````
 
 ## File: packages/web/src/components/RoleDropdown.tsx
@@ -14497,6 +13953,130 @@ describe('ApiError', () => {
     expect(err).toBeInstanceOf(Error)
     expect(err.status).toBe(404)
     expect(err.code).toBe('NOT_FOUND')
+  })
+})
+````
+
+## File: packages/web/src/lib/findMatcher.test.ts
+````typescript
+import { describe, it, expect } from 'vitest'
+import { matchEvents } from './findMatcher'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+
+// ── Fixtures ─────────────────────────────────────────────────────────────────
+
+const MEMBERS: Member[] = [
+  { id: 'm1', name: 'Alice Smith',   initials: 'AS', color: '#288C9B' },
+  { id: 'm2', name: 'Bob Jones',     initials: 'BJ', color: '#F29E4C' },
+  { id: 'm3', name: 'Charlie Brown', initials: 'CB', color: '#5BC0DE' },
+]
+
+function makeActivity(overrides: Partial<ApiActivity> & { id: string; title: string }): ApiActivity {
+  return {
+    timelineId: 'timeline-1',
+    startAt: '2026-01-01T00:00:00Z',
+    endAt: '2026-01-07T00:00:00Z',
+    allDay: true,
+    createdBy: 'user-1',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+const ACTIVITIES: ApiActivity[] = [
+  makeActivity({ id: 'e1', title: 'Alpha Launch',        description: 'Ship the first version' }),
+  makeActivity({ id: 'e2', title: 'Beta Testing',        description: 'Run QA on beta build', assignedMemberIds: ['m1'] }),
+  makeActivity({ id: 'e3', title: 'Design Review',       description: null, assignedMemberIds: ['m2', 'm3'] }),
+  makeActivity({ id: 'e4', title: 'Security Audit',      description: 'Check alice permissions' }),
+  makeActivity({ id: 'e5', title: 'Parent Activity',     description: null }),
+  makeActivity({ id: 'e6', title: 'Child milestone',     description: null, parentActivityId: 'e5' }),
+  makeActivity({ id: 'e7', title: 'Another Child',       description: null, parentActivityId: 'e5' }),
+]
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+describe('matchActivities', () => {
+  it('returns empty array for empty query', () => {
+    expect(matchEvents('', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
+    expect(matchEvents('   ', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
+  })
+
+  it('matches activity title, case-insensitive', () => {
+    const results = matchEvents('alpha', ACTIVITIES, MEMBERS, ACTIVITIES)
+    expect(results).toHaveLength(1)
+    expect(results[0].activityId).toBe('e1')
+    expect(results[0].reasons).toContain('title')
+  })
+
+  it('matches description', () => {
+    const results = matchEvents('QA on beta', ACTIVITIES, MEMBERS, ACTIVITIES)
+    expect(results).toHaveLength(1)
+    expect(results[0].activityId).toBe('e2')
+    expect(results[0].reasons).toContain('description')
+  })
+
+  it('matches assignee display name', () => {
+    const results = matchEvents('alice', ACTIVITIES, MEMBERS, ACTIVITIES)
+    // e2 assigns Alice Smith; e4 has "alice" in description
+    const matchedIds = results.map(r => r.activityId)
+    expect(matchedIds).toContain('e2')
+    expect(matchedIds).toContain('e4')
+    const e2 = results.find(r => r.activityId === 'e2')!
+    expect(e2.reasons).toContain('assignee: Alice Smith')
+    const e4 = results.find(r => r.activityId === 'e4')!
+    expect(e4.reasons).toContain('description')
+  })
+
+  it('matches parent activity title for child activities', () => {
+    const results = matchEvents('parent activity', ACTIVITIES, MEMBERS, ACTIVITIES)
+    const matchedIds = results.map(r => r.activityId)
+    // e5 matches by title; e6 and e7 match by parent title
+    expect(matchedIds).toContain('e5')
+    expect(matchedIds).toContain('e6')
+    expect(matchedIds).toContain('e7')
+    const e6 = results.find(r => r.activityId === 'e6')!
+    expect(e6.reasons.some(r => r.startsWith('parent:'))).toBe(true)
+  })
+
+  it('is case-insensitive for all match fields', () => {
+    expect(matchEvents('ALPHA', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e1')
+    expect(matchEvents('AlPhA', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e1')
+    expect(matchEvents('ALICE', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e2')
+    expect(matchEvents('bob', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e3')
+  })
+
+  it('reports multiple reasons when multiple fields match', () => {
+    // e2: title contains "beta", description contains "beta", no assignee match for "beta"
+    const results = matchEvents('beta', ACTIVITIES, MEMBERS, ACTIVITIES)
+    const e2 = results.find(r => r.activityId === 'e2')!
+    expect(e2.reasons).toContain('title')
+    expect(e2.reasons).toContain('description')
+  })
+
+  it('does not include activities outside the visible set', () => {
+    // Only pass e1 as visible
+    const results = matchEvents('alpha', [ACTIVITIES[0]], MEMBERS, ACTIVITIES)
+    expect(results).toHaveLength(1)
+    expect(results[0].activityId).toBe('e1')
+
+    // e2 not visible — should not appear
+    const results2 = matchEvents('alpha', [ACTIVITIES[1]], MEMBERS, ACTIVITIES)
+    expect(results2).toHaveLength(0)
+  })
+
+  it('returns empty when nothing matches', () => {
+    expect(matchEvents('xyznonexistent', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
+  })
+
+  it('handles activities with no optional fields gracefully', () => {
+    const bare = makeActivity({ id: 'bare', title: 'Bare activity' })
+    expect(() => matchEvents('bare', [bare], [], [])).not.toThrow()
+    const results = matchEvents('bare', [bare], [], [])
+    expect(results[0].activityId).toBe('bare')
   })
 })
 ````
@@ -15337,32 +14917,6 @@ export default function SetupPage() {
 }
 ````
 
-## File: packages/web/src/types/api.ts
-````typescript
-/**
- * Named re-exports of API wire-format types generated from packages/shared/openapi.yaml.
- *
- * Import these in components and hooks instead of reaching into the raw
- * generated file — this layer insulates callers from openapi-typescript's
- * internal schema path syntax.
- */
-import type { components } from "@draba/shared";
-
-type Schemas = components["schemas"];
-
-export type User = Schemas["User"];
-export type Team = Schemas["Team"];
-export type TeamMember = Schemas["TeamMember"];
-/** Team member extended with user display fields (email, displayName, avatarUrl). */
-export type TeamMemberWithUser = Schemas["TeamMemberWithUser"];
-export type Invite = Schemas["Invite"];
-/** API activity — a scheduled work item assigned to a team. */
-export type Activity = Schemas["Activity"];
-export type AuthResponse = Schemas["AuthResponse"];
-export type RefreshResponse = Schemas["RefreshResponse"];
-export type ApiError = Schemas["ApiError"];
-````
-
 ## File: packages/web/src/index.css
 ````css
 @import "tailwindcss";
@@ -15701,212 +15255,6 @@ Grep("MemberDetail", "docs/ai-context/repomap.md", output_mode="content")
 - [skills/ts-comments.md](skills/ts-comments.md) — TypeScript/React comment conventions (file headers, TSDoc on exports, inline why-comments)
 ````
 
-## File: docs/REQUIREMENTS.md
-````markdown
-# Requirements
-
-## Product Summary
-draba is a lightweight team coordination and planning tool. It answers one question — **"Who is working on what, and when?"** — without the overhead of a full project management suite. The primary interface is a horizontal timeline grouped by person, where work appears as blocks across time. Teams adopt it in minutes, not weeks.
-
-**Target users:** Small teams of 5–20 people. Marketing, creative, and product teams who need visibility across people and time without tickets, sprints, or dependencies.
-
-**Positioning:** Not a calendar replacement. Not a project management tool. A shared team timeline.
-
----
-
-## Functional Requirements
-
-### Users and Auth
-- [ ] Admins can invite users to a team via email invite link
-- [ ] Invited users register by following the invite link and setting up an account (email + password)
-- [ ] Users have: display name, email, optional avatar
-- [ ] Four levels of participation:
-  - **Team Admins:** Manage the team overall. Can invite new people to the team and can create multiple teams.
-  - **Timeline Admins:** Scoped to specific timelines. Can configure those timelines and add/remove people (from the team) to their timelines.
-  - **Users:** Have a login. Can participate in timelines assigned to them.
-  - **Participants:** Do not have a login. Managed as team members (e.g. contractors) so they can be scheduled on timelines and assigned colors without needing account access.
-- [ ] Users can belong to multiple teams simultaneously
-- [ ] Password reset via email
-
-### API Access Tokens
-Programmatic access (CLI, webhooks, MCP) uses scoped API tokens rather than user passwords.
-
-- [ ] Admins and members can generate named API tokens for their account
-- [ ] Tokens have a configurable permission scope: read-only | add | edit/delete own | edit/delete all
-- [ ] Tokens can be revoked at any time
-- [ ] Token values are shown once at creation and never stored in plaintext (hashed at rest)
-- [ ] CLI, webhook consumers, and MCP integrations authenticate using these tokens
-
-### Teams
-- [ ] Admins can create teams with a name, description, notes, and identity (icon + color)
-- [ ] Admins can edit team name, description, notes, and identity
-- [ ] Admins can invite users to a team by email (one-time invite)
-- [ ] Admins can generate a reusable invite link for a team; anyone with the link can register and join
-- [ ] Admins can revoke or regenerate the reusable invite link
-- [ ] Admins can add existing registered users to a team
-- [ ] Admins can remove members from a team (cannot remove the last admin)
-- [ ] Admins can promote a member to team admin or demote to member
-- [ ] Admins can create participants (login-less team members) who can be assigned to activities but don't have draba accounts
-- [ ] Teams can be archived (hidden from active views, data preserved, restorable)
-- [ ] Teams have a name, description, notes, identity, and a list of members
-
-### Members
-- [ ] Each team member has a display name, identity (icon + color), and a role (admin, member, or participant)
-- [ ] Admins can edit any member's display name, identity, and role
-- [ ] Members can edit their own display name and identity
-- [ ] Members can be inactivated (access disabled, data preserved, reversible) — uses the same archive pattern as other entities but displayed as "Inactivate" in the UI
-- [ ] Inactivated members cannot log in; their activity assignments are preserved
-- [ ] Super admins can promote any non-participant member to super admin status
-- [ ] Super admins can inactivate or delete user accounts (delete only when no active activities and single team)
-- [ ] Each member has computed stats: timeline counts (active/archived), activity counts (past due, running, upcoming, unscheduled, archived) — date-relative, not status-relative
-
-### Activities
-Activities are the core data object — a block of time assigned to one or more people.
-
-- [ ] Activities have: title, start date/time, end date/time, description/notes, status, percent complete, tags, icon, color, assigned people (one or more)
-- [ ] Activities can have a parent activity (another event within the same team), enabling simple nesting (e.g., "Launch Week" contains "Design Review")
-- [ ] Activities store all standard CalDAV VEVENT fields natively (UID, DTSTART, DTEND, SUMMARY, DESCRIPTION, LOCATION, URL, RRULE, etc.) so no information is lost in sync
-- [ ] Activities support recurrence rules (RRULE) from CalDAV/Google
-- [ ] Activities are scoped to a team
-- [ ] Activities can be archived (hidden from active views but not deleted; recoverable)
-
-### Timelines
-Timelines are named viewing windows — a name and a date range — scoped to a team. They are not data containers; they are views over the team's activities.
-
-- [ ] Teams can create multiple timelines, including overlapping ones
-- [ ] Each timeline has: name, start date, end date
-- [ ] Team membership controls who can view a timeline by default; team admins implicitly access all timelines, members require an explicit access grant (see RBAC in Phase 8.0)
-- [ ] Timelines can be archived (removed from active list but preserved; recoverable)
-- [ ] External / public visibility is handled via the **Shares** model (below) — a timeline is not inherently "public" or "restricted"; it becomes externally visible only via a share link the team explicitly creates
-
-### Timeline Views
-The primary view is a Gantt chart. Additional views display the same underlying activities in different formats.
-
-- [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per activity, bars span their date range; see `docs/design/UX_PATTERNS.md`
-  - A **timeline sub-toolbar** sits between the top bar and the grid. It provides:
-    - **Zoom** — variable column width (day granularity, zoom in/out)
-    - **Group by** — controls how activity rows are organized:
-      - _None_ — flat list, sorted by the active sort key
-      - _Member_ — one labeled section per assigned team member; events with multiple assignees appear under their primary assignee
-      - _Parent activity_ — root activities shown first; child events (those with `parentActivityId` set) indented beneath their parent
-    - **Sort by** — Start date (default), End date, Title A–Z
-    - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
-- [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
-- [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of activities; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many activities at once.
-- [ ] **Kanban view** — read-only; columns = statuses (in the team's configured status order); cards = activities, color-coded by assigned person(s); multiple assignees shown as stacked color indicators. This is a viewing mode only — dragging cards to change status is out of scope for v1.
-- [ ] View switcher in the timeline header to toggle between available views
-- [ ] Each view persists its own toolbar state per timeline (group / sort / zoom / column visibility / filter preset) via user preferences
-
-> **Note:** Kanban is intentionally read-only in v1; drag-to-change-status is a later addition once the status model is proven.
-
-### Team Configuration
-Admins can customize team-level settings that apply to all members and views.
-
-**Statuses**
-- [ ] Each team has a configurable list of statuses (name + color)
-- [ ] Default statuses created when a team is created: `Planned`, `In Progress`, `Done`
-- [ ] Admins can add, rename, reorder, and delete statuses
-- [ ] Statuses have a display order that controls column order in Kanban view and sort order in dropdowns
-- [ ] At least one status must always exist (cannot delete the last one)
-- [ ] Deleting a status requires choosing a replacement status for any events currently using it
-- [ ] Status color is used as the column header color in Kanban view
-
-**Member Colors**
-- [ ] Each team member has a display color, used to color-code their events in Kanban view and any other person-first views
-- [ ] Admin can set member colors; members can also set their own
-- [ ] Default color is auto-assigned from a preset palette on invite acceptance
-
-### Real-Time Collaboration
-- [ ] Multiple users can view and edit the same timeline simultaneously
-- [ ] Changes (event create, update, delete) appear in real-time for all connected users
-- [ ] No last-write-wins data loss — changes are applied and broadcast immediately
-
-### Calendar Sync
-- [ ] Users can connect a personal Google Calendar account (OAuth 2.0) for two-way sync of their assigned events
-- [ ] Users can connect a personal CalDAV account (iOS/macOS Calendar, Fastmail, Thunderbird, etc.) for two-way sync
-- [ ] draba implements a built-in CalDAV endpoint — Apple Calendar users point their app directly at the draba server
-- [ ] Outbound sync: when an event is created/updated/deleted in draba, changes push to all connected personal calendars for assigned users
-- [ ] Inbound sync: changes made in Google Calendar trigger a webhook that updates draba
-- [ ] **Team read-only feed:** each timeline exposes a subscribable iCal/CalDAV URL that any calendar app can subscribe to for a read-only view of all team events in that timeline
-- [ ] Public iCal/Google Calendar feeds include only basic event info (title, date range, assigned people) — notes and internal fields are stripped
-- [ ] Microsoft/Outlook sync is explicitly out of scope for v1
-
-### External Connectors (e.g. Asana, Aha!)
-- [ ] Draba supports a one-way, read-only inbound feed from external systems of record.
-- [ ] Teams can generate unique inbound Webhook URLs to paste into Asana, Jira, etc.
-- [ ] External events appear alongside hand-crafted Draba events in the timeline and Gantt views.
-- [ ] Events generated via connectors are marked as "read-only" in Draba — users cannot change dates or properties via the Draba UI (they must change them in Asana).
-- [ ] The event card links back to the original source URL.
-
-### Sharing and Public Access
-Sharing in draba is a first-class entity, not a property of a timeline. A **Share** is a frozen pairing of `{ timeline + view type + view configuration + optional password + optional expiry }`. One timeline can have many shares, each tuned for a different audience.
-
-- [ ] A Share captures: the source timeline, the view type (Gantt / List / Calendar / Kanban), and a snapshot of the view's configuration at creation time (filter, sort, group, zoom, column visibility, etc.)
-- [ ] The view-config snapshot is **frozen** at creation — later edits to the live view do not retroactively change existing shares
-- [ ] A Share can optionally require a password to view (stored hashed; not retrievable)
-- [ ] A Share can optionally expire on a given date; expired shares return a clear "this link has expired" page
-- [ ] A Share can be revoked at any time by the creator or a team admin; revoked links are immediately unusable
-- [ ] A single timeline can host many independent shares simultaneously (e.g., a public Gantt for stakeholders + a password-protected List for contractors)
-- [ ] Share viewers see the chosen view in read-only mode — no drag, no inline edit, no create
-- [ ] Share URLs are unguessable (URL-safe random tokens); password-protected shares additionally rate-limit unlock attempts
-- [ ] Team admins can list, edit, and revoke any share for their team; members can only manage shares they created
-- [ ] Each timeline also exposes a public iCal feed URL (separate from the Share model) containing sanitized event data for calendar app subscription — see Calendar Sync
-
-### Data Portability
-Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visual** (one-way view exports for sharing offline — PDF / PNG / Markdown).
-
-**Tabular (round-trip):**
-- [ ] Events can be exported to CSV and Excel (.xlsx) from any timeline view
-- [ ] Events can be imported from a CSV or Excel file
-- [ ] A downloadable template file is provided showing the expected import format
-- [ ] Import shows a preview and validation errors before committing
-
-**Visual (view-shaped, one-way out):**
-- [ ] Gantt → PDF (landscape, paginated by date range) and PNG (single page)
-- [ ] Kanban → PDF (columns side-by-side, paginated when too wide for one page) and PNG
-- [ ] List → CSV, xlsx, Markdown table, and PDF
-- [ ] Calendar → PDF, one page per month / week / day depending on active sub-layout
-- [ ] All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description
-- [ ] All visual exports respect the active filter / sort / group at time of export — the deliverable is "what's on the screen right now"
-
----
-
-## Non-Functional Requirements
-- [ ] API response time < 200ms for standard reads under normal load
-- [ ] Real-time updates delivered within 500ms of a change
-- [ ] Self-hosted: runs as a single Docker container with no external service dependencies
-- [ ] Direct binary install is also supported (for users who don't use Docker)
-- [ ] Database: SQLite by default; MySQL/MariaDB and Postgres are supported configuration options
-- [ ] Same Docker artifact deploys to self-hosted and any future cloud offering
-- [ ] All API endpoints are authenticated (except public timeline share links and public iCal feeds)
-- [ ] All secrets, calendar credentials, and API tokens stored encrypted/hashed at rest
-
----
-
-## Constraints
-- Must run as a single Docker container with zero required external services (SQLite path)
-- No paid third-party services required for self-hosting
-- Calendar sync credentials and API tokens must never be stored in plaintext
-- No server-side rendering required
-
----
-
-## Out of Scope (v1)
-- Microsoft / Outlook / Exchange calendar sync
-- Kanban drag-to-change-status (Kanban is in v1 as a read-only view; interactive status changes via drag are v2)
-- Gantt dependency arrows / critical-path visualization (parent–child grouping is in scope; visual dependency arrows are not)
-- Time tracking or billable hours
-- Task dependencies or critical path
-- Workload balancing or capacity planning
-- Billing or invoicing
-- Automation or rule-based triggers
-- Mobile native apps (web/PWA first)
-- Multi-tenant cloud hosting (self-hosted per-customer to start)
-- SSO / SAML / OAuth login (email + password only for v1)
-- MCP server integration (parking lot — token auth system is designed to support it when ready)
-- CLI binary (parking lot — token auth system is designed to support it when ready)
-````
-
 ## File: docs/TESTING.md
 ````markdown
 # Testing & Review Procedures
@@ -16130,6 +15478,515 @@ No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `Event
 2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
 3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
 4. That's it — `/test-phase` will pick it up on the next run.
+````
+
+## File: packages/api/internal/api/api_types.gen.go
+````go
+// Package api provides primitives to interact with the openapi HTTP API.
+//
+// Code generated by github.com/oapi-codegen/oapi-codegen/v2 version v2.7.0 DO NOT EDIT.
+package api
+
+import (
+	"time"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+)
+
+const (
+	BearerAuthScopes bearerAuthContextKey = "bearerAuth.Scopes"
+)
+
+// Defines values for HealthResponseStatus.
+const (
+	Ok HealthResponseStatus = "ok"
+)
+
+// Valid indicates whether the value is a known member of the HealthResponseStatus enum.
+func (e HealthResponseStatus) Valid() bool {
+	switch e {
+	case Ok:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for InviteRole.
+const (
+	InviteRoleAdmin  InviteRole = "admin"
+	InviteRoleMember InviteRole = "member"
+)
+
+// Valid indicates whether the value is a known member of the InviteRole enum.
+func (e InviteRole) Valid() bool {
+	switch e {
+	case InviteRoleAdmin:
+		return true
+	case InviteRoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TeamMemberRole.
+const (
+	TeamMemberRoleAdmin  TeamMemberRole = "admin"
+	TeamMemberRoleMember TeamMemberRole = "member"
+	TeamMemberRoleOwner  TeamMemberRole = "owner"
+)
+
+// Valid indicates whether the value is a known member of the TeamMemberRole enum.
+func (e TeamMemberRole) Valid() bool {
+	switch e {
+	case TeamMemberRoleAdmin:
+		return true
+	case TeamMemberRoleMember:
+		return true
+	case TeamMemberRoleOwner:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TeamMemberWithUserRole.
+const (
+	TeamMemberWithUserRoleAdmin  TeamMemberWithUserRole = "admin"
+	TeamMemberWithUserRoleMember TeamMemberWithUserRole = "member"
+	TeamMemberWithUserRoleOwner  TeamMemberWithUserRole = "owner"
+)
+
+// Valid indicates whether the value is a known member of the TeamMemberWithUserRole enum.
+func (e TeamMemberWithUserRole) Valid() bool {
+	switch e {
+	case TeamMemberWithUserRoleAdmin:
+		return true
+	case TeamMemberWithUserRoleMember:
+		return true
+	case TeamMemberWithUserRoleOwner:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TimelineVisibility.
+const (
+	TimelineVisibilityPublic     TimelineVisibility = "public"
+	TimelineVisibilityRestricted TimelineVisibility = "restricted"
+)
+
+// Valid indicates whether the value is a known member of the TimelineVisibility enum.
+func (e TimelineVisibility) Valid() bool {
+	switch e {
+	case TimelineVisibilityPublic:
+		return true
+	case TimelineVisibilityRestricted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CreateInviteJSONBodyRole.
+const (
+	CreateInviteJSONBodyRoleAdmin  CreateInviteJSONBodyRole = "admin"
+	CreateInviteJSONBodyRoleMember CreateInviteJSONBodyRole = "member"
+)
+
+// Valid indicates whether the value is a known member of the CreateInviteJSONBodyRole enum.
+func (e CreateInviteJSONBodyRole) Valid() bool {
+	switch e {
+	case CreateInviteJSONBodyRoleAdmin:
+		return true
+	case CreateInviteJSONBodyRoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CreateTimelineJSONBodyVisibility.
+const (
+	CreateTimelineJSONBodyVisibilityPublic     CreateTimelineJSONBodyVisibility = "public"
+	CreateTimelineJSONBodyVisibilityRestricted CreateTimelineJSONBodyVisibility = "restricted"
+)
+
+// Valid indicates whether the value is a known member of the CreateTimelineJSONBodyVisibility enum.
+func (e CreateTimelineJSONBodyVisibility) Valid() bool {
+	switch e {
+	case CreateTimelineJSONBodyVisibilityPublic:
+		return true
+	case CreateTimelineJSONBodyVisibilityRestricted:
+		return true
+	default:
+		return false
+	}
+}
+
+// ApiError defines model for ApiError.
+type ApiError struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// AuthResponse defines model for AuthResponse.
+type AuthResponse struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	User         User   `json:"user"`
+}
+
+// Activity defines model for Activity.
+type Activity struct {
+	AllDay           bool       `json:"allDay"`
+	ArchivedAt       *time.Time `json:"archivedAt,omitempty"`
+	CaldavUid        *string    `json:"caldavUid,omitempty"`
+	Color            *string    `json:"color,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	CreatedBy        string     `json:"createdBy"`
+	Description      *string    `json:"description,omitempty"`
+	EndAt            time.Time  `json:"endAt"`
+	GoogleEventId    *string    `json:"googleEventId,omitempty"`
+	Icon             *string    `json:"icon,omitempty"`
+	Id               string     `json:"id"`
+	Location         *string    `json:"location,omitempty"`
+	ParentActivityId *string    `json:"parentActivityId,omitempty"`
+	PercentComplete  *int       `json:"percentComplete,omitempty"`
+	Rrule            *string    `json:"rrule,omitempty"`
+	StartAt          time.Time  `json:"startAt"`
+	StatusId         *string    `json:"statusId,omitempty"`
+	TeamId           string     `json:"teamId"`
+	Title            string     `json:"title"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+	Url              *string    `json:"url,omitempty"`
+}
+
+// HealthResponse defines model for HealthResponse.
+type HealthResponse struct {
+	Status HealthResponseStatus `json:"status"`
+}
+
+// HealthResponseStatus defines model for HealthResponse.Status.
+type HealthResponseStatus string
+
+// Invite defines model for Invite.
+type Invite struct {
+	AcceptedAt *time.Time `json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	Email      string     `json:"email"`
+	ExpiresAt  time.Time  `json:"expiresAt"`
+	Id         string     `json:"id"`
+	InvitedBy  string     `json:"invitedBy"`
+	Role       InviteRole `json:"role"`
+	TeamId     string     `json:"teamId"`
+	Token      string     `json:"token"`
+}
+
+// InviteRole defines model for Invite.Role.
+type InviteRole string
+
+// RefreshResponse defines model for RefreshResponse.
+type RefreshResponse struct {
+	AccessToken string `json:"accessToken"`
+}
+
+// UserPreference defines model for UserPreference.
+type UserPreference struct {
+	Id         string    `json:"id"`
+	UserId     string    `json:"userId"`
+	TimelineId string    `json:"timelineId,omitempty"`
+	Key        string    `json:"key"`
+	Value      string    `json:"value"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+// UpsertPreferenceJSONBody defines parameters for UpsertPreference.
+type UpsertPreferenceJSONBody struct {
+	// Key Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
+	Key string `json:"key"`
+
+	// Value JSON-encoded preference value.
+	Value string `json:"value"`
+
+	// TimelineId Optional timeline scope. Omit or pass "" for a global preference.
+	TimelineId *string `json:"timelineId,omitempty"`
+}
+
+// UpsertPreferenceJSONRequestBody defines body for UpsertPreference for application/json ContentType.
+type UpsertPreferenceJSONRequestBody UpsertPreferenceJSONBody
+
+// SavedFilter defines model for SavedFilter.
+type SavedFilter struct {
+	CreatedAt time.Time `json:"createdAt"`
+
+	// Definition Opaque JSON filter spec (validated client-side).
+	Definition string    `json:"definition"`
+	Id         string    `json:"id"`
+	Name       string    `json:"name"`
+	TeamId     string    `json:"teamId"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	UserId     string    `json:"userId"`
+}
+
+// Team defines model for Team.
+type Team struct {
+	ArchivedAt  *time.Time `json:"archivedAt,omitempty"`
+	Color       *string    `json:"color,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	Description *string    `json:"description,omitempty"`
+	Icon        *string    `json:"icon,omitempty"`
+	Id          string     `json:"id"`
+	Name        string     `json:"name"`
+	Notes       *string    `json:"notes,omitempty"`
+	Slug        string     `json:"slug"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+}
+
+// TeamMember defines model for TeamMember.
+type TeamMember struct {
+	Color    *string        `json:"color,omitempty"`
+	JoinedAt time.Time      `json:"joinedAt"`
+	Role     TeamMemberRole `json:"role"`
+	TeamId   string         `json:"teamId"`
+	UserId   string         `json:"userId"`
+}
+
+// TeamMemberRole defines model for TeamMember.Role.
+type TeamMemberRole string
+
+// TeamMemberWithUser defines model for TeamMemberWithUser.
+type TeamMemberWithUser struct {
+	AvatarUrl   *string                `json:"avatarUrl,omitempty"`
+	Color       *string                `json:"color,omitempty"`
+	DisplayName string                 `json:"displayName"`
+	Email       openapi_types.Email    `json:"email"`
+	JoinedAt    time.Time              `json:"joinedAt"`
+	Role        TeamMemberWithUserRole `json:"role"`
+	TeamId      string                 `json:"teamId"`
+	UserId      string                 `json:"userId"`
+}
+
+// TeamMemberWithUserRole defines model for TeamMemberWithUser.Role.
+type TeamMemberWithUserRole string
+
+// Timeline defines model for Timeline.
+type Timeline struct {
+	ArchivedAt *time.Time         `json:"archivedAt,omitempty"`
+	CreatedAt  time.Time          `json:"createdAt"`
+	CreatedBy  string             `json:"createdBy"`
+	EndDate    openapi_types.Date `json:"endDate"`
+	IcalToken  string             `json:"icalToken"`
+	Id         string             `json:"id"`
+	Name       string             `json:"name"`
+	ShareToken string             `json:"shareToken"`
+	StartDate  openapi_types.Date `json:"startDate"`
+	TeamId     string             `json:"teamId"`
+	UpdatedAt  time.Time          `json:"updatedAt"`
+	Visibility TimelineVisibility `json:"visibility"`
+}
+
+// TimelineVisibility defines model for Timeline.Visibility.
+type TimelineVisibility string
+
+// User defines model for User.
+type User struct {
+	AvatarUrl   *string             `json:"avatarUrl,omitempty"`
+	CreatedAt   time.Time           `json:"createdAt"`
+	DisplayName string              `json:"displayName"`
+	Email       openapi_types.Email `json:"email"`
+	Id          string              `json:"id"`
+	UpdatedAt   time.Time           `json:"updatedAt"`
+}
+
+// ActivityId defines model for activityId.
+type ActivityId = string
+
+// SavedFilterId defines model for savedFilterId.
+type SavedFilterId = string
+
+// ShareToken defines model for shareToken.
+type ShareToken = string
+
+// TeamId defines model for teamId.
+type TeamId = string
+
+// TimelineId defines model for timelineId.
+type TimelineId = string
+
+// BadRequest defines model for BadRequest.
+type BadRequest = ApiError
+
+// Forbidden defines model for Forbidden.
+type Forbidden = ApiError
+
+// InternalError defines model for InternalError.
+type InternalError = ApiError
+
+// NotFound defines model for NotFound.
+type NotFound = ApiError
+
+// PaymentRequired defines model for PaymentRequired.
+type PaymentRequired = ApiError
+
+// Unauthorized defines model for Unauthorized.
+type Unauthorized = ApiError
+
+// bearerAuthContextKey is the context key for bearerAuth security scheme
+type bearerAuthContextKey string
+
+// LoginJSONBody defines parameters for Login.
+type LoginJSONBody struct {
+	Email    openapi_types.Email `json:"email"`
+	Password string              `json:"password"`
+}
+
+// RefreshTokenJSONBody defines parameters for RefreshToken.
+type RefreshTokenJSONBody struct {
+	RefreshToken string `json:"refreshToken"`
+}
+
+// RegisterJSONBody defines parameters for Register.
+type RegisterJSONBody struct {
+	DisplayName string              `json:"displayName"`
+	Email       openapi_types.Email `json:"email"`
+	InviteToken *string             `json:"inviteToken,omitempty"`
+	Password    string              `json:"password"`
+}
+
+// UpdateActivityJSONBody defines parameters for UpdateActivity.
+type UpdateActivityJSONBody struct {
+	AllDay           *bool      `json:"allDay,omitempty"`
+	Color            *string    `json:"color,omitempty"`
+	Description      *string    `json:"description,omitempty"`
+	EndAt            *time.Time `json:"endAt,omitempty"`
+	Icon             *string    `json:"icon,omitempty"`
+	Location         *string    `json:"location,omitempty"`
+	ParentActivityId *string    `json:"parentActivityId,omitempty"`
+	PercentComplete  *int       `json:"percentComplete,omitempty"`
+	Rrule            *string    `json:"rrule,omitempty"`
+	StartAt          *time.Time `json:"startAt,omitempty"`
+	StatusId         *string    `json:"statusId,omitempty"`
+	Title            *string    `json:"title,omitempty"`
+	Url              *string    `json:"url,omitempty"`
+}
+
+// UpdateSavedFilterJSONBody defines parameters for UpdateSavedFilter.
+type UpdateSavedFilterJSONBody struct {
+	Definition *string `json:"definition,omitempty"`
+	Name       *string `json:"name,omitempty"`
+}
+
+// CreateTeamJSONBody defines parameters for CreateTeam.
+type CreateTeamJSONBody struct {
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// UpdateTeamJSONBody defines parameters for UpdateTeam.
+type UpdateTeamJSONBody struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// ListActivitiesParams defines parameters for ListActivities.
+type ListActivitiesParams struct {
+	// From Only return activities where startAt >= from (RFC 3339).
+	From *time.Time `form:"from,omitempty" json:"from,omitempty"`
+
+	// To Only return activities where startAt <= to (RFC 3339).
+	To *time.Time `form:"to,omitempty" json:"to,omitempty"`
+}
+
+// CreateActivityJSONBody defines parameters for CreateActivity.
+type CreateActivityJSONBody struct {
+	AllDay            *bool     `json:"allDay,omitempty"`
+	AssignedMemberIds *[]string `json:"assignedMemberIds,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	Description       *string   `json:"description,omitempty"`
+	EndAt             time.Time `json:"endAt"`
+	Icon              *string   `json:"icon,omitempty"`
+	Location          *string   `json:"location,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	ParentActivityId  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	Rrule             *string   `json:"rrule,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	StatusId          *string   `json:"statusId,omitempty"`
+	Title             string    `json:"title"`
+	Url               *string   `json:"url,omitempty"`
+}
+
+// CreateInviteJSONBody defines parameters for CreateInvite.
+type CreateInviteJSONBody struct {
+	// Email If provided, the invite is scoped to this email address.
+	Email *openapi_types.Email      `json:"email,omitempty"`
+	Role  *CreateInviteJSONBodyRole `json:"role,omitempty"`
+}
+
+// CreateInviteJSONBodyRole defines parameters for CreateInvite.
+type CreateInviteJSONBodyRole string
+
+// CreateSavedFilterJSONBody defines parameters for CreateSavedFilter.
+type CreateSavedFilterJSONBody struct {
+	// Definition Opaque JSON filter spec (validated client-side).
+	Definition string `json:"definition"`
+	Name       string `json:"name"`
+}
+
+// CreateTimelineJSONBody defines parameters for CreateTimeline.
+type CreateTimelineJSONBody struct {
+	EndDate    openapi_types.Date                `json:"endDate"`
+	Name       string                            `json:"name"`
+	StartDate  openapi_types.Date                `json:"startDate"`
+	Visibility *CreateTimelineJSONBodyVisibility `json:"visibility,omitempty"`
+}
+
+// CreateTimelineJSONBodyVisibility defines parameters for CreateTimeline.
+type CreateTimelineJSONBodyVisibility string
+
+// LoginJSONRequestBody defines body for Login for application/json ContentType.
+type LoginJSONRequestBody LoginJSONBody
+
+// RefreshTokenJSONRequestBody defines body for RefreshToken for application/json ContentType.
+type RefreshTokenJSONRequestBody RefreshTokenJSONBody
+
+// RegisterJSONRequestBody defines body for Register for application/json ContentType.
+type RegisterJSONRequestBody RegisterJSONBody
+
+// UpdateActivityJSONRequestBody defines body for UpdateActivity for application/json ContentType.
+type UpdateActivityJSONRequestBody UpdateActivityJSONBody
+
+// UpdateSavedFilterJSONRequestBody defines body for UpdateSavedFilter for application/json ContentType.
+type UpdateSavedFilterJSONRequestBody UpdateSavedFilterJSONBody
+
+// CreateTeamJSONRequestBody defines body for CreateTeam for application/json ContentType.
+type CreateTeamJSONRequestBody CreateTeamJSONBody
+
+// UpdateTeamJSONRequestBody defines body for UpdateTeam for application/json ContentType.
+type UpdateTeamJSONRequestBody UpdateTeamJSONBody
+
+// CreateActivityJSONRequestBody defines body for CreateActivity for application/json ContentType.
+type CreateActivityJSONRequestBody CreateActivityJSONBody
+
+// CreateInviteJSONRequestBody defines body for CreateInvite for application/json ContentType.
+type CreateInviteJSONRequestBody CreateInviteJSONBody
+
+// CreateSavedFilterJSONRequestBody defines body for CreateSavedFilter for application/json ContentType.
+type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
+
+// CreateTimelineJSONRequestBody defines body for CreateTimeline for application/json ContentType.
+type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
 ## File: packages/api/internal/api/timeline_types.go
@@ -16836,6 +16693,440 @@ INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
   ('tl-mcf-rebrand', 'tm-mcf-rick',  'member');
 ````
 
+## File: packages/web/src/components/filters/FilterDropdown.tsx
+````typescript
+/**
+ * Top-bar filter selector. Surfaces presets, a per-member section, a
+ * team-promoted filters section (stub), and the user's saved filters.
+ * Selection is stored in FilterContext; wiring to the events list lands
+ * when real views render in Phase 8.
+ */
+
+import { useEffect, useRef, useState } from 'react'
+import {
+  Layers, Clock, User, AlertCircle, UserX, CheckCircle,
+  ChevronDown, Plus, Check, Settings2,
+} from 'lucide-react'
+import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { useSavedFilters } from '@/hooks/useSavedFilters'
+import { useAuth } from '@/contexts/AuthContext'
+
+interface Props {
+  teamId?: string
+  onOpenEditor: () => void
+}
+
+// ── Preset definitions ───────────────────────────────────────────────────────
+
+type PresetId = 'all' | 'upcoming' | 'my' | 'overdue' | 'noassign' | 'open'
+
+interface Preset {
+  id: PresetId
+  label: string
+  icon: React.ReactNode
+  subtitle?: string
+}
+
+const ICON_PRESET = { size: 14, strokeWidth: 1.8 } as const
+
+const PRESETS: Preset[] = [
+  { id: 'all',      label: 'All activities',  icon: <Layers      {...ICON_PRESET} /> },
+  { id: 'open',     label: 'Open only',       icon: <CheckCircle {...ICON_PRESET} />, subtitle: 'Hide activities with a closed status' },
+  { id: 'upcoming', label: 'Upcoming',         icon: <Clock       {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
+  { id: 'my',       label: 'My events',        icon: <User        {...ICON_PRESET} /> },
+  { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
+  { id: 'noassign', label: 'No assignee',      icon: <UserX       {...ICON_PRESET} /> },
+]
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Narrow TeamMemberWithUser to only those with a real user account. */
+function hasUserId<T extends { userId?: string | null }>(m: T): m is T & { userId: string } {
+  return typeof m.userId === 'string' && m.userId.length > 0
+}
+
+function activeLabel(
+  active: ActiveFilter,
+  members: { userId: string; displayName: string }[],
+  saved: { id: string; name: string }[],
+): string {
+  if (active.kind === 'preset') return PRESETS.find(p => p.id === active.id)?.label ?? 'Filter'
+  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.displayName ?? 'Member'
+  return saved.find(s => s.id === active.id)?.name ?? 'Saved filter'
+}
+
+function activeMemberColor(
+  active: ActiveFilter,
+  members: { userId: string; color?: string | null }[],
+): string | null {
+  if (active.kind !== 'member') return null
+  return members.find(m => m.userId === active.userId)?.color ?? null
+}
+
+// ── Sub-components ───────────────────────────────────────────────────────────
+
+interface ItemRowProps {
+  icon?: React.ReactNode
+  /** Rendered in the 8px-dot slot when provided (overrides icon). */
+  dotColor?: string
+  label: string
+  subtitle?: string
+  active: boolean
+  /** Gear button shown on hover for custom filters. */
+  onConfigure?: () => void
+  onClick: () => void
+}
+
+function ItemRow({ icon, dotColor, label, subtitle, active, onConfigure, onClick }: ItemRowProps) {
+  const [hovered, setHovered] = useState(false)
+  const [gearHovered, setGearHovered] = useState(false)
+
+  const rowBg = active
+    ? 'rgba(40,140,155,.09)'
+    : hovered
+    ? 'var(--muted)'
+    : 'transparent'
+
+  const labelColor = active ? 'var(--primary)' : 'var(--foreground)'
+  const labelWeight = active ? 600 : 400
+
+  const showGear = onConfigure && hovered
+  const showCheck = active && !showGear
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        padding: '5px 10px 5px 14px',
+        background: rowBg,
+        cursor: 'pointer',
+        transition: 'background 0.08s',
+      }}
+      onClick={onClick}
+    >
+      {/* 16px icon / dot slot */}
+      <div style={{ width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: active ? 'var(--primary)' : 'var(--muted-foreground)' }}>
+        {dotColor ? (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor }} />
+        ) : (
+          icon
+        )}
+      </div>
+
+      {/* Label + subtitle */}
+      <div style={{ flex: 1, minWidth: 0, marginLeft: 8 }}>
+        <div style={{
+          fontSize: 13,
+          fontWeight: labelWeight,
+          color: labelColor,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+          title={label}
+        >
+          {label}
+        </div>
+        {subtitle && (
+          <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {subtitle}
+          </div>
+        )}
+      </div>
+
+      {/* 24px right slot */}
+      <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        {showGear ? (
+          <button
+            onClick={e => { e.stopPropagation(); onConfigure?.() }}
+            onMouseEnter={() => setGearHovered(true)}
+            onMouseLeave={() => setGearHovered(false)}
+            style={{
+              width: 22,
+              height: 22,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: gearHovered ? '#dde2e8' : 'var(--muted, #EDF0F3)',
+              border: 'none',
+              borderRadius: 5,
+              cursor: 'pointer',
+              color: 'var(--muted-foreground)',
+              transition: 'background 0.1s',
+            }}
+          >
+            <Settings2 size={12} strokeWidth={1.8} />
+          </button>
+        ) : showCheck ? (
+          <Check size={13} strokeWidth={2.5} color="var(--primary)" />
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+// ── Section header ───────────────────────────────────────────────────────────
+
+interface SectionHeaderProps {
+  label: string
+  teamBadge?: boolean
+}
+
+function SectionHeader({ label, teamBadge }: SectionHeaderProps) {
+  return (
+    <div style={{
+      padding: '10px 14px 3px',
+      fontSize: 10,
+      fontWeight: 700,
+      letterSpacing: '0.8px',
+      textTransform: 'uppercase',
+      color: 'var(--muted-foreground)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+    }}>
+      {label}
+      {teamBadge && (
+        <span style={{
+          fontSize: 9,
+          fontWeight: 700,
+          color: 'var(--primary)',
+          background: 'rgba(40,140,155,.1)',
+          border: '1px solid rgba(40,140,155,.25)',
+          borderRadius: 99,
+          padding: '1px 5px',
+          letterSpacing: 0,
+          textTransform: 'none',
+        }}>
+          Team
+        </span>
+      )}
+    </div>
+  )
+}
+
+function Divider() {
+  return <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+}
+
+// ── Main component ───────────────────────────────────────────────────────────
+
+export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
+  const { activeFilter, setActiveFilter } = useFilter()
+  const { user } = useAuth()
+  const { data: members = [] } = useTeamMembers(teamId)
+  const { data: saved = [] } = useSavedFilters(teamId)
+
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [])
+
+  const membersWithUser = members.filter(hasUserId)
+  const label = activeLabel(activeFilter, membersWithUser, saved)
+  const memberDotColor = activeMemberColor(activeFilter, membersWithUser)
+  const currentUserId = (user as { id?: string } | null)?.id ?? ''
+
+  const isDefaultFilter = activeFilter.kind === 'preset' && activeFilter.id === 'all'
+
+  function select(f: ActiveFilter) {
+    setActiveFilter(f)
+    setOpen(false)
+  }
+
+  function isSelected(f: ActiveFilter): boolean {
+    if (f.kind !== activeFilter.kind) return false
+    if (f.kind === 'preset' && activeFilter.kind === 'preset') return f.id === activeFilter.id
+    if (f.kind === 'member' && activeFilter.kind === 'member') return f.userId === activeFilter.userId
+    if (f.kind === 'saved' && activeFilter.kind === 'saved') return f.id === activeFilter.id
+    return false
+  }
+
+  // Trigger appearance — teal tint when a non-default filter is active.
+  const triggerBg = isDefaultFilter ? 'transparent' : 'rgba(40,140,155,.09)'
+  const triggerBorder = isDefaultFilter ? 'var(--border)' : 'rgba(40,140,155,.22)'
+  const triggerColor = isDefaultFilter ? 'var(--foreground)' : 'var(--primary)'
+  const triggerWeight = isDefaultFilter ? 400 : 600
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      {/* Trigger */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        title="Filter"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          cursor: 'pointer',
+          fontFamily: 'var(--font-sans)',
+          border: `1px solid ${triggerBorder}`,
+          borderRadius: 6,
+          background: triggerBg,
+          color: triggerColor,
+          padding: '5px 9px 5px 8px',
+          height: 30,
+          fontSize: 13,
+          fontWeight: triggerWeight,
+          maxWidth: 220,
+          transition: 'all 0.12s',
+        }}
+      >
+        {/* Icon: colored dot when a member filter is active, otherwise Filter icon */}
+        {memberDotColor && !isDefaultFilter ? (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: memberDotColor, flexShrink: 0 }} />
+        ) : (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: 'var(--muted-foreground)' }}>
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+          </svg>
+        )}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+          {label}
+        </span>
+        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {/* Dropdown panel */}
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 8px)',
+            right: 0,
+            width: 284,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            boxShadow: '0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)',
+            zIndex: 100,
+            paddingBottom: 4,
+            maxHeight: 460,
+            overflowY: 'auto',
+          }}
+        >
+          {/* Presets */}
+          <SectionHeader label="Presets" />
+          {PRESETS.map(p => {
+            const f: ActiveFilter = { kind: 'preset', id: p.id }
+            return (
+              <ItemRow
+                key={p.id}
+                icon={p.icon}
+                label={p.label}
+                subtitle={p.subtitle}
+                active={isSelected(f)}
+                onClick={() => select(f)}
+              />
+            )
+          })}
+
+          {/* Members */}
+          {membersWithUser.length > 0 && (
+            <>
+              <Divider />
+              <SectionHeader label="Members" />
+              {membersWithUser.map(m => {
+                const f: ActiveFilter = { kind: 'member', userId: m.userId }
+                const name = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName
+                return (
+                  <ItemRow
+                    key={m.userId}
+                    dotColor={m.color ?? '#8b949e'}
+                    label={name}
+                    active={isSelected(f)}
+                    onClick={() => select(f)}
+                  />
+                )
+              })}
+            </>
+          )}
+
+          {/* Team filters — stub; no API support yet */}
+          <Divider />
+          <SectionHeader label="Team filters" teamBadge />
+          <div style={{ padding: '6px 14px 4px', fontSize: 12, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+            No team filters yet
+          </div>
+
+          {/* My filters */}
+          {saved.length > 0 && (
+            <>
+              <Divider />
+              <SectionHeader label="My filters" />
+              {saved.map(s => {
+                const f: ActiveFilter = { kind: 'saved', id: s.id }
+                return (
+                  <ItemRow
+                    key={s.id}
+                    label={s.name}
+                    active={isSelected(f)}
+                    onConfigure={() => { onOpenEditor(); setOpen(false) }}
+                    onClick={() => select(f)}
+                  />
+                )
+              })}
+            </>
+          )}
+
+          {/* Footer — add filter */}
+          <Divider />
+          <AddFilterRow onClick={() => { onOpenEditor(); setOpen(false) }} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Add filter footer row ─────────────────────────────────────────────────────
+
+function AddFilterRow({ onClick }: { onClick: () => void }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        width: '100%',
+        padding: '7px 14px',
+        background: hovered ? 'var(--muted)' : 'transparent',
+        border: 'none',
+        fontSize: 13,
+        fontWeight: hovered ? 600 : 400,
+        color: hovered ? 'var(--primary)' : 'var(--muted-foreground)',
+        cursor: 'pointer',
+        fontFamily: 'var(--font-sans)',
+        textAlign: 'left',
+        transition: 'all 0.1s',
+      }}
+    >
+      <Plus size={14} strokeWidth={2} />
+      Add filter
+    </button>
+  )
+}
+````
+
 ## File: packages/web/src/components/gantt/GanttToolbar.tsx
 ````typescript
 /**
@@ -17049,6 +17340,364 @@ export default function GanttToolbar({
       </button>
     </div>
   );
+}
+````
+
+## File: packages/web/src/components/gantt/granularity.test.ts
+````typescript
+import { describe, it, expect } from 'vitest'
+import { generateColumns, snapDivisorFor } from './granularity'
+
+// ── generateColumns — weekStart option ───────────────────────────────────────
+
+// Jan 2026 layout:
+//   Mon Jan  5 (ISO week start)
+//   Sun Jan  4 (Sunday week start)
+//
+// Jan 1 2026 is a Thursday.
+
+const JAN1 = new Date(2026, 0, 1)   // Thu
+const JAN31 = new Date(2026, 0, 31) // Sat
+
+describe('generateColumns — weekStart', () => {
+  it('monday week start: first week column begins on Monday Dec 29', () => {
+    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
+    // Jan 1 is Thursday; Monday ISO week start = Dec 29 2025
+    expect(cols[0].start.getDay()).toBe(1) // 1 = Monday
+    expect(cols[0].start.getDate()).toBe(29)
+  })
+
+  it('sunday week start: first week column begins on Sunday Dec 28', () => {
+    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'sunday' })
+    // Jan 1 is Thursday; Sunday week start = Dec 28 2025
+    expect(cols[0].start.getDay()).toBe(0) // 0 = Sunday
+    expect(cols[0].start.getDate()).toBe(28)
+  })
+
+  it('default (no option) behaves like monday', () => {
+    const defaultCols = generateColumns(JAN1, JAN31, 'week')
+    const mondayCols  = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
+    expect(defaultCols[0].start.getTime()).toBe(mondayCols[0].start.getTime())
+  })
+})
+
+// ── generateColumns — locale option ──────────────────────────────────────────
+
+describe('generateColumns — locale', () => {
+  it('en-US: month column label contains English month name', () => {
+    const cols = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
+    expect(cols[0].label).toMatch(/Jan/)
+  })
+
+  it('en-GB: day column label shows day-first ordering (e.g. "1 Jan")', () => {
+    const cols = generateColumns(JAN1, JAN31, 'day', { locale: 'en-GB' })
+    // en-GB {month:'short', day:'numeric'} → "1 Jan"
+    expect(cols[0].label).toMatch(/Jan/)
+    // The day should come first in en-GB
+    expect(cols[0].label).toMatch(/^1/)
+  })
+
+  it('default locale behaves like en-US', () => {
+    const defaultCols = generateColumns(JAN1, JAN31, 'month')
+    const usCols      = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
+    expect(defaultCols[0].label).toBe(usCols[0].label)
+  })
+})
+
+// ── snapDivisorFor ────────────────────────────────────────────────────────────
+
+describe('snapDivisorFor', () => {
+  it('week → 7 (snap to day within week)', () => {
+    expect(snapDivisorFor('week')).toBe(7)
+  })
+
+  it('month → 4 (snap to week within month)', () => {
+    expect(snapDivisorFor('month')).toBe(4)
+  })
+
+  it('quarter → 3 (snap to month within quarter)', () => {
+    expect(snapDivisorFor('quarter')).toBe(3)
+  })
+
+  it('year → 4 (snap to quarter within year)', () => {
+    expect(snapDivisorFor('year')).toBe(4)
+  })
+
+  it('day → 1 (no finer snap at day granularity)', () => {
+    expect(snapDivisorFor('day')).toBe(1)
+  })
+
+  it('auto → 1 (no finer snap for auto)', () => {
+    expect(snapDivisorFor('auto')).toBe(1)
+  })
+})
+````
+
+## File: packages/web/src/components/gantt/granularity.ts
+````typescript
+/**
+ * Time-granularity helpers for the Gantt view.
+ *
+ * Generates column definitions and maps event date ranges to fractional
+ * column positions at any granularity (day → year).
+ */
+
+export type TimeGranularity = 'day' | 'week' | 'month' | 'quarter' | 'year';
+
+export interface ColumnDef {
+  label: string;
+  /** Secondary label rendered on a second line (used for week numbers). */
+  sublabel?: string;
+  start: Date;
+  end: Date;
+  /** Calendar days this column spans (varies for months, quarters, years). */
+  days: number;
+}
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function daysBetween(a: Date, b: Date): number {
+  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
+}
+
+function startOfDay(d: Date): Date {
+  const r = new Date(d);
+  r.setHours(0, 0, 0, 0);
+  return r;
+}
+
+function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
+  const r = startOfDay(d);
+  const day = r.getDay(); // 0=Sun, 1=Mon, …, 6=Sat
+  if (weekStart === 'sunday') {
+    r.setDate(r.getDate() - day);
+  } else {
+    // Monday = ISO week start
+    r.setDate(r.getDate() - ((day + 6) % 7));
+  }
+  return r;
+}
+
+function startOfMonth(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+
+function startOfQuarter(d: Date): Date {
+  const q = Math.floor(d.getMonth() / 3) * 3;
+  return new Date(d.getFullYear(), q, 1);
+}
+
+function startOfYear(d: Date): Date {
+  return new Date(d.getFullYear(), 0, 1);
+}
+
+export function addDays(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setDate(r.getDate() + n);
+  return r;
+}
+
+function addMonths(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setMonth(r.getMonth() + n);
+  return r;
+}
+
+function endOfPeriod(start: Date, gran: TimeGranularity): Date {
+  switch (gran) {
+    case 'day':     return addDays(start, 1);
+    case 'week':    return addDays(start, 7);
+    case 'month':   return addMonths(start, 1);
+    case 'quarter': return addMonths(start, 3);
+    case 'year':    return addMonths(start, 12);
+  }
+}
+
+function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sunday' = 'monday'): Date {
+  switch (gran) {
+    case 'day':     return startOfDay(d);
+    case 'week':    return startOfWeek(d, weekStart);
+    case 'month':   return startOfMonth(d);
+    case 'quarter': return startOfQuarter(d);
+    case 'year':    return startOfYear(d);
+  }
+}
+
+// ── Label formatting ────────────────────────────────────────────────────────
+
+/** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
+function isoWeekNumber(d: Date): number {
+  const date = new Date(d);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
+  const week1 = new Date(date.getFullYear(), 0, 4);
+  return 1 + Math.round(
+    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getDay() + 6) % 7)) / 7,
+  );
+}
+
+function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
+  switch (gran) {
+    case 'day':
+      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+    case 'week': {
+      const end = addDays(start, 6);
+      const sameMonth = start.getMonth() === end.getMonth();
+      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+      const e = sameMonth
+        ? end.getDate().toString()
+        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+      return `${s}–${e}`;
+    }
+    case 'month':
+      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric' });
+    case 'quarter': {
+      const q = Math.floor(start.getMonth() / 3) + 1;
+      return `Q${q} ${start.getFullYear()}`;
+    }
+    case 'year':
+      return start.getFullYear().toString();
+  }
+}
+
+// ── Column generation ───────────────────────────────────────────────────────
+
+export interface GenerateColumnsOptions {
+  /** Which day the week grid starts on. Defaults to 'monday' (ISO). */
+  weekStart?: 'monday' | 'sunday';
+  /** BCP 47 locale tag for month name formatting. Defaults to 'en-US'. */
+  locale?: string;
+}
+
+export function generateColumns(
+  viewStart: Date,
+  viewEnd: Date,
+  granularity: TimeGranularity,
+  options?: GenerateColumnsOptions,
+): ColumnDef[] {
+  const weekStart = options?.weekStart ?? 'monday';
+  const locale = options?.locale ?? 'en-US';
+  const columns: ColumnDef[] = [];
+  let cur = periodStart(viewStart, granularity, weekStart);
+
+  while (cur <= viewEnd) {
+    const next = endOfPeriod(cur, granularity);
+    // Clamp to view bounds for the first and last columns
+    const colStart = cur < viewStart ? viewStart : cur;
+    const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
+    columns.push({
+      label: formatLabel(cur, granularity, locale),
+      sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
+      start: cur,
+      end: next,
+      days: daysBetween(colStart, colEnd),
+    });
+    cur = next;
+  }
+
+  return columns;
+}
+
+// ── Event positioning ───────────────────────────────────────────────────────
+
+/** Fractional position within the column array. */
+export function positionInColumns(
+  eventStart: Date,
+  eventEnd: Date,
+  columns: ColumnDef[],
+): { startCol: number; span: number } {
+  if (columns.length === 0) return { startCol: 0, span: 0 };
+
+  const evStartMs = eventStart.getTime();
+  const evEndMs = eventEnd.getTime();
+
+  let startCol = 0;
+  let endCol = columns.length;
+
+  for (let i = 0; i < columns.length; i++) {
+    const col = columns[i];
+    const colStartMs = col.start.getTime();
+    const colEndMs = col.end.getTime();
+    const colSpanMs = colEndMs - colStartMs;
+
+    if (evStartMs >= colStartMs && evStartMs < colEndMs) {
+      startCol = i + (colSpanMs > 0 ? (evStartMs - colStartMs) / colSpanMs : 0);
+    }
+    // End is inclusive day, so add 1 day for positioning
+    const evEndNextDayMs = evEndMs + 86_400_000;
+    if (evEndNextDayMs > colStartMs && evEndNextDayMs <= colEndMs) {
+      endCol = i + (colSpanMs > 0 ? (evEndNextDayMs - colStartMs) / colSpanMs : 1);
+    }
+  }
+
+  const span = Math.max(endCol - startCol, 0.15);
+  return { startCol, span };
+}
+
+// ── Snap divisor ────────────────────────────────────────────────────────────
+
+// Number of snap divisions per column at the given zoom granularity.
+// Higher divisor → finer snap (e.g. week columns snap to individual days).
+export function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
+  switch (granularity) {
+    case 'week':    return 7;  // snap to day within week
+    case 'month':   return 4;  // snap to week within month
+    case 'quarter': return 3;  // snap to month within quarter
+    case 'year':    return 4;  // snap to quarter within year
+    default:        return 1;  // day or auto → no finer snap
+  }
+}
+
+// ── Today position ──────────────────────────────────────────────────────────
+
+export function todayColumnPosition(columns: ColumnDef[]): number {
+  const now = startOfDay(new Date());
+  const nowMs = now.getTime();
+
+  for (let i = 0; i < columns.length; i++) {
+    const col = columns[i];
+    const colStartMs = col.start.getTime();
+    const colEndMs = col.end.getTime();
+    if (nowMs >= colStartMs && nowMs < colEndMs) {
+      const colSpanMs = colEndMs - colStartMs;
+      return i + (colSpanMs > 0 ? (nowMs - colStartMs) / colSpanMs : 0.5);
+    }
+  }
+  return -1;
+}
+
+// ── Auto-fit ────────────────────────────────────────────────────────────────
+
+const GRANULARITIES: TimeGranularity[] = ['day', 'week', 'month', 'quarter', 'year'];
+const BASE_COL_WIDTH = 80;
+
+export function autoFitGranularity(
+  viewStart: Date,
+  viewEnd: Date,
+  viewportWidth: number,
+): TimeGranularity {
+  const targetCols = Math.max(viewportWidth / BASE_COL_WIDTH, 2);
+
+  let best: TimeGranularity = 'month';
+  let bestDiff = Infinity;
+
+  for (const gran of GRANULARITIES) {
+    const cols = generateColumns(viewStart, viewEnd, gran).length;
+    if (cols < 2) continue;
+    // Prefer the finest granularity that fits within 50-150% of viewport
+    const ratio = cols / targetCols;
+    if (ratio >= 0.4 && ratio <= 1.5) {
+      // Within range — prefer finest (earliest in array)
+      return gran;
+    }
+    const diff = Math.abs(ratio - 1);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = gran;
+    }
+  }
+
+  return best;
 }
 ````
 
@@ -18174,130 +18823,6 @@ export function createAuthFetch(getToken: () => string | null) {
     }
   }
 }
-````
-
-## File: packages/web/src/lib/findMatcher.test.ts
-````typescript
-import { describe, it, expect } from 'vitest'
-import { matchEvents } from './findMatcher'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-
-// ── Fixtures ─────────────────────────────────────────────────────────────────
-
-const MEMBERS: Member[] = [
-  { id: 'm1', name: 'Alice Smith',   initials: 'AS', color: '#288C9B' },
-  { id: 'm2', name: 'Bob Jones',     initials: 'BJ', color: '#F29E4C' },
-  { id: 'm3', name: 'Charlie Brown', initials: 'CB', color: '#5BC0DE' },
-]
-
-function makeActivity(overrides: Partial<ApiActivity> & { id: string; title: string }): ApiActivity {
-  return {
-    timelineId: 'timeline-1',
-    startAt: '2026-01-01T00:00:00Z',
-    endAt: '2026-01-07T00:00:00Z',
-    allDay: true,
-    createdBy: 'user-1',
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T00:00:00Z',
-    ...overrides,
-  }
-}
-
-const ACTIVITIES: ApiActivity[] = [
-  makeActivity({ id: 'e1', title: 'Alpha Launch',        description: 'Ship the first version' }),
-  makeActivity({ id: 'e2', title: 'Beta Testing',        description: 'Run QA on beta build', assignedMemberIds: ['m1'] }),
-  makeActivity({ id: 'e3', title: 'Design Review',       description: null, assignedMemberIds: ['m2', 'm3'] }),
-  makeActivity({ id: 'e4', title: 'Security Audit',      description: 'Check alice permissions' }),
-  makeActivity({ id: 'e5', title: 'Parent Activity',     description: null }),
-  makeActivity({ id: 'e6', title: 'Child milestone',     description: null, parentActivityId: 'e5' }),
-  makeActivity({ id: 'e7', title: 'Another Child',       description: null, parentActivityId: 'e5' }),
-]
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-describe('matchActivities', () => {
-  it('returns empty array for empty query', () => {
-    expect(matchEvents('', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
-    expect(matchEvents('   ', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
-  })
-
-  it('matches activity title, case-insensitive', () => {
-    const results = matchEvents('alpha', ACTIVITIES, MEMBERS, ACTIVITIES)
-    expect(results).toHaveLength(1)
-    expect(results[0].activityId).toBe('e1')
-    expect(results[0].reasons).toContain('title')
-  })
-
-  it('matches description', () => {
-    const results = matchEvents('QA on beta', ACTIVITIES, MEMBERS, ACTIVITIES)
-    expect(results).toHaveLength(1)
-    expect(results[0].activityId).toBe('e2')
-    expect(results[0].reasons).toContain('description')
-  })
-
-  it('matches assignee display name', () => {
-    const results = matchEvents('alice', ACTIVITIES, MEMBERS, ACTIVITIES)
-    // e2 assigns Alice Smith; e4 has "alice" in description
-    const matchedIds = results.map(r => r.activityId)
-    expect(matchedIds).toContain('e2')
-    expect(matchedIds).toContain('e4')
-    const e2 = results.find(r => r.activityId === 'e2')!
-    expect(e2.reasons).toContain('assignee: Alice Smith')
-    const e4 = results.find(r => r.activityId === 'e4')!
-    expect(e4.reasons).toContain('description')
-  })
-
-  it('matches parent activity title for child activities', () => {
-    const results = matchEvents('parent activity', ACTIVITIES, MEMBERS, ACTIVITIES)
-    const matchedIds = results.map(r => r.activityId)
-    // e5 matches by title; e6 and e7 match by parent title
-    expect(matchedIds).toContain('e5')
-    expect(matchedIds).toContain('e6')
-    expect(matchedIds).toContain('e7')
-    const e6 = results.find(r => r.activityId === 'e6')!
-    expect(e6.reasons.some(r => r.startsWith('parent:'))).toBe(true)
-  })
-
-  it('is case-insensitive for all match fields', () => {
-    expect(matchEvents('ALPHA', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e1')
-    expect(matchEvents('AlPhA', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e1')
-    expect(matchEvents('ALICE', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e2')
-    expect(matchEvents('bob', ACTIVITIES, MEMBERS, ACTIVITIES).map(r => r.activityId)).toContain('e3')
-  })
-
-  it('reports multiple reasons when multiple fields match', () => {
-    // e2: title contains "beta", description contains "beta", no assignee match for "beta"
-    const results = matchEvents('beta', ACTIVITIES, MEMBERS, ACTIVITIES)
-    const e2 = results.find(r => r.activityId === 'e2')!
-    expect(e2.reasons).toContain('title')
-    expect(e2.reasons).toContain('description')
-  })
-
-  it('does not include activities outside the visible set', () => {
-    // Only pass e1 as visible
-    const results = matchEvents('alpha', [ACTIVITIES[0]], MEMBERS, ACTIVITIES)
-    expect(results).toHaveLength(1)
-    expect(results[0].activityId).toBe('e1')
-
-    // e2 not visible — should not appear
-    const results2 = matchEvents('alpha', [ACTIVITIES[1]], MEMBERS, ACTIVITIES)
-    expect(results2).toHaveLength(0)
-  })
-
-  it('returns empty when nothing matches', () => {
-    expect(matchEvents('xyznonexistent', ACTIVITIES, MEMBERS, ACTIVITIES)).toHaveLength(0)
-  })
-
-  it('handles activities with no optional fields gracefully', () => {
-    const bare = makeActivity({ id: 'bare', title: 'Bare activity' })
-    expect(() => matchEvents('bare', [bare], [], [])).not.toThrow()
-    const results = matchEvents('bare', [bare], [], [])
-    expect(results[0].activityId).toBe('bare')
-  })
-})
 ````
 
 ## File: packages/web/src/pages/settings/AdminUsersPage.tsx
@@ -21874,1417 +22399,6 @@ func newRepoID() string {
 }
 ````
 
-## File: packages/web/src/components/filters/FilterDropdown.tsx
-````typescript
-/**
- * Top-bar filter selector. Surfaces presets, a per-member section, a
- * team-promoted filters section (stub), and the user's saved filters.
- * Selection is stored in FilterContext; wiring to the events list lands
- * when real views render in Phase 8.
- */
-
-import { useEffect, useRef, useState } from 'react'
-import {
-  Layers, Clock, User, AlertCircle, UserX, CheckCircle,
-  ChevronDown, Plus, Check, Settings2,
-} from 'lucide-react'
-import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { useSavedFilters } from '@/hooks/useSavedFilters'
-import { useAuth } from '@/contexts/AuthContext'
-
-interface Props {
-  teamId?: string
-  onOpenEditor: () => void
-}
-
-// ── Preset definitions ───────────────────────────────────────────────────────
-
-type PresetId = 'all' | 'upcoming' | 'my' | 'overdue' | 'noassign' | 'open'
-
-interface Preset {
-  id: PresetId
-  label: string
-  icon: React.ReactNode
-  subtitle?: string
-}
-
-const ICON_PRESET = { size: 14, strokeWidth: 1.8 } as const
-
-const PRESETS: Preset[] = [
-  { id: 'all',      label: 'All activities',  icon: <Layers      {...ICON_PRESET} /> },
-  { id: 'open',     label: 'Open only',       icon: <CheckCircle {...ICON_PRESET} />, subtitle: 'Hide activities with a closed status' },
-  { id: 'upcoming', label: 'Upcoming',         icon: <Clock       {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
-  { id: 'my',       label: 'My events',        icon: <User        {...ICON_PRESET} /> },
-  { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
-  { id: 'noassign', label: 'No assignee',      icon: <UserX       {...ICON_PRESET} /> },
-]
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Narrow TeamMemberWithUser to only those with a real user account. */
-function hasUserId<T extends { userId?: string | null }>(m: T): m is T & { userId: string } {
-  return typeof m.userId === 'string' && m.userId.length > 0
-}
-
-function activeLabel(
-  active: ActiveFilter,
-  members: { userId: string; displayName: string }[],
-  saved: { id: string; name: string }[],
-): string {
-  if (active.kind === 'preset') return PRESETS.find(p => p.id === active.id)?.label ?? 'Filter'
-  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.displayName ?? 'Member'
-  return saved.find(s => s.id === active.id)?.name ?? 'Saved filter'
-}
-
-function activeMemberColor(
-  active: ActiveFilter,
-  members: { userId: string; color?: string | null }[],
-): string | null {
-  if (active.kind !== 'member') return null
-  return members.find(m => m.userId === active.userId)?.color ?? null
-}
-
-// ── Sub-components ───────────────────────────────────────────────────────────
-
-interface ItemRowProps {
-  icon?: React.ReactNode
-  /** Rendered in the 8px-dot slot when provided (overrides icon). */
-  dotColor?: string
-  label: string
-  subtitle?: string
-  active: boolean
-  /** Gear button shown on hover for custom filters. */
-  onConfigure?: () => void
-  onClick: () => void
-}
-
-function ItemRow({ icon, dotColor, label, subtitle, active, onConfigure, onClick }: ItemRowProps) {
-  const [hovered, setHovered] = useState(false)
-  const [gearHovered, setGearHovered] = useState(false)
-
-  const rowBg = active
-    ? 'rgba(40,140,155,.09)'
-    : hovered
-    ? 'var(--muted)'
-    : 'transparent'
-
-  const labelColor = active ? 'var(--primary)' : 'var(--foreground)'
-  const labelWeight = active ? 600 : 400
-
-  const showGear = onConfigure && hovered
-  const showCheck = active && !showGear
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        padding: '5px 10px 5px 14px',
-        background: rowBg,
-        cursor: 'pointer',
-        transition: 'background 0.08s',
-      }}
-      onClick={onClick}
-    >
-      {/* 16px icon / dot slot */}
-      <div style={{ width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: active ? 'var(--primary)' : 'var(--muted-foreground)' }}>
-        {dotColor ? (
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor }} />
-        ) : (
-          icon
-        )}
-      </div>
-
-      {/* Label + subtitle */}
-      <div style={{ flex: 1, minWidth: 0, marginLeft: 8 }}>
-        <div style={{
-          fontSize: 13,
-          fontWeight: labelWeight,
-          color: labelColor,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-          title={label}
-        >
-          {label}
-        </div>
-        {subtitle && (
-          <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {subtitle}
-          </div>
-        )}
-      </div>
-
-      {/* 24px right slot */}
-      <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-        {showGear ? (
-          <button
-            onClick={e => { e.stopPropagation(); onConfigure?.() }}
-            onMouseEnter={() => setGearHovered(true)}
-            onMouseLeave={() => setGearHovered(false)}
-            style={{
-              width: 22,
-              height: 22,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: gearHovered ? '#dde2e8' : 'var(--muted, #EDF0F3)',
-              border: 'none',
-              borderRadius: 5,
-              cursor: 'pointer',
-              color: 'var(--muted-foreground)',
-              transition: 'background 0.1s',
-            }}
-          >
-            <Settings2 size={12} strokeWidth={1.8} />
-          </button>
-        ) : showCheck ? (
-          <Check size={13} strokeWidth={2.5} color="var(--primary)" />
-        ) : null}
-      </div>
-    </div>
-  )
-}
-
-// ── Section header ───────────────────────────────────────────────────────────
-
-interface SectionHeaderProps {
-  label: string
-  teamBadge?: boolean
-}
-
-function SectionHeader({ label, teamBadge }: SectionHeaderProps) {
-  return (
-    <div style={{
-      padding: '10px 14px 3px',
-      fontSize: 10,
-      fontWeight: 700,
-      letterSpacing: '0.8px',
-      textTransform: 'uppercase',
-      color: 'var(--muted-foreground)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-    }}>
-      {label}
-      {teamBadge && (
-        <span style={{
-          fontSize: 9,
-          fontWeight: 700,
-          color: 'var(--primary)',
-          background: 'rgba(40,140,155,.1)',
-          border: '1px solid rgba(40,140,155,.25)',
-          borderRadius: 99,
-          padding: '1px 5px',
-          letterSpacing: 0,
-          textTransform: 'none',
-        }}>
-          Team
-        </span>
-      )}
-    </div>
-  )
-}
-
-function Divider() {
-  return <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
-}
-
-// ── Main component ───────────────────────────────────────────────────────────
-
-export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
-  const { activeFilter, setActiveFilter } = useFilter()
-  const { user } = useAuth()
-  const { data: members = [] } = useTeamMembers(teamId)
-  const { data: saved = [] } = useSavedFilters(teamId)
-
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [])
-
-  const membersWithUser = members.filter(hasUserId)
-  const label = activeLabel(activeFilter, membersWithUser, saved)
-  const memberDotColor = activeMemberColor(activeFilter, membersWithUser)
-  const currentUserId = (user as { id?: string } | null)?.id ?? ''
-
-  const isDefaultFilter = activeFilter.kind === 'preset' && activeFilter.id === 'all'
-
-  function select(f: ActiveFilter) {
-    setActiveFilter(f)
-    setOpen(false)
-  }
-
-  function isSelected(f: ActiveFilter): boolean {
-    if (f.kind !== activeFilter.kind) return false
-    if (f.kind === 'preset' && activeFilter.kind === 'preset') return f.id === activeFilter.id
-    if (f.kind === 'member' && activeFilter.kind === 'member') return f.userId === activeFilter.userId
-    if (f.kind === 'saved' && activeFilter.kind === 'saved') return f.id === activeFilter.id
-    return false
-  }
-
-  // Trigger appearance — teal tint when a non-default filter is active.
-  const triggerBg = isDefaultFilter ? 'transparent' : 'rgba(40,140,155,.09)'
-  const triggerBorder = isDefaultFilter ? 'var(--border)' : 'rgba(40,140,155,.22)'
-  const triggerColor = isDefaultFilter ? 'var(--foreground)' : 'var(--primary)'
-  const triggerWeight = isDefaultFilter ? 400 : 600
-
-  return (
-    <div ref={ref} style={{ position: 'relative' }}>
-      {/* Trigger */}
-      <button
-        onClick={() => setOpen(o => !o)}
-        title="Filter"
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          cursor: 'pointer',
-          fontFamily: 'var(--font-sans)',
-          border: `1px solid ${triggerBorder}`,
-          borderRadius: 6,
-          background: triggerBg,
-          color: triggerColor,
-          padding: '5px 9px 5px 8px',
-          height: 30,
-          fontSize: 13,
-          fontWeight: triggerWeight,
-          maxWidth: 220,
-          transition: 'all 0.12s',
-        }}
-      >
-        {/* Icon: colored dot when a member filter is active, otherwise Filter icon */}
-        {memberDotColor && !isDefaultFilter ? (
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: memberDotColor, flexShrink: 0 }} />
-        ) : (
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: 'var(--muted-foreground)' }}>
-            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-          </svg>
-        )}
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-          {label}
-        </span>
-        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {/* Dropdown panel */}
-      {open && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 8px)',
-            right: 0,
-            width: 284,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 8,
-            boxShadow: '0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)',
-            zIndex: 100,
-            paddingBottom: 4,
-            maxHeight: 460,
-            overflowY: 'auto',
-          }}
-        >
-          {/* Presets */}
-          <SectionHeader label="Presets" />
-          {PRESETS.map(p => {
-            const f: ActiveFilter = { kind: 'preset', id: p.id }
-            return (
-              <ItemRow
-                key={p.id}
-                icon={p.icon}
-                label={p.label}
-                subtitle={p.subtitle}
-                active={isSelected(f)}
-                onClick={() => select(f)}
-              />
-            )
-          })}
-
-          {/* Members */}
-          {membersWithUser.length > 0 && (
-            <>
-              <Divider />
-              <SectionHeader label="Members" />
-              {membersWithUser.map(m => {
-                const f: ActiveFilter = { kind: 'member', userId: m.userId }
-                const name = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName
-                return (
-                  <ItemRow
-                    key={m.userId}
-                    dotColor={m.color ?? '#8b949e'}
-                    label={name}
-                    active={isSelected(f)}
-                    onClick={() => select(f)}
-                  />
-                )
-              })}
-            </>
-          )}
-
-          {/* Team filters — stub; no API support yet */}
-          <Divider />
-          <SectionHeader label="Team filters" teamBadge />
-          <div style={{ padding: '6px 14px 4px', fontSize: 12, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-            No team filters yet
-          </div>
-
-          {/* My filters */}
-          {saved.length > 0 && (
-            <>
-              <Divider />
-              <SectionHeader label="My filters" />
-              {saved.map(s => {
-                const f: ActiveFilter = { kind: 'saved', id: s.id }
-                return (
-                  <ItemRow
-                    key={s.id}
-                    label={s.name}
-                    active={isSelected(f)}
-                    onConfigure={() => { onOpenEditor(); setOpen(false) }}
-                    onClick={() => select(f)}
-                  />
-                )
-              })}
-            </>
-          )}
-
-          {/* Footer — add filter */}
-          <Divider />
-          <AddFilterRow onClick={() => { onOpenEditor(); setOpen(false) }} />
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Add filter footer row ─────────────────────────────────────────────────────
-
-function AddFilterRow({ onClick }: { onClick: () => void }) {
-  const [hovered, setHovered] = useState(false)
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        width: '100%',
-        padding: '7px 14px',
-        background: hovered ? 'var(--muted)' : 'transparent',
-        border: 'none',
-        fontSize: 13,
-        fontWeight: hovered ? 600 : 400,
-        color: hovered ? 'var(--primary)' : 'var(--muted-foreground)',
-        cursor: 'pointer',
-        fontFamily: 'var(--font-sans)',
-        textAlign: 'left',
-        transition: 'all 0.1s',
-      }}
-    >
-      <Plus size={14} strokeWidth={2} />
-      Add filter
-    </button>
-  )
-}
-````
-
-## File: packages/web/src/components/gantt/GanttGrid.tsx
-````typescript
-/**
- * GanttGrid — presentational Gantt chart.
- *
- * Renders a sticky header row of column labels, then one row per GanttRow
- * entry. Rows are either group-header dividers or event bars. All data
- * preparation (grouping, sorting, date math) lives in the parent GanttView.
- *
- * Drag on an empty lane cell to select a date range; onLaneDrag fires on
- * mouseup with the resolved start/end dates and the lane's memberId.
- *
- * Drag on an event bar's left/right 8px edge to resize it, or on its body to
- * move it. onBarDrag fires on mouseup with the resolved new dates.
- *
- * When findState is provided with a non-empty query, non-matching event rows
- * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
- * the active (parked) match gets a stronger amber outline with a pulse
- * animation. Stepping to a new active match auto-scrolls both axes to center
- * the bar in the viewport.
- */
-
-import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
-import MemberAvatar from '../MemberAvatar';
-import { Badge } from '../identity/Badge';
-import EmptyState from '../shared/EmptyState';
-import type { Member } from '../../types';
-import type { ColumnDef, TimeGranularity } from './granularity';
-import { addDays } from './granularity';
-
-const DEFAULT_LABEL_COL_W = 240;
-const MIN_LABEL_COL_W = 140;
-const MAX_LABEL_COL_W = 400;
-const HEADER_H = 36;
-const ROW_H = 44;
-const GROUP_H = 30;
-const COL_W = 80;
-const EDGE_W = 8; // px hit zone for resize handles
-
-/** A positioned activity bar ready for rendering. */
-export interface GanttActivity {
-  id: string;
-  title: string;
-  /** Fractional column start (0-based). */
-  startCol: number;
-  /** Fractional column span. */
-  span: number;
-  /** Hex color for bar background and badge. */
-  color: string;
-  /** Icon ID from the activity's identity, if set. */
-  icon?: string;
-  members: Member[];
-  isChild: boolean;
-}
-
-export type GanttRow =
-  | { kind: 'group'; id: string; label: string; color: string; count: number }
-  | { kind: 'activity'; event: GanttActivity };
-
-/** Visual state for the in-view Find feature. Passed from GanttView. */
-export interface FindState {
-  hasQuery: boolean;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
-  matchReasons: Map<string, string[]>;
-  filtersActive: boolean;
-  matchCount: number;
-}
-
-interface DragState {
-  rowIdx: number;
-  memberId: string | null;
-  startCol: number;
-  currentCol: number;
-}
-
-type BarDragZone = 'left' | 'right' | 'body';
-
-interface BarDragState {
-  eventId: string;
-  zone: BarDragZone;
-  /** Fractional column of the event's visual start when drag began. */
-  initStartCol: number;
-  /** Fractional column of the event's visual end (startCol + span) when drag began. */
-  initEndCol: number;
-  /** Lane-relative x of the mouse when drag began. */
-  initMouseX: number;
-  /** Page-relative left edge of the lane div. */
-  laneLeft: number;
-  /** Current snapped start column (integer). */
-  snapStartCol: number;
-  /** Current snapped end column (integer, exclusive — col after last occupied). */
-  snapEndCol: number;
-}
-
-interface TooltipState {
-  text: string;
-  /** Viewport-relative x for tooltip positioning. */
-  x: number;
-  /** Viewport-relative y for tooltip positioning. */
-  y: number;
-}
-
-/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
-interface MatchTooltipState {
-  reasons: string[];
-  x: number;
-  y: number;
-}
-
-interface Props {
-  rows: GanttRow[];
-  columns: ColumnDef[];
-  /** Fractional column index of today (-1 if outside range). */
-  todayIndex: number;
-  selectedActivityId: string | null;
-  onSelectActivity: (id: string | null) => void;
-  /** Called when the user drags on an empty lane cell to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called when the user drags a bar edge or body to resize/move it. */
-  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
-  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Resolved granularity — used to compute the finer snap divisor during drag. */
-  resolvedGranularity?: TimeGranularity | 'auto';
-  /** Find state from GanttView; absent when the find bar is closed/idle. */
-  findState?: FindState;
-  /** Called when the user clicks "Clear filters" in the no-matches callout. */
-  onClearFilters?: () => void;
-}
-
-// ── Bar drag helpers ─────────────────────────────────────────────────────────
-
-function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
-  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
-  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
-  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
-}
-
-// ── Date helpers (support fractional column positions) ───────────────────────
-
-// Maps a fractional column position to a calendar Date by interpolating within
-// the column's day range. Fractional positions enable finer snap granularities.
-function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
-  let remaining = Math.max(0, colFrac);
-  for (const col of columns) {
-    if (remaining <= 1) {
-      return addDays(col.start, Math.round(remaining * col.days));
-    }
-    remaining -= 1;
-  }
-  return columns[columns.length - 1].end;
-}
-
-function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
-  return colFracToDate(Math.max(0, colFrac), columns);
-}
-
-// endColFrac is exclusive (the fractional col just past the last occupied day).
-function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
-  // The last included date is 1 day before the date at the exclusive end.
-  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
-}
-
-// Number of snap divisions per column based on the active zoom granularity.
-// Higher divisor → finer snap (e.g. week columns snap to day boundaries).
-function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
-  switch (granularity) {
-    case 'week':    return 7;  // snap to day within week
-    case 'month':   return 4;  // snap to week within month
-    case 'quarter': return 3;  // snap to month within quarter
-    case 'year':    return 4;  // snap to quarter within year
-    default:        return 1;  // day or auto → no finer snap
-  }
-}
-
-function formatDragDate(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-export default function GanttGrid({
-  rows,
-  columns,
-  todayIndex,
-  selectedActivityId,
-  onSelectActivity,
-  onLaneDrag,
-  onBarDrag,
-  onBarDragProgress,
-  resolvedGranularity,
-  findState,
-  onClearFilters,
-}: Props) {
-  // ── Resizable label column ─────────────────────────────────────────────────
-  const [labelColW, setLabelColW] = useState(DEFAULT_LABEL_COL_W);
-
-  const totalW = useMemo(
-    () => labelColW + columns.length * COL_W,
-    [labelColW, columns.length],
-  );
-
-  const labelColWRef = useRef(labelColW);
-  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
-
-  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = labelColWRef.current;
-
-    function onMouseMove(mv: MouseEvent) {
-      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
-      setLabelColW(next);
-    }
-    function onMouseUp() {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, []);
-
-  // Integer column index that contains today (for background highlight)
-  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
-
-  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-
-  // Always-current rows ref so the active-match scroll effect doesn't go stale
-  const rowsRef = useRef(rows);
-  useEffect(() => { rowsRef.current = rows; });
-
-  // ── Drag-to-create state ──────────────────────────────────────────────────
-  const [drag, setDrag] = useState<DragState | null>(null);
-  const dragRef = useRef<DragState | null>(null);
-
-  // ── Bar drag state ────────────────────────────────────────────────────────
-  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
-  const barDragRef = useRef<BarDragState | null>(null);
-  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
-
-  // ── "Why matched" hover tooltip ───────────────────────────────────────────
-  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
-
-  const colFromX = useCallback((laneX: number) => {
-    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
-  }, [columns.length]);
-
-  // ── Auto-scroll to active find match ─────────────────────────────────────
-  useEffect(() => {
-    const activeId = findState?.activeMatchId;
-    if (!activeId || !scrollContainerRef.current) return;
-    const container = scrollContainerRef.current;
-    const currentRows = rowsRef.current;
-
-    let y = HEADER_H;
-    let matchedActivity: GanttActivity | null = null;
-    for (const row of currentRows) {
-      if (row.kind === 'activity' && row.event.id === activeId) {
-        matchedActivity = row.event;
-        break;
-      }
-      y += row.kind === 'group' ? GROUP_H : ROW_H;
-    }
-    if (!matchedActivity) return;
-
-    const viewH = container.clientHeight;
-    const viewW = container.clientWidth;
-    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
-    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
-    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
-
-    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
-  // Only re-run when the active match changes, not when rows or columns change.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [findState?.activeMatchId]);
-
-  const handleLaneMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    rowIdx: number,
-    memberId: string | null,
-  ) => {
-    if (!onLaneDrag) return;
-    e.preventDefault();
-    const rect = e.currentTarget.getBoundingClientRect();
-    const col = colFromX(e.clientX - rect.left);
-    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
-    dragRef.current = state;
-    setDrag(state);
-
-    function onMouseMove(mv: MouseEvent) {
-      if (!dragRef.current) return;
-      const col2 = colFromX(mv.clientX - rect.left);
-      const next = { ...dragRef.current, currentCol: col2 };
-      dragRef.current = next;
-      setDrag({ ...next });
-    }
-
-    function onMouseUp() {
-      const s = dragRef.current;
-      if (s && onLaneDrag && columns.length > 0) {
-        const lo = Math.min(s.startCol, s.currentCol);
-        const hi = Math.max(s.startCol, s.currentCol);
-        const startDate = columns[lo]?.start ?? columns[0].start;
-        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
-        onLaneDrag(startDate, endDate, s.memberId);
-      }
-      dragRef.current = null;
-      setDrag(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [colFromX, columns, onLaneDrag]);
-
-  // ── Bar drag handler ──────────────────────────────────────────────────────
-
-  const handleBarMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    ev: GanttActivity,
-    zone: BarDragZone,
-  ) => {
-    if (!onBarDrag) return;
-    // Only allow drag/resize when the bar is already selected.
-    if (ev.id !== selectedActivityId) return;
-    e.preventDefault();
-    e.stopPropagation(); // prevent lane-drag from firing
-
-    // The bar's parent is the lane div (position: relative, flex: 1).
-    const laneEl = e.currentTarget.parentElement;
-    if (!laneEl) return;
-    const laneRect = laneEl.getBoundingClientRect();
-
-    const initStartCol = ev.startCol;
-    const initEndCol = ev.startCol + ev.span;
-    const initMouseX = e.clientX - laneRect.left;
-    // Snap initial positions using finer step.
-    const div = snapDivisorFor(resolvedGranularity ?? 'auto');
-    const step = 1 / div;
-    const snapInit = (x: number) => Math.round(x / step) * step;
-    const initSnapStart = snapInit(initStartCol);
-    const initSnapEnd = snapInit(initEndCol);
-
-    const state: BarDragState = {
-      eventId: ev.id,
-      zone,
-      initStartCol,
-      initEndCol,
-      initMouseX,
-      laneLeft: laneRect.left,
-      snapStartCol: initSnapStart,
-      snapEndCol: Math.max(initSnapEnd, initSnapStart + step),
-    };
-    barDragRef.current = state;
-    setBarDrag(state);
-
-    // Initial tooltip
-    const startDate = colToStartDate(state.snapStartCol, columns);
-    const endDate = colToEndDate(state.snapEndCol, columns);
-    setDragTooltip({
-      text: tooltipText(zone, startDate, endDate),
-      x: e.clientX,
-      y: e.clientY,
-    });
-
-    function onMouseMove(mv: MouseEvent) {
-      const s = barDragRef.current;
-      if (!s) return;
-
-      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
-      const n = columns.length;
-      // Finer snap: snap one granularity level below the active zoom.
-      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
-      const step = 1 / div;
-      const snap = (x: number) => Math.round(x / step) * step;
-
-      let nextStart = s.snapStartCol;
-      let nextEnd = s.snapEndCol;
-
-      if (s.zone === 'left') {
-        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.snapEndCol - step));
-      } else if (s.zone === 'right') {
-        nextEnd = Math.max(s.snapStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
-      } else {
-        // body: preserve span, shift both
-        const span = Math.max(step, snap(s.initEndCol - s.initStartCol));
-        const shift = snap(deltaCol);
-        nextStart = Math.max(0, Math.min(snap(s.initStartCol) + shift, n - span));
-        nextEnd = nextStart + span;
-      }
-
-      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
-      barDragRef.current = next;
-      setBarDrag(next);
-
-      const sd = colToStartDate(nextStart, columns);
-      const ed = colToEndDate(nextEnd, columns);
-      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
-      onBarDragProgress?.(s.eventId, sd, ed);
-    }
-
-    function onMouseUp() {
-      const s = barDragRef.current;
-      if (s && onBarDrag) {
-        const sd = colToStartDate(s.snapStartCol, columns);
-        const ed = colToEndDate(s.snapEndCol, columns);
-        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
-      }
-      barDragRef.current = null;
-      setBarDrag(null);
-      setDragTooltip(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [columns, onBarDrag]);
-
-  // Header cells are shared between the empty-state path and the unified scroll path.
-  const headerContent = (
-    <>
-      <div
-        style={{
-          width: labelColW,
-          flexShrink: 0,
-          padding: '0 16px',
-          display: 'flex',
-          alignItems: 'center',
-          borderRight: '1px solid var(--border)',
-          fontSize: 11,
-          fontWeight: 600,
-          color: 'var(--muted-foreground)',
-          textTransform: 'uppercase' as const,
-          letterSpacing: '0.06em',
-          position: 'sticky' as const,
-          left: 0,
-          zIndex: 6,
-          background: 'var(--card)',
-          userSelect: 'none',
-        }}
-      >
-        Activity
-        {/* Drag handle — resize the label column */}
-        <div
-          onMouseDown={handleColumnResizeMouseDown}
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: 0,
-            bottom: 0,
-            width: 6,
-            cursor: 'col-resize',
-            zIndex: 10,
-          }}
-        />
-      </div>
-
-      {columns.map((col, i) => {
-        const isToday = i === todayCol;
-        return (
-          <div
-            key={i}
-            style={{
-              width: COL_W,
-              flexShrink: 0,
-              height: HEADER_H,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '0 4px 8px',
-              gap: 2,
-              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-              position: 'relative',
-              overflow: 'hidden',
-            }}
-          >
-            <span style={{
-              fontSize: col.sublabel ? 10 : 11,
-              fontWeight: isToday ? 700 : 600,
-              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
-              lineHeight: 1.2,
-              textAlign: 'center',
-            }}>
-              {col.label}
-            </span>
-            {col.sublabel && (
-              <span style={{
-                fontSize: 9,
-                fontWeight: 500,
-                color: 'var(--muted-foreground)',
-                lineHeight: 1,
-                opacity: isToday ? 1 : 0.75,
-              }}>
-                {col.sublabel}
-              </span>
-            )}
-            {isToday && (
-              <div
-                style={{
-                  position: 'absolute',
-                  bottom: 2,
-                  left: `${((todayIndex - todayCol) * 100)}%`,
-                  transform: 'translateX(-50%)',
-                  width: 6,
-                  height: 6,
-                  borderRadius: '50%',
-                  background: 'var(--secondary)',
-                }}
-              />
-            )}
-          </div>
-        );
-      })}
-    </>
-  );
-
-  // ── Find helpers ──────────────────────────────────────────────────────────
-
-  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
-
-  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
-  function isActive(id: string) { return activeMatchId === id; }
-
-  // Non-title reasons to surface in the "why matched" tooltip
-  function nonTitleReasons(id: string): string[] {
-    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
-  }
-
-  // ── Empty state: header + centered placeholder ──────────────────────────────
-  if (rows.length === 0) {
-    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
-    return (
-      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
-          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-        </div>
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-          <EmptyState message="No viewable activities" />
-          {showNoMatchCallout && findState.filtersActive && (
-            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </p>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Unified scroll: header sticky inside the single container ──────────────
-  return (
-    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
-        <div style={{ width: totalW }}>
-
-          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
-          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-
-          {rows.map((row, rowIdx) => {
-            if (row.kind === 'group') {
-              return (
-                <div
-                  key={row.id}
-                  style={{
-                    display: 'flex',
-                    height: GROUP_H,
-                    background: 'var(--muted)',
-                    borderBottom: '1px solid var(--border)',
-                  }}
-                >
-                  <div
-                    style={{
-                      width: labelColW,
-                      flexShrink: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 7,
-                      padding: '0 14px',
-                      position: 'sticky',
-                      left: 0,
-                      background: 'var(--muted)',
-                      zIndex: 3,
-                      borderRight: '1px solid var(--border)',
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: 9,
-                        height: 9,
-                        borderRadius: 2,
-                        background: row.color,
-                        flexShrink: 0,
-                      }}
-                    />
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: 'var(--foreground)',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.05em',
-                        flex: 1,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.label}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 10,
-                        color: 'var(--muted-foreground)',
-                        flexShrink: 0,
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.count}
-                    </span>
-                  </div>
-                  <div style={{ flex: 1 }} />
-                </div>
-              );
-            }
-
-            const ev = row.event;
-            const selected = selectedActivityId === ev.id;
-            const indent = ev.isChild ? 20 : 0;
-            const evIsMatch = isMatch(ev.id);
-            const evIsActive = isActive(ev.id);
-            const dimmed = hasQuery && !evIsMatch;
-            const extraReasons = nonTitleReasons(ev.id);
-
-            return (
-              <div
-                key={`${ev.id}-${rowIdx}`}
-                style={{
-                  display: 'flex',
-                  height: ROW_H,
-                  borderBottom: '1px solid var(--border)',
-                  position: 'relative',
-                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                  opacity: dimmed ? 0.3 : 1,
-                  transition: 'opacity 0.15s',
-                }}
-              >
-                {/* Sticky label cell */}
-                <div
-                  style={{
-                    width: labelColW,
-                    flexShrink: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 7,
-                    paddingLeft: 14 + indent,
-                    paddingRight: 10,
-                    position: 'sticky',
-                    left: 0,
-                    background: selected ? 'var(--muted)' : 'var(--card)',
-                    zIndex: 6,
-                    borderRight: '1px solid var(--border)',
-                    cursor: 'pointer',
-                    transition: 'background 0.1s',
-                  }}
-                  onClick={() => onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
-                  onMouseEnter={e => {
-                    e.currentTarget.style.background = 'var(--muted)';
-                  }}
-                  onMouseLeave={e => {
-                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
-                  }}
-                >
-                  <Badge
-                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
-                    name={ev.title}
-                    shape="square"
-                    size={20}
-                  />
-                  <span
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 500,
-                      color: 'var(--foreground)',
-                      flex: 1,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      fontFamily: 'var(--font-sans)',
-                    }}
-                  >
-                    {ev.title}
-                  </span>
-                  {ev.members.length > 0 && (
-                    <div style={{ display: 'flex', flexShrink: 0 }}>
-                      {ev.members.slice(0, 3).map((m, i) => (
-                        <div
-                          key={m.id}
-                          style={{ marginLeft: i === 0 ? 0 : -5 }}
-                          title={m.name}
-                        >
-                          <MemberAvatar member={m} size={20} />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Lane — background columns + today line + event bar */}
-                <div
-                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: onLaneDrag ? 'crosshair' : 'default' }}
-                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
-                >
-                  {columns.map((_, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        width: COL_W,
-                        height: '100%',
-                        flexShrink: 0,
-                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-                        background:
-                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                      }}
-                    />
-                  ))}
-
-                  {/* Drag selection highlight */}
-                  {drag && drag.rowIdx === rowIdx && (() => {
-                    const lo = Math.min(drag.startCol, drag.currentCol);
-                    const hi = Math.max(drag.startCol, drag.currentCol);
-                    return (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: 4,
-                          bottom: 4,
-                          left: lo * COL_W,
-                          width: (hi - lo + 1) * COL_W,
-                          background: 'hsl(188 59% 38% / .18)',
-                          border: '1.5px dashed var(--primary)',
-                          borderRadius: 4,
-                          pointerEvents: 'none',
-                          zIndex: 3,
-                        }}
-                      />
-                    );
-                  })()}
-
-                  {/* Today vertical line */}
-                  {todayIndex >= 0 && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        bottom: 0,
-                        left: todayIndex * COL_W,
-                        width: 2,
-                        background: 'var(--secondary)',
-                        opacity: 0.5,
-                        zIndex: 2,
-                        pointerEvents: 'none',
-                      }}
-                    />
-                  )}
-
-                  {/* Event bar — live position overridden while dragging */}
-                  {(() => {
-                    const isDragging = barDrag?.eventId === ev.id;
-                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
-                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
-                    const left = startCol * COL_W + 2;
-                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
-                    // Only selected bars show grab/move cursors; unselected bars show pointer
-                    // to prevent accidental date changes when the user just wants to inspect.
-                    const grabCursor = isDragging
-                      ? 'grabbing'
-                      : (selected && onBarDrag) ? 'grab' : 'pointer';
-
-                    // Box shadow: find states take precedence over selection ring.
-                    // CSS classes (.find-active-bar, .find-match-bar) provide the
-                    // amber outline; we only set inline boxShadow for the selected ring.
-                    const boxShadow = (evIsActive || evIsMatch)
-                      ? undefined
-                      : selected
-                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
-                        : 'var(--shadow-sm)';
-
-                    return (
-                      <div
-                        onClick={() => {
-                          // Bar click always selects — use the label cell to deselect.
-                          if (!isDragging) onSelectActivity(ev.id);
-                        }}
-                        onMouseDown={e => {
-                          if (!onBarDrag) { e.stopPropagation(); return; }
-                          const barRect = e.currentTarget.getBoundingClientRect();
-                          const xInBar = e.clientX - barRect.left;
-                          let zone: BarDragZone;
-                          if (xInBar <= EDGE_W) zone = 'left';
-                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
-                          else zone = 'body';
-                          handleBarMouseDown(e, ev, zone);
-                        }}
-                        onMouseEnter={e => {
-                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
-                          // Show "why matched" tooltip for non-title matches
-                          if (extraReasons.length > 0) {
-                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
-                          }
-                        }}
-                        onMouseMove={e => {
-                          if (matchTooltip) {
-                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
-                          }
-                        }}
-                        onMouseLeave={e => {
-                          e.currentTarget.style.filter = '';
-                          setMatchTooltip(null);
-                        }}
-                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
-                        style={{
-                          position: 'absolute',
-                          top: 9,
-                          bottom: 9,
-                          left,
-                          width,
-                          background: ev.color,
-                          borderRadius: 5,
-                          display: 'flex',
-                          alignItems: 'center',
-                          padding: `0 ${EDGE_W + 2}px`,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: 'white',
-                          overflow: 'hidden',
-                          whiteSpace: 'nowrap',
-                          textOverflow: 'ellipsis',
-                          cursor: grabCursor,
-                          zIndex: 4,
-                          boxShadow,
-                          opacity: isDragging ? 0.85 : 1,
-                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
-                          fontFamily: 'var(--font-sans)',
-                          userSelect: 'none',
-                        }}
-                      >
-                        {/* Left resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              left: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '5px 0 0 5px',
-                            }}
-                          />
-                        )}
-                        {ev.title}
-                        {/* Right resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              right: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '0 5px 5px 0',
-                            }}
-                          />
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
-            );
-          })}
-
-          {/* No-matches-in-view callout — rendered inside the scroll container */}
-          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
-            <div style={{
-              padding: '12px 16px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              borderTop: '1px solid var(--border)',
-            }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </div>
-          )}
-
-        </div>
-      </div>
-
-      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
-      {dragTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: dragTooltip.x + 14,
-            top: dragTooltip.y - 28,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontWeight: 600,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {dragTooltip.text}
-        </div>
-      )}
-
-      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
-      {matchTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: matchTooltip.x + 12,
-            top: matchTooltip.y - 36,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {matchTooltip.reasons.map(r => (
-            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/components/StatusTemplatesTab.tsx
 ````typescript
 /**
@@ -24176,436 +23290,6 @@ export default function App() {
       </BrowserRouter>
     </QueryClientProvider>
   )
-}
-````
-
-## File: packages/api/internal/api/activity_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
-// The authenticated user must be a member of the team.
-func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	var req CreateActivityJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
-		return
-	}
-	if req.StartAt.IsZero() || req.EndAt.IsZero() {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
-		return
-	}
-	if req.EndAt.Before(req.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	allDay := false
-	if req.AllDay != nil {
-		allDay = *req.AllDay
-	}
-
-	now := time.Now()
-	activity := &models.Activity{
-		ID:               newID(),
-		TimelineID:       timelineID,
-		Title:            req.Title,
-		Description:      req.Description,
-		Icon:             req.Icon,
-		Color:            req.Color,
-		StartAt:          req.StartAt,
-		EndAt:            req.EndAt,
-		AllDay:           allDay,
-		StatusID:         req.StatusId,
-		ParentActivityID: req.ParentActivityId,
-		PercentComplete:  req.PercentComplete,
-		Location:         req.Location,
-		URL:              req.Url,
-		Rrule:            req.Rrule,
-		CreatedBy:        claims.UserID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-	if err := s.activities.Create(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-
-	if req.AssignedMemberIds != nil {
-		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *req.AssignedMemberIds
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusCreated, activity)
-}
-
-// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
-// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
-func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	var from, to *time.Time
-	if v := r.URL.Query().Get("from"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		from = &t
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		to = &t
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, acts)
-}
-
-// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
-// the request body are applied; the caller must be a member of the activity's team.
-func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	// Decode into a map so we can detect which fields the caller provided.
-	var patch map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if v, ok := patch["title"]; ok {
-		if err := json.Unmarshal(v, &activity.Title); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
-			return
-		}
-	}
-	if v, ok := patch["description"]; ok {
-		if err := json.Unmarshal(v, &activity.Description); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
-			return
-		}
-	}
-	if v, ok := patch["notes"]; ok {
-		if err := json.Unmarshal(v, &activity.Notes); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
-			return
-		}
-	}
-	if v, ok := patch["icon"]; ok {
-		if err := json.Unmarshal(v, &activity.Icon); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
-			return
-		}
-	}
-	if v, ok := patch["color"]; ok {
-		if err := json.Unmarshal(v, &activity.Color); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
-			return
-		}
-	}
-	if v, ok := patch["startAt"]; ok {
-		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
-			return
-		}
-	}
-	if v, ok := patch["endAt"]; ok {
-		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
-			return
-		}
-	}
-	if v, ok := patch["allDay"]; ok {
-		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
-			return
-		}
-	}
-	if v, ok := patch["statusId"]; ok {
-		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
-			return
-		}
-	}
-	if v, ok := patch["parentActivityId"]; ok {
-		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
-			return
-		}
-	}
-	if v, ok := patch["percentComplete"]; ok {
-		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
-			return
-		}
-	}
-	if v, ok := patch["location"]; ok {
-		if err := json.Unmarshal(v, &activity.Location); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
-			return
-		}
-	}
-	if v, ok := patch["url"]; ok {
-		if err := json.Unmarshal(v, &activity.URL); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
-			return
-		}
-	}
-	if v, ok := patch["rrule"]; ok {
-		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
-			return
-		}
-	}
-
-	var newAssignees *[]string
-	if v, ok := patch["assignedMemberIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
-			return
-		}
-		newAssignees = &ids
-	}
-
-	if activity.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
-		return
-	}
-	if activity.EndAt.Before(activity.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	activity.UpdatedAt = time.Now()
-	if err := s.activities.Update(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if newAssignees != nil {
-		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *newAssignees
-	} else {
-		// Populate current assignments so the response always includes them.
-		existing, err := s.activities.GetAssignments(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = existing
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
-// may archive an activity; the row is soft-deleted (archived_at set) so it is
-// hidden from list responses by default but can be restored.
-func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, true)
-}
-
-// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
-func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, false)
-}
-
-// setActivityArchive is the shared implementation for the archive/unarchive
-// endpoints. When archive is true, archived_at is set to now; otherwise it
-// is cleared.
-func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-	}
-	if err := s.activities.SetArchived(activityID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-	activity.ArchivedAt = at
-	activity.UpdatedAt = time.Now().UTC()
-
-	// Re-populate assignments for a stable response shape.
-	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
-		activity.AssignedMemberIDs = ids
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
-// activity's team may delete it.
-func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.activities.Delete(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	s.bus.Publish(events.Message{
-		Type:    events.ActivityDeleted,
-		TeamID:  timeline.TeamID,
-		Payload: map[string]string{"id": activityID},
-	})
-	w.WriteHeader(http.StatusNoContent)
 }
 ````
 
@@ -25698,6 +24382,985 @@ export default function ActivityCreatePanel({
     </div>
     </div>
   )
+}
+````
+
+## File: packages/web/src/components/gantt/GanttGrid.tsx
+````typescript
+/**
+ * GanttGrid — presentational Gantt chart.
+ *
+ * Renders a sticky header row of column labels, then one row per GanttRow
+ * entry. Rows are either group-header dividers or event bars. All data
+ * preparation (grouping, sorting, date math) lives in the parent GanttView.
+ *
+ * Drag on an empty lane cell to select a date range; onLaneDrag fires on
+ * mouseup with the resolved start/end dates and the lane's memberId.
+ *
+ * Drag on an event bar's left/right 8px edge to resize it, or on its body to
+ * move it. onBarDrag fires on mouseup with the resolved new dates.
+ *
+ * When findState is provided with a non-empty query, non-matching event rows
+ * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
+ * the active (parked) match gets a stronger amber outline with a pulse
+ * animation. Stepping to a new active match auto-scrolls both axes to center
+ * the bar in the viewport.
+ */
+
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
+import MemberAvatar from '../MemberAvatar';
+import { Badge } from '../identity/Badge';
+import EmptyState from '../shared/EmptyState';
+import type { Member } from '../../types';
+import type { ColumnDef, TimeGranularity } from './granularity';
+import { addDays, snapDivisorFor } from './granularity';
+
+export const DEFAULT_LABEL_COL_W = 240;
+const MIN_LABEL_COL_W = 140;
+const MAX_LABEL_COL_W = 400;
+const HEADER_H = 36;
+const ROW_H = 44;
+const GROUP_H = 30;
+const COL_W = 80;
+const EDGE_W = 8; // px hit zone for resize handles
+
+/** A positioned activity bar ready for rendering. */
+export interface GanttActivity {
+  id: string;
+  title: string;
+  /** Fractional column start (0-based). */
+  startCol: number;
+  /** Fractional column span. */
+  span: number;
+  /** Hex color for bar background and badge. */
+  color: string;
+  /** Icon ID from the activity's identity, if set. */
+  icon?: string;
+  members: Member[];
+  isChild: boolean;
+}
+
+export type GanttRow =
+  | { kind: 'group'; id: string; label: string; color: string; count: number }
+  | { kind: 'activity'; event: GanttActivity };
+
+/** Visual state for the in-view Find feature. Passed from GanttView. */
+export interface FindState {
+  hasQuery: boolean;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
+  matchReasons: Map<string, string[]>;
+  filtersActive: boolean;
+  matchCount: number;
+}
+
+interface DragState {
+  rowIdx: number;
+  memberId: string | null;
+  startCol: number;
+  currentCol: number;
+}
+
+type BarDragZone = 'left' | 'right' | 'body';
+
+interface BarDragState {
+  eventId: string;
+  zone: BarDragZone;
+  /** Fractional column of the event's visual start when drag began. */
+  initStartCol: number;
+  /** Fractional column of the event's visual end (startCol + span) when drag began. */
+  initEndCol: number;
+  /** Lane-relative x of the mouse when drag began. */
+  initMouseX: number;
+  /** Page-relative left edge of the lane div. */
+  laneLeft: number;
+  /** Current snapped start column (integer). */
+  snapStartCol: number;
+  /** Current snapped end column (integer, exclusive — col after last occupied). */
+  snapEndCol: number;
+}
+
+interface TooltipState {
+  text: string;
+  /** Viewport-relative x for tooltip positioning. */
+  x: number;
+  /** Viewport-relative y for tooltip positioning. */
+  y: number;
+}
+
+/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
+interface MatchTooltipState {
+  reasons: string[];
+  x: number;
+  y: number;
+}
+
+interface Props {
+  rows: GanttRow[];
+  columns: ColumnDef[];
+  /** Fractional column index of today (-1 if outside range). */
+  todayIndex: number;
+  selectedActivityId: string | null;
+  onSelectActivity: (id: string | null) => void;
+  /** Called when the user drags on an empty lane cell to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called when the user drags a bar edge or body to resize/move it. */
+  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
+  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Resolved granularity — used to compute the finer snap divisor during drag. */
+  resolvedGranularity?: TimeGranularity | 'auto';
+  /** Find state from GanttView; absent when the find bar is closed/idle. */
+  findState?: FindState;
+  /** Called when the user clicks "Clear filters" in the no-matches callout. */
+  onClearFilters?: () => void;
+  /** Current label column width in px — lifts state to the parent so it survives view switches. */
+  labelColW?: number;
+  /** Called when the user drags the column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+}
+
+// ── Bar drag helpers ─────────────────────────────────────────────────────────
+
+function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
+  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
+  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
+  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
+}
+
+// ── Date helpers (support fractional column positions) ───────────────────────
+
+// Maps a fractional column position to a calendar Date by interpolating within
+// the column's day range. Fractional positions enable finer snap granularities.
+function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
+  let remaining = Math.max(0, colFrac);
+  for (const col of columns) {
+    if (remaining <= 1) {
+      return addDays(col.start, Math.round(remaining * col.days));
+    }
+    remaining -= 1;
+  }
+  return columns[columns.length - 1].end;
+}
+
+function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
+  return colFracToDate(Math.max(0, colFrac), columns);
+}
+
+// endColFrac is exclusive (the fractional col just past the last occupied day).
+function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
+  // The last included date is 1 day before the date at the exclusive end.
+  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
+}
+
+
+function formatDragDate(d: Date): string {
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+export default function GanttGrid({
+  rows,
+  columns,
+  todayIndex,
+  selectedActivityId,
+  onSelectActivity,
+  onLaneDrag,
+  onBarDrag,
+  onBarDragProgress,
+  resolvedGranularity,
+  findState,
+  onClearFilters,
+  labelColW: labelColWProp,
+  onLabelColWChange,
+}: Props) {
+  // ── Resizable label column ─────────────────────────────────────────────────
+  // When the parent passes labelColW + onLabelColWChange the column is
+  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
+  // When neither is provided we fall back to internal state.
+  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
+  const labelColW = labelColWProp ?? internalLabelColW;
+  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
+
+  const totalW = useMemo(
+    () => labelColW + columns.length * COL_W,
+    [labelColW, columns.length],
+  );
+
+  const labelColWRef = useRef(labelColW);
+  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
+
+  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = labelColWRef.current;
+
+    function onMouseMove(mv: MouseEvent) {
+      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
+      setLabelColW(next);
+    }
+    function onMouseUp() {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Integer column index that contains today (for background highlight)
+  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
+
+  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Always-current rows ref so the active-match scroll effect doesn't go stale
+  const rowsRef = useRef(rows);
+  useEffect(() => { rowsRef.current = rows; });
+
+  // ── Drag-to-create state ──────────────────────────────────────────────────
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+
+  // ── Bar drag state ────────────────────────────────────────────────────────
+  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
+  const barDragRef = useRef<BarDragState | null>(null);
+  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
+
+  // ── "Why matched" hover tooltip ───────────────────────────────────────────
+  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
+
+  const colFromX = useCallback((laneX: number) => {
+    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
+  }, [columns.length]);
+
+  // ── Auto-scroll to active find match ─────────────────────────────────────
+  useEffect(() => {
+    const activeId = findState?.activeMatchId;
+    if (!activeId || !scrollContainerRef.current) return;
+    const container = scrollContainerRef.current;
+    const currentRows = rowsRef.current;
+
+    let y = HEADER_H;
+    let matchedActivity: GanttActivity | null = null;
+    for (const row of currentRows) {
+      if (row.kind === 'activity' && row.event.id === activeId) {
+        matchedActivity = row.event;
+        break;
+      }
+      y += row.kind === 'group' ? GROUP_H : ROW_H;
+    }
+    if (!matchedActivity) return;
+
+    const viewH = container.clientHeight;
+    const viewW = container.clientWidth;
+    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
+    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
+    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
+
+    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
+  // Only re-run when the active match changes, not when rows or columns change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findState?.activeMatchId]);
+
+  const handleLaneMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    rowIdx: number,
+    memberId: string | null,
+  ) => {
+    if (!onLaneDrag) return;
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const col = colFromX(e.clientX - rect.left);
+    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
+    dragRef.current = state;
+    setDrag(state);
+
+    function onMouseMove(mv: MouseEvent) {
+      if (!dragRef.current) return;
+      const col2 = colFromX(mv.clientX - rect.left);
+      const next = { ...dragRef.current, currentCol: col2 };
+      dragRef.current = next;
+      setDrag({ ...next });
+    }
+
+    function onMouseUp() {
+      const s = dragRef.current;
+      if (s && onLaneDrag && columns.length > 0) {
+        const lo = Math.min(s.startCol, s.currentCol);
+        const hi = Math.max(s.startCol, s.currentCol);
+        const startDate = columns[lo]?.start ?? columns[0].start;
+        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
+        onLaneDrag(startDate, endDate, s.memberId);
+      }
+      dragRef.current = null;
+      setDrag(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [colFromX, columns, onLaneDrag]);
+
+  // ── Bar drag handler ──────────────────────────────────────────────────────
+
+  const handleBarMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    ev: GanttActivity,
+    zone: BarDragZone,
+  ) => {
+    if (!onBarDrag) return;
+    // Only allow drag/resize when the bar is already selected.
+    if (ev.id !== selectedActivityId) return;
+    e.preventDefault();
+    e.stopPropagation(); // prevent lane-drag from firing
+
+    // The bar's parent is the lane div (position: relative, flex: 1).
+    const laneEl = e.currentTarget.parentElement;
+    if (!laneEl) return;
+    const laneRect = laneEl.getBoundingClientRect();
+
+    const initStartCol = ev.startCol;
+    const initEndCol = ev.startCol + ev.span;
+    const initMouseX = e.clientX - laneRect.left;
+    // Snap initial positions using finer step.
+    const div = snapDivisorFor(resolvedGranularity ?? 'auto');
+    const step = 1 / div;
+    const snapInit = (x: number) => Math.round(x / step) * step;
+    const initSnapStart = snapInit(initStartCol);
+    const initSnapEnd = snapInit(initEndCol);
+
+    const state: BarDragState = {
+      eventId: ev.id,
+      zone,
+      initStartCol,
+      initEndCol,
+      initMouseX,
+      laneLeft: laneRect.left,
+      snapStartCol: initSnapStart,
+      snapEndCol: Math.max(initSnapEnd, initSnapStart + step),
+    };
+    barDragRef.current = state;
+    setBarDrag(state);
+
+    // Initial tooltip
+    const startDate = colToStartDate(state.snapStartCol, columns);
+    const endDate = colToEndDate(state.snapEndCol, columns);
+    setDragTooltip({
+      text: tooltipText(zone, startDate, endDate),
+      x: e.clientX,
+      y: e.clientY,
+    });
+
+    function onMouseMove(mv: MouseEvent) {
+      const s = barDragRef.current;
+      if (!s) return;
+
+      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
+      const n = columns.length;
+      // Finer snap: snap one granularity level below the active zoom.
+      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
+      const step = 1 / div;
+      const snap = (x: number) => Math.round(x / step) * step;
+
+      let nextStart = s.snapStartCol;
+      let nextEnd = s.snapEndCol;
+
+      if (s.zone === 'left') {
+        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.snapEndCol - step));
+      } else if (s.zone === 'right') {
+        nextEnd = Math.max(s.snapStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
+      } else {
+        // body: preserve span, shift both
+        const span = Math.max(step, snap(s.initEndCol - s.initStartCol));
+        const shift = snap(deltaCol);
+        nextStart = Math.max(0, Math.min(snap(s.initStartCol) + shift, n - span));
+        nextEnd = nextStart + span;
+      }
+
+      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
+      barDragRef.current = next;
+      setBarDrag(next);
+
+      const sd = colToStartDate(nextStart, columns);
+      const ed = colToEndDate(nextEnd, columns);
+      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
+      onBarDragProgress?.(s.eventId, sd, ed);
+    }
+
+    function onMouseUp() {
+      const s = barDragRef.current;
+      if (s && onBarDrag) {
+        const sd = colToStartDate(s.snapStartCol, columns);
+        const ed = colToEndDate(s.snapEndCol, columns);
+        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
+      }
+      barDragRef.current = null;
+      setBarDrag(null);
+      setDragTooltip(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [columns, onBarDrag]);
+
+  // Header cells are shared between the empty-state path and the unified scroll path.
+  const headerContent = (
+    <>
+      <div
+        style={{
+          width: labelColW,
+          flexShrink: 0,
+          padding: '0 16px',
+          display: 'flex',
+          alignItems: 'center',
+          borderRight: '1px solid var(--border)',
+          fontSize: 11,
+          fontWeight: 600,
+          color: 'var(--muted-foreground)',
+          textTransform: 'uppercase' as const,
+          letterSpacing: '0.06em',
+          position: 'sticky' as const,
+          left: 0,
+          zIndex: 6,
+          background: 'var(--card)',
+          userSelect: 'none',
+        }}
+      >
+        Activity
+        {/* Drag handle — resize the label column */}
+        <div
+          onMouseDown={handleColumnResizeMouseDown}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: 6,
+            cursor: 'col-resize',
+            zIndex: 10,
+          }}
+        />
+      </div>
+
+      {columns.map((col, i) => {
+        const isToday = i === todayCol;
+        return (
+          <div
+            key={i}
+            style={{
+              width: COL_W,
+              flexShrink: 0,
+              height: HEADER_H,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '0 4px 8px',
+              gap: 2,
+              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+              position: 'relative',
+              overflow: 'hidden',
+            }}
+          >
+            <span style={{
+              fontSize: col.sublabel ? 10 : 11,
+              fontWeight: isToday ? 700 : 600,
+              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
+              lineHeight: 1.2,
+              textAlign: 'center',
+            }}>
+              {col.label}
+            </span>
+            {col.sublabel && (
+              <span style={{
+                fontSize: 9,
+                fontWeight: 500,
+                color: 'var(--muted-foreground)',
+                lineHeight: 1,
+                opacity: isToday ? 1 : 0.75,
+              }}>
+                {col.sublabel}
+              </span>
+            )}
+            {isToday && (
+              <div
+                style={{
+                  position: 'absolute',
+                  bottom: 2,
+                  left: `${((todayIndex - todayCol) * 100)}%`,
+                  transform: 'translateX(-50%)',
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: 'var(--secondary)',
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+
+  // ── Find helpers ──────────────────────────────────────────────────────────
+
+  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
+
+  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
+  function isActive(id: string) { return activeMatchId === id; }
+
+  // Non-title reasons to surface in the "why matched" tooltip
+  function nonTitleReasons(id: string): string[] {
+    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
+  }
+
+  // ── Empty state: header + centered placeholder ──────────────────────────────
+  if (rows.length === 0) {
+    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
+    return (
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
+          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+        </div>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+          <EmptyState message="No viewable activities" />
+          {showNoMatchCallout && findState.filtersActive && (
+            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Unified scroll: header sticky inside the single container ──────────────
+  return (
+    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
+        <div style={{ width: totalW }}>
+
+          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
+          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+
+          {rows.map((row, rowIdx) => {
+            if (row.kind === 'group') {
+              return (
+                <div
+                  key={row.id}
+                  style={{
+                    display: 'flex',
+                    height: GROUP_H,
+                    background: 'var(--muted)',
+                    borderBottom: '1px solid var(--border)',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: labelColW,
+                      flexShrink: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 7,
+                      padding: '0 14px',
+                      position: 'sticky',
+                      left: 0,
+                      background: 'var(--muted)',
+                      zIndex: 3,
+                      borderRight: '1px solid var(--border)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 9,
+                        height: 9,
+                        borderRadius: 2,
+                        background: row.color,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: 'var(--foreground)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        flex: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.label}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: 'var(--muted-foreground)',
+                        flexShrink: 0,
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.count}
+                    </span>
+                  </div>
+                  <div style={{ flex: 1 }} />
+                </div>
+              );
+            }
+
+            const ev = row.event;
+            const selected = selectedActivityId === ev.id;
+            const indent = ev.isChild ? 20 : 0;
+            const evIsMatch = isMatch(ev.id);
+            const evIsActive = isActive(ev.id);
+            const dimmed = hasQuery && !evIsMatch;
+            const extraReasons = nonTitleReasons(ev.id);
+
+            return (
+              <div
+                key={`${ev.id}-${rowIdx}`}
+                style={{
+                  display: 'flex',
+                  height: ROW_H,
+                  borderBottom: '1px solid var(--border)',
+                  position: 'relative',
+                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                  opacity: dimmed ? 0.3 : 1,
+                  transition: 'opacity 0.15s',
+                }}
+              >
+                {/* Sticky label cell */}
+                <div
+                  style={{
+                    width: labelColW,
+                    flexShrink: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 7,
+                    paddingLeft: 14 + indent,
+                    paddingRight: 10,
+                    position: 'sticky',
+                    left: 0,
+                    background: selected ? 'var(--muted)' : 'var(--card)',
+                    zIndex: 6,
+                    borderRight: '1px solid var(--border)',
+                    cursor: 'pointer',
+                    transition: 'background 0.1s',
+                  }}
+                  onClick={() => onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = 'var(--muted)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
+                  }}
+                >
+                  <Badge
+                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
+                    name={ev.title}
+                    shape="square"
+                    size={20}
+                  />
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 500,
+                      color: 'var(--foreground)',
+                      flex: 1,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontFamily: 'var(--font-sans)',
+                    }}
+                  >
+                    {ev.title}
+                  </span>
+                  {ev.members.length > 0 && (
+                    <div style={{ display: 'flex', flexShrink: 0 }}>
+                      {ev.members.slice(0, 3).map((m, i) => (
+                        <div
+                          key={m.id}
+                          style={{ marginLeft: i === 0 ? 0 : -5 }}
+                          title={m.name}
+                        >
+                          <MemberAvatar member={m} size={20} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Lane — background columns + today line + event bar */}
+                <div
+                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: onLaneDrag ? 'crosshair' : 'default' }}
+                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
+                >
+                  {columns.map((_, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        width: COL_W,
+                        height: '100%',
+                        flexShrink: 0,
+                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+                        background:
+                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                      }}
+                    />
+                  ))}
+
+                  {/* Drag selection highlight */}
+                  {drag && drag.rowIdx === rowIdx && (() => {
+                    const lo = Math.min(drag.startCol, drag.currentCol);
+                    const hi = Math.max(drag.startCol, drag.currentCol);
+                    return (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 4,
+                          bottom: 4,
+                          left: lo * COL_W,
+                          width: (hi - lo + 1) * COL_W,
+                          background: 'hsl(188 59% 38% / .18)',
+                          border: '1.5px dashed var(--primary)',
+                          borderRadius: 4,
+                          pointerEvents: 'none',
+                          zIndex: 3,
+                        }}
+                      />
+                    );
+                  })()}
+
+                  {/* Today vertical line */}
+                  {todayIndex >= 0 && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        bottom: 0,
+                        left: todayIndex * COL_W,
+                        width: 2,
+                        background: 'var(--secondary)',
+                        opacity: 0.5,
+                        zIndex: 2,
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  )}
+
+                  {/* Event bar — live position overridden while dragging */}
+                  {(() => {
+                    const isDragging = barDrag?.eventId === ev.id;
+                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
+                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
+                    const left = startCol * COL_W + 2;
+                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
+                    // Only selected bars show grab/move cursors; unselected bars show pointer
+                    // to prevent accidental date changes when the user just wants to inspect.
+                    const grabCursor = isDragging
+                      ? 'grabbing'
+                      : (selected && onBarDrag) ? 'grab' : 'pointer';
+
+                    // Box shadow: find states take precedence over selection ring.
+                    // CSS classes (.find-active-bar, .find-match-bar) provide the
+                    // amber outline; we only set inline boxShadow for the selected ring.
+                    const boxShadow = (evIsActive || evIsMatch)
+                      ? undefined
+                      : selected
+                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
+                        : 'var(--shadow-sm)';
+
+                    return (
+                      <div
+                        onClick={() => {
+                          // Bar click always selects — use the label cell to deselect.
+                          if (!isDragging) onSelectActivity(ev.id);
+                        }}
+                        onMouseDown={e => {
+                          if (!onBarDrag) { e.stopPropagation(); return; }
+                          const barRect = e.currentTarget.getBoundingClientRect();
+                          const xInBar = e.clientX - barRect.left;
+                          let zone: BarDragZone;
+                          if (xInBar <= EDGE_W) zone = 'left';
+                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
+                          else zone = 'body';
+                          handleBarMouseDown(e, ev, zone);
+                        }}
+                        onMouseEnter={e => {
+                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
+                          // Show "why matched" tooltip for non-title matches
+                          if (extraReasons.length > 0) {
+                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
+                          }
+                        }}
+                        onMouseMove={e => {
+                          if (matchTooltip) {
+                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
+                          }
+                        }}
+                        onMouseLeave={e => {
+                          e.currentTarget.style.filter = '';
+                          setMatchTooltip(null);
+                        }}
+                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
+                        style={{
+                          position: 'absolute',
+                          top: 9,
+                          bottom: 9,
+                          left,
+                          width,
+                          background: ev.color,
+                          borderRadius: 5,
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: `0 ${EDGE_W + 2}px`,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          color: 'white',
+                          overflow: 'hidden',
+                          whiteSpace: 'nowrap',
+                          textOverflow: 'ellipsis',
+                          cursor: grabCursor,
+                          zIndex: 4,
+                          boxShadow,
+                          opacity: isDragging ? 0.85 : 1,
+                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
+                          fontFamily: 'var(--font-sans)',
+                          userSelect: 'none',
+                        }}
+                      >
+                        {/* Left resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '5px 0 0 5px',
+                            }}
+                          />
+                        )}
+                        {ev.title}
+                        {/* Right resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              right: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '0 5px 5px 0',
+                            }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* No-matches-in-view callout — rendered inside the scroll container */}
+          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
+            <div style={{
+              padding: '12px 16px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              borderTop: '1px solid var(--border)',
+            }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
+      {dragTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: dragTooltip.x + 14,
+            top: dragTooltip.y - 28,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontWeight: 600,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {dragTooltip.text}
+        </div>
+      )}
+
+      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
+      {matchTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: matchTooltip.x + 12,
+            top: matchTooltip.y - 36,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {matchTooltip.reasons.map(r => (
+            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 ````
 
@@ -27093,6 +26756,437 @@ export default defineConfig(({ mode }) => {
     },
   }
 })
+````
+
+## File: packages/api/internal/api/activity_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
+// The authenticated user must be a member of the team.
+func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	var req CreateActivityJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
+		return
+	}
+	if req.StartAt.IsZero() || req.EndAt.IsZero() {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
+		return
+	}
+	if req.EndAt.Before(req.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	allDay := false
+	if req.AllDay != nil {
+		allDay = *req.AllDay
+	}
+
+	now := time.Now()
+	activity := &models.Activity{
+		ID:               newID(),
+		TimelineID:       timelineID,
+		Title:            req.Title,
+		Description:      req.Description,
+		Notes:            req.Notes,
+		Icon:             req.Icon,
+		Color:            req.Color,
+		StartAt:          req.StartAt,
+		EndAt:            req.EndAt,
+		AllDay:           allDay,
+		StatusID:         req.StatusId,
+		ParentActivityID: req.ParentActivityId,
+		PercentComplete:  req.PercentComplete,
+		Location:         req.Location,
+		URL:              req.Url,
+		Rrule:            req.Rrule,
+		CreatedBy:        claims.UserID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := s.activities.Create(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+
+	if req.AssignedMemberIds != nil {
+		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *req.AssignedMemberIds
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusCreated, activity)
+}
+
+// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
+// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
+func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	var from, to *time.Time
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		from = &t
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		to = &t
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, acts)
+}
+
+// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
+// the request body are applied; the caller must be a member of the activity's team.
+func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	// Decode into a map so we can detect which fields the caller provided.
+	var patch map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if v, ok := patch["title"]; ok {
+		if err := json.Unmarshal(v, &activity.Title); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
+			return
+		}
+	}
+	if v, ok := patch["description"]; ok {
+		if err := json.Unmarshal(v, &activity.Description); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
+			return
+		}
+	}
+	if v, ok := patch["notes"]; ok {
+		if err := json.Unmarshal(v, &activity.Notes); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
+			return
+		}
+	}
+	if v, ok := patch["icon"]; ok {
+		if err := json.Unmarshal(v, &activity.Icon); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
+			return
+		}
+	}
+	if v, ok := patch["color"]; ok {
+		if err := json.Unmarshal(v, &activity.Color); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
+			return
+		}
+	}
+	if v, ok := patch["startAt"]; ok {
+		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
+			return
+		}
+	}
+	if v, ok := patch["endAt"]; ok {
+		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
+			return
+		}
+	}
+	if v, ok := patch["allDay"]; ok {
+		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
+			return
+		}
+	}
+	if v, ok := patch["statusId"]; ok {
+		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
+			return
+		}
+	}
+	if v, ok := patch["parentActivityId"]; ok {
+		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
+			return
+		}
+	}
+	if v, ok := patch["percentComplete"]; ok {
+		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
+			return
+		}
+	}
+	if v, ok := patch["location"]; ok {
+		if err := json.Unmarshal(v, &activity.Location); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
+			return
+		}
+	}
+	if v, ok := patch["url"]; ok {
+		if err := json.Unmarshal(v, &activity.URL); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
+			return
+		}
+	}
+	if v, ok := patch["rrule"]; ok {
+		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
+			return
+		}
+	}
+
+	var newAssignees *[]string
+	if v, ok := patch["assignedMemberIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
+			return
+		}
+		newAssignees = &ids
+	}
+
+	if activity.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
+		return
+	}
+	if activity.EndAt.Before(activity.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	activity.UpdatedAt = time.Now()
+	if err := s.activities.Update(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if newAssignees != nil {
+		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *newAssignees
+	} else {
+		// Populate current assignments so the response always includes them.
+		existing, err := s.activities.GetAssignments(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = existing
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
+// may archive an activity; the row is soft-deleted (archived_at set) so it is
+// hidden from list responses by default but can be restored.
+func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, true)
+}
+
+// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
+func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, false)
+}
+
+// setActivityArchive is the shared implementation for the archive/unarchive
+// endpoints. When archive is true, archived_at is set to now; otherwise it
+// is cleared.
+func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+	}
+	if err := s.activities.SetArchived(activityID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+	activity.ArchivedAt = at
+	activity.UpdatedAt = time.Now().UTC()
+
+	// Re-populate assignments for a stable response shape.
+	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
+		activity.AssignedMemberIDs = ids
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
+// activity's team may delete it.
+func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.activities.Delete(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	s.bus.Publish(events.Message{
+		Type:    events.ActivityDeleted,
+		TeamID:  timeline.TeamID,
+		Payload: map[string]string{"id": activityID},
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
 ````
 
 ## File: packages/web/src/pages/settings/PreferencesPage.tsx
@@ -28898,454 +28992,6 @@ export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
 }
 ````
 
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { usePreferenceMap } from '@/hooks/usePreferences';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-interface Props {
-  teamId: string;
-  /** Active timeline ID — activities are fetched scoped to this timeline. */
-  timelineId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  /** Set of status IDs that are marked is_closed. Used when the 'open' filter preset is active. */
-  closedStatusIds?: Set<string>;
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called during a bar drag with live snapped dates — for sidebar preview. */
-  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
-  /** Called when a bar drag completes (before the PATCH fires). */
-  onBarDragEnd?: () => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-}
-
-/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
-function statusColorFromId(statusId: string | null | undefined): string {
-  if (!statusId) return '#6b7280';
-  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
-  let h = 0;
-  for (let i = 0; i < statusId.length; i++) {
-    h = statusId.charCodeAt(i) + ((h << 5) - h);
-    h |= 0;
-  }
-  return palette[Math.abs(h) % palette.length];
-}
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate type that carries original API fields alongside view-state. */
-interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-  }
-
-  if (groupBy === 'member') {
-    const buckets: Record<string, RichActivity[]> = {};
-    for (const ev of sorted) {
-      const key = ev.primaryMemberId ?? '__none__';
-      (buckets[key] ??= []).push(ev);
-    }
-
-    const rows: GanttRow[] = [];
-    for (const m of members) {
-      const evs = buckets[m.id];
-      if (!evs?.length) continue;
-      rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-    }
-    const unassigned = buckets['__none__'];
-    if (unassigned?.length) {
-      rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
-      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    const placed = new Set<string>();
-    const rows: GanttRow[] = [];
-
-    for (const ev of sorted) {
-      if (placed.has(ev.id) || ev.parentActivityId) continue;
-      placed.add(ev.id);
-      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
-
-      for (const child of sorted) {
-        if (child.parentActivityId === ev.id) {
-          placed.add(child.id);
-          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
-        }
-      }
-    }
-
-    for (const ev of sorted) {
-      if (!placed.has(ev.id)) {
-        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
-      }
-    }
-
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-export default function GanttView({
-  teamId,
-  timelineId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  closedStatusIds,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onBarDragProgress,
-  onBarDragEnd,
-  onMembersLoaded,
-  onSelectApiActivity,
-}: Props) {
-  const updateActivity = useUpdateActivity(timelineId);
-  const today = todayMidnight();
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  const globalPrefs = usePreferenceMap();
-  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
-  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
-  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
-  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
-  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  const hideClosedActive = activeFilter.kind === 'preset' && activeFilter.id === 'open'
-  const visibleActivities = useMemo(() => {
-    if (!hideClosedActive || !closedStatusIds?.size) return apiActivities
-    return apiActivities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiActivities, hideClosedActive, closedStatusIds])
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    onBarDragEnd?.();
-    updateActivity.mutate({
-      activityId,
-      patch: {
-        startAt: newStartDate.toISOString(),
-        endAt: newEndDate.toISOString(),
-      },
-    });
-  }, [updateActivity, onBarDragEnd]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={onLaneDrag}
-        onBarDrag={handleBarDrag}
-        onBarDragProgress={onBarDragProgress}
-        resolvedGranularity={resolvedGranularity}
-        onClearFilters={filtersActive ? () => {} : undefined}
-      />
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/components/MemberModal.tsx
 ````typescript
 /**
@@ -30954,6 +30600,474 @@ func flatten[T any](s []*T) []T {
 }
 ````
 
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+interface Props {
+  teamId: string;
+  /** Active timeline ID — activities are fetched scoped to this timeline. */
+  timelineId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  /** Set of status IDs that are marked is_closed. Used when the 'open' filter preset is active. */
+  closedStatusIds?: Set<string>;
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag completes (before the PATCH fires). */
+  onBarDragEnd?: () => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
+  labelColW?: number;
+  /** Called when the user drags the label column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+}
+
+/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
+function statusColorFromId(statusId: string | null | undefined): string {
+  if (!statusId) return '#6b7280';
+  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
+  let h = 0;
+  for (let i = 0; i < statusId.length; i++) {
+    h = statusId.charCodeAt(i) + ((h << 5) - h);
+    h |= 0;
+  }
+  return palette[Math.abs(h) % palette.length];
+}
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate type that carries original API fields alongside view-state. */
+interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+  }
+
+  if (groupBy === 'member') {
+    const buckets: Record<string, RichActivity[]> = {};
+    for (const ev of sorted) {
+      const key = ev.primaryMemberId ?? '__none__';
+      (buckets[key] ??= []).push(ev);
+    }
+
+    const rows: GanttRow[] = [];
+    for (const m of members) {
+      const evs = buckets[m.id];
+      if (!evs?.length) continue;
+      rows.push({ kind: 'group', id: m.id, label: m.name, color: m.color, count: evs.length });
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+    }
+    const unassigned = buckets['__none__'];
+    if (unassigned?.length) {
+      rows.push({ kind: 'group', id: '__none__', label: 'Unassigned', color: 'var(--muted-foreground)', count: unassigned.length });
+      for (const ev of unassigned) rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    const placed = new Set<string>();
+    const rows: GanttRow[] = [];
+
+    for (const ev of sorted) {
+      if (placed.has(ev.id) || ev.parentActivityId) continue;
+      placed.add(ev.id);
+      rows.push({ kind: 'activity', event: { ...ev, isChild: false } });
+
+      for (const child of sorted) {
+        if (child.parentActivityId === ev.id) {
+          placed.add(child.id);
+          rows.push({ kind: 'activity', event: { ...child, isChild: true } });
+        }
+      }
+    }
+
+    for (const ev of sorted) {
+      if (!placed.has(ev.id)) {
+        rows.push({ kind: 'activity', event: { ...ev, isChild: true } });
+      }
+    }
+
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+/**
+ * Returns only the activities whose status is not in closedStatusIds.
+ * Extracted as a named export so the 'open' filter preset logic can be
+ * unit-tested without mounting the full component.
+ */
+export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
+  activities: T[],
+  closedStatusIds: Set<string>,
+): T[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
+export default function GanttView({
+  teamId,
+  timelineId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  closedStatusIds,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onBarDragProgress,
+  onBarDragEnd,
+  onMembersLoaded,
+  onSelectApiActivity,
+  labelColW,
+  onLabelColWChange,
+}: Props) {
+  const updateActivity = useUpdateActivity(timelineId);
+  const today = todayMidnight();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  const hideClosedActive = activeFilter.kind === 'preset' && activeFilter.id === 'open'
+  const visibleActivities = useMemo(() => {
+    if (!hideClosedActive || !closedStatusIds?.size) return apiActivities
+    return filterOpenActivities(apiActivities, closedStatusIds)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiActivities, hideClosedActive, closedStatusIds])
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = visibleActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    onBarDragEnd?.();
+    updateActivity.mutate({
+      activityId,
+      patch: {
+        startAt: newStartDate.toISOString(),
+        endAt: newEndDate.toISOString(),
+      },
+    });
+  }, [updateActivity, onBarDragEnd]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={onLaneDrag}
+        onBarDrag={handleBarDrag}
+        onBarDragProgress={onBarDragProgress}
+        resolvedGranularity={resolvedGranularity}
+        onClearFilters={filtersActive ? () => {} : undefined}
+        labelColW={labelColW}
+        onLabelColWChange={onLabelColWChange}
+      />
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/components/TeamModal.tsx
 ````typescript
 /**
@@ -32006,6 +32120,1058 @@ type Invite struct {
 	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
 	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
+````
+
+## File: docs/TASKS.md
+````markdown
+# Tasks
+
+## Current Sprint — Foundation
+
+### Repo & Tooling
+- [x] Initialize Go module (`packages/api/`) with basic project structure — 2026-04-29
+- [x] Initialize React + TypeScript + Vite project (`packages/web/`) — 2026-04-29
+- [x] Set up pnpm workspace (`pnpm-workspace.yaml`) — 2026-04-29
+- [x] Add `golangci-lint` config (`.golangci.yml`) — 2026-04-29
+- [x] Set up GitHub Actions CI: lint + test on PR — 2026-04-29
+- [x] Write `docker-compose.yml` for local development — 2026-04-29
+
+### API — Core
+- [x] DB abstraction layer with SQLite adapter (sqlx + modernc.org/sqlite) — 2026-04-30
+- [x] Migration runner (auto-runs on startup) — 2026-04-30
+- [x] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens — 2026-04-30
+- [x] Auth: JWT issue/validate, password hash/verify, invite token generate/validate — 2026-04-30
+- [x] `POST /auth/register` (invite token required) — 2026-04-30
+- [x] `POST /auth/login` — 2026-04-30
+- [x] `POST /auth/refresh` — 2026-04-30
+- [x] `POST /teams` — create team — 2026-05-03
+- [x] `POST /teams/:id/invites` — send invite — 2026-05-03
+- [x] `GET /teams/:id/members` — 2026-05-03
+- [x] `POST /teams/:id/events` — create event — 2026-05-03
+- [x] `GET /teams/:id/events` — list events (date range filter) — 2026-05-03
+- [x] `PATCH /events/:id` — update event — 2026-05-03
+- [x] `DELETE /events/:id` — delete event — 2026-05-03
+
+### API — Real-Time
+- [x] WebSocket hub (`internal/ws/`) — 2026-05-14
+- [x] Team-scoped subscription model — 2026-05-14
+- [x] Broadcast on `events.*` internal bus events — 2026-05-14
+
+### API — Timelines
+- [x] `POST /teams/:id/timelines` — create timeline — 2026-05-15
+- [x] `GET /timelines/:id` — fetch timeline (public or auth-gated) — 2026-05-15
+- [x] `GET /timelines/share/:token` — public share link handler — 2026-05-15
+- [x] Timeline access list enforcement — 2026-05-15
+
+### Web — Scaffold
+- [x] Initialize shadcn/ui: `pnpm dlx shadcn@latest init` — 2026-05-16
+- [x] Set color tokens in `src/index.css` once palette is decided — 2026-05-16
+- [x] Set up dark mode toggle (localStorage + `prefers-color-scheme`) — 2026-05-16
+- [x] Routing setup (React Router) — 2026-05-16
+- [x] Auth flow: login, register (via invite), token storage — 2026-05-16
+- [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
+- [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
+- [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
+
+### RBAC Refactor + First-Run Setup (Phase 8.0)
+- [x] Migration 003: `team_members` PK, nullable `user_id`, `display_name` — 2026-05-18
+- [x] Migration 003: `event_assignments` + `timeline_access` swap `user_id` FK for `team_member_id` — 2026-05-18
+- [x] Migration 003: `timeline_access` gains `role (admin|member)`; `visibility` dropped from `timelines` — 2026-05-18
+- [x] `User.IsSuperadmin`: first registered user auto-granted superadmin — 2026-05-18
+- [x] `GET /setup/status` — public endpoint (`{ needsSetup: bool }`) — 2026-05-18
+- [x] Timeline access: team admins bypass check; members require explicit `timeline_access` entry — 2026-05-18
+- [x] `SetupPage`: 3-step first-run wizard (account → team → timeline) — 2026-05-18
+- [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
+- [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
+
+### Web — Timeline View (Phase 8.1: Shell & Rendering — Gantt pivot)
+- [x] API: `GET /teams`, `GET /teams/:id/timelines`, `assignedMemberIds[]` on Event — 2026-05-18
+- [x] `TimelineView` + `TimelineGrid` (person-lane prototype, later pivoted) — 2026-05-18
+- [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
+- [x] Wire to `GET /teams/:id/events?start=&end=` and `GET /teams/:id/members` — 2026-05-18
+- [x] `TimelineGrid` rewrite: Gantt layout — one row per event, sticky label col, member avatars — 2026-05-18
+- [x] `TimelineToolbar` component: zoom in/out, group-by, sort-by, export stub — 2026-05-18
+- [x] `TimelineView` update: build `GanttRow[]` with grouping + sorting logic — 2026-05-18
+- [x] Group by Member: section headers per assignee, events under primary assignee — 2026-05-18
+- [x] Group by Parent: root events first, children indented below their parent — 2026-05-18
+- [x] Sort by: start date, end date, title A–Z — 2026-05-18
+- [x] Zoom: variable `colWidth` stepped through [40, 60, 80, 120, 160] px/day — 2026-05-18
+- [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
+
+### Web — Timeline View (Phase 8.2: Interactions)
+- [x] Click event block → open `EventDetailPanel` (view mode) — 2026-05-19
+- [x] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id` — 2026-05-19
+- [x] Delete event with confirm dialog; remove from timeline — 2026-05-19
+- [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
+- [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
+
+### Web — Gantt Bar Drag (Phase 8.2.1: Resize & Move)
+- [x] Detect mousedown on left/right edge (8px zone) vs. bar body — 2026-05-19
+- [x] Edge drag: update start or end date live as user drags; snap to active granularity column — 2026-05-19
+- [x] Body drag: shift both start and end dates by the same column delta — 2026-05-19
+- [x] Show date tooltip during drag (start date for left edge, end date for right edge, both for body) — 2026-05-19
+- [x] PATCH `/events/:id` with new startAt/endAt on mouseup; optimistic update in cache — 2026-05-19
+- [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
+
+### Web — Timeline View (Phase 8.3: Real-Time Sync)
+- [x] Connect `useWebSocket` to subscribe to `events.*` for active team — 2026-05-19
+- [x] `events.created` delta: insert block into TanStack Query cache — 2026-05-19
+- [x] `events.updated` delta: update block in cache — 2026-05-19
+- [x] `events.deleted` delta: remove block from cache — 2026-05-19
+- [x] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta) — 2026-05-19
+
+### OpenAPI
+- [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
+- [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
+- [x] Set up Go type generation from spec (`oapi-codegen`) — 2026-05-16
+- [x] Refactor existing Go handlers to use generated OpenAPI models — 2026-05-16
+
+### Web — Persistent View Settings (Phase 8.4)
+- [x] Migration 004: `user_preferences` table with empty-string sentinel for global scope — 2026-05-20
+- [x] `UserPreference` model (`models.go`) — 2026-05-20
+- [x] `UserPreferenceRepo`: `List` and `Upsert` methods — 2026-05-20
+- [x] `GET /users/me/preferences?timeline_id=` — returns scoped or global prefs — 2026-05-20
+- [x] `PUT /users/me/preferences` — upsert single key/value, validates JSON — 2026-05-20
+- [x] OpenAPI spec: `UserPreference` schema + two endpoints — 2026-05-20
+- [x] TypeScript types regenerated from spec — 2026-05-20
+- [x] `usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks — 2026-05-20
+- [x] `DashboardPage`: restore toolbar state from per-timeline prefs on timeline switch — 2026-05-20
+- [x] `DashboardPage`: save toolbar state (group_by, sort_by, zoom_granularity, color_by) on change — 2026-05-20
+- [x] `DashboardPage`: persist dark mode preference globally — 2026-05-20
+
+### Web — Find (Phase 8.5)
+In-view "find in page" with highlight + match navigation. Scoped to already-loaded events; respects active filters. Global cross-team search is deferred to Phase 15.
+
+**Find bar:**
+- [x] `FindBar` component in the TopBar (between FilterDropdown and ProfileMenu) — query input, match counter (`N / M`), prev/next chevrons, close (×) — 2026-05-20
+- [x] Open via `Ctrl/Cmd+F` global keybinding and via a search icon in the TopBar; close via `Esc` or × — 2026-05-20
+- [x] Debounced (~150ms) client-side matcher over already-fetched events — 2026-05-20
+
+**Match scope:**
+- [x] Case-insensitive match against: event title, description, assignee display names, parent event title — 2026-05-20
+- [x] Respect active filters — only events already visible in the current view are candidates — 2026-05-20
+
+**Visual treatment:**
+- [x] Matching events: amber outline / glow using existing design tokens — 2026-05-20
+- [x] Non-matching events: dimmed to ~0.3 opacity — 2026-05-20
+- [x] Active match (prev/next cursor position): stronger outline + subtle pulse to distinguish from other matches — 2026-05-20
+- [x] On hover, non-title matches show a "why matched" hint (e.g. `matched assignee Jane`) — 2026-05-20
+
+**Navigation:**
+- [x] `Enter` / `Shift+Enter` and ◀ ▶ chevrons walk forward/backward through matches — 2026-05-20
+- [x] Auto-scroll the Gantt on each step — horizontal pan to event's date range, vertical scroll to its row, centered in viewport — 2026-05-20
+
+**Empty / edge cases:**
+- [x] Zero matches, no filters active → bar shows `No matches` — 2026-05-20
+- [x] Zero matches in view, filters active → soft callout: *"No matches in current view. [Clear filters]"* — 2026-05-20
+- [x] Find query is ephemeral (not persisted across navigation/reload); bar open-state also ephemeral — 2026-05-20
+
+**Testing:**
+- [x] Unit: matcher returns correct hits across all match fields, case-insensitive — 2026-05-20
+- [ ] Integration: Find works at every granularity level and every group-by mode (requires live data — manual)
+- [ ] Keyboard: full prev/next cycle reachable with keyboard only (manual verification with live events)
+
+## Up Next
+
+> **Member management work is split across Phase 10.1.1 (Teams — CRUD) and Phase 10.1.2 (Members — Management & Editing)**. Team entity CRUD (create, edit, archive) is in 10.1.1; member lifecycle (add, edit, roles, invites, stubs, inactivation, admin actions) is in 10.1.2. The previously enumerated sidebar gear-icon + add-member-sheet tasks are absorbed into 10.1.2.
+
+### Web — Filter Scoping (FilterDropdown + API)
+Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
+
+**Data model:**
+- Single `saved_filters` table: `(id, team_id, timeline_id nullable, created_by, name, definition JSON, scope ENUM(personal|nominated|team|timeline), status ENUM(active|pending_review))`
+- `scope=personal` — visible only to creator; `scope=team` — visible to all team members; `scope=timeline` — visible to all members of that timeline; `scope=nominated` — personal filter flagged by member for admin review (visible to admins)
+
+**API:**
+- [ ] Migration: replace current `saved_filters` shape with the unified schema above
+- [ ] `GET /teams/:id/filters` — returns filters scoped `team` or `timeline` (for the active timeline), plus the calling user's `personal` and `nominated` filters
+- [ ] `POST /teams/:id/filters` — create a new personal filter; `definition` is the filter JSON
+- [ ] `PATCH /filters/:id` — update name or definition (creator or admin)
+- [ ] `PATCH /filters/:id/scope` — promote/demote scope; admin-only for `team`/`timeline`; any member can set `nominated`
+- [ ] `DELETE /filters/:id` — creator or admin
+
+**Web — FilterDropdown layout:**
+- [ ] Reorganize dropdown into four labeled sections, each hidden when empty:
+  1. **Default** — All events / Upcoming / My events (hardcoded presets, always present)
+  2. **Team** — filters with `scope=team` from API
+  3. **Timeline** — filters with `scope=timeline` for the active timeline
+  4. **Mine** — caller's `personal` filters; nominated filters shown with a "Pending" badge
+- [ ] Filter names truncate with ellipsis at a max width; full name in tooltip on hover
+- [ ] "New filter…" opens filter editor (personal scope by default); "Share…" action on existing personal filters lets the member nominate it or (if admin) promote directly to team/timeline
+- [ ] Pass active timeline ID through context so the dropdown can fetch timeline-scoped filters
+- [ ] Admin-visible section at bottom of "Mine": nominated filters awaiting review, with Approve / Reject actions
+
+---
+
+> **Connectors sidebar + per-timeline connector model is absorbed into the External Connectors (Inbound Webhooks) task block further down** — that section now carries both the webhook backend and the sidebar UI work.
+
+### API — Token Auth (Phase 9)
+- [x] `POST /tokens` — create API token (returns value once) — 2026-05-20
+- [x] `GET /tokens` — list tokens for current user — 2026-05-20
+- [x] `DELETE /tokens/:id` — revoke token (preserved row, sets revoked_at) — 2026-05-20
+- [x] Middleware: accept Bearer token (JWT or API token) on all authenticated routes — 2026-05-20
+- [x] Enforce token scope on writes (read-only tokens blocked from mutations) — 2026-05-20
+
+### API — Archive (Phase 9)
+- [x] `POST /events/:id/archive` and `POST /events/:id/unarchive` — 2026-05-20
+- [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
+- [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
+
+### The Great Event → Activity Rename (Phase 9.5)
+Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEventToActivity.md](GreatEventToActivity.md). Roadmap: [Phase 9.5](ROADMAP.md#phase-95--rename-event--activity-the-great-rename).
+
+> **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
+
+**DB:**
+- [x] Write migration `005_rename_events_to_activities.sql` — 2026-05-21 (`ALTER TABLE ... RENAME`)
+- [x] Rename indexes containing `event` in their name — 2026-05-21
+- [x] Update `migrations_test.go` to assert new table + column names — 2026-05-21
+- [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
+
+**Go API:**
+- [x] `models.Event` → `models.Activity` — 2026-05-21
+- [x] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo` — 2026-05-21
+- [x] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions — 2026-05-21
+- [x] `server.go`: routes `/events*` → `/activities*` — 2026-05-21
+- [x] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` — 2026-05-21 → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
+- [x] Update `bus_test.go`, `hub_test.go` wire-string assertions — 2026-05-21
+- [x] `golangci-lint run` clean, `go test ./...` passes — 2026-05-21
+
+**OpenAPI + generated types:**
+- [x] `packages/shared/openapi.yaml`: schema, paths, operationIds — 2026-05-21, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
+- [x] Run `pnpm --filter shared generate`; verify `Activity` exports — 2026-05-21, zero `Event` exports
+
+**Web:**
+- [x] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` — 2026-05-21 → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
+- [x] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys — 2026-05-21
+- [x] `useWebSocket.ts`: update message-type switch to `activity.*` — 2026-05-21
+- [x] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*` — 2026-05-21; fix imports
+- [x] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels — 2026-05-21
+- [x] `pnpm --filter web lint` clean — 2026-05-21
+
+**Tests + seed:**
+- [x] Rename `event_handler_test.go` → `activity_handler_test.go` — 2026-05-21
+- [x] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql` — 2026-05-21; update INSERTs + cleanup
+
+**Docs:**
+- [x] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md — 2026-05-21
+- [x] Hand-review: ROADMAP Phase 3 title — 2026-05-21 → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
+- [x] Do **not** rewrite `docs/log.md` historical entries — 2026-05-21
+- [x] Add Phase 9.5 entry to `docs/log.md` — 2026-05-21
+
+**Verification (smoke against http://epcot.lan:8081):**
+- [ ] Create / edit / archive / unarchive / delete an Activity end-to-end
+- [ ] WebSocket frames arrive as `activity.created` / `.updated` / `.deleted`
+- [ ] Final sweep `rg "\bevent" packages/ docs/` returns only expected hits (bus package, calendar fields, log.md)
+
+### Identity System (Phase 9.6)
+Reusable Identity component system (color + icon) for all entities. Design spec: [IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md). Prototype: `docs/design/assets/identity-widget-prototype.html`.
+
+**Schema (migration 006):**
+- [x] Write migration `006_identity_fields.sql` — 2026-05-24
+- [x] Update `migrations_test.go` to assert new columns exist — 2026-05-24
+
+**Go API:**
+- [x] `models.go`: add `Icon *string` + `Color *string` to `Team`; add `Icon *string` + `Color *string` to `Timeline`; add `Icon *string` to `TeamMember` — 2026-05-24
+- [x] Update `TeamMemberWithUser` to surface the new `Icon` field (via embedding) — 2026-05-24
+- [x] Update OpenAPI spec: add `icon`/`color` to `Team`, `Timeline`, `TeamMember` schemas — 2026-05-24
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-24
+- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-05-24
+
+**Web — component library (`src/components/identity/`):**
+- [x] `identity-constants.ts` — 2026-05-24
+- [x] `Badge.tsx` — 2026-05-24
+- [x] `IdentityTrigger.tsx` — 2026-05-24
+- [x] `IdentityPicker.tsx` — 2026-05-24
+- [x] `IdentityWidget.tsx` — 2026-05-24
+
+**Web — replace existing color/icon UI:**
+- [x] `ActivityDetailPanel`: `<IdentityWidget>` replacing icon stub + 8-color swatch — 2026-05-24
+- [x] `ActivityCreatePanel`: `<IdentityWidget>` replacing color swatch — 2026-05-24
+- [x] Gantt bar label column: `<Badge size={20} shape="square">` — 2026-05-24
+- [x] Sidebar timeline rows: `<Badge size={20} shape="square">` — 2026-05-24
+- [x] Sidebar member rows: `<Badge size={20} shape="circle">` — 2026-05-24
+
+**Web — MemberAvatar migration:**
+- [x] Refactor `MemberAvatar.tsx` to delegate to `<Badge>` — 2026-05-24
+- [ ] Verify all existing MemberAvatar call sites render correctly (manual)
+
+**Web — palette consolidation:**
+- [x] Update `types/index.ts`: re-export `ACTIVITY_COLORS` and `MEMBER_COLORS` from `identity-constants.ts` — 2026-05-24
+- [x] Update `index.css`: `--member-N-*` → 16 `--identity-<name>` custom properties — 2026-05-24
+- [x] Update `DESIGN_SYSTEM.md`: 8-color → 16-color identity palette reference — 2026-05-24
+
+**Testing & verification:**
+- [x] `pnpm --filter web lint` clean — 2026-05-24
+- [x] `golangci-lint run` clean — 2026-05-24
+- [x] `go test ./...` passes — 2026-05-24
+- [ ] Badge renders all four modes (Lucide icon, 1-letter, 2-letter, none) at sizes 20–40px, both shapes (manual)
+- [ ] IdentityWidget popover opens/closes; color, name option, and icon selection fire onChange (manual)
+- [ ] Legacy hex colors in existing activities display correctly via `hexToColorId()` mapping (manual — test on Docker)
+- [ ] Manual: ActivityDetailPanel uses IdentityWidget; changes persist as color IDs (manual — test on Docker)
+- [ ] Manual: sidebar member + timeline rows use Badge (manual)
+
+**Docs:**
+- [x] Add Phase 9.6 entry to `docs/log.md` — 2026-05-24
+
+---
+
+### Phase 10 — Entity Management (data-cornerstone CRUD)
+
+Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
+
+Design references:
+- Team Modal: `docs/design/handoffs/team-modal/` — Settings tab, Members tab, archive flow
+- Member Edit Modal: `docs/design/handoffs/member-modal/` — member profile, stats, admin actions
+
+---
+
+### Teams — CRUD & Management (Phase 10.1.1)
+Closes the Teams data entity. Ships the Team Modal with Settings tab functional; Members tab scaffolded as locked/placeholder until 10.1.2.
+
+**Schema (migration 008):**
+- [x] Add `description TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `notes TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `archived_at DATETIME` column to `teams` (nullable) — 2026-05-25
+- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
+
+**API — team-level:**
+- [x] `GET /teams/:id` — full team detail (name, description, notes, icon, color, archived_at) — 2026-05-25
+- [x] `PATCH /teams/:id` — update name, description, notes, icon, color (admin only) — 2026-05-25
+- [x] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` — 2026-05-25
+- [x] Update `POST /teams` to accept `description`, `notes`, `icon`, `color` — 2026-05-25
+- [x] Update `GET /teams` — add `?archived=true` to include archived teams — 2026-05-25
+
+**OpenAPI + types:**
+- [x] Update `Team` schema: add `description`, `notes`, `archivedAt` — 2026-05-25
+- [x] Update `CreateTeamInput` and `PatchTeamInput` request bodies — 2026-05-25
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-25
+
+**Web — Team Modal (`<TeamModal>`):**
+- [x] Modal shell: portal, backdrop, panel (580px, dark theme), header, tab bar, scrollable content, footer — 2026-05-25
+- [x] Header: identity badge (36px square) + label ("NEW TEAM" / "EDIT TEAM") + team name + close button — 2026-05-25
+- [x] Tab bar: Settings (active) + Members (locked/placeholder in this phase) — 2026-05-25
+- [x] Members tab locked state: opacity 0.45, not-allowed cursor, tooltip "Save the team first to add members" — 2026-05-25
+- [x] Settings tab: `<IdentityPicker>` (square shape), name (required), description, notes (textarea) — 2026-05-25
+- [x] Footer: Archive team button (edit mode, left side), Cancel + Create team / Save changes (right side, team-color primary button) — 2026-05-25
+- [x] "Saved" banner: appears after new team creation, auto-dismisses after 3s — 2026-05-25
+- [x] New-team flow: Settings tab → Create team → banner → Members tab unlocks (placeholder content) — 2026-05-25
+- [x] Edit-team flow: pre-populated Settings tab, Members tab unlocked (placeholder) — 2026-05-25
+- [x] Archive confirmation dialog: replaces modal content, amber styling, icon, title, body, Cancel + Archive team buttons — 2026-05-25
+
+**Web — team picker + settings shell:**
+- [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
+- [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
+- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
+- [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
+- [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
+- [ ] Manual: create second team from picker, edit existing team, archive/unarchive
+- [ ] Manual: Team Modal opens in both modes with correct Settings tab behavior
+- [x] `docs/log.md` Phase 10.1.1 entry written — 2026-05-25
+
+---
+
+### Members — Management & Editing (Phase 10.1.2)
+Fills in the Team Modal Members tab and adds the Member Edit Modal. Full member lifecycle: add, edit, roles, stubs, invites, reusable invite link, stats, inactivation, superadmin actions. Depends on 10.1.1 (Team Modal shell).
+
+**Terminology:** "Participant" = login-less team member (backend: `user_id = NULL`). Design handoffs use "stub" but we use "Participant" — established in Phase 8.0, more user-friendly. "Inactivate" = `archived_at`-based disabling. "Super Admin" = `is_superadmin`.
+
+**Schema (migration 009):**
+- [x] Add `archived_at DATETIME` column to `team_members` (nullable) — member inactivation — 2026-05-25
+- [x] Add `archived_at DATETIME` column to `users` (nullable) — account-level inactivation — 2026-05-25
+- [x] Add `invite_link_token TEXT UNIQUE` column to `teams` (nullable) — reusable invite link — 2026-05-25
+- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
+
+**API — member CRUD:**
+- [x] `GET /teams/:id/members/:memberId` — full member detail with computed stats — 2026-05-25
+- [x] `POST /teams/:id/members` — add existing registered user by `userId` (admin only) — 2026-05-25
+- [x] `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; self for own name/color/icon) — 2026-05-25
+- [x] `DELETE /teams/:id/members/:memberId` — remove from team; reject if last admin — 2026-05-25
+- [x] `POST /teams/:id/members/:memberId/archive` — inactivate member (set `archived_at`) — 2026-05-25
+- [x] `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clear `archived_at`) — 2026-05-25
+
+**API — participant CRUD:**
+- [x] `POST /teams/:id/participants` — create login-less participant (admin only); name, icon, color, optional email — 2026-05-25
+- [x] Participants managed via same PATCH/DELETE member endpoints (role always `member`, `user_id` stays NULL) — 2026-05-25
+
+**API — invites:**
+- [x] `GET /teams/:id/invites` — list pending invites (email, sent date) — 2026-05-25
+- [x] `DELETE /teams/:id/invites/:inviteId` — revoke/cancel pending invite — 2026-05-25
+- [x] `POST /teams/:id/invite-link` — generate or regenerate reusable team invite link token — 2026-05-25
+- [x] `GET /teams/:id/invite-link` — get current invite link (or null) — 2026-05-25
+- [x] `DELETE /teams/:id/invite-link` — revoke current invite link — 2026-05-25
+- [x] Update `POST /auth/register` to accept reusable invite link tokens alongside existing one-time tokens — 2026-05-25
+
+**API — member stats (computed per request, not stored):**
+- [x] Timeline counts: active, archived (per member) — 2026-05-25
+- [x] Activity counts: past due, running, upcoming, unscheduled, archived (date-relative, not status-relative) — 2026-05-25
+
+**API — superadmin actions:**
+- [x] `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only, not applicable to participants) — 2026-05-25
+- [x] `POST /users/:id/archive` — inactivate user account (superadmin only) — 2026-05-25
+- [x] `POST /users/:id/unarchive` — reactivate user account (superadmin only) — 2026-05-25
+- [x] `DELETE /users/:id` — hard delete user (superadmin only; zero active activities + single team only) — 2026-05-25
+- [x] Auth middleware: reject login from archived users with clear error — 2026-05-25
+
+**OpenAPI + types:**
+- [x] Add `MemberDetail` schema with stats, teams list, archived_at — 2026-05-25
+- [x] Add invite link endpoints to spec — 2026-05-25
+- [x] Add superadmin action endpoints to spec — 2026-05-25
+- [x] Update `TeamMember` schema with `archivedAt` — 2026-05-25
+- [x] Regenerate TypeScript types — 2026-05-25
+
+**Web — Team Modal Members tab:**
+- [x] Search/add input: search users by name/email, or type email to invite; clear button — 2026-05-25
+- [x] Search results dropdown: user matches with "Add" / "Already added" / "Invite pending"; email-only with "Invite" — 2026-05-25
+- [x] Participant creation: expandable inline form — identity picker (circle), name (required), optional email, "Create participant" button (amber) — 2026-05-25
+- [x] Member list: avatar (dashed border for stubs), name, "No login" pill (stubs, amber), email, `<RoleDropdown>`, remove (×) — 2026-05-25
+- [x] `<RoleDropdown>`: Admin (teal), Member (muted), Participant (amber) — with descriptions; portal-rendered; role changes save immediately — 2026-05-25
+- [x] Pending invitations section: rows with dashed-circle mail icon, email, sent date, "Revoke" button (red) — 2026-05-25
+- [x] Invite link section: URL display + "Copy link" button (teal transition to "Copied!"), explanatory note below — 2026-05-25
+- [x] Member count badge on Members tab label — 2026-05-25
+
+**Web — Member Edit Modal (`<MemberModal>`):**
+- [x] Modal shell: portal, backdrop, 560px panel, header / scrollable content / footer — 2026-05-25
+- [x] Header: `<IdentityPicker>` (40px circle), subline (participant/team member + viewer role label), name + badges ("No login" amber) — 2026-05-25
+- [x] Name + email row: 2-column grid; email read-only for participants ("No email — participant" placeholder) — 2026-05-25
+- [x] Timeline stats: 2 chips — Active (teal border), Archived (muted border) — 2026-05-25
+- [x] Activity stats: 5 chips — Past due (red if >0), Running (teal), Upcoming (blue), Unscheduled (muted), Archived (muted) — 2026-05-25
+- [x] Joined date: read-only pill with icon — 2026-05-25
+- [x] Teams list: each row with team badge (square, initials), team name, role pill — 2026-05-25
+- [x] Account section (team admin + non-participant): password reset button — shows "SMTP not configured" until Phase 14 — 2026-05-25
+- [x] Super Admin actions section (superadmin viewer only): Promote to Super Admin button (indigo), Inactivate (amber) / Delete (red) based on deletability — 2026-05-25
+- [x] Promote confirmation dialog: indigo icon, title, body, Cancel + Promote — 2026-05-25
+- [x] Inactivate confirmation dialog: amber icon, title, body, Cancel + Inactivate — 2026-05-25
+- [x] Delete confirmation dialog: red icon, title, body, Cancel + Delete — 2026-05-25
+- [x] Footer: Cancel + Save changes (member identity color) — 2026-05-25
+- [x] Deletable rule: zero active activities AND single team membership — 2026-05-25
+- [x] Role permission matrix enforcement: team admin vs superadmin capability differences — 2026-05-25
+
+**Web — sidebar integration:**
+- [x] Member rows: gear icon on hover → opens `<MemberModal>` for that member — 2026-05-25
+- [x] Inactivated members: reduced opacity — 2026-05-25
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
+- [ ] Manual: add user, invite email, create participant, change roles, remove member
+- [ ] Manual: generate invite link, copy, register new user via link
+- [ ] Manual: Member Modal shows correct stats, admin actions work with confirmations
+- [ ] Manual: inactivated user cannot log in; reactivation restores access
+- [x] `docs/log.md` Phase 10.1.2 entry written — 2026-05-25
+
+---
+
+### Settings — Profile, Tokens & Admin (Phase 10.1.3)
+Builds out the `/settings` page into a working settings experience. Users get profile + identity management, security (password change), preferences, and API token management. Superadmins get SMTP config, instance defaults, and an orphaned-users view. Also ships forgot-password flow.
+
+**Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
+
+**Schema (migration 010):**
+- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
+- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
+- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
+- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
+
+**API — profile management:**
+- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
+- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
+- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
+- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
+- [x] Test: error path — empty name returns 400 — 2026-05-26
+
+**API — password change:**
+- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
+- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
+- [x] Test: happy path — password changed — 2026-05-26
+- [x] Test: error path — wrong current password returns 401 — 2026-05-26
+
+**API — forgot password:**
+- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
+- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
+- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
+- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
+- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
+
+**API — SMTP configuration (superadmin only):**
+- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
+- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
+- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
+- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
+- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
+- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
+- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
+
+**API — instance settings (superadmin only):**
+- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
+- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
+- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
+
+**API — orphaned users (superadmin only):**
+- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
+- [x] Test: superadmin can list all users — 2026-05-26
+
+**OpenAPI + types:**
+- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
+- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
+- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
+- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
+- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
+- [x] Add `GET /admin/users` to spec — 2026-05-26
+- [x] Regenerate TypeScript types — 2026-05-26
+
+**Web — Settings page layout:**
+- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
+- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
+- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
+- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
+
+**Web — Profile (`/settings/profile`):**
+- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
+- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
+- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
+- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
+- [x] Inline success/error feedback on save — 2026-05-26
+
+**Web — Security (`/settings/security`):**
+- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
+- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
+- [x] On success: show success message, clear form — 2026-05-26
+- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
+- [x] Calls `PUT /users/me/password` — 2026-05-26
+
+**Web — Preferences (`/settings/preferences`):**
+- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
+- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
+- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
+- [x] Theme change applies immediately — 2026-05-26
+- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
+
+**Web — API Tokens (`/settings/tokens`):**
+- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
+- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
+- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
+- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
+- [x] Empty state when no tokens exist — 2026-05-26
+
+**Web — Admin: Instance (`/settings/admin`):**
+- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Instance name field — 2026-05-26
+- [x] Save button with inline success feedback — 2026-05-26
+
+**Web — Admin: Email / SMTP (`/settings/admin`):**
+- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
+- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
+- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
+- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
+
+**Web — Admin: Users (`/settings/admin`):**
+- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
+- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
+- [x] Search input: filter by name or email — 2026-05-26
+- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
+- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
+- [ ] Orphaned users: "Assign team" action (deferred)
+
+**Web — Forgot password flow:**
+- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
+- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
+- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
+- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-26
+- [x] `go test ./...` passes — 2026-05-26
+- [x] `pnpm --filter web lint` clean — 2026-05-26
+- [ ] Manual: change display name → visible in sidebar and team member lists after refresh
+- [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
+- [ ] Manual: change password → old password rejected, new password works
+- [ ] Manual: forgot-password → email received → click link → set new password → login works
+- [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
+- [ ] Manual: configure SMTP → test email arrives → save persists across restart
+- [ ] Manual: set instance defaults → values persist
+- [ ] Manual: view all users; filter orphaned
+- [ ] Manual: toggle registration policy → test with/without invite
+- [ ] Manual: non-superadmin does not see admin sections
+- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
+
+---
+
+### Member Access & Data Lifecycle (Phase 10.1.4)
+Closes data-integrity and access-revocation gaps from 10.1.2. Protects historical activity data, defines the three membership lifecycle states, and gives superadmins a single "revoke all access" action.
+
+**Schema (migration 011):**
+- [x] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing — 2026-05-27
+- [x] Same check for `timeline_access.team_member_id` — 2026-05-27
+- [x] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — already set since early phases — 2026-05-27
+- [x] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT — 2026-05-27
+
+**API — removal guard:**
+- [x] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }` — 2026-05-27
+- [x] Zero-assignment removal continues to hard-delete as before (deletes timeline_access first due to RESTRICT FK) — 2026-05-27
+- [x] Add `MemberHasAssignments` error handling to OpenAPI spec via `RevokeUserResult` and inline error response — 2026-05-27
+
+**API — full revoke (superadmin only):**
+- [x] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }` — 2026-05-27
+- [x] Add `RevokeUser` repo method: wraps the three steps in a transaction — 2026-05-27
+- [x] 403 if caller is not superadmin; 404 if user not found — 2026-05-27
+- [x] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types — 2026-05-27
+
+**Web — TeamModal Members tab:**
+- [x] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive` — 2026-05-27
+- [x] On inactivate success from the inline error, dismiss the error and re-fetch the member list — 2026-05-27
+- [x] Clear the inline error before each new removal attempt for the same member — 2026-05-27
+
+**Web — MemberModal:**
+- [x] Add "Revoke all access" button to Super Admin Actions section (red, below Delete) — 2026-05-27
+- [x] Button hidden when user is already fully inactivated (`users.archived_at` set) — 2026-05-27
+- [x] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed) — 2026-05-27
+- [x] On confirm: call `POST /users/:id/revoke`; on success show a summary chip for 2s, then close modal — 2026-05-27
+- [x] Invalidate `['teams']` query cache on success — 2026-05-27
+
+**Testing & verification:**
+- [ ] Manual: remove a member with assignments → 409; inline error appears; "Inactivate instead" button works
+- [ ] Manual: remove a member with zero assignments → success
+- [ ] Manual: superadmin uses "Revoke all access" → account deactivated; user can no longer log in; existing Gantt bars still show their avatar name
+- [ ] Manual: inactivated members' avatars still render on Gantt bars (data preserved)
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [x] `docs/log.md` Phase 10.1.4 entry written — 2026-05-27
+
+---
+
+### Status Templates & Timeline Statuses (Phase 10.2)
+API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
+
+**Schema (migration 012):**
+- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
+- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
+- [x] Update `migrations_test.go` — 2026-05-27
+
+**Go API:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
+- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
+- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
+- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
+- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
+- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
+- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
+- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
+- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
+- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
+- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
+
+**OpenAPI + types:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
+- [x] All new endpoint paths — 2026-05-27
+- [x] Regenerate TypeScript types — 2026-05-27
+
+**Web:**
+- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
+- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
+- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
+
+**Testing & verification:**
+- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
+- [ ] Manual: create second template, add items, rename/recolor items
+- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
+- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
+- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
+
+---
+
+### Timelines — Full CRUD (Phase 10.3)
+Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
+
+**API — timeline-level:**
+- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
+- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
+- [x] Archive endpoints already in Phase 9
+
+**API — timeline statuses (editing):**
+- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
+- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
+
+**API — access list:**
+- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
+- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
+- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
+
+**Web:**
+- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
+- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
+- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
+- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
+- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
+- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
+- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
+- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
+
+**Testing & verification:**
+- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
+- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
+- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
+- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
+- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
+- [ ] Manual: delete timeline → confirm → gone from sidebar
+- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
+- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
+
+---
+
+### Preference Consumption & Session Handling (Phase 10.4.1)
+Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
+
+**Session lifecycle:**
+- [x] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
+- [x] Mutex/queue so concurrent 401s don't fire multiple refresh calls
+- [x] Invisible to user — no toast, no banner (standard SPA pattern)
+
+**Preference consumption:**
+- [x] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
+- [x] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
+- [x] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
+- [ ] `ActivityDetailPanel` and other date displays: consume date format preference (date inputs are native browser — no explicit text formatting needed until a read-only date display surface is added)
+- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in (deferred — shared views ship in Phase 13)
+- [x] Theme: sync server-side preference on login (`useDarkMode.ts` — added `applyTheme`; `ThemeSync` component applies server value on auth init)
+
+**Admin — branding (`/settings/admin`):**
+- [x] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
+- [x] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
+- [ ] Optional logo upload (stretch — deferred)
+
+---
+
+### Activity Schema Normalization — Drop team_id (Phase 10.4.2)
+Removes `activities.team_id` (redundant now that `timeline_id` is stored). Hardens `timeline_id` to NOT NULL. Moves activity routes to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix avoids Go 1.22 mux conflict with `GET /timelines/share/{token}`).
+
+**Schema (migration 015):**
+- [x] Backfill NULL `timeline_id` rows (assign to team's oldest timeline) — 2026-05-28
+- [x] Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE` — 2026-05-28
+- [x] Recreate `idx_activities_timeline_id` on the new table — 2026-05-28
+
+**API — Go:**
+- [x] `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string` — 2026-05-28
+- [x] `ActivityRepo.Create`: remove `team_id` from INSERT — 2026-05-28
+- [x] `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: query becomes `WHERE timeline_id = ?` — 2026-05-28
+- [x] `handleCreateActivity`, `handleListActivities`: path params are `teamId` + `timelineId`; look up timeline to verify ownership — 2026-05-28
+- [x] `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: replace `activity.TeamID` with timeline lookup — 2026-05-28
+- [x] WebSocket broadcasts: derive `TeamID` from timeline lookup — 2026-05-28
+- [x] Move activity routes: `POST /teams/{id}/timelines/{timelineId}/activities`, `GET /teams/{id}/timelines/{timelineId}/activities` — 2026-05-28
+
+**OpenAPI + types:**
+- [x] Update `Activity` schema: replace `teamId` with `timelineId` (required, non-nullable) — 2026-05-28
+- [x] Update activity endpoints to new team-scoped path — 2026-05-28
+- [x] Regenerate TypeScript types — 2026-05-28
+
+**Frontend:**
+- [x] Rename `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)` — cache key `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `useCreateActivity(teamId, timelineId)`: URL becomes `/teams/${teamId}/timelines/${timelineId}/activities`; no `timelineId` in request body — 2026-05-28
+- [x] `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache key updated — 2026-05-28
+- [x] `useTeamActivitySync`: update cache key lookups to `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `GanttView`: use `useTimelineActivities`; `timelineId` prop is now required (not optional) — 2026-05-28
+- [x] `ActivityCreatePanel`: `teamId` + `timelineId` passed to `useCreateActivity`; no `timelineId` in body — 2026-05-28
+- [x] `ActivityDetailPanel`: `timelineId` required; passed to `useUpdateActivity`/`useDeleteActivity` — 2026-05-28
+- [x] `DashboardPage`: updated GanttView/ActivityCreatePanel/ActivityDetailPanel prop signatures — 2026-05-28
+
+**Tests:**
+- [x] `activity_repo_test.go`: `makeActivity` uses `timelineID`; all `ListByTeam` calls → `ListByTimeline` — 2026-05-28
+- [x] Added `TestActivityRepo_ListByTimeline_Filter` — 2026-05-28
+- [x] `activity_handler_test.go`: `activityTestSetup` creates a timeline; all routes updated — 2026-05-28
+- [x] `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes — 2026-05-28
+- [x] `user_repo_test.go`, `migrations_test.go`: activity INSERTs use `timeline_id` instead of `team_id` — 2026-05-28
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-28
+- [x] `go test ./...` passes — 2026-05-28
+- [x] `pnpm --filter web lint` clean — 2026-05-28
+- [ ] Manual: Gantt view loads activities for the active timeline
+- [ ] Manual: Creating an activity from the panel associates it with the correct timeline
+- [ ] Manual: `PRAGMA foreign_key_check` returns no rows after migration on Docker DB
+
+---
+
+### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.3) [was mislabeled 10.4.2]
+Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
+
+**Inline name editing (3 → 1):**
+- [x] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus — 2026-05-28
+- [x] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle` — 2026-05-28
+
+**Archive/restore buttons (3 → 1):**
+- [x] Standardize archive button: amber bg+border+icon (aligned with MemberModal prominence) — 2026-05-28
+- [x] Standardize restore button: teal bg+border+RotateCcw icon — 2026-05-28
+- [x] Fix `TeamModal.tsx` archive button (was neutral gray) — 2026-05-28
+- [x] Fix `TimelineModal.tsx` archive button (was border-only, no icon) — 2026-05-28
+
+**Confirmation dialogs (3 → 1):**
+- [x] Consolidate into shared `ConfirmDialog` component with color variants (red, amber, indigo, teal) — 2026-05-28
+- [x] Replace `MemberModal.tsx` custom ConfirmDialog — 2026-05-28
+- [x] Replace `TeamModal.tsx` ArchiveDialog — 2026-05-28
+- [x] Replace `TimelineModal.tsx` inline confirmation panels — 2026-05-28
+
+**Color system (mixed → CSS variables):**
+- [x] Migrate `TeamModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Verified `TimelineModal.tsx` CSS variable usage is consistent — 2026-05-28
+
+**Sidebar & toolbar audit:**
+- [x] Sidebar member/timeline rows: Badge usage, hover states, gear icon consistency verified — 2026-05-28
+- [x] Gantt toolbar controls: Tailwind + CSS vars, consistent with modal footer patterns — 2026-05-28
+- [x] No inconsistencies requiring fixes found — 2026-05-28
+
+---
+
+### Gantt Interaction & Activity Edit Polish (Phase 10.4.4)
+
+**Schema (migration 016):**
+- [x] Add `notes TEXT` column to `activities` (nullable) — 2026-05-29
+
+**Go API:**
+- [x] `Activity` model: add `Notes *string` field — 2026-05-29
+- [x] `ActivityRepo.Update`: include `notes` in UPDATE SET — 2026-05-29
+- [x] `handleUpdateActivity`: parse `notes` from PATCH body — 2026-05-29
+
+**OpenAPI + types:**
+- [x] Add `notes` to `Activity` schema and PATCH body — 2026-05-29
+- [x] Regenerate TypeScript types — 2026-05-29
+- [x] Add `notes` to `UpdateActivityInput` patch type in `useTeamActivities.ts` — 2026-05-29
+
+**Gantt — resizable activity column:**
+- [x] Label column drag handle on right edge; min 140px, max 400px; live resize — 2026-05-29
+
+**Gantt — click-to-activate before drag:**
+- [x] Unselected bars show `cursor: pointer`; drag/resize only starts when bar is selected — 2026-05-29
+- [x] Resize handles (left/right edge) visible only on selected bars — 2026-05-29
+
+**Gantt — bar drag updates sidebar dates live:**
+- [x] `onBarDragProgress` callback fires during mousemove with current snapped dates — 2026-05-29
+- [x] `DashboardPage` stores `liveDragDates` and passes to `ActivityDetailPanel` — 2026-05-29
+- [x] `ActivityDetailPanel` shows live dates in date inputs without triggering saves — 2026-05-29
+- [x] `onBarDragEnd` callback clears live dates when drag completes — 2026-05-29
+
+**Gantt — finer-grained snap during drag:**
+- [x] `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4 — 2026-05-29
+- [x] `colFracToDate` interpolates fractional column positions for accurate date mapping — 2026-05-29
+- [x] Drag mousemove uses `Math.round(x / step) * step` with finer step — 2026-05-29
+- [x] `resolvedGranularity` prop passed from GanttView → GanttGrid — 2026-05-29
+
+**Gantt — "Hide closed" moves to filter preset:**
+- [x] Remove `hideClosed` checkbox and props from `GanttToolbar` — 2026-05-29
+- [x] Add `'open'` preset to `FilterDropdown` ("Open only — Hide activities with a closed status") — 2026-05-29
+- [x] Add `'open'` to `ActiveFilter` preset type in `FilterContext` — 2026-05-29
+- [x] `GanttView` reads `activeFilter.id === 'open'` to activate closed-status filtering — 2026-05-29
+- [x] Remove `hideClosed` state from `DashboardPage` — 2026-05-29
+
+**Activity Edit Sidebar — layout and field changes:**
+- [x] Remove "All day" checkbox — 2026-05-29
+- [x] Remove human-readable date summary line — 2026-05-29
+- [x] Move Description field directly below date pickers — 2026-05-29
+- [x] Restyle Assigned To with bordered card style matching create panel — 2026-05-29
+- [x] Status dropdown: replaced plain `<select>` with rich dropdown (color dot + name + CLOSED badge) — 2026-05-29
+- [x] Remove "Identity" line from Classify section — 2026-05-29
+- [x] Rename "Details" → "Advanced" — 2026-05-29
+- [x] Add Notes textarea (multi-line, resizable) backed by new `notes` column — 2026-05-29
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-29
+- [x] `go test ./...` passes — 2026-05-29
+- [x] `pnpm --filter web lint` clean — 2026-05-29
+- [ ] Manual: drag label column edge → width changes and persists during session
+- [ ] Manual: click bar (unselected) → selects it; second drag moves/resizes it
+- [ ] Manual: drag bar at week zoom → date tooltip shows day-level changes, not week-level
+- [ ] Manual: drag bar at month zoom → snaps to week boundaries
+- [ ] Manual: select "Open only" filter → closed-status activities hidden; clearing restores them
+- [ ] Manual: edit panel shows only date pickers (no allDay, no date summary)
+- [ ] Manual: description moves below dates; matches create panel layout
+- [ ] Manual: assignees use bordered card style (colored border + tint when selected)
+- [ ] Manual: status dropdown shows color dot + name; selection persists
+- [ ] Manual: notes textarea saves and loads correctly
+- [ ] Manual: bar drag → sidebar date inputs update live; stop drag → dates reset to server value
+
+---
+
+### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
+Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
+
+**Infrastructure:**
+- [ ] Extend `ViewMode` to `'gantt' | 'list' | 'calendar' | 'kanban'`
+- [ ] View switcher control in the timeline sub-toolbar; per-timeline persisted via existing preferences (8.4)
+- [ ] View-specific toolbar slots so each view contributes its own controls
+
+**List view:**
+- [ ] Virtualized table (TanStack Virtual or react-virtual) — must handle 1000+ rows smoothly
+- [ ] Default columns: Title, Start, End, Duration, Status, Assignees, Tags, Parent
+- [ ] Column show/hide menu; column reorder via drag; resizable widths — persisted via preferences (new prefs keys)
+- [ ] Sort by clicking a column header (single-column sort for v1)
+- [ ] Density toggle (Comfortable / Compact)
+- [ ] Inline edit for title, dates, status; Tab / Shift+Tab / Enter cell navigation
+- [ ] Row click (off editable cell) opens existing `EventDetailPanel`
+- [ ] Bulk selection via checkbox column; contextual bulk-action bar (archive / delete / status-change)
+- [ ] Find bar (8.5) highlights matching rows in List view
+
+---
+
+### Timeline Views — Calendar (Web — Phase 11.2)
+Three sub-layouts sharing one component skeleton.
+
+**Shared:**
+- [ ] Sub-layout switcher (Month / Week / Day) in the view's toolbar slot
+- [ ] Today / prev / next navigation; jump-to-date picker
+- [ ] Click empty cell → Event create form prefilled with that date
+- [ ] Click event → `EventDetailPanel`
+- [ ] Drag event between cells → PATCH new start/end preserving duration (Week / Day only for v1)
+
+**Month layout:**
+- [ ] 6-week grid; multi-day events render as continuous bars across cells
+- [ ] "+N more" overflow affordance per cell
+
+**Week layout:**
+- [ ] 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
+- [ ] All-day strip above the time grid for events without time components
+- [ ] Overlapping-event lane algorithm: side-by-side columns within a day
+
+**Day layout:**
+- [ ] Single-day variant of Week; same time grid and lane algorithm
+
+**Open question to resolve at start of phase:**
+- [ ] Decide handling for date-only events in time-grid layouts (default 9am vs. all-day strip)
+
+---
+
+### Timeline Views — Kanban (Web — Phase 11.3)
+Read-only per requirements. Depends on Phase 10.1 (status API) and 10.2 (status UI).
+
+- [ ] Columns from `team_statuses` in display order; column header colored from status color
+- [ ] Cards: title, date range, assignee avatars (stacked color indicators for multi-assignee), parent badge if nested
+- [ ] Empty column shows muted "No events" placeholder
+- [ ] Each column scrolls independently when card count exceeds viewport height
+- [ ] Card click → `EventDetailPanel`
+- [ ] Status renamed/recolored in Settings updates Kanban column header without refresh
+- [ ] Attempting to drag a card produces no errors and no state change (read-only enforcement)
+
+### Calendar Sync
+- [ ] Google Calendar OAuth connect flow
+- [ ] Outbound sync: push draba events to Google Calendar on create/update/delete
+- [ ] Inbound sync: Google webhook handler → upsert event in draba
+- [ ] Built-in CalDAV server (`internal/caldav/`)
+- [ ] CalDAV connect flow (user provides URL + credentials)
+- [ ] Outbound sync: push draba events to CalDAV on create/update/delete
+- [ ] Team iCal feed endpoint: `GET /timelines/:ical_token/feed.ics` (public, sanitized — no notes)
+
+### Shares — Multi-Share Views with Passwords (Phase 13)
+First-class Share entity. One timeline can host many shares, each frozen to a specific view + config.
+
+**Schema:**
+- [ ] Migration: `shares` table — id, timeline_id, view_type, view_config JSON, password_hash (nullable), expires_at (nullable), created_by, created_at, last_viewed_at, view_count, revoked_at
+- [ ] Migration: migrate existing `timelines.share_token` value into a first share row, then drop the column in a follow-up migration once UI references are gone
+
+**API:**
+- [ ] `POST /timelines/:id/shares` — create share with view_type + view_config snapshot + optional password + optional expiry
+- [ ] `GET /timelines/:id/shares` — list shares (creator + admins)
+- [ ] `PATCH /shares/:id` — rename / change password / extend expiry / revoke
+- [ ] `DELETE /shares/:id` — hard delete
+- [ ] `GET /shares/:token` — public lookup; password-protected returns 401 with `passwordRequired: true`
+- [ ] `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
+- [ ] Rate-limit unlock attempts per IP
+
+**Web — creating shares:**
+- [ ] "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
+- [ ] Share modal: snapshots current toolbar state into `view_config`, optional password + expiry toggles, returns URL with copy button
+
+**Web — viewing shares:**
+- [ ] Public viewer route `/s/:token` — no auth required
+- [ ] Password gate page for protected shares
+- [ ] Mount the appropriate view component in read-only mode with `view_config` applied
+- [ ] Branding strip: team name, "Shared view", last-updated timestamp
+
+**Web — managing shares:**
+- [ ] Manage-shares section on each timeline (list, view counts, revoke, edit)
+- [ ] Indicator chip on timeline tile showing active share count
+
+---
+
+### Data Portability & Exports (Phase 14)
+
+**Tabular (round-trip):**
+- [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
+- [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
+- [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
+
+**Visual exports (gofpdf):**
+- [ ] Gantt → PDF: landscape, paginated by date range, member-color legend strip
+- [ ] Gantt → PNG: single-page rasterized variant
+- [ ] Kanban → PDF: columns side-by-side, paginated when too wide
+- [ ] Kanban → PNG: single-page
+- [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
+- [ ] Calendar → PDF: one page per month / week / day depending on active sub-layout
+- [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
+- [ ] All visual exports respect active filter / sort / group at time of export
+
+**Wiring:**
+- [ ] Gantt toolbar's existing "Export" stub becomes a real menu: CSV / xlsx / PDF / PNG
+- [ ] Same export menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to formats valid for that view
+
+**SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
+- [ ] Password reset flow (email required — pick SMTP or transactional email provider)
+- [ ] SMTP configuration surface in `/settings/admin`
+
+---
+
+### External Connectors (Inbound Webhooks) — Phase 15
+Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
+
+**Backend:**
+- [ ] Create `team_inbound_webhooks` and `event_links` DB migrations
+- [ ] Add `is_external` boolean column to `events` table
+- [ ] `POST /teams/:id/webhooks` — generate an inbound webhook URL for a provider (e.g. Asana)
+- [ ] `GET /teams/:id/webhooks` — list active inbound webhooks
+- [ ] `POST /webhooks/:provider/:token` — generic inbound webhook handler to map payload to Draba events
+- [ ] Web UI: Render `is_external` events as read-only (disable drag-and-drop handles)
+- [ ] Web UI: Show external provider icon/link on the event detail card
+
+**Per-timeline connector model (was Up-Next "Web — Connectors"):**
+- [ ] Migration: `team_connectors (id, team_id, timeline_id, provider ENUM, display_name, config JSON, created_by, created_at)` — one row per connector instance
+- [ ] Provider values initially: `asana | aha | google_sheets | excel_online | webhook`
+- [ ] `GET /timelines/:id/connectors` — list connectors for a timeline
+- [ ] `POST /timelines/:id/connectors` — create connector (admin only); returns generated inbound token
+- [ ] `PATCH /connectors/:id` — update display name or config (admin only)
+- [ ] `DELETE /connectors/:id` — remove connector (admin only)
+- [ ] `POST /connectors/:token/ingest` — public inbound endpoint; validates token; maps payload via provider adapter
+
+**Sidebar CONNECTORS section (already stubbed):**
+- [ ] Wire `GET /timelines/:id/connectors` — list active connectors beneath the active timeline label
+- [ ] "Add connector" → connector setup sheet: provider picker → config fields → save → `POST /timelines/:id/connectors`
+- [ ] Connector row hover → gear icon → config drawer; delete with confirm
+- [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
+
+## Done
+- [x] Initialize repo scaffold — 2026-04-27
+- [x] Define requirements, architecture, conventions — 2026-04-27
+
+## Parking Lot
+- MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
+- CLI binary
+- MCP server for AI agent access
+- Mobile native apps (ship PWA first)
+- Microsoft/Outlook calendar sync (v2)
+- Multi-tenant cloud hosting
+- SSO / OAuth login (GitHub, Google)
+- Notifications (email, push)
+- Recurring event UI (RRULE editing)
+- Kanban drag-to-change-status (v2; v1 Kanban is read-only)
 ````
 
 ## File: packages/shared/src/index.ts
@@ -34597,6 +35763,7 @@ export interface operations {
                 "application/json": {
                     title: string;
                     description?: string | null;
+                    notes?: string | null;
                     icon?: string | null;
                     color?: string | null;
                     /** Format: date-time */
@@ -37815,6 +38982,9 @@ paths:
                 description:
                   type: string
                   nullable: true
+                notes:
+                  type: string
+                  nullable: true
                 icon:
                   type: string
                   nullable: true
@@ -39066,1556 +40236,6 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
-## File: docs/TASKS.md
-````markdown
-# Tasks
-
-## Current Sprint — Foundation
-
-### Repo & Tooling
-- [x] Initialize Go module (`packages/api/`) with basic project structure — 2026-04-29
-- [x] Initialize React + TypeScript + Vite project (`packages/web/`) — 2026-04-29
-- [x] Set up pnpm workspace (`pnpm-workspace.yaml`) — 2026-04-29
-- [x] Add `golangci-lint` config (`.golangci.yml`) — 2026-04-29
-- [x] Set up GitHub Actions CI: lint + test on PR — 2026-04-29
-- [x] Write `docker-compose.yml` for local development — 2026-04-29
-
-### API — Core
-- [x] DB abstraction layer with SQLite adapter (sqlx + modernc.org/sqlite) — 2026-04-30
-- [x] Migration runner (auto-runs on startup) — 2026-04-30
-- [x] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens — 2026-04-30
-- [x] Auth: JWT issue/validate, password hash/verify, invite token generate/validate — 2026-04-30
-- [x] `POST /auth/register` (invite token required) — 2026-04-30
-- [x] `POST /auth/login` — 2026-04-30
-- [x] `POST /auth/refresh` — 2026-04-30
-- [x] `POST /teams` — create team — 2026-05-03
-- [x] `POST /teams/:id/invites` — send invite — 2026-05-03
-- [x] `GET /teams/:id/members` — 2026-05-03
-- [x] `POST /teams/:id/events` — create event — 2026-05-03
-- [x] `GET /teams/:id/events` — list events (date range filter) — 2026-05-03
-- [x] `PATCH /events/:id` — update event — 2026-05-03
-- [x] `DELETE /events/:id` — delete event — 2026-05-03
-
-### API — Real-Time
-- [x] WebSocket hub (`internal/ws/`) — 2026-05-14
-- [x] Team-scoped subscription model — 2026-05-14
-- [x] Broadcast on `events.*` internal bus events — 2026-05-14
-
-### API — Timelines
-- [x] `POST /teams/:id/timelines` — create timeline — 2026-05-15
-- [x] `GET /timelines/:id` — fetch timeline (public or auth-gated) — 2026-05-15
-- [x] `GET /timelines/share/:token` — public share link handler — 2026-05-15
-- [x] Timeline access list enforcement — 2026-05-15
-
-### Web — Scaffold
-- [x] Initialize shadcn/ui: `pnpm dlx shadcn@latest init` — 2026-05-16
-- [x] Set color tokens in `src/index.css` once palette is decided — 2026-05-16
-- [x] Set up dark mode toggle (localStorage + `prefers-color-scheme`) — 2026-05-16
-- [x] Routing setup (React Router) — 2026-05-16
-- [x] Auth flow: login, register (via invite), token storage — 2026-05-16
-- [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
-- [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
-- [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
-
-### RBAC Refactor + First-Run Setup (Phase 8.0)
-- [x] Migration 003: `team_members` PK, nullable `user_id`, `display_name` — 2026-05-18
-- [x] Migration 003: `event_assignments` + `timeline_access` swap `user_id` FK for `team_member_id` — 2026-05-18
-- [x] Migration 003: `timeline_access` gains `role (admin|member)`; `visibility` dropped from `timelines` — 2026-05-18
-- [x] `User.IsSuperadmin`: first registered user auto-granted superadmin — 2026-05-18
-- [x] `GET /setup/status` — public endpoint (`{ needsSetup: bool }`) — 2026-05-18
-- [x] Timeline access: team admins bypass check; members require explicit `timeline_access` entry — 2026-05-18
-- [x] `SetupPage`: 3-step first-run wizard (account → team → timeline) — 2026-05-18
-- [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
-- [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
-
-### Web — Timeline View (Phase 8.1: Shell & Rendering — Gantt pivot)
-- [x] API: `GET /teams`, `GET /teams/:id/timelines`, `assignedMemberIds[]` on Event — 2026-05-18
-- [x] `TimelineView` + `TimelineGrid` (person-lane prototype, later pivoted) — 2026-05-18
-- [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
-- [x] Wire to `GET /teams/:id/events?start=&end=` and `GET /teams/:id/members` — 2026-05-18
-- [x] `TimelineGrid` rewrite: Gantt layout — one row per event, sticky label col, member avatars — 2026-05-18
-- [x] `TimelineToolbar` component: zoom in/out, group-by, sort-by, export stub — 2026-05-18
-- [x] `TimelineView` update: build `GanttRow[]` with grouping + sorting logic — 2026-05-18
-- [x] Group by Member: section headers per assignee, events under primary assignee — 2026-05-18
-- [x] Group by Parent: root events first, children indented below their parent — 2026-05-18
-- [x] Sort by: start date, end date, title A–Z — 2026-05-18
-- [x] Zoom: variable `colWidth` stepped through [40, 60, 80, 120, 160] px/day — 2026-05-18
-- [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
-
-### Web — Timeline View (Phase 8.2: Interactions)
-- [x] Click event block → open `EventDetailPanel` (view mode) — 2026-05-19
-- [x] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id` — 2026-05-19
-- [x] Delete event with confirm dialog; remove from timeline — 2026-05-19
-- [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
-- [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
-
-### Web — Gantt Bar Drag (Phase 8.2.1: Resize & Move)
-- [x] Detect mousedown on left/right edge (8px zone) vs. bar body — 2026-05-19
-- [x] Edge drag: update start or end date live as user drags; snap to active granularity column — 2026-05-19
-- [x] Body drag: shift both start and end dates by the same column delta — 2026-05-19
-- [x] Show date tooltip during drag (start date for left edge, end date for right edge, both for body) — 2026-05-19
-- [x] PATCH `/events/:id` with new startAt/endAt on mouseup; optimistic update in cache — 2026-05-19
-- [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
-
-### Web — Timeline View (Phase 8.3: Real-Time Sync)
-- [x] Connect `useWebSocket` to subscribe to `events.*` for active team — 2026-05-19
-- [x] `events.created` delta: insert block into TanStack Query cache — 2026-05-19
-- [x] `events.updated` delta: update block in cache — 2026-05-19
-- [x] `events.deleted` delta: remove block from cache — 2026-05-19
-- [x] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta) — 2026-05-19
-
-### OpenAPI
-- [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
-- [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
-- [x] Set up Go type generation from spec (`oapi-codegen`) — 2026-05-16
-- [x] Refactor existing Go handlers to use generated OpenAPI models — 2026-05-16
-
-### Web — Persistent View Settings (Phase 8.4)
-- [x] Migration 004: `user_preferences` table with empty-string sentinel for global scope — 2026-05-20
-- [x] `UserPreference` model (`models.go`) — 2026-05-20
-- [x] `UserPreferenceRepo`: `List` and `Upsert` methods — 2026-05-20
-- [x] `GET /users/me/preferences?timeline_id=` — returns scoped or global prefs — 2026-05-20
-- [x] `PUT /users/me/preferences` — upsert single key/value, validates JSON — 2026-05-20
-- [x] OpenAPI spec: `UserPreference` schema + two endpoints — 2026-05-20
-- [x] TypeScript types regenerated from spec — 2026-05-20
-- [x] `usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks — 2026-05-20
-- [x] `DashboardPage`: restore toolbar state from per-timeline prefs on timeline switch — 2026-05-20
-- [x] `DashboardPage`: save toolbar state (group_by, sort_by, zoom_granularity, color_by) on change — 2026-05-20
-- [x] `DashboardPage`: persist dark mode preference globally — 2026-05-20
-
-### Web — Find (Phase 8.5)
-In-view "find in page" with highlight + match navigation. Scoped to already-loaded events; respects active filters. Global cross-team search is deferred to Phase 15.
-
-**Find bar:**
-- [x] `FindBar` component in the TopBar (between FilterDropdown and ProfileMenu) — query input, match counter (`N / M`), prev/next chevrons, close (×) — 2026-05-20
-- [x] Open via `Ctrl/Cmd+F` global keybinding and via a search icon in the TopBar; close via `Esc` or × — 2026-05-20
-- [x] Debounced (~150ms) client-side matcher over already-fetched events — 2026-05-20
-
-**Match scope:**
-- [x] Case-insensitive match against: event title, description, assignee display names, parent event title — 2026-05-20
-- [x] Respect active filters — only events already visible in the current view are candidates — 2026-05-20
-
-**Visual treatment:**
-- [x] Matching events: amber outline / glow using existing design tokens — 2026-05-20
-- [x] Non-matching events: dimmed to ~0.3 opacity — 2026-05-20
-- [x] Active match (prev/next cursor position): stronger outline + subtle pulse to distinguish from other matches — 2026-05-20
-- [x] On hover, non-title matches show a "why matched" hint (e.g. `matched assignee Jane`) — 2026-05-20
-
-**Navigation:**
-- [x] `Enter` / `Shift+Enter` and ◀ ▶ chevrons walk forward/backward through matches — 2026-05-20
-- [x] Auto-scroll the Gantt on each step — horizontal pan to event's date range, vertical scroll to its row, centered in viewport — 2026-05-20
-
-**Empty / edge cases:**
-- [x] Zero matches, no filters active → bar shows `No matches` — 2026-05-20
-- [x] Zero matches in view, filters active → soft callout: *"No matches in current view. [Clear filters]"* — 2026-05-20
-- [x] Find query is ephemeral (not persisted across navigation/reload); bar open-state also ephemeral — 2026-05-20
-
-**Testing:**
-- [x] Unit: matcher returns correct hits across all match fields, case-insensitive — 2026-05-20
-- [ ] Integration: Find works at every granularity level and every group-by mode (requires live data — manual)
-- [ ] Keyboard: full prev/next cycle reachable with keyboard only (manual verification with live events)
-
-## Up Next
-
-> **Member management work is split across Phase 10.1.1 (Teams — CRUD) and Phase 10.1.2 (Members — Management & Editing)**. Team entity CRUD (create, edit, archive) is in 10.1.1; member lifecycle (add, edit, roles, invites, stubs, inactivation, admin actions) is in 10.1.2. The previously enumerated sidebar gear-icon + add-member-sheet tasks are absorbed into 10.1.2.
-
-### Web — Filter Scoping (FilterDropdown + API)
-Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
-
-**Data model:**
-- Single `saved_filters` table: `(id, team_id, timeline_id nullable, created_by, name, definition JSON, scope ENUM(personal|nominated|team|timeline), status ENUM(active|pending_review))`
-- `scope=personal` — visible only to creator; `scope=team` — visible to all team members; `scope=timeline` — visible to all members of that timeline; `scope=nominated` — personal filter flagged by member for admin review (visible to admins)
-
-**API:**
-- [ ] Migration: replace current `saved_filters` shape with the unified schema above
-- [ ] `GET /teams/:id/filters` — returns filters scoped `team` or `timeline` (for the active timeline), plus the calling user's `personal` and `nominated` filters
-- [ ] `POST /teams/:id/filters` — create a new personal filter; `definition` is the filter JSON
-- [ ] `PATCH /filters/:id` — update name or definition (creator or admin)
-- [ ] `PATCH /filters/:id/scope` — promote/demote scope; admin-only for `team`/`timeline`; any member can set `nominated`
-- [ ] `DELETE /filters/:id` — creator or admin
-
-**Web — FilterDropdown layout:**
-- [ ] Reorganize dropdown into four labeled sections, each hidden when empty:
-  1. **Default** — All events / Upcoming / My events (hardcoded presets, always present)
-  2. **Team** — filters with `scope=team` from API
-  3. **Timeline** — filters with `scope=timeline` for the active timeline
-  4. **Mine** — caller's `personal` filters; nominated filters shown with a "Pending" badge
-- [ ] Filter names truncate with ellipsis at a max width; full name in tooltip on hover
-- [ ] "New filter…" opens filter editor (personal scope by default); "Share…" action on existing personal filters lets the member nominate it or (if admin) promote directly to team/timeline
-- [ ] Pass active timeline ID through context so the dropdown can fetch timeline-scoped filters
-- [ ] Admin-visible section at bottom of "Mine": nominated filters awaiting review, with Approve / Reject actions
-
----
-
-> **Connectors sidebar + per-timeline connector model is absorbed into the External Connectors (Inbound Webhooks) task block further down** — that section now carries both the webhook backend and the sidebar UI work.
-
-### API — Token Auth (Phase 9)
-- [x] `POST /tokens` — create API token (returns value once) — 2026-05-20
-- [x] `GET /tokens` — list tokens for current user — 2026-05-20
-- [x] `DELETE /tokens/:id` — revoke token (preserved row, sets revoked_at) — 2026-05-20
-- [x] Middleware: accept Bearer token (JWT or API token) on all authenticated routes — 2026-05-20
-- [x] Enforce token scope on writes (read-only tokens blocked from mutations) — 2026-05-20
-
-### API — Archive (Phase 9)
-- [x] `POST /events/:id/archive` and `POST /events/:id/unarchive` — 2026-05-20
-- [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
-- [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
-
-### The Great Event → Activity Rename (Phase 9.5)
-Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEventToActivity.md](GreatEventToActivity.md). Roadmap: [Phase 9.5](ROADMAP.md#phase-95--rename-event--activity-the-great-rename).
-
-> **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
-
-**DB:**
-- [x] Write migration `005_rename_events_to_activities.sql` — 2026-05-21 (`ALTER TABLE ... RENAME`)
-- [x] Rename indexes containing `event` in their name — 2026-05-21
-- [x] Update `migrations_test.go` to assert new table + column names — 2026-05-21
-- [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
-
-**Go API:**
-- [x] `models.Event` → `models.Activity` — 2026-05-21
-- [x] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo` — 2026-05-21
-- [x] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions — 2026-05-21
-- [x] `server.go`: routes `/events*` → `/activities*` — 2026-05-21
-- [x] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` — 2026-05-21 → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
-- [x] Update `bus_test.go`, `hub_test.go` wire-string assertions — 2026-05-21
-- [x] `golangci-lint run` clean, `go test ./...` passes — 2026-05-21
-
-**OpenAPI + generated types:**
-- [x] `packages/shared/openapi.yaml`: schema, paths, operationIds — 2026-05-21, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
-- [x] Run `pnpm --filter shared generate`; verify `Activity` exports — 2026-05-21, zero `Event` exports
-
-**Web:**
-- [x] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` — 2026-05-21 → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
-- [x] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys — 2026-05-21
-- [x] `useWebSocket.ts`: update message-type switch to `activity.*` — 2026-05-21
-- [x] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*` — 2026-05-21; fix imports
-- [x] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels — 2026-05-21
-- [x] `pnpm --filter web lint` clean — 2026-05-21
-
-**Tests + seed:**
-- [x] Rename `event_handler_test.go` → `activity_handler_test.go` — 2026-05-21
-- [x] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql` — 2026-05-21; update INSERTs + cleanup
-
-**Docs:**
-- [x] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md — 2026-05-21
-- [x] Hand-review: ROADMAP Phase 3 title — 2026-05-21 → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
-- [x] Do **not** rewrite `docs/log.md` historical entries — 2026-05-21
-- [x] Add Phase 9.5 entry to `docs/log.md` — 2026-05-21
-
-**Verification (smoke against http://epcot.lan:8081):**
-- [ ] Create / edit / archive / unarchive / delete an Activity end-to-end
-- [ ] WebSocket frames arrive as `activity.created` / `.updated` / `.deleted`
-- [ ] Final sweep `rg "\bevent" packages/ docs/` returns only expected hits (bus package, calendar fields, log.md)
-
-### Identity System (Phase 9.6)
-Reusable Identity component system (color + icon) for all entities. Design spec: [IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md). Prototype: `docs/design/assets/identity-widget-prototype.html`.
-
-**Schema (migration 006):**
-- [x] Write migration `006_identity_fields.sql` — 2026-05-24
-- [x] Update `migrations_test.go` to assert new columns exist — 2026-05-24
-
-**Go API:**
-- [x] `models.go`: add `Icon *string` + `Color *string` to `Team`; add `Icon *string` + `Color *string` to `Timeline`; add `Icon *string` to `TeamMember` — 2026-05-24
-- [x] Update `TeamMemberWithUser` to surface the new `Icon` field (via embedding) — 2026-05-24
-- [x] Update OpenAPI spec: add `icon`/`color` to `Team`, `Timeline`, `TeamMember` schemas — 2026-05-24
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-24
-- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-05-24
-
-**Web — component library (`src/components/identity/`):**
-- [x] `identity-constants.ts` — 2026-05-24
-- [x] `Badge.tsx` — 2026-05-24
-- [x] `IdentityTrigger.tsx` — 2026-05-24
-- [x] `IdentityPicker.tsx` — 2026-05-24
-- [x] `IdentityWidget.tsx` — 2026-05-24
-
-**Web — replace existing color/icon UI:**
-- [x] `ActivityDetailPanel`: `<IdentityWidget>` replacing icon stub + 8-color swatch — 2026-05-24
-- [x] `ActivityCreatePanel`: `<IdentityWidget>` replacing color swatch — 2026-05-24
-- [x] Gantt bar label column: `<Badge size={20} shape="square">` — 2026-05-24
-- [x] Sidebar timeline rows: `<Badge size={20} shape="square">` — 2026-05-24
-- [x] Sidebar member rows: `<Badge size={20} shape="circle">` — 2026-05-24
-
-**Web — MemberAvatar migration:**
-- [x] Refactor `MemberAvatar.tsx` to delegate to `<Badge>` — 2026-05-24
-- [ ] Verify all existing MemberAvatar call sites render correctly (manual)
-
-**Web — palette consolidation:**
-- [x] Update `types/index.ts`: re-export `ACTIVITY_COLORS` and `MEMBER_COLORS` from `identity-constants.ts` — 2026-05-24
-- [x] Update `index.css`: `--member-N-*` → 16 `--identity-<name>` custom properties — 2026-05-24
-- [x] Update `DESIGN_SYSTEM.md`: 8-color → 16-color identity palette reference — 2026-05-24
-
-**Testing & verification:**
-- [x] `pnpm --filter web lint` clean — 2026-05-24
-- [x] `golangci-lint run` clean — 2026-05-24
-- [x] `go test ./...` passes — 2026-05-24
-- [ ] Badge renders all four modes (Lucide icon, 1-letter, 2-letter, none) at sizes 20–40px, both shapes (manual)
-- [ ] IdentityWidget popover opens/closes; color, name option, and icon selection fire onChange (manual)
-- [ ] Legacy hex colors in existing activities display correctly via `hexToColorId()` mapping (manual — test on Docker)
-- [ ] Manual: ActivityDetailPanel uses IdentityWidget; changes persist as color IDs (manual — test on Docker)
-- [ ] Manual: sidebar member + timeline rows use Badge (manual)
-
-**Docs:**
-- [x] Add Phase 9.6 entry to `docs/log.md` — 2026-05-24
-
----
-
-### Phase 10 — Entity Management (data-cornerstone CRUD)
-
-Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
-
-Design references:
-- Team Modal: `docs/design/handoffs/team-modal/` — Settings tab, Members tab, archive flow
-- Member Edit Modal: `docs/design/handoffs/member-modal/` — member profile, stats, admin actions
-
----
-
-### Teams — CRUD & Management (Phase 10.1.1)
-Closes the Teams data entity. Ships the Team Modal with Settings tab functional; Members tab scaffolded as locked/placeholder until 10.1.2.
-
-**Schema (migration 008):**
-- [x] Add `description TEXT` column to `teams` (nullable) — 2026-05-25
-- [x] Add `notes TEXT` column to `teams` (nullable) — 2026-05-25
-- [x] Add `archived_at DATETIME` column to `teams` (nullable) — 2026-05-25
-- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
-
-**API — team-level:**
-- [x] `GET /teams/:id` — full team detail (name, description, notes, icon, color, archived_at) — 2026-05-25
-- [x] `PATCH /teams/:id` — update name, description, notes, icon, color (admin only) — 2026-05-25
-- [x] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` — 2026-05-25
-- [x] Update `POST /teams` to accept `description`, `notes`, `icon`, `color` — 2026-05-25
-- [x] Update `GET /teams` — add `?archived=true` to include archived teams — 2026-05-25
-
-**OpenAPI + types:**
-- [x] Update `Team` schema: add `description`, `notes`, `archivedAt` — 2026-05-25
-- [x] Update `CreateTeamInput` and `PatchTeamInput` request bodies — 2026-05-25
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-25
-
-**Web — Team Modal (`<TeamModal>`):**
-- [x] Modal shell: portal, backdrop, panel (580px, dark theme), header, tab bar, scrollable content, footer — 2026-05-25
-- [x] Header: identity badge (36px square) + label ("NEW TEAM" / "EDIT TEAM") + team name + close button — 2026-05-25
-- [x] Tab bar: Settings (active) + Members (locked/placeholder in this phase) — 2026-05-25
-- [x] Members tab locked state: opacity 0.45, not-allowed cursor, tooltip "Save the team first to add members" — 2026-05-25
-- [x] Settings tab: `<IdentityPicker>` (square shape), name (required), description, notes (textarea) — 2026-05-25
-- [x] Footer: Archive team button (edit mode, left side), Cancel + Create team / Save changes (right side, team-color primary button) — 2026-05-25
-- [x] "Saved" banner: appears after new team creation, auto-dismisses after 3s — 2026-05-25
-- [x] New-team flow: Settings tab → Create team → banner → Members tab unlocks (placeholder content) — 2026-05-25
-- [x] Edit-team flow: pre-populated Settings tab, Members tab unlocked (placeholder) — 2026-05-25
-- [x] Archive confirmation dialog: replaces modal content, amber styling, icon, title, body, Cancel + Archive team buttons — 2026-05-25
-
-**Web — team picker + settings shell:**
-- [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
-- [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
-- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
-- [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
-- [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
-- [ ] Manual: create second team from picker, edit existing team, archive/unarchive
-- [ ] Manual: Team Modal opens in both modes with correct Settings tab behavior
-- [x] `docs/log.md` Phase 10.1.1 entry written — 2026-05-25
-
----
-
-### Members — Management & Editing (Phase 10.1.2)
-Fills in the Team Modal Members tab and adds the Member Edit Modal. Full member lifecycle: add, edit, roles, stubs, invites, reusable invite link, stats, inactivation, superadmin actions. Depends on 10.1.1 (Team Modal shell).
-
-**Terminology:** "Participant" = login-less team member (backend: `user_id = NULL`). Design handoffs use "stub" but we use "Participant" — established in Phase 8.0, more user-friendly. "Inactivate" = `archived_at`-based disabling. "Super Admin" = `is_superadmin`.
-
-**Schema (migration 009):**
-- [x] Add `archived_at DATETIME` column to `team_members` (nullable) — member inactivation — 2026-05-25
-- [x] Add `archived_at DATETIME` column to `users` (nullable) — account-level inactivation — 2026-05-25
-- [x] Add `invite_link_token TEXT UNIQUE` column to `teams` (nullable) — reusable invite link — 2026-05-25
-- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
-
-**API — member CRUD:**
-- [x] `GET /teams/:id/members/:memberId` — full member detail with computed stats — 2026-05-25
-- [x] `POST /teams/:id/members` — add existing registered user by `userId` (admin only) — 2026-05-25
-- [x] `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; self for own name/color/icon) — 2026-05-25
-- [x] `DELETE /teams/:id/members/:memberId` — remove from team; reject if last admin — 2026-05-25
-- [x] `POST /teams/:id/members/:memberId/archive` — inactivate member (set `archived_at`) — 2026-05-25
-- [x] `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clear `archived_at`) — 2026-05-25
-
-**API — participant CRUD:**
-- [x] `POST /teams/:id/participants` — create login-less participant (admin only); name, icon, color, optional email — 2026-05-25
-- [x] Participants managed via same PATCH/DELETE member endpoints (role always `member`, `user_id` stays NULL) — 2026-05-25
-
-**API — invites:**
-- [x] `GET /teams/:id/invites` — list pending invites (email, sent date) — 2026-05-25
-- [x] `DELETE /teams/:id/invites/:inviteId` — revoke/cancel pending invite — 2026-05-25
-- [x] `POST /teams/:id/invite-link` — generate or regenerate reusable team invite link token — 2026-05-25
-- [x] `GET /teams/:id/invite-link` — get current invite link (or null) — 2026-05-25
-- [x] `DELETE /teams/:id/invite-link` — revoke current invite link — 2026-05-25
-- [x] Update `POST /auth/register` to accept reusable invite link tokens alongside existing one-time tokens — 2026-05-25
-
-**API — member stats (computed per request, not stored):**
-- [x] Timeline counts: active, archived (per member) — 2026-05-25
-- [x] Activity counts: past due, running, upcoming, unscheduled, archived (date-relative, not status-relative) — 2026-05-25
-
-**API — superadmin actions:**
-- [x] `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only, not applicable to participants) — 2026-05-25
-- [x] `POST /users/:id/archive` — inactivate user account (superadmin only) — 2026-05-25
-- [x] `POST /users/:id/unarchive` — reactivate user account (superadmin only) — 2026-05-25
-- [x] `DELETE /users/:id` — hard delete user (superadmin only; zero active activities + single team only) — 2026-05-25
-- [x] Auth middleware: reject login from archived users with clear error — 2026-05-25
-
-**OpenAPI + types:**
-- [x] Add `MemberDetail` schema with stats, teams list, archived_at — 2026-05-25
-- [x] Add invite link endpoints to spec — 2026-05-25
-- [x] Add superadmin action endpoints to spec — 2026-05-25
-- [x] Update `TeamMember` schema with `archivedAt` — 2026-05-25
-- [x] Regenerate TypeScript types — 2026-05-25
-
-**Web — Team Modal Members tab:**
-- [x] Search/add input: search users by name/email, or type email to invite; clear button — 2026-05-25
-- [x] Search results dropdown: user matches with "Add" / "Already added" / "Invite pending"; email-only with "Invite" — 2026-05-25
-- [x] Participant creation: expandable inline form — identity picker (circle), name (required), optional email, "Create participant" button (amber) — 2026-05-25
-- [x] Member list: avatar (dashed border for stubs), name, "No login" pill (stubs, amber), email, `<RoleDropdown>`, remove (×) — 2026-05-25
-- [x] `<RoleDropdown>`: Admin (teal), Member (muted), Participant (amber) — with descriptions; portal-rendered; role changes save immediately — 2026-05-25
-- [x] Pending invitations section: rows with dashed-circle mail icon, email, sent date, "Revoke" button (red) — 2026-05-25
-- [x] Invite link section: URL display + "Copy link" button (teal transition to "Copied!"), explanatory note below — 2026-05-25
-- [x] Member count badge on Members tab label — 2026-05-25
-
-**Web — Member Edit Modal (`<MemberModal>`):**
-- [x] Modal shell: portal, backdrop, 560px panel, header / scrollable content / footer — 2026-05-25
-- [x] Header: `<IdentityPicker>` (40px circle), subline (participant/team member + viewer role label), name + badges ("No login" amber) — 2026-05-25
-- [x] Name + email row: 2-column grid; email read-only for participants ("No email — participant" placeholder) — 2026-05-25
-- [x] Timeline stats: 2 chips — Active (teal border), Archived (muted border) — 2026-05-25
-- [x] Activity stats: 5 chips — Past due (red if >0), Running (teal), Upcoming (blue), Unscheduled (muted), Archived (muted) — 2026-05-25
-- [x] Joined date: read-only pill with icon — 2026-05-25
-- [x] Teams list: each row with team badge (square, initials), team name, role pill — 2026-05-25
-- [x] Account section (team admin + non-participant): password reset button — shows "SMTP not configured" until Phase 14 — 2026-05-25
-- [x] Super Admin actions section (superadmin viewer only): Promote to Super Admin button (indigo), Inactivate (amber) / Delete (red) based on deletability — 2026-05-25
-- [x] Promote confirmation dialog: indigo icon, title, body, Cancel + Promote — 2026-05-25
-- [x] Inactivate confirmation dialog: amber icon, title, body, Cancel + Inactivate — 2026-05-25
-- [x] Delete confirmation dialog: red icon, title, body, Cancel + Delete — 2026-05-25
-- [x] Footer: Cancel + Save changes (member identity color) — 2026-05-25
-- [x] Deletable rule: zero active activities AND single team membership — 2026-05-25
-- [x] Role permission matrix enforcement: team admin vs superadmin capability differences — 2026-05-25
-
-**Web — sidebar integration:**
-- [x] Member rows: gear icon on hover → opens `<MemberModal>` for that member — 2026-05-25
-- [x] Inactivated members: reduced opacity — 2026-05-25
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
-- [ ] Manual: add user, invite email, create participant, change roles, remove member
-- [ ] Manual: generate invite link, copy, register new user via link
-- [ ] Manual: Member Modal shows correct stats, admin actions work with confirmations
-- [ ] Manual: inactivated user cannot log in; reactivation restores access
-- [x] `docs/log.md` Phase 10.1.2 entry written — 2026-05-25
-
----
-
-### Settings — Profile, Tokens & Admin (Phase 10.1.3)
-Builds out the `/settings` page into a working settings experience. Users get profile + identity management, security (password change), preferences, and API token management. Superadmins get SMTP config, instance defaults, and an orphaned-users view. Also ships forgot-password flow.
-
-**Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
-
-**Schema (migration 010):**
-- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
-- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
-- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
-- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
-
-**API — profile management:**
-- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
-- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
-- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
-- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
-- [x] Test: error path — empty name returns 400 — 2026-05-26
-
-**API — password change:**
-- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
-- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
-- [x] Test: happy path — password changed — 2026-05-26
-- [x] Test: error path — wrong current password returns 401 — 2026-05-26
-
-**API — forgot password:**
-- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
-- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
-- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
-- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
-- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
-
-**API — SMTP configuration (superadmin only):**
-- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
-- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
-- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
-- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
-- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
-- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
-- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
-
-**API — instance settings (superadmin only):**
-- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
-- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
-- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
-
-**API — orphaned users (superadmin only):**
-- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
-- [x] Test: superadmin can list all users — 2026-05-26
-
-**OpenAPI + types:**
-- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
-- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
-- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
-- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
-- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
-- [x] Add `GET /admin/users` to spec — 2026-05-26
-- [x] Regenerate TypeScript types — 2026-05-26
-
-**Web — Settings page layout:**
-- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
-- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
-- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
-- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
-
-**Web — Profile (`/settings/profile`):**
-- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
-- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
-- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
-- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
-- [x] Inline success/error feedback on save — 2026-05-26
-
-**Web — Security (`/settings/security`):**
-- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
-- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
-- [x] On success: show success message, clear form — 2026-05-26
-- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
-- [x] Calls `PUT /users/me/password` — 2026-05-26
-
-**Web — Preferences (`/settings/preferences`):**
-- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
-- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
-- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
-- [x] Theme change applies immediately — 2026-05-26
-- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
-
-**Web — API Tokens (`/settings/tokens`):**
-- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
-- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
-- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
-- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
-- [x] Empty state when no tokens exist — 2026-05-26
-
-**Web — Admin: Instance (`/settings/admin`):**
-- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
-- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
-- [x] Instance name field — 2026-05-26
-- [x] Save button with inline success feedback — 2026-05-26
-
-**Web — Admin: Email / SMTP (`/settings/admin`):**
-- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
-- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
-- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
-- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
-
-**Web — Admin: Users (`/settings/admin`):**
-- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
-- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
-- [x] Search input: filter by name or email — 2026-05-26
-- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
-- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
-- [ ] Orphaned users: "Assign team" action (deferred)
-
-**Web — Forgot password flow:**
-- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
-- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
-- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
-- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-26
-- [x] `go test ./...` passes — 2026-05-26
-- [x] `pnpm --filter web lint` clean — 2026-05-26
-- [ ] Manual: change display name → visible in sidebar and team member lists after refresh
-- [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
-- [ ] Manual: change password → old password rejected, new password works
-- [ ] Manual: forgot-password → email received → click link → set new password → login works
-- [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
-- [ ] Manual: configure SMTP → test email arrives → save persists across restart
-- [ ] Manual: set instance defaults → values persist
-- [ ] Manual: view all users; filter orphaned
-- [ ] Manual: toggle registration policy → test with/without invite
-- [ ] Manual: non-superadmin does not see admin sections
-- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
-
----
-
-### Member Access & Data Lifecycle (Phase 10.1.4)
-Closes data-integrity and access-revocation gaps from 10.1.2. Protects historical activity data, defines the three membership lifecycle states, and gives superadmins a single "revoke all access" action.
-
-**Schema (migration 011):**
-- [x] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing — 2026-05-27
-- [x] Same check for `timeline_access.team_member_id` — 2026-05-27
-- [x] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — already set since early phases — 2026-05-27
-- [x] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT — 2026-05-27
-
-**API — removal guard:**
-- [x] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }` — 2026-05-27
-- [x] Zero-assignment removal continues to hard-delete as before (deletes timeline_access first due to RESTRICT FK) — 2026-05-27
-- [x] Add `MemberHasAssignments` error handling to OpenAPI spec via `RevokeUserResult` and inline error response — 2026-05-27
-
-**API — full revoke (superadmin only):**
-- [x] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }` — 2026-05-27
-- [x] Add `RevokeUser` repo method: wraps the three steps in a transaction — 2026-05-27
-- [x] 403 if caller is not superadmin; 404 if user not found — 2026-05-27
-- [x] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types — 2026-05-27
-
-**Web — TeamModal Members tab:**
-- [x] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive` — 2026-05-27
-- [x] On inactivate success from the inline error, dismiss the error and re-fetch the member list — 2026-05-27
-- [x] Clear the inline error before each new removal attempt for the same member — 2026-05-27
-
-**Web — MemberModal:**
-- [x] Add "Revoke all access" button to Super Admin Actions section (red, below Delete) — 2026-05-27
-- [x] Button hidden when user is already fully inactivated (`users.archived_at` set) — 2026-05-27
-- [x] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed) — 2026-05-27
-- [x] On confirm: call `POST /users/:id/revoke`; on success show a summary chip for 2s, then close modal — 2026-05-27
-- [x] Invalidate `['teams']` query cache on success — 2026-05-27
-
-**Testing & verification:**
-- [ ] Manual: remove a member with assignments → 409; inline error appears; "Inactivate instead" button works
-- [ ] Manual: remove a member with zero assignments → success
-- [ ] Manual: superadmin uses "Revoke all access" → account deactivated; user can no longer log in; existing Gantt bars still show their avatar name
-- [ ] Manual: inactivated members' avatars still render on Gantt bars (data preserved)
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [x] `docs/log.md` Phase 10.1.4 entry written — 2026-05-27
-
----
-
-### Status Templates & Timeline Statuses (Phase 10.2)
-API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
-
-**Schema (migration 012):**
-- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
-- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
-- [x] Update `migrations_test.go` — 2026-05-27
-
-**Go API:**
-- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
-- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
-- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
-- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
-- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
-- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
-- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
-- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
-- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
-- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
-- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
-- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
-
-**OpenAPI + types:**
-- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
-- [x] All new endpoint paths — 2026-05-27
-- [x] Regenerate TypeScript types — 2026-05-27
-
-**Web:**
-- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
-- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
-- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
-
-**Testing & verification:**
-- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
-- [ ] Manual: create second template, add items, rename/recolor items
-- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
-- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
-- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
-
----
-
-### Timelines — Full CRUD (Phase 10.3)
-Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
-
-**API — timeline-level:**
-- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
-- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
-- [x] Archive endpoints already in Phase 9
-
-**API — timeline statuses (editing):**
-- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
-- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
-- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
-
-**API — access list:**
-- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
-- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
-- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
-
-**Web:**
-- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
-- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
-- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
-- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
-- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
-- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
-- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
-- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
-
-**Testing & verification:**
-- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
-- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
-- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
-- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
-- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
-- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
-- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
-- [ ] Manual: delete timeline → confirm → gone from sidebar
-- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
-- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
-
----
-
-### Preference Consumption & Session Handling (Phase 10.4.1)
-Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
-
-**Session lifecycle:**
-- [x] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
-- [x] Mutex/queue so concurrent 401s don't fire multiple refresh calls
-- [x] Invisible to user — no toast, no banner (standard SPA pattern)
-
-**Preference consumption:**
-- [x] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
-- [x] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
-- [x] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
-- [ ] `ActivityDetailPanel` and other date displays: consume date format preference (date inputs are native browser — no explicit text formatting needed until a read-only date display surface is added)
-- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in (deferred — shared views ship in Phase 13)
-- [x] Theme: sync server-side preference on login (`useDarkMode.ts` — added `applyTheme`; `ThemeSync` component applies server value on auth init)
-
-**Admin — branding (`/settings/admin`):**
-- [x] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
-- [x] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
-- [ ] Optional logo upload (stretch — deferred)
-
----
-
-### Activity Schema Normalization — Drop team_id (Phase 10.4.2)
-Removes `activities.team_id` (redundant now that `timeline_id` is stored). Hardens `timeline_id` to NOT NULL. Moves activity routes to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix avoids Go 1.22 mux conflict with `GET /timelines/share/{token}`).
-
-**Schema (migration 015):**
-- [x] Backfill NULL `timeline_id` rows (assign to team's oldest timeline) — 2026-05-28
-- [x] Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE` — 2026-05-28
-- [x] Recreate `idx_activities_timeline_id` on the new table — 2026-05-28
-
-**API — Go:**
-- [x] `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string` — 2026-05-28
-- [x] `ActivityRepo.Create`: remove `team_id` from INSERT — 2026-05-28
-- [x] `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: query becomes `WHERE timeline_id = ?` — 2026-05-28
-- [x] `handleCreateActivity`, `handleListActivities`: path params are `teamId` + `timelineId`; look up timeline to verify ownership — 2026-05-28
-- [x] `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: replace `activity.TeamID` with timeline lookup — 2026-05-28
-- [x] WebSocket broadcasts: derive `TeamID` from timeline lookup — 2026-05-28
-- [x] Move activity routes: `POST /teams/{id}/timelines/{timelineId}/activities`, `GET /teams/{id}/timelines/{timelineId}/activities` — 2026-05-28
-
-**OpenAPI + types:**
-- [x] Update `Activity` schema: replace `teamId` with `timelineId` (required, non-nullable) — 2026-05-28
-- [x] Update activity endpoints to new team-scoped path — 2026-05-28
-- [x] Regenerate TypeScript types — 2026-05-28
-
-**Frontend:**
-- [x] Rename `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)` — cache key `['timelines', timelineId, 'activities']` — 2026-05-28
-- [x] `useCreateActivity(teamId, timelineId)`: URL becomes `/teams/${teamId}/timelines/${timelineId}/activities`; no `timelineId` in request body — 2026-05-28
-- [x] `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache key updated — 2026-05-28
-- [x] `useTeamActivitySync`: update cache key lookups to `['timelines', timelineId, 'activities']` — 2026-05-28
-- [x] `GanttView`: use `useTimelineActivities`; `timelineId` prop is now required (not optional) — 2026-05-28
-- [x] `ActivityCreatePanel`: `teamId` + `timelineId` passed to `useCreateActivity`; no `timelineId` in body — 2026-05-28
-- [x] `ActivityDetailPanel`: `timelineId` required; passed to `useUpdateActivity`/`useDeleteActivity` — 2026-05-28
-- [x] `DashboardPage`: updated GanttView/ActivityCreatePanel/ActivityDetailPanel prop signatures — 2026-05-28
-
-**Tests:**
-- [x] `activity_repo_test.go`: `makeActivity` uses `timelineID`; all `ListByTeam` calls → `ListByTimeline` — 2026-05-28
-- [x] Added `TestActivityRepo_ListByTimeline_Filter` — 2026-05-28
-- [x] `activity_handler_test.go`: `activityTestSetup` creates a timeline; all routes updated — 2026-05-28
-- [x] `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes — 2026-05-28
-- [x] `user_repo_test.go`, `migrations_test.go`: activity INSERTs use `timeline_id` instead of `team_id` — 2026-05-28
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-28
-- [x] `go test ./...` passes — 2026-05-28
-- [x] `pnpm --filter web lint` clean — 2026-05-28
-- [ ] Manual: Gantt view loads activities for the active timeline
-- [ ] Manual: Creating an activity from the panel associates it with the correct timeline
-- [ ] Manual: `PRAGMA foreign_key_check` returns no rows after migration on Docker DB
-
----
-
-### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.3) [was mislabeled 10.4.2]
-Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
-
-**Inline name editing (3 → 1):**
-- [x] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus — 2026-05-28
-- [x] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle` — 2026-05-28
-- [x] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle` — 2026-05-28
-- [x] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle` — 2026-05-28
-
-**Archive/restore buttons (3 → 1):**
-- [x] Standardize archive button: amber bg+border+icon (aligned with MemberModal prominence) — 2026-05-28
-- [x] Standardize restore button: teal bg+border+RotateCcw icon — 2026-05-28
-- [x] Fix `TeamModal.tsx` archive button (was neutral gray) — 2026-05-28
-- [x] Fix `TimelineModal.tsx` archive button (was border-only, no icon) — 2026-05-28
-
-**Confirmation dialogs (3 → 1):**
-- [x] Consolidate into shared `ConfirmDialog` component with color variants (red, amber, indigo, teal) — 2026-05-28
-- [x] Replace `MemberModal.tsx` custom ConfirmDialog — 2026-05-28
-- [x] Replace `TeamModal.tsx` ArchiveDialog — 2026-05-28
-- [x] Replace `TimelineModal.tsx` inline confirmation panels — 2026-05-28
-
-**Color system (mixed → CSS variables):**
-- [x] Migrate `TeamModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
-- [x] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
-- [x] Verified `TimelineModal.tsx` CSS variable usage is consistent — 2026-05-28
-
-**Sidebar & toolbar audit:**
-- [x] Sidebar member/timeline rows: Badge usage, hover states, gear icon consistency verified — 2026-05-28
-- [x] Gantt toolbar controls: Tailwind + CSS vars, consistent with modal footer patterns — 2026-05-28
-- [x] No inconsistencies requiring fixes found — 2026-05-28
-
----
-
-### Gantt Interaction & Activity Edit Polish (Phase 10.4.4)
-
-**Schema (migration 016):**
-- [x] Add `notes TEXT` column to `activities` (nullable) — 2026-05-29
-
-**Go API:**
-- [x] `Activity` model: add `Notes *string` field — 2026-05-29
-- [x] `ActivityRepo.Update`: include `notes` in UPDATE SET — 2026-05-29
-- [x] `handleUpdateActivity`: parse `notes` from PATCH body — 2026-05-29
-
-**OpenAPI + types:**
-- [x] Add `notes` to `Activity` schema and PATCH body — 2026-05-29
-- [x] Regenerate TypeScript types — 2026-05-29
-- [x] Add `notes` to `UpdateActivityInput` patch type in `useTeamActivities.ts` — 2026-05-29
-
-**Gantt — resizable activity column:**
-- [x] Label column drag handle on right edge; min 140px, max 400px; live resize — 2026-05-29
-
-**Gantt — click-to-activate before drag:**
-- [x] Unselected bars show `cursor: pointer`; drag/resize only starts when bar is selected — 2026-05-29
-- [x] Resize handles (left/right edge) visible only on selected bars — 2026-05-29
-
-**Gantt — bar drag updates sidebar dates live:**
-- [x] `onBarDragProgress` callback fires during mousemove with current snapped dates — 2026-05-29
-- [x] `DashboardPage` stores `liveDragDates` and passes to `ActivityDetailPanel` — 2026-05-29
-- [x] `ActivityDetailPanel` shows live dates in date inputs without triggering saves — 2026-05-29
-- [x] `onBarDragEnd` callback clears live dates when drag completes — 2026-05-29
-
-**Gantt — finer-grained snap during drag:**
-- [x] `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4 — 2026-05-29
-- [x] `colFracToDate` interpolates fractional column positions for accurate date mapping — 2026-05-29
-- [x] Drag mousemove uses `Math.round(x / step) * step` with finer step — 2026-05-29
-- [x] `resolvedGranularity` prop passed from GanttView → GanttGrid — 2026-05-29
-
-**Gantt — "Hide closed" moves to filter preset:**
-- [x] Remove `hideClosed` checkbox and props from `GanttToolbar` — 2026-05-29
-- [x] Add `'open'` preset to `FilterDropdown` ("Open only — Hide activities with a closed status") — 2026-05-29
-- [x] Add `'open'` to `ActiveFilter` preset type in `FilterContext` — 2026-05-29
-- [x] `GanttView` reads `activeFilter.id === 'open'` to activate closed-status filtering — 2026-05-29
-- [x] Remove `hideClosed` state from `DashboardPage` — 2026-05-29
-
-**Activity Edit Sidebar — layout and field changes:**
-- [x] Remove "All day" checkbox — 2026-05-29
-- [x] Remove human-readable date summary line — 2026-05-29
-- [x] Move Description field directly below date pickers — 2026-05-29
-- [x] Restyle Assigned To with bordered card style matching create panel — 2026-05-29
-- [x] Status dropdown: replaced plain `<select>` with rich dropdown (color dot + name + CLOSED badge) — 2026-05-29
-- [x] Remove "Identity" line from Classify section — 2026-05-29
-- [x] Rename "Details" → "Advanced" — 2026-05-29
-- [x] Add Notes textarea (multi-line, resizable) backed by new `notes` column — 2026-05-29
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-29
-- [x] `go test ./...` passes — 2026-05-29
-- [x] `pnpm --filter web lint` clean — 2026-05-29
-- [ ] Manual: drag label column edge → width changes and persists during session
-- [ ] Manual: click bar (unselected) → selects it; second drag moves/resizes it
-- [ ] Manual: drag bar at week zoom → date tooltip shows day-level changes, not week-level
-- [ ] Manual: drag bar at month zoom → snaps to week boundaries
-- [ ] Manual: select "Open only" filter → closed-status activities hidden; clearing restores them
-- [ ] Manual: edit panel shows only date pickers (no allDay, no date summary)
-- [ ] Manual: description moves below dates; matches create panel layout
-- [ ] Manual: assignees use bordered card style (colored border + tint when selected)
-- [ ] Manual: status dropdown shows color dot + name; selection persists
-- [ ] Manual: notes textarea saves and loads correctly
-- [ ] Manual: bar drag → sidebar date inputs update live; stop drag → dates reset to server value
-
----
-
-### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
-Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
-
-**Infrastructure:**
-- [ ] Extend `ViewMode` to `'gantt' | 'list' | 'calendar' | 'kanban'`
-- [ ] View switcher control in the timeline sub-toolbar; per-timeline persisted via existing preferences (8.4)
-- [ ] View-specific toolbar slots so each view contributes its own controls
-
-**List view:**
-- [ ] Virtualized table (TanStack Virtual or react-virtual) — must handle 1000+ rows smoothly
-- [ ] Default columns: Title, Start, End, Duration, Status, Assignees, Tags, Parent
-- [ ] Column show/hide menu; column reorder via drag; resizable widths — persisted via preferences (new prefs keys)
-- [ ] Sort by clicking a column header (single-column sort for v1)
-- [ ] Density toggle (Comfortable / Compact)
-- [ ] Inline edit for title, dates, status; Tab / Shift+Tab / Enter cell navigation
-- [ ] Row click (off editable cell) opens existing `EventDetailPanel`
-- [ ] Bulk selection via checkbox column; contextual bulk-action bar (archive / delete / status-change)
-- [ ] Find bar (8.5) highlights matching rows in List view
-
----
-
-### Timeline Views — Calendar (Web — Phase 11.2)
-Three sub-layouts sharing one component skeleton.
-
-**Shared:**
-- [ ] Sub-layout switcher (Month / Week / Day) in the view's toolbar slot
-- [ ] Today / prev / next navigation; jump-to-date picker
-- [ ] Click empty cell → Event create form prefilled with that date
-- [ ] Click event → `EventDetailPanel`
-- [ ] Drag event between cells → PATCH new start/end preserving duration (Week / Day only for v1)
-
-**Month layout:**
-- [ ] 6-week grid; multi-day events render as continuous bars across cells
-- [ ] "+N more" overflow affordance per cell
-
-**Week layout:**
-- [ ] 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
-- [ ] All-day strip above the time grid for events without time components
-- [ ] Overlapping-event lane algorithm: side-by-side columns within a day
-
-**Day layout:**
-- [ ] Single-day variant of Week; same time grid and lane algorithm
-
-**Open question to resolve at start of phase:**
-- [ ] Decide handling for date-only events in time-grid layouts (default 9am vs. all-day strip)
-
----
-
-### Timeline Views — Kanban (Web — Phase 11.3)
-Read-only per requirements. Depends on Phase 10.1 (status API) and 10.2 (status UI).
-
-- [ ] Columns from `team_statuses` in display order; column header colored from status color
-- [ ] Cards: title, date range, assignee avatars (stacked color indicators for multi-assignee), parent badge if nested
-- [ ] Empty column shows muted "No events" placeholder
-- [ ] Each column scrolls independently when card count exceeds viewport height
-- [ ] Card click → `EventDetailPanel`
-- [ ] Status renamed/recolored in Settings updates Kanban column header without refresh
-- [ ] Attempting to drag a card produces no errors and no state change (read-only enforcement)
-
-### Calendar Sync
-- [ ] Google Calendar OAuth connect flow
-- [ ] Outbound sync: push draba events to Google Calendar on create/update/delete
-- [ ] Inbound sync: Google webhook handler → upsert event in draba
-- [ ] Built-in CalDAV server (`internal/caldav/`)
-- [ ] CalDAV connect flow (user provides URL + credentials)
-- [ ] Outbound sync: push draba events to CalDAV on create/update/delete
-- [ ] Team iCal feed endpoint: `GET /timelines/:ical_token/feed.ics` (public, sanitized — no notes)
-
-### Shares — Multi-Share Views with Passwords (Phase 13)
-First-class Share entity. One timeline can host many shares, each frozen to a specific view + config.
-
-**Schema:**
-- [ ] Migration: `shares` table — id, timeline_id, view_type, view_config JSON, password_hash (nullable), expires_at (nullable), created_by, created_at, last_viewed_at, view_count, revoked_at
-- [ ] Migration: migrate existing `timelines.share_token` value into a first share row, then drop the column in a follow-up migration once UI references are gone
-
-**API:**
-- [ ] `POST /timelines/:id/shares` — create share with view_type + view_config snapshot + optional password + optional expiry
-- [ ] `GET /timelines/:id/shares` — list shares (creator + admins)
-- [ ] `PATCH /shares/:id` — rename / change password / extend expiry / revoke
-- [ ] `DELETE /shares/:id` — hard delete
-- [ ] `GET /shares/:token` — public lookup; password-protected returns 401 with `passwordRequired: true`
-- [ ] `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
-- [ ] Rate-limit unlock attempts per IP
-
-**Web — creating shares:**
-- [ ] "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
-- [ ] Share modal: snapshots current toolbar state into `view_config`, optional password + expiry toggles, returns URL with copy button
-
-**Web — viewing shares:**
-- [ ] Public viewer route `/s/:token` — no auth required
-- [ ] Password gate page for protected shares
-- [ ] Mount the appropriate view component in read-only mode with `view_config` applied
-- [ ] Branding strip: team name, "Shared view", last-updated timestamp
-
-**Web — managing shares:**
-- [ ] Manage-shares section on each timeline (list, view counts, revoke, edit)
-- [ ] Indicator chip on timeline tile showing active share count
-
----
-
-### Data Portability & Exports (Phase 14)
-
-**Tabular (round-trip):**
-- [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
-- [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
-- [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
-
-**Visual exports (gofpdf):**
-- [ ] Gantt → PDF: landscape, paginated by date range, member-color legend strip
-- [ ] Gantt → PNG: single-page rasterized variant
-- [ ] Kanban → PDF: columns side-by-side, paginated when too wide
-- [ ] Kanban → PNG: single-page
-- [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
-- [ ] Calendar → PDF: one page per month / week / day depending on active sub-layout
-- [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
-- [ ] All visual exports respect active filter / sort / group at time of export
-
-**Wiring:**
-- [ ] Gantt toolbar's existing "Export" stub becomes a real menu: CSV / xlsx / PDF / PNG
-- [ ] Same export menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to formats valid for that view
-
-**SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
-- [ ] Password reset flow (email required — pick SMTP or transactional email provider)
-- [ ] SMTP configuration surface in `/settings/admin`
-
----
-
-### External Connectors (Inbound Webhooks) — Phase 15
-Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
-
-**Backend:**
-- [ ] Create `team_inbound_webhooks` and `event_links` DB migrations
-- [ ] Add `is_external` boolean column to `events` table
-- [ ] `POST /teams/:id/webhooks` — generate an inbound webhook URL for a provider (e.g. Asana)
-- [ ] `GET /teams/:id/webhooks` — list active inbound webhooks
-- [ ] `POST /webhooks/:provider/:token` — generic inbound webhook handler to map payload to Draba events
-- [ ] Web UI: Render `is_external` events as read-only (disable drag-and-drop handles)
-- [ ] Web UI: Show external provider icon/link on the event detail card
-
-**Per-timeline connector model (was Up-Next "Web — Connectors"):**
-- [ ] Migration: `team_connectors (id, team_id, timeline_id, provider ENUM, display_name, config JSON, created_by, created_at)` — one row per connector instance
-- [ ] Provider values initially: `asana | aha | google_sheets | excel_online | webhook`
-- [ ] `GET /timelines/:id/connectors` — list connectors for a timeline
-- [ ] `POST /timelines/:id/connectors` — create connector (admin only); returns generated inbound token
-- [ ] `PATCH /connectors/:id` — update display name or config (admin only)
-- [ ] `DELETE /connectors/:id` — remove connector (admin only)
-- [ ] `POST /connectors/:token/ingest` — public inbound endpoint; validates token; maps payload via provider adapter
-
-**Sidebar CONNECTORS section (already stubbed):**
-- [ ] Wire `GET /timelines/:id/connectors` — list active connectors beneath the active timeline label
-- [ ] "Add connector" → connector setup sheet: provider picker → config fields → save → `POST /timelines/:id/connectors`
-- [ ] Connector row hover → gear icon → config drawer; delete with confirm
-- [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
-
-## Done
-- [x] Initialize repo scaffold — 2026-04-27
-- [x] Define requirements, architecture, conventions — 2026-04-27
-
-## Parking Lot
-- MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
-- CLI binary
-- MCP server for AI agent access
-- Mobile native apps (ship PWA first)
-- Microsoft/Outlook calendar sync (v2)
-- Multi-tenant cloud hosting
-- SSO / OAuth login (GitHub, Google)
-- Notifications (email, push)
-- Recurring event UI (RRULE editing)
-- Kanban drag-to-change-status (v2; v1 Kanban is read-only)
-````
-
-## File: packages/web/src/pages/DashboardPage.tsx
-````typescript
-/**
- * Main application shell: sidebar + top bar + content area.
- *
- * Fetches the authenticated user's first team and first timeline to seed the
- * initial view. Team-selection UI and full sidebar wiring come in a later phase.
- */
-
-import { useState, useRef, useEffect, useCallback } from 'react'
-import Sidebar from '@/components/layout/Sidebar'
-import TopBar, { type ViewMode } from '@/components/layout/TopBar'
-import RightSidebar from '@/components/layout/RightSidebar'
-import GanttView from '@/components/gantt/GanttView'
-import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
-import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
-import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
-import { FilterProvider } from '@/contexts/FilterContext'
-import { FindProvider, useFind } from '@/contexts/FindContext'
-import { useAuth } from '@/contexts/AuthContext'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import TeamModal from '@/components/TeamModal'
-import MemberModal from '@/components/MemberModal'
-import TimelineModal from '@/components/TimelineModal'
-import { useNavigate } from 'react-router-dom'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-type ApiTeam = components['schemas']['Team']
-type ApiTimeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-const DROPDOWN_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  width: '100%',
-  padding: '10px 14px',
-  background: 'none',
-  border: 'none',
-  fontSize: 13,
-  color: 'var(--foreground)',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  textAlign: 'left',
-}
-
-function DashboardShell() {
-  const { logout, accessToken, user } = useAuth()
-  const navigate = useNavigate()
-  const { isDark, toggle: toggleDark, theme } = useDarkMode()
-  const { setFindBarOpen } = useFind()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('gantt')
-  const [profileOpen, setProfileOpen] = useState(false)
-  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
-  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
-  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
-  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
-  const [filterEditorOpen, setFilterEditorOpen] = useState(false)
-  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
-  // Gantt toolbar state
-  const [groupBy, setGroupBy] = useState<GroupBy>('none')
-  const [sortBy, setSortBy] = useState<SortBy>('startDate')
-  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
-  const [colorBy, setColorBy] = useState<ColorBy>('activity')
-  const profileRef = useRef<HTMLDivElement>(null)
-  // Preference persistence
-  const upsert = useUpsertPreference()
-  // Track whether we've applied server prefs for the active timeline so we
-  // don't immediately write defaults back before the server data arrives.
-  const prefsAppliedForTimeline = useRef<string | null>(null)
-  // One-shot guard: init activeTimelineId from global prefs only on first load.
-  const timelineIdInitialized = useRef(false)
-
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
-        setProfileOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault()
-        setFindBarOpen(true)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [setFindBarOpen])
-
-  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
-  const email = (user as { email?: string } | null)?.email ?? ''
-  const userIdentity: Identity = {
-    color: (user as { color?: string } | null)?.color ?? '#288C9B',
-    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
-  }
-
-  // Global preferences — restored on login to seed team/timeline selection.
-  const { isSuccess: globalPrefsSettled } = usePreferences()
-  const globalPrefMap = usePreferenceMap()
-
-  // Team modal state
-  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
-  const unarchiveTeam = useUnarchiveTeam()
-
-  // Member modal state
-  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
-
-  // Timeline modal state
-  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
-
-  // Fetch all teams including archived for the sidebar's archived section.
-  const { data: allTeams = [] } = useMyTeams(true)
-  const activeTeams = allTeams.filter(t => !t.archivedAt)
-  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
-
-  // Explicit team selection state — initialized from global prefs or first active team.
-  const [activeTeamId, setActiveTeamId] = useState<string>('')
-  const teamIdInitialized = useRef(false)
-  useEffect(() => {
-    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
-    teamIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
-    const exists = saved && activeTeams.some(t => t.id === saved)
-    setActiveTeamId(exists ? saved : activeTeams[0].id)
-  }, [activeTeams, globalPrefsSettled, globalPrefMap])
-
-  const activeTeam = activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0]
-  const teamId = activeTeam?.id ?? ''
-
-  // Check whether the current user is an admin of the active team.
-  const { data: teamMembers = [] } = useTeamMembers(teamId)
-  const userId = (user as { id?: string } | null)?.id ?? ''
-  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
-  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
-
-  const handleSelectTeam = useCallback((id: string) => {
-    setActiveTeamId(id)
-  }, [])
-
-  const unarchiveTimeline = useUnarchiveTimeline(teamId)
-
-  const { data: timelines = [] } = useTeamTimelines(teamId)
-  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
-  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
-  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
-  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
-  // Initialize activeTimelineId from the saved global pref (selected_timeline),
-  // falling back to timelines[0] when no pref is stored or the saved timeline
-  // is no longer in the list. Waits for global prefs to settle so we don't
-  // immediately overwrite a restored value with the fallback.
-  useEffect(() => {
-    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
-    timelineIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
-    const exists = saved && timelines.some(t => t.id === saved)
-    setActiveTimelineId(exists ? saved : timelines[0].id)
-  }, [timelines, globalPrefsSettled, globalPrefMap])
-  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
-  // Derived so they stay in sync after edits without needing separate state.
-  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
-  const activeTimelineName = activeTimeline?.name ?? ''
-
-  const handleTimelineChange = useCallback((id: string) => {
-    prefsAppliedForTimeline.current = null
-    setActiveTimelineId(id)
-  }, [])
-
-  useTeamActivitySync(teamId, accessToken)
-
-  // Per-timeline preferences: restore toolbar state when the active timeline changes.
-  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
-  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
-  const timelinePrefs = usePreferenceMap(activeTimelineId)
-  useEffect(() => {
-    if (!activeTimelineId || !prefsSettled) return
-    if (prefsAppliedForTimeline.current === activeTimelineId) return
-    prefsAppliedForTimeline.current = activeTimelineId
-
-    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
-    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
-    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
-    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
-  }, [activeTimelineId, prefsSettled, timelinePrefs])
-
-  // Save toolbar state changes to per-timeline prefs.
-  const saveTimelinePref = useCallback((key: string, value: string) => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
-  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('group_by', groupBy)
-  }, [groupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('sort_by', sortBy)
-  }, [sortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('zoom_granularity', granularity)
-  }, [granularity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('color_by', colorBy)
-  }, [colorBy, saveTimelinePref])
-
-  // Global preferences: persist dark mode, active team, and active timeline.
-  useEffect(() => {
-    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
-  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!teamId) return
-    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
-  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
-  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
-      <Sidebar
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(c => !c)}
-        apiTimelines={timelines}
-        archivedTimelines={archivedTimelines}
-        activeTimelineId={activeTimelineId}
-        onActiveTimelineChange={handleTimelineChange}
-        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
-        onEditTimeline={id => {
-          // timelines (active) is always loaded; allTimelines (?archived=true) may
-          // still be in-flight, so prefer the already-loaded list to avoid opening
-          // the modal with an undefined timeline and blank fields.
-          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
-          setEditingTimeline(tl ?? null)
-          setTimelineModalMode('edit')
-        }}
-        onNewActivity={() => {
-          const today = new Date().toISOString().slice(0, 10)
-          setSelectedActivityId(null)
-          setSelectedApiActivity(null)
-          setFilterEditorOpen(false)
-          setCreateDefaults({ start: today, end: today, memberId: null })
-        }}
-        activeTeam={activeTeam}
-        activeTeams={activeTeams}
-        archivedTeams={archivedTeams}
-        canEditTeam={canEditTeam}
-        onSelectTeam={handleSelectTeam}
-        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
-        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
-        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
-        members={teamMembers.length > 0 ? teamMembers : undefined}
-        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
-      />
-
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
-        <TopBar
-          view={view}
-          teamId={teamId}
-          timelineName={activeTimelineName}
-          onViewChange={setView}
-          onOpenFilterEditor={() => setFilterEditorOpen(true)}
-          rightSlot={
-            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
-              <button
-                onClick={() => setProfileOpen(o => !o)}
-                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
-                title={displayName}
-              >
-                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
-              </button>
-
-              {profileOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 'calc(100% + 8px)',
-                    right: 0,
-                    width: 220,
-                    background: 'var(--card)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-                    zIndex: 100,
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
-                  </div>
-                  <button
-                    onClick={toggleDark}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
-                    {isDark ? 'Dark mode' : 'Light mode'}
-                  </button>
-                  <button
-                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Settings size={14} strokeWidth={1.8} />
-                    Settings
-                  </button>
-                  <button
-                    onClick={logout}
-                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <LogOut size={14} strokeWidth={1.8} />
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
-          }
-        />
-
-        {/* Active timeline color band */}
-        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
-
-        {/* Gantt sub-toolbar — only shown in Gantt view */}
-        {view === 'gantt' && (
-          <GanttToolbar
-            groupBy={groupBy}
-            onGroupByChange={setGroupBy}
-            sortBy={sortBy}
-            onSortByChange={setSortBy}
-            granularity={granularity}
-            onGranularityChange={setGranularity}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => {}}
-            onShare={() => {}}
-          />
-        )}
-
-        {/* Content area */}
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'gantt' && teamId && activeTimelineId ? (
-            <GanttView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              startDate={activeTimeline?.startDate}
-              endDate={activeTimeline?.endDate}
-              groupBy={groupBy}
-              sortBy={sortBy}
-              granularity={granularity}
-              colorBy={colorBy}
-              closedStatusIds={new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-                if (activity) setFilterEditorOpen(false)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
-                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Activity detail panel — slides in from right when an activity is selected */}
-      <ActivityDetailPanel
-        open={Boolean(selectedApiActivity)}
-        event={selectedApiActivity}
-        members={ganttMembers}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
-        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
-        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
-      />
-
-      {/* Activity create panel — slides in from New Activity button or future drag */}
-      <ActivityCreatePanel
-        open={Boolean(createDefaults) && !selectedApiActivity}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        members={ganttMembers}
-        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
-        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
-        defaultMemberId={createDefaults?.memberId}
-        onClose={() => setCreateDefaults(null)}
-      />
-
-      <RightSidebar
-        open={filterEditorOpen}
-        title="Filter editor"
-        onClose={() => setFilterEditorOpen(false)}
-      >
-        <p style={{ color: 'var(--muted-foreground)', fontSize: 13, lineHeight: 1.5 }}>
-          Filter editor coming soon.
-        </p>
-      </RightSidebar>
-
-      {/* Team modal — create or edit */}
-      {teamModalMode && (
-        <TeamModal
-          mode={teamModalMode}
-          team={editingTeam ?? undefined}
-          isAdmin={canEditTeam}
-          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
-          onTeamCreated={created => setActiveTeamId(created.id)}
-        />
-      )}
-
-      {/* Member modal — edit a team member */}
-      {editingMember && (
-        <MemberModal
-          teamId={teamId}
-          memberId={editingMember.id}
-          isAdmin={canEditTeam}
-          isSuperadmin={isSuperadmin}
-          onClose={() => setEditingMember(null)}
-        />
-      )}
-
-      {/* Timeline modal — create or edit */}
-      {timelineModalMode && (
-        <TimelineModal
-          mode={timelineModalMode}
-          teamId={teamId}
-          timeline={editingTimeline ?? undefined}
-          canAdmin={canEditTeam}
-          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
-          onCreated={created => setActiveTimelineId(created.id)}
-          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
-        />
-      )}
-    </div>
-  )
-}
-
-export default function DashboardPage() {
-  return (
-    <FindProvider>
-      <FilterProvider>
-        <DashboardShell />
-      </FilterProvider>
-    </FindProvider>
-  )
-}
-````
-
 ## File: packages/web/src/components/layout/Sidebar.tsx
 ````typescript
 import { useState, useRef, useEffect } from 'react';
@@ -41623,6 +41243,517 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
       )}
     </div>
   );
+}
+````
+
+## File: packages/web/src/pages/DashboardPage.tsx
+````typescript
+/**
+ * Main application shell: sidebar + top bar + content area.
+ *
+ * Fetches the authenticated user's first team and first timeline to seed the
+ * initial view. Team-selection UI and full sidebar wiring come in a later phase.
+ */
+
+import { useState, useRef, useEffect, useCallback } from 'react'
+import Sidebar from '@/components/layout/Sidebar'
+import TopBar, { type ViewMode } from '@/components/layout/TopBar'
+import RightSidebar from '@/components/layout/RightSidebar'
+import GanttView from '@/components/gantt/GanttView'
+import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
+import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
+import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
+import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
+import { FilterProvider } from '@/contexts/FilterContext'
+import { FindProvider, useFind } from '@/contexts/FindContext'
+import { useAuth } from '@/contexts/AuthContext'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Settings, Moon, Sun, LogOut } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import TeamModal from '@/components/TeamModal'
+import MemberModal from '@/components/MemberModal'
+import TimelineModal from '@/components/TimelineModal'
+import { useNavigate } from 'react-router-dom'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type ApiTeam = components['schemas']['Team']
+type ApiTimeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+const DROPDOWN_BTN: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  padding: '10px 14px',
+  background: 'none',
+  border: 'none',
+  fontSize: 13,
+  color: 'var(--foreground)',
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+  textAlign: 'left',
+}
+
+function DashboardShell() {
+  const { logout, accessToken, user } = useAuth()
+  const navigate = useNavigate()
+  const { isDark, toggle: toggleDark, theme } = useDarkMode()
+  const { setFindBarOpen } = useFind()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [view, setView] = useState<ViewMode>('gantt')
+  // Gantt label-column width — held here so it survives switching to another
+  // view and back (GanttView unmounts on view change, which would reset it).
+  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
+  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
+  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
+  const [filterEditorOpen, setFilterEditorOpen] = useState(false)
+  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
+  // Gantt toolbar state
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
+  const [sortBy, setSortBy] = useState<SortBy>('startDate')
+  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
+  const [colorBy, setColorBy] = useState<ColorBy>('activity')
+  const profileRef = useRef<HTMLDivElement>(null)
+  // Preference persistence
+  const upsert = useUpsertPreference()
+  // Track whether we've applied server prefs for the active timeline so we
+  // don't immediately write defaults back before the server data arrives.
+  const prefsAppliedForTimeline = useRef<string | null>(null)
+  // One-shot guard: init activeTimelineId from global prefs only on first load.
+  const timelineIdInitialized = useRef(false)
+
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setFindBarOpen(true)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [setFindBarOpen])
+
+  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
+  const email = (user as { email?: string } | null)?.email ?? ''
+  const userIdentity: Identity = {
+    color: (user as { color?: string } | null)?.color ?? '#288C9B',
+    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+  }
+
+  // Global preferences — restored on login to seed team/timeline selection.
+  const { isSuccess: globalPrefsSettled } = usePreferences()
+  const globalPrefMap = usePreferenceMap()
+
+  // Team modal state
+  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
+  const unarchiveTeam = useUnarchiveTeam()
+
+  // Member modal state
+  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
+
+  // Timeline modal state
+  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
+
+  // Fetch all teams including archived for the sidebar's archived section.
+  const { data: allTeams = [] } = useMyTeams(true)
+  const activeTeams = allTeams.filter(t => !t.archivedAt)
+  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
+
+  // Explicit team selection state — initialized from global prefs or first active team.
+  const [activeTeamId, setActiveTeamId] = useState<string>('')
+  const teamIdInitialized = useRef(false)
+  useEffect(() => {
+    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
+    teamIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
+    const exists = saved && activeTeams.some(t => t.id === saved)
+    setActiveTeamId(exists ? saved : activeTeams[0].id)
+  }, [activeTeams, globalPrefsSettled, globalPrefMap])
+
+  const activeTeam = activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0]
+  const teamId = activeTeam?.id ?? ''
+
+  // Check whether the current user is an admin of the active team.
+  const { data: teamMembers = [] } = useTeamMembers(teamId)
+  const userId = (user as { id?: string } | null)?.id ?? ''
+  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
+  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
+
+  const handleSelectTeam = useCallback((id: string) => {
+    setActiveTeamId(id)
+  }, [])
+
+  const unarchiveTimeline = useUnarchiveTimeline(teamId)
+
+  const { data: timelines = [] } = useTeamTimelines(teamId)
+  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
+  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
+  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
+  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
+  // Initialize activeTimelineId from the saved global pref (selected_timeline),
+  // falling back to timelines[0] when no pref is stored or the saved timeline
+  // is no longer in the list. Waits for global prefs to settle so we don't
+  // immediately overwrite a restored value with the fallback.
+  useEffect(() => {
+    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
+    timelineIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
+    const exists = saved && timelines.some(t => t.id === saved)
+    setActiveTimelineId(exists ? saved : timelines[0].id)
+  }, [timelines, globalPrefsSettled, globalPrefMap])
+  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
+  // Derived so they stay in sync after edits without needing separate state.
+  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
+  const activeTimelineName = activeTimeline?.name ?? ''
+
+  const handleTimelineChange = useCallback((id: string) => {
+    prefsAppliedForTimeline.current = null
+    setActiveTimelineId(id)
+  }, [])
+
+  useTeamActivitySync(teamId, accessToken)
+
+  // Per-timeline preferences: restore toolbar state when the active timeline changes.
+  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
+  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
+  const timelinePrefs = usePreferenceMap(activeTimelineId)
+  useEffect(() => {
+    if (!activeTimelineId || !prefsSettled) return
+    if (prefsAppliedForTimeline.current === activeTimelineId) return
+    prefsAppliedForTimeline.current = activeTimelineId
+
+    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
+    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
+    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
+    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
+  }, [activeTimelineId, prefsSettled, timelinePrefs])
+
+  // Save toolbar state changes to per-timeline prefs.
+  const saveTimelinePref = useCallback((key: string, value: string) => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
+  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('group_by', groupBy)
+  }, [groupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('sort_by', sortBy)
+  }, [sortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('zoom_granularity', granularity)
+  }, [granularity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('color_by', colorBy)
+  }, [colorBy, saveTimelinePref])
+
+  // Global preferences: persist dark mode, active team, and active timeline.
+  useEffect(() => {
+    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
+  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!teamId) return
+    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
+  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
+  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset label column width when the user switches timelines so each timeline
+  // starts fresh. Switching between views on the same timeline preserves width
+  // because the state lives here rather than inside the unmounting GanttView.
+  useEffect(() => {
+    setGanttLabelColW(DEFAULT_LABEL_COL_W)
+  }, [activeTimelineId])
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(c => !c)}
+        apiTimelines={timelines}
+        archivedTimelines={archivedTimelines}
+        activeTimelineId={activeTimelineId}
+        onActiveTimelineChange={handleTimelineChange}
+        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
+        onEditTimeline={id => {
+          // timelines (active) is always loaded; allTimelines (?archived=true) may
+          // still be in-flight, so prefer the already-loaded list to avoid opening
+          // the modal with an undefined timeline and blank fields.
+          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
+          setEditingTimeline(tl ?? null)
+          setTimelineModalMode('edit')
+        }}
+        onNewActivity={() => {
+          const today = new Date().toISOString().slice(0, 10)
+          setSelectedActivityId(null)
+          setSelectedApiActivity(null)
+          setFilterEditorOpen(false)
+          setCreateDefaults({ start: today, end: today, memberId: null })
+        }}
+        activeTeam={activeTeam}
+        activeTeams={activeTeams}
+        archivedTeams={archivedTeams}
+        canEditTeam={canEditTeam}
+        onSelectTeam={handleSelectTeam}
+        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
+        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
+        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
+        members={teamMembers.length > 0 ? teamMembers : undefined}
+        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
+      />
+
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <TopBar
+          view={view}
+          teamId={teamId}
+          timelineName={activeTimelineName}
+          onViewChange={setView}
+          onOpenFilterEditor={() => setFilterEditorOpen(true)}
+          rightSlot={
+            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
+              <button
+                onClick={() => setProfileOpen(o => !o)}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                title={displayName}
+              >
+                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
+              </button>
+
+              {profileOpen && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 8px)',
+                    right: 0,
+                    width: 220,
+                    background: 'var(--card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+                    zIndex: 100,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
+                  </div>
+                  <button
+                    onClick={toggleDark}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
+                    {isDark ? 'Dark mode' : 'Light mode'}
+                  </button>
+                  <button
+                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Settings size={14} strokeWidth={1.8} />
+                    Settings
+                  </button>
+                  <button
+                    onClick={logout}
+                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <LogOut size={14} strokeWidth={1.8} />
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
+          }
+        />
+
+        {/* Active timeline color band */}
+        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
+
+        {/* Gantt sub-toolbar — only shown in Gantt view */}
+        {view === 'gantt' && (
+          <GanttToolbar
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            granularity={granularity}
+            onGranularityChange={setGranularity}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => {}}
+            onShare={() => {}}
+          />
+        )}
+
+        {/* Content area */}
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {view === 'gantt' && teamId && activeTimelineId ? (
+            <GanttView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              granularity={granularity}
+              colorBy={colorBy}
+              closedStatusIds={new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+                if (activity) setFilterEditorOpen(false)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onMembersLoaded={setGanttMembers}
+              labelColW={ganttLabelColW}
+              onLabelColWChange={setGanttLabelColW}
+            />
+          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
+                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Activity detail panel — slides in from right when an activity is selected */}
+      <ActivityDetailPanel
+        open={Boolean(selectedApiActivity)}
+        event={selectedApiActivity}
+        members={ganttMembers}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
+        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
+        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
+      />
+
+      {/* Activity create panel — slides in from New Activity button or future drag */}
+      <ActivityCreatePanel
+        open={Boolean(createDefaults) && !selectedApiActivity}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        members={ganttMembers}
+        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
+        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
+        defaultMemberId={createDefaults?.memberId}
+        onClose={() => setCreateDefaults(null)}
+      />
+
+      <RightSidebar
+        open={filterEditorOpen}
+        title="Filter editor"
+        onClose={() => setFilterEditorOpen(false)}
+      >
+        <p style={{ color: 'var(--muted-foreground)', fontSize: 13, lineHeight: 1.5 }}>
+          Filter editor coming soon.
+        </p>
+      </RightSidebar>
+
+      {/* Team modal — create or edit */}
+      {teamModalMode && (
+        <TeamModal
+          mode={teamModalMode}
+          team={editingTeam ?? undefined}
+          isAdmin={canEditTeam}
+          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
+          onTeamCreated={created => setActiveTeamId(created.id)}
+        />
+      )}
+
+      {/* Member modal — edit a team member */}
+      {editingMember && (
+        <MemberModal
+          teamId={teamId}
+          memberId={editingMember.id}
+          isAdmin={canEditTeam}
+          isSuperadmin={isSuperadmin}
+          onClose={() => setEditingMember(null)}
+        />
+      )}
+
+      {/* Timeline modal — create or edit */}
+      {timelineModalMode && (
+        <TimelineModal
+          mode={timelineModalMode}
+          teamId={teamId}
+          timeline={editingTimeline ?? undefined}
+          canAdmin={canEditTeam}
+          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
+          onCreated={created => setActiveTimelineId(created.id)}
+          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
+        />
+      )}
+    </div>
+  )
+}
+
+export default function DashboardPage() {
+  return (
+    <FindProvider>
+      <FilterProvider>
+        <DashboardShell />
+      </FilterProvider>
+    </FindProvider>
+  )
 }
 ````
 
@@ -43251,6 +43382,14 @@ Admin tools for database backup visibility, manual backups, and scheduled backup
 - `TestMigrate_016_ActivityNotes`: verifies `activities.notes` column exists after migration
 
 **All automated checks pass:** `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean.
+
+---
+
+## 2026-05-29 — /test-phase 10.4.4
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 skip (ws-smoke — websocat/wscat not installed on dev box; heartbeat covered by unit tests)
+- Smoke target: http://epcot.lan:8081
 
 ---
 
