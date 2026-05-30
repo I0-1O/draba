@@ -442,6 +442,44 @@ jobs:
           cache-to: type=gha,mode=max
 ````
 
+## File: .github/workflows/repomap.yml
+````yaml
+name: Generate AI Repomap
+
+on:
+  push:
+    branches: [ "master" ]
+
+# Explicitly grant the bot permission to push commits
+permissions:
+  contents: write
+
+jobs:
+  update-map:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Generate Map
+        run: |
+          npm install -g repomix
+          repomix --style markdown --output docs/ai-context/repomap.md
+
+      - name: Commit Updated Map
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update automated AI repomap [skip ci]"
+          file_pattern: docs/ai-context/repomap.md
+````
+
 ## File: docs/design/assets/Icon Color Picker.html
 ````html
 <!doctype html>
@@ -12056,28 +12094,6 @@ services:
 [MIT License](LICENSE)
 ````
 
-## File: .claude/commands/build-phase.md
-````markdown
-Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or "Phase 1").
-
-1. Read the phase's scope and exit criteria from ROADMAP.md.
-2. Find the corresponding tasks in docs/TASKS.md.
-3. Read any referenced docs (ARCHITECTURE.md, CONVENTIONS.md, REQUIREMENTS.md) relevant to this phase before writing any code.
-4. Update the phase status in ROADMAP.md from ⬜ to 🔄 before starting work.
-5. Implement every task in the phase's scope, following CONVENTIONS.md throughout.
-6. After implementation, run all of the following checks in order — all must pass before marking the phase done:
-   - **Go:** `golangci-lint run` then `go test ./...`
-   - **Web lint:** `pnpm --filter web lint` (runs `tsc --noEmit` — catches type errors in isolation)
-   - **Web build:** `pnpm --filter web build` (runs `tsc -b && vite build` — catches additional errors that `--noEmit` misses, such as missing fields on exported interfaces, composite project reference issues, and import graph problems). This is the same build CI runs; skipping it is the most common source of "passes locally, fails in CI" build errors.
-   - Fix any errors found before proceeding, even if they're in files you didn't directly touch.
-   Suggest running `/test-phase <N>` and `/review-phase <N>` to fan the verification out across subagents in parallel.
-7. Check off completed items in TASKS.md.
-8. Update the phase status in ROADMAP.md:
-   - If all exit criteria pass: ✅ Done, add the completion date.
-   - If any exit criterion fails or needs manual verification: mark 🔄 In Progress and add a note listing what still needs review.
-9. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
-````
-
 ## File: .github/workflows/ci.yml
 ````yaml
 name: CI
@@ -17497,42 +17513,35 @@ Grep("MemberDetail", "docs/ai-context/repomap.md", output_mode="content")
 - [skills/ts-comments.md](skills/ts-comments.md) — TypeScript/React comment conventions (file headers, TSDoc on exports, inline why-comments)
 ````
 
-## File: .github/workflows/repomap.yml
-````yaml
-name: Generate AI Repomap
+## File: .claude/commands/build-phase.md
+````markdown
+Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or "Phase 1").
 
-on:
-  push:
-    branches: [ "master" ]
-
-# Explicitly grant the bot permission to push commits
-permissions:
-  contents: write
-
-jobs:
-  update-map:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout codebase
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Generate Map
-        run: |
-          npm install -g repomix
-          repomix --style markdown --output docs/ai-context/repomap.md
-
-      - name: Commit Updated Map
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: update automated AI repomap [skip ci]"
-          file_pattern: docs/ai-context/repomap.md
+1. Read the phase's scope and exit criteria from ROADMAP.md.
+2. Find the corresponding tasks in docs/TASKS.md.
+3. Read any referenced docs (ARCHITECTURE.md, CONVENTIONS.md, REQUIREMENTS.md) relevant to this phase before writing any code.
+4. Update the phase status in ROADMAP.md from ⬜ to 🔄 before starting work.
+5. Implement every task in the phase's scope, following CONVENTIONS.md throughout.
+6. After implementation, run all of the following checks in order — all must pass before marking the phase done:
+   - **Go:** `golangci-lint run` then `go test ./...`
+   - **Web lint:** `pnpm --filter web lint` (runs `tsc --noEmit` — catches type errors in isolation)
+   - **Web build:** `pnpm --filter web build` (runs `tsc -b && vite build` — catches additional errors that `--noEmit` misses, such as missing fields on exported interfaces, composite project reference issues, and import graph problems). This is the same build CI runs; skipping it is the most common source of "passes locally, fails in CI" build errors.
+   - Fix any errors found before proceeding, even if they're in files you didn't directly touch.
+   Suggest running `/test-phase <N>` and `/review-phase <N>` to fan the verification out across subagents in parallel.
+7. Check off completed items in TASKS.md.
+8. Update the phase status in ROADMAP.md:
+   - If all exit criteria pass: ✅ Done, add the completion date.
+   - If any exit criterion fails or needs manual verification: mark 🔄 In Progress and add a note listing what still needs review.
+9. Update `docs/log.md` (mandatory — this is the durable per-phase record):
+   - Prepend a dated entry at the top, matching the format of existing entries (Goal, then Backend / Frontend / Tests sections as relevant).
+   - This is the place for full implementation detail. Do **not** put that detail in session-state.md.
+10. Refresh `docs/ai-context/session-state.md` so it stays a *current-state snapshot*, never an append-log:
+   - Update the **Last updated** line.
+   - In **Phase Status**: if the phase passed all checks, leave it as the just-built phase awaiting manual verification; if a *previously* built phase has since been Docker-verified, collapse it into the "all phases through X.Y complete and verified" sentence and delete its detail (the detail already lives in log.md).
+   - Update **Open Issues** — add anything new this phase surfaced, remove anything now resolved.
+   - Point **Next phase** at the next ROADMAP item and its plan file.
+   - Keep the whole file short. If it grows past ~60 lines you are duplicating log.md — move detail out. The top-of-file contract ("per-phase detail lives in log.md; this is a snapshot only") is the rule; honor it.
+11. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
 ````
 
 ## File: docs/TESTING.md
@@ -45682,6 +45691,27 @@ Full settings experience: profile + identity management, password change, forgot
 - Click user row in admin users list → open MemberModal (deferred to polish pass)
 - "Assign team" action on orphaned users (deferred)
 - Default team/timeline dropdown in Preferences (requires loading teams list; deferred)
+
+---
+
+## 2026-05-25 — Phase 10.1.2: Members — manual-testing bug fixes
+
+Issues found during manual UI testing of 10.1.2 and fixed the same day (since verified working on Docker).
+
+**Frontend (`packages/web/`):**
+- `TeamModal.tsx` — Members tab badge was hardcoded `0`; now uses `members.length`.
+- `MemberModal.tsx` — loading overlay had no close button / no backdrop dismiss and got stuck permanently on API error; now dismissable and shows an error state.
+- `AuthContext.tsx` — browser refresh lost `user` (RefreshResponse only returns `accessToken`); fixed by calling `GET /auth/me` after token exchange to restore the user object. This was the cause of `canEditTeam = false` and the sidebar configure icons disappearing after every page refresh.
+- `useMemberManagement.ts` — `useTeamInvites` / `useUserSearch` returned `null` from the API (not `[]`); the `= []` destructuring default only catches `undefined`. Fixed with `?? []` normalization in `queryFn`.
+- `useTeamActivities.ts` — same null-vs-empty bug in `useMyTeams`, `useTeamTimelines`, `useTeamActivities`, `useTeamMembers`; all patched.
+- `TeamModal.tsx` — participant form used `IdentityPicker` (raw expanded panel) instead of `IdentityWidget` (trigger + popover); replaced.
+- `TeamModal.tsx` — role dropdown disabled on the current user's own row (`m.userId === currentUserId`); user cannot change their own role from the UI. Error banner wired to `updateMember.isError`.
+
+**Backend (`packages/api/`):**
+- `internal/db/team_repo.go` — `GetMemberStats`: `SUM()` over zero rows returns SQL `NULL`, failing `rows.Scan` into `int` with a 500; fixed with `COALESCE(SUM(...), 0)`.
+- `internal/api/team_handler.go` — `handleUpdateMember`: replaced the "last admin" check with a self-change guard (`SELF_ROLE_CHANGE / 409`); admins can now demote any other admin freely (at least one admin always remains — the current user).
+- `vite.config.ts` — WebSocket proxy target changed to `ws://`; added `rewriteWsOrigin: true`; added missing `/activities` proxy route.
+- `useWebSocket.ts` — when `VITE_API_TARGET` is set (Docker dev), WebSocket connects directly to the target instead of through Vite's unreliable `ws: true` proxy.
 
 ---
 
