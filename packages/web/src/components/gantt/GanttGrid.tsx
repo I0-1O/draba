@@ -49,6 +49,7 @@ export interface GanttActivity {
   icon?: string;
   members: Member[];
   isChild: boolean;
+  percentComplete?: number | null;
 }
 
 export type GanttRow =
