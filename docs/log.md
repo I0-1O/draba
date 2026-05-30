@@ -533,6 +533,27 @@ Full settings experience: profile + identity management, password change, forgot
 
 ---
 
+## 2026-05-25 — Phase 10.1.2: Members — manual-testing bug fixes
+
+Issues found during manual UI testing of 10.1.2 and fixed the same day (since verified working on Docker).
+
+**Frontend (`packages/web/`):**
+- `TeamModal.tsx` — Members tab badge was hardcoded `0`; now uses `members.length`.
+- `MemberModal.tsx` — loading overlay had no close button / no backdrop dismiss and got stuck permanently on API error; now dismissable and shows an error state.
+- `AuthContext.tsx` — browser refresh lost `user` (RefreshResponse only returns `accessToken`); fixed by calling `GET /auth/me` after token exchange to restore the user object. This was the cause of `canEditTeam = false` and the sidebar configure icons disappearing after every page refresh.
+- `useMemberManagement.ts` — `useTeamInvites` / `useUserSearch` returned `null` from the API (not `[]`); the `= []` destructuring default only catches `undefined`. Fixed with `?? []` normalization in `queryFn`.
+- `useTeamActivities.ts` — same null-vs-empty bug in `useMyTeams`, `useTeamTimelines`, `useTeamActivities`, `useTeamMembers`; all patched.
+- `TeamModal.tsx` — participant form used `IdentityPicker` (raw expanded panel) instead of `IdentityWidget` (trigger + popover); replaced.
+- `TeamModal.tsx` — role dropdown disabled on the current user's own row (`m.userId === currentUserId`); user cannot change their own role from the UI. Error banner wired to `updateMember.isError`.
+
+**Backend (`packages/api/`):**
+- `internal/db/team_repo.go` — `GetMemberStats`: `SUM()` over zero rows returns SQL `NULL`, failing `rows.Scan` into `int` with a 500; fixed with `COALESCE(SUM(...), 0)`.
+- `internal/api/team_handler.go` — `handleUpdateMember`: replaced the "last admin" check with a self-change guard (`SELF_ROLE_CHANGE / 409`); admins can now demote any other admin freely (at least one admin always remains — the current user).
+- `vite.config.ts` — WebSocket proxy target changed to `ws://`; added `rewriteWsOrigin: true`; added missing `/activities` proxy route.
+- `useWebSocket.ts` — when `VITE_API_TARGET` is set (Docker dev), WebSocket connects directly to the target instead of through Vite's unreliable `ws: true` proxy.
+
+---
+
 ## 2026-05-25 — Phase 10.1.2: Members — Management & Editing (review fixes)
 
 Post-review fixes applied: security hardening, token entropy, new routes, full test suite.

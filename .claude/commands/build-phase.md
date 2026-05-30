@@ -15,4 +15,13 @@ Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or
 8. Update the phase status in ROADMAP.md:
    - If all exit criteria pass: ✅ Done, add the completion date.
    - If any exit criterion fails or needs manual verification: mark 🔄 In Progress and add a note listing what still needs review.
-9. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
+9. Update `docs/log.md` (mandatory — this is the durable per-phase record):
+   - Prepend a dated entry at the top, matching the format of existing entries (Goal, then Backend / Frontend / Tests sections as relevant).
+   - This is the place for full implementation detail. Do **not** put that detail in session-state.md.
+10. Refresh `docs/ai-context/session-state.md` so it stays a *current-state snapshot*, never an append-log:
+   - Update the **Last updated** line.
+   - In **Phase Status**: if the phase passed all checks, leave it as the just-built phase awaiting manual verification; if a *previously* built phase has since been Docker-verified, collapse it into the "all phases through X.Y complete and verified" sentence and delete its detail (the detail already lives in log.md).
+   - Update **Open Issues** — add anything new this phase surfaced, remove anything now resolved.
+   - Point **Next phase** at the next ROADMAP item and its plan file.
+   - Keep the whole file short. If it grows past ~60 lines you are duplicating log.md — move detail out. The top-of-file contract ("per-phase detail lives in log.md; this is a snapshot only") is the rule; honor it.
+11. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
