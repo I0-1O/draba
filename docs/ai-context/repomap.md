@@ -9033,113 +9033,6 @@ export default function RightSidebar({ open, title, onClose, children }: Props) 
 }
 ````
 
-## File: packages/web/src/components/layout/TopBar.tsx
-````typescript
-/**
- * Top toolbar above the active view. Left side: global app navigation
- * (view switcher) and global object actions (Share). Right side: global
- * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
- * then whatever the parent injects into `rightSlot` (typically the profile menu).
- *
- * View-specific controls (date nav, zoom) intentionally live elsewhere —
- * a context-sensitive sub-toolbar hosts them.
- */
-
-import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
-import FilterDropdown from '@/components/filters/FilterDropdown';
-import FindBar from '@/components/layout/FindBar';
-import { useFind } from '@/contexts/FindContext';
-import { cn } from '@/lib/utils';
-
-export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
-
-interface Props {
-  view: ViewMode;
-  teamId?: string;
-  timelineName?: string;
-  onViewChange: (view: ViewMode) => void;
-  onOpenFilterEditor: () => void;
-  rightSlot?: React.ReactNode;
-}
-
-const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
-  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
-  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
-  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
-  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
-];
-
-export default function TopBar({
-  view,
-  teamId,
-  timelineName,
-  onViewChange,
-  onOpenFilterEditor,
-  rightSlot,
-}: Props) {
-  const { findBarOpen, setFindBarOpen } = useFind();
-
-  return (
-    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
-      {/* Left zone: view switcher */}
-      <div className="flex items-center justify-start shrink-0">
-        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
-          {VIEWS.map(v => (
-            <button
-              key={v.id}
-              onClick={() => onViewChange(v.id)}
-              className={cn(
-                'flex items-center justify-center gap-[5px]',
-                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
-                'border-none cursor-pointer',
-                view === v.id
-                  ? 'bg-card text-foreground shadow-sm'
-                  : 'bg-transparent text-muted-foreground',
-              )}
-            >
-              {v.icon}
-              {v.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Center zone: timeline name — truncates with ellipsis when narrow */}
-      <div className="flex-1 min-w-0 flex items-center justify-center px-3">
-        <span
-          title={timelineName}
-          className="text-xs font-medium text-muted-foreground truncate select-none"
-        >
-          {timelineName}
-        </span>
-      </div>
-
-      {/* Right zone: Find bar / trigger, Filter, profile slot */}
-      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
-        {findBarOpen ? (
-          <FindBar />
-        ) : (
-          <button
-            onClick={() => setFindBarOpen(true)}
-            title="Find in view (Ctrl+F)"
-            className={cn(
-              'flex items-center justify-center w-7 h-7',
-              'border border-border rounded-md bg-card',
-              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
-              'transition-colors shrink-0',
-            )}
-          >
-            <Search size={13} strokeWidth={1.8} />
-          </button>
-        )}
-        <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
-        {rightSlot}
-      </div>
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/components/shared/EmptyState.tsx
 ````typescript
 /**
@@ -11773,6 +11666,90 @@ issues:
         - errcheck
 ````
 
+## File: .repomixignore
+````
+# Ignore dependency locks
+package-lock.json
+yarn.lock
+go.sum
+
+# Ignore media and assets
+public/
+docs/assets/
+*.svg
+*.png
+session-state.md
+
+# Ignore tests if you only want architectural context
+**/*.test.tsx
+**/*.spec.ts
+*_test.go
+````
+
+## File: CLAUDE.md
+````markdown
+# draba
+
+## Overview
+draba is a team coordination and planning tool for small-to-medium teams. It occupies the space between a shared calendar (too simple) and a full project management suite (too complex). The core mental model is **Person + Time Range + Work** — teams see who is working on what, at a glance, in a shared timeline view.
+
+## Context Loading Protocol
+
+**At the start of a session** — read `docs/ai-context/session-state.md` first. It is a short snapshot of current phase status, recent unfiled bug fixes, known open issues, and the recommended starting point. This replaces reading TASKS.md + log.md + ROADMAP.md from scratch.
+
+**Looking up a type, struct field, or component prop** — grep `docs/ai-context/repomap.md` for the symbol name instead of a full codebase search. Do not read the file wholesale; it is 1.3 MB and exceeds the Read tool's limit. Use targeted lookups only:
+```
+Grep("MemberDetail", "docs/ai-context/repomap.md", output_mode="content")
+```
+
+**Before writing code** — if the file in question is listed in the repomap directory structure, read it directly with the Read tool before editing. Do not infer signatures from memory.
+
+## Tech Stack
+- Backend: Go (single binary, self-hosted first)
+- Frontend: React (TypeScript) + shadcn/ui + Tailwind CSS
+- Database: SQLite (default), MySQL/MariaDB, Postgres (configurable)
+- Calendar sync: Google Calendar API, CalDAV (iOS/macOS) — Microsoft/Outlook is v2
+- Deployment: Docker (primary), direct binary install
+- Real-time: WebSockets
+
+## Key Principles
+- **Ruthlessly resist feature creep.** The product succeeds by doing one thing extremely well.
+- **API-first.** Every client (web, CLI, MCP) is a consumer of the same API.
+- **Event-driven.** Every state change emits an internal event. Calendar sync, WebSocket broadcast, and notifications are all event consumers.
+- **Self-hosted by default.** The product must run as a single Docker container with zero external dependencies.
+- **The app is the source of truth.** Calendars are read projections, not the data store.
+- **No paid dependencies without approval.**
+
+## Project Structure
+- `packages/api/` — Go API server (REST + WebSocket)
+- `packages/web/` — React web frontend
+- `packages/shared/` — OpenAPI spec + generated TypeScript types
+- `docs/` — Architecture, requirements, design, tasks
+- `skills/` — Reference docs for Claude (how to do things)
+- `.claude/commands/` — Reusable slash commands
+
+## Working Agreements
+- Always run `golangci-lint run` before committing Go code
+- Always run `pnpm --filter web lint` before committing frontend code
+- Always run `pnpm --filter api test` after changes to the API
+- Read `docs/REQUIREMENTS.md` before starting new features
+- Read `docs/ARCHITECTURE.md` before making structural changes
+- Check `docs/TASKS.md` for current priorities
+- Check `docs/ROADMAP.md` to understand which phase we're in and what the exit criteria are
+
+## References
+- [docs/ai-context/session-state.md](docs/ai-context/session-state.md) — **Read first.** Current phase status, recent fixes, open issues, next steps
+- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — What the app does
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — How the system is built
+- [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — Code style and patterns
+- [docs/TASKS.md](docs/TASKS.md) — Current backlog and priorities
+- [docs/ROADMAP.md](docs/ROADMAP.md) — Phased development timeline with effort estimates and exit criteria
+- [docs/design/DESIGN_SYSTEM.md](docs/design/DESIGN_SYSTEM.md) — Visual design tokens
+- [docs/design/UX_PATTERNS.md](docs/design/UX_PATTERNS.md) — Interaction patterns
+- [skills/go-comments.md](skills/go-comments.md) — Go comment conventions (package headers, exported doc comments, inline why-comments)
+- [skills/ts-comments.md](skills/ts-comments.md) — TypeScript/React comment conventions (file headers, TSDoc on exports, inline why-comments)
+````
+
 ## File: docker-compose.yml
 ````yaml
 services:
@@ -13543,287 +13520,6 @@ These items are NOT in scope for 10.4.6 but inform the design:
 12. Tests
 ````
 
-## File: docs/SAMPLE_DATA.md
-````markdown
-# Sample Data Procedure
-
-Guide for generating and maintaining a sample data SQL script that can flush and reload the database with realistic test data. Run this procedure whenever the schema changes in a way that affects the sample dataset.
-
-## When to regenerate
-
-- A migration adds, removes, or renames a column used by sample data
-- A new table is added that should be populated for a realistic experience
-- Identity system colors or icons change
-- Status template structure changes
-
-## How to run
-
-Sample data lives in `packages/api/sample_data/` as numbered per-table SQL files. Files are concatenated in sort order to form a complete flush-and-reload script.
-
-```bash
-# SQLite CLI
-cat packages/api/sample_data/*.sql | sqlite3 draba.db
-
-# Verify
-go test ./internal/db/ -run TestSampleDataLoads
-```
-
-### Updating a single table
-
-When a schema change affects one table, edit only that file (e.g. add a column to `01_users.sql`). Run the test to verify. No need to regenerate the entire dataset.
-
----
-
-## Data generation rules
-
-### Passwords
-
-All user passwords must be `password` (minimum 8 characters per the app's validation). Store the bcrypt hash of `password` at cost 12 (the project standard). Generate the hash once and reuse it across all user rows.
-
-Current hash: `$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG`
-
-### Identity fields (color + icon)
-
-Every record that has identity fields (`color` and `icon` columns) gets a randomly chosen color and icon, subject to these rules:
-
-| Entity | color | icon | Notes |
-|---|---|---|---|
-| Teams | Random hex from palette | Random Lucide icon or `__name_2__` | |
-| Timelines | Random hex from palette | Random Lucide icon or `__none__` | |
-| Activities | Random hex from palette | Random Lucide icon or `__none__` | |
-| Users | Random hex from palette | `__name_words__` | Always use `__name_words__` for users |
-| Team members | Random hex from palette | `__name_words__` | Always use `__name_words__` for members |
-
-**Color palette** (16 colors, store as hex):
-
-| ID | Hex |
-|---|---|
-| teal | `#288C9B` |
-| cyan | `#06B6D4` |
-| blue | `#3B82F6` |
-| indigo | `#6366F1` |
-| violet | `#8B5CF6` |
-| purple | `#A855F7` |
-| pink | `#EC4899` |
-| rose | `#F43F5E` |
-| red | `#EF4444` |
-| orange | `#F97316` |
-| amber | `#F59E0B` |
-| yellow | `#EAB308` |
-| lime | `#84CC16` |
-| green | `#22C55E` |
-| slate | `#64748B` |
-| stone | `#78716C` |
-
-**Icon options for non-user/member entities** (pick from 64 Lucide IDs):
-`activity`, `archive`, `award`, `bar-chart`, `bell`, `bookmark`, `briefcase`, `calendar`, `check-circle`, `clipboard`, `clock`, `cloud`, `code`, `coffee`, `compass`, `cpu`, `database`, `download`, `edit`, `eye`, `file-text`, `filter`, `flag`, `folder`, `git-branch`, `globe`, `grid`, `heart`, `help-circle`, `home`, `info`, `layers`, `link`, `list`, `lock`, `mail`, `map`, `message-circle`, `moon`, `package`, `pencil`, `phone`, `pie-chart`, `plug`, `refresh-cw`, `search`, `server`, `settings`, `share`, `shield`, `star`, `sun`, `tag`, `target`, `terminal`, `trash`, `trending-up`, `upload`, `user`, `users`, `wifi`, `zap`, `alert-circle`, `copy`
-
-Or use the special tokens: `__none__` (color only), `__name_1__` (first letter), `__name_2__` (first two letters), `__name_words__` (initials).
-
-### IDs
-
-All IDs are UUIDs (TEXT). Generate deterministic UUIDs for sample data so the script is idempotent.
-
-### Timestamps
-
-Use relative dates anchored to "now" so the data always looks current:
-- `created_at` / `joined_at`: spread across the past few months
-- Timeline `start_date` / `end_date`: see per-timeline specs below
-- Activity date ranges: distributed within their timeline's window
-
-### Deletion order (flush)
-
-See `sample_data/00_flush.sql` — deletes all data in reverse FK dependency order. Tables NOT flushed: `schema_migrations`, `instance_settings`, `saved_filters`.
-
----
-
-## Dataset specification
-
-### Super admins
-
-Set `is_superadmin = 1` on these users:
-
-| Name | Email |
-|---|---|
-| Brian Rieb | brian@rieb.cc |
-| Scott Fitzgerald | scott@fitzgerald.example |
-
-### Users
-
-Create a user row for every person referenced below. Each user gets:
-- Deterministic UUID
-- Email derived from name (e.g. `brian@rieb.cc` for Brian, `lindsay.k@example.com` for Lindsay K.)
-- `password_hash`: bcrypt of `pass`
-- `color`: random hex from palette
-- `icon`: `__name_words__`
-
-Full user list (deduplicated across all teams):
-- Brian Rieb (super admin)
-- Scott Fitzgerald (super admin)
-- Lindsay K.
-- Erik B
-- Michelle T
-- Codi K
-- Dan S
-- Kristen K
-- Jamie F
-- Paula H
-- Corey F
-- Dan B
-- Rick S
-
-### Teams
-
-#### 1. Product Marketing
-
-- **Slug**: `product-marketing`
-- **Identity**: random color + random icon
-- **Members**:
-
-| Person | Role | Notes |
-|---|---|---|
-| Brian R | `admin` | |
-| Lindsay K | `member` | |
-| Erik B | `admin` | |
-| Michelle T | `member` | |
-| Contractor | `member` | Participant: `user_id = NULL`, `display_name = 'Contractor'` |
-
-- **Status templates**:
-  - **Default**: Planning, In Progress, Done
-  - **Workload**: Planning, In Progress, Blockers, Done, Deferred, Cancelled
-
-- **Timelines**:
-
-  **Q1 Workload**
-  - 3-month window (e.g. now − 1 month → now + 2 months)
-  - ~20 activities: PMM work (competitive analysis, messaging docs, launch plans, analyst briefings, content reviews, etc.)
-  - Most activities assigned to one person
-  - Uses **Workload** statuses
-  - Distribute statuses realistically (some done, some in progress, a few planning)
-
-  **Sales Kick Off**
-  - 2-month window
-  - ~10 activities: sales enablement prep (deck creation, battle cards, demo scripts, training sessions, etc.)
-  - Activities assigned to multiple people
-  - Uses **Default** statuses
-
-  **Q2 Workload** *(archived)*
-  - 3-month window in the past (set `archived_at`)
-  - ~5 activities: high-level PMM tasks
-  - Most assigned to one person
-  - Uses **Workload** statuses
-
-#### 2. P&B Tiger Team *(archived)*
-
-- **Slug**: `pb-tiger-team`
-- **Identity**: random color + random icon
-- **`archived_at`**: set to a past date
-- **Members**:
-
-| Person | Role |
-|---|---|
-| Brian R | `admin` |
-| Scott F | `member` |
-| Codi K | `admin` |
-| Dan S | `member` |
-| Kristen K | `member` |
-| Jamie F | `member` |
-
-Note: Kristen K is described as a "participant" in the brief, but the schema only supports `admin` and `member` roles. External participants use `user_id = NULL`. Since Kristen is a named user, she is a `member`.
-
-- **Status templates**:
-  - **Default**: Planning, In Progress, Done
-
-- **Timelines**:
-
-  **Right to Win Initiative**
-  - 2-month window
-  - ~4 activities: researching and presenting the right-to-win for a product
-  - Uses **Default** statuses
-
-  **Displacement GTM**
-  - 3-month window
-  - ~4 activities: building a GTM for a displacement play, sales enablement
-  - Uses **Default** statuses
-
-#### 3. Marketing Cross Functional
-
-- **Slug**: `marketing-cross-functional`
-- **Identity**: random color + random icon
-- **Members**:
-
-| Person | Role |
-|---|---|
-| Scott F | `admin` |
-| Paula H | `admin` |
-| Corey F | `member` |
-| Dan B | `member` |
-| Rick S | `member` |
-
-- **Status templates**:
-  - **Default**: Planning, In Progress, Done
-  - **Workload**: Planning, In Progress, Blockers, Done, Deferred, Cancelled
-
-- **Timelines**:
-
-  **Web Site Rebrand**
-  - 6-month window
-  - ~15 activities: rebranding and rebuilding the corporate website (design system, content migration, SEO audit, stakeholder reviews, launch prep, etc.)
-  - Uses **Workload** statuses
-
----
-
-## Activity content guidelines
-
-When generating activity titles and descriptions, make them sound like real PMM / marketing work:
-
-- **PMM activities**: Competitive battlecard update, Analyst briefing prep, Q1 messaging framework, Product launch checklist, Win/loss interview synthesis, Pricing positioning doc, Sales one-pager refresh
-- **Sales enablement**: SKO keynote deck, Demo environment setup, Objection handling workshop, New rep onboarding kit, Customer story video
-- **Website/brand**: Brand guidelines v2, Homepage hero redesign, SEO keyword audit, Content migration plan, Analytics tagging spec, Stakeholder review meeting, Accessibility audit, Launch readiness checklist
-
-Activities should have realistic date ranges (a few days to a few weeks each), spread across their timeline window without excessive overlap.
-
----
-
-## Schema reference (current as of migration 015)
-
-This section summarizes the tables and columns that sample data touches. Regenerate this section if migrations change the schema.
-
-### Core tables
-
-```
-users (id, email, password_hash, display_name, avatar_url, color, icon, is_superadmin, created_at, updated_at, archived_at)
-teams (id, name, slug, color, icon, description, notes, archived_at, invite_link_token, created_at, updated_at)
-team_members (id, team_id, user_id, display_name, role, color, icon, joined_at, archived_at)
-timelines (id, team_id, name, start_date, end_date, description, notes, color, icon, share_token, ical_token, created_by, created_at, updated_at, archived_at)
-activities (id, timeline_id, title, description, icon, color, start_at, end_at, all_day, status_id, parent_activity_id, percent_complete, location, url, created_by, created_at, updated_at, archived_at)
-```
-
-### Junction / child tables
-
-```
-activity_assignments (activity_id, team_member_id)
-activity_tags (activity_id, tag)
-timeline_access (timeline_id, team_member_id, role)
-status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
-status_template_items (id, template_id, name, color, icon, is_closed, position)
-statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
-```
-
-### Tables NOT in sample data scope
-
-```
-schema_migrations — managed by the migration runner
-instance_settings — configured per deployment
-saved_filters — user-generated at runtime
-calendar_connections — requires real OAuth credentials
-api_tokens — generated at runtime
-invites — generated at runtime
-password_reset_tokens — generated at runtime
-user_preferences — set by users at runtime
-```
-````
-
 ## File: packages/api/internal/api/authz.go
 ````go
 package api
@@ -14718,29 +14414,6 @@ func (r *TagRepo) Delete(id string) error {
 }
 ````
 
-## File: packages/api/sample_data/00_flush.sql
-````sql
--- Flush all sample-data tables in FK-safe (reverse dependency) order.
--- Tables NOT flushed: schema_migrations, instance_settings, saved_filters.
-
-DELETE FROM activity_assignments;
-DELETE FROM activity_tags;
-DELETE FROM activities;
-DELETE FROM statuses;
-DELETE FROM status_template_items;
-DELETE FROM status_templates;
-DELETE FROM timeline_access;
-DELETE FROM timelines;
-DELETE FROM team_members;
-DELETE FROM teams;
-DELETE FROM user_preferences;
-DELETE FROM password_reset_tokens;
-DELETE FROM invites;
-DELETE FROM api_tokens;
-DELETE FROM calendar_connections;
-DELETE FROM users;
-````
-
 ## File: packages/api/sample_data/01_users.sql
 ````sql
 -- Users: 13 total (2 super admins).
@@ -14930,93 +14603,6 @@ INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created
   ('s-reb-cancelled',  'tl-mcf-rebrand', 'Cancelled',   '#78716C', 1, 5, datetime('now', '-60 days'), datetime('now', '-60 days'));
 ````
 
-## File: packages/api/sample_data/07_activities.sql
-````sql
--- Activities: 58 total across 6 timelines.
-
--- ── Q1 Workload (20 activities, Workload statuses) ───────────────────────────
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
-  ('a-q1-01', 'tl-pm-q1', 'Competitive landscape analysis',      'Deep-dive on top 5 competitors — positioning, pricing, recent launches.', '#3B82F6', 'search',         datetime('now', '-28 days'), datetime('now', '-18 days'), 's-q1-done',       'u-brian-rieb',  datetime('now', '-28 days'), datetime('now', '-18 days')),
-  ('a-q1-02', 'tl-pm-q1', 'Competitive battlecard refresh',      'Update sales battlecards with latest competitive intel.',                  '#06B6D4', 'shield',         datetime('now', '-20 days'), datetime('now', '-12 days'), 's-q1-done',       'u-brian-rieb',  datetime('now', '-20 days'), datetime('now', '-12 days')),
-  ('a-q1-03', 'tl-pm-q1', 'Q1 messaging framework',              'Core positioning and messaging for Q1 product launches.',                  '#8B5CF6', 'file-text',      datetime('now', '-25 days'), datetime('now', '-10 days'), 's-q1-done',       'u-lindsay-k',   datetime('now', '-25 days'), datetime('now', '-10 days')),
-  ('a-q1-04', 'tl-pm-q1', 'Analyst briefing prep — Gartner',     'Slide deck and talking points for Gartner analyst meeting.',               '#F97316', 'briefcase',      datetime('now', '-15 days'), datetime('now', '-8 days'),  's-q1-done',       'u-erik-b',      datetime('now', '-15 days'), datetime('now', '-8 days')),
-  ('a-q1-05', 'tl-pm-q1', 'Analyst briefing prep — Forrester',   'Deck and prep for Forrester wave discussion.',                             '#F97316', 'briefcase',      datetime('now', '-12 days'), datetime('now', '-5 days'),  's-q1-done',       'u-erik-b',      datetime('now', '-12 days'), datetime('now', '-5 days')),
-  ('a-q1-06', 'tl-pm-q1', 'Product launch checklist — v4.2',     'End-to-end launch readiness: docs, blog, enablement, PR.',                 '#22C55E', 'check-circle',   datetime('now', '-20 days'), datetime('now', '-3 days'),  's-q1-done',       'u-brian-rieb',  datetime('now', '-20 days'), datetime('now', '-3 days')),
-  ('a-q1-07', 'tl-pm-q1', 'Win/loss interview synthesis',        'Summarize Q4 win/loss interviews into themes and recommendations.',         '#EC4899', 'message-circle', datetime('now', '-18 days'), datetime('now', '-7 days'),  's-q1-done',       'u-michelle-t',  datetime('now', '-18 days'), datetime('now', '-7 days')),
-  ('a-q1-08', 'tl-pm-q1', 'Pricing positioning doc',             'Updated pricing rationale and competitive positioning matrix.',             '#F43F5E', 'trending-up',    datetime('now', '-10 days'), datetime('now', '+5 days'),  's-q1-inprogress', 'u-brian-rieb',  datetime('now', '-10 days'), datetime('now', '-2 days')),
-  ('a-q1-09', 'tl-pm-q1', 'Sales one-pager refresh',             'Refresh the 2-sided sales leave-behind for Q1 messaging.',                 '#84CC16', 'file-text',      datetime('now', '-8 days'),  datetime('now', '+3 days'),  's-q1-inprogress', 'u-lindsay-k',   datetime('now', '-8 days'),  datetime('now', '-2 days')),
-  ('a-q1-10', 'tl-pm-q1', 'Customer story — Acme Corp',          'Draft case study from Acme Corp expansion deal.',                          '#288C9B', 'star',           datetime('now', '-14 days'), datetime('now', '-4 days'),  's-q1-done',       'u-michelle-t',  datetime('now', '-14 days'), datetime('now', '-4 days')),
-  ('a-q1-11', 'tl-pm-q1', 'Content calendar planning',           'Map out blog, social, and email content for next 6 weeks.',                '#A855F7', 'calendar',       datetime('now', '-5 days'),  datetime('now', '+7 days'),  's-q1-inprogress', 'u-lindsay-k',   datetime('now', '-5 days'),  datetime('now', '-1 days')),
-  ('a-q1-12', 'tl-pm-q1', 'Webinar script — platform overview',  'Script and slide deck for monthly product webinar.',                       '#6366F1', 'edit',           datetime('now', '-3 days'),  datetime('now', '+10 days'), 's-q1-planning',   'u-erik-b',      datetime('now', '-3 days'),  datetime('now', '-1 days')),
-  ('a-q1-13', 'tl-pm-q1', 'Partner co-marketing brief',          'Joint value prop and co-marketing plan with PartnerCo.',                   '#F59E0B', 'share',          datetime('now', '-7 days'),  datetime('now', '+4 days'),  's-q1-inprogress', 'u-brian-rieb',  datetime('now', '-7 days'),  datetime('now', '-1 days')),
-  ('a-q1-14', 'tl-pm-q1', 'AR/PR coordination — Q1 launch',     'Coordinate PR release and analyst outreach for v4.2 launch.',              '#EF4444', 'globe',          datetime('now', '-6 days'),  datetime('now', '+5 days'),  's-q1-inprogress', 'u-erik-b',      datetime('now', '-6 days'),  datetime('now', '-1 days')),
-  ('a-q1-15', 'tl-pm-q1', 'Persona refresh workshop',            'Internal workshop to validate and update buyer personas.',                 '#78716C', 'users',          datetime('now', '+2 days'),  datetime('now', '+5 days'),  's-q1-planning',   'u-michelle-t',  datetime('now', '-2 days'),  datetime('now', '-1 days')),
-  ('a-q1-16', 'tl-pm-q1', 'ROI calculator update',               'Refresh the interactive ROI calculator with new benchmark data.',          '#06B6D4', 'pie-chart',      datetime('now', '+5 days'),  datetime('now', '+18 days'), 's-q1-planning',   'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days')),
-  ('a-q1-17', 'tl-pm-q1', 'Demo environment setup',              'Provision and configure demo environment for Q1 launches.',                '#288C9B', 'server',         datetime('now', '-4 days'),  datetime('now', '+3 days'),  's-q1-blockers',   'u-erik-b',      datetime('now', '-4 days'),  datetime('now', '-1 days')),
-  ('a-q1-18', 'tl-pm-q1', 'Competitive teardown — NewCo launch', 'Rapid response analysis of NewCo product announcement.',                  '#EF4444', 'alert-circle',   datetime('now', '+7 days'),  datetime('now', '+14 days'), 's-q1-planning',   'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days')),
-  ('a-q1-19', 'tl-pm-q1', 'Sales enablement newsletter — March', 'Monthly enablement digest: new assets, competitive updates, wins.',        '#22C55E', 'mail',           datetime('now', '+10 days'), datetime('now', '+14 days'), 's-q1-planning',   'u-lindsay-k',   datetime('now', '-1 days'),  datetime('now', '-1 days')),
-  ('a-q1-20', 'tl-pm-q1', 'Quarterly business review deck',      'PMM section of the QBR deck: pipeline impact, content metrics.',           '#F97316', 'bar-chart',      datetime('now', '+14 days'), datetime('now', '+21 days'), 's-q1-planning',   'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days'));
-
--- ── Sales Kick Off (10 activities, Default statuses) ─────────────────────────
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
-  ('a-sko-01', 'tl-pm-sko', 'SKO keynote deck',                    'Main stage presentation — product vision and roadmap.',                  '#3B82F6', 'star',           datetime('now', '+2 days'),  datetime('now', '+14 days'), 's-sko-inprogress', 'u-erik-b',     datetime('now', '-10 days'), datetime('now', '-1 days')),
-  ('a-sko-02', 'tl-pm-sko', 'Competitive battle card workshop',    'Interactive session: how to use battlecards in live deals.',             '#EF4444', 'shield',         datetime('now', '+7 days'),  datetime('now', '+12 days'), 's-sko-planning',   'u-brian-rieb', datetime('now', '-10 days'), datetime('now', '-1 days')),
-  ('a-sko-03', 'tl-pm-sko', 'Demo script — enterprise tier',       'Step-by-step demo flow for enterprise prospects.',                       '#22C55E', 'code',           datetime('now', '+3 days'),  datetime('now', '+10 days'), 's-sko-inprogress', 'u-erik-b',     datetime('now', '-8 days'),  datetime('now', '-1 days')),
-  ('a-sko-04', 'tl-pm-sko', 'New rep onboarding kit',              'Welcome pack: product overview, personas, competitive cheat sheet.',     '#F97316', 'package',        datetime('now', '+5 days'),  datetime('now', '+15 days'), 's-sko-planning',   'u-lindsay-k',  datetime('now', '-7 days'),  datetime('now', '-1 days')),
-  ('a-sko-05', 'tl-pm-sko', 'Objection handling playbook',         'Top 15 objections with response frameworks and proof points.',           '#8B5CF6', 'message-circle', datetime('now', '+8 days'),  datetime('now', '+18 days'), 's-sko-planning',   'u-brian-rieb', datetime('now', '-6 days'),  datetime('now', '-1 days')),
-  ('a-sko-06', 'tl-pm-sko', 'Customer story video — GlobalTech',   'Film and edit 3-minute customer testimonial video.',                     '#EC4899', 'eye',            datetime('now', '+1 days'),  datetime('now', '+20 days'), 's-sko-inprogress', 'u-michelle-t', datetime('now', '-12 days'), datetime('now', '-1 days')),
-  ('a-sko-07', 'tl-pm-sko', 'Sales training session — pricing',    'Live training: positioning premium tier and handling price objections.', '#F59E0B', 'trending-up',    datetime('now', '+14 days'), datetime('now', '+16 days'), 's-sko-planning',   'u-brian-rieb', datetime('now', '-5 days'),  datetime('now', '-1 days')),
-  ('a-sko-08', 'tl-pm-sko', 'SKO swag and logistics',              'Coordinate branded materials, venue AV, and printed collateral.',        '#64748B', 'package',        datetime('now'),             datetime('now', '+25 days'), 's-sko-inprogress', 'u-lindsay-k',  datetime('now', '-14 days'), datetime('now', '-1 days')),
-  ('a-sko-09', 'tl-pm-sko', 'Breakout session — vertical selling', 'Prep for healthcare and finserv vertical breakout sessions.',            '#06B6D4', 'layers',         datetime('now', '+10 days'), datetime('now', '+18 days'), 's-sko-planning',   'u-erik-b',     datetime('now', '-4 days'),  datetime('now', '-1 days')),
-  ('a-sko-10', 'tl-pm-sko', 'Post-SKO follow-up plan',             'Email sequences and resource hub for post-event reinforcement.',         '#84CC16', 'mail',           datetime('now', '+20 days'), datetime('now', '+30 days'), 's-sko-planning',   'u-michelle-t', datetime('now', '-3 days'),  datetime('now', '-1 days'));
-
--- ── Q2 Workload (5 activities, archived, Workload statuses) ──────────────────
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
-  ('a-q2-01', 'tl-pm-q2', 'Q2 product launch plan',           'High-level launch timeline and DRI assignments for Q2 releases.',     '#3B82F6', 'calendar',     datetime('now', '-175 days'), datetime('now', '-140 days'), 's-q2-done',     'u-brian-rieb', datetime('now', '-178 days'), datetime('now', '-140 days')),
-  ('a-q2-02', 'tl-pm-q2', 'Analyst day preparation',           'Materials and dry-run for annual analyst day event.',                 '#F97316', 'briefcase',    datetime('now', '-160 days'), datetime('now', '-130 days'), 's-q2-done',     'u-erik-b',     datetime('now', '-165 days'), datetime('now', '-130 days')),
-  ('a-q2-03', 'tl-pm-q2', 'Mid-year messaging audit',          'Review all external messaging for consistency with Q2 positioning.', '#EC4899', 'eye',          datetime('now', '-145 days'), datetime('now', '-115 days'), 's-q2-done',     'u-lindsay-k',  datetime('now', '-150 days'), datetime('now', '-115 days')),
-  ('a-q2-04', 'tl-pm-q2', 'Competitive intel digest — June',   'Monthly competitive summary for sales and leadership.',              '#EF4444', 'alert-circle', datetime('now', '-120 days'), datetime('now', '-100 days'), 's-q2-done',     'u-brian-rieb', datetime('now', '-125 days'), datetime('now', '-100 days')),
-  ('a-q2-05', 'tl-pm-q2', 'Customer advisory board planning',  'Agenda and invite list for H2 customer advisory board session.',     '#22C55E', 'users',        datetime('now', '-110 days'), datetime('now', '-92 days'),  's-q2-deferred', 'u-michelle-t', datetime('now', '-115 days'), datetime('now', '-92 days'));
-
--- ── Right to Win Initiative (4 activities, Default statuses) ─────────────────
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
-  ('a-rtw-01', 'tl-pb-rtw', 'Market sizing research',         'TAM/SAM/SOM analysis for the target segment.',                       '#3B82F6', 'pie-chart',      datetime('now', '-118 days'), datetime('now', '-100 days'), 's-rtw-done', 'u-dan-s',     datetime('now', '-118 days'), datetime('now', '-100 days')),
-  ('a-rtw-02', 'tl-pb-rtw', 'Customer interview round',       'Interview 8 target-segment customers on needs and pain points.',     '#22C55E', 'message-circle', datetime('now', '-105 days'), datetime('now', '-85 days'),  's-rtw-done', 'u-kristen-k', datetime('now', '-105 days'), datetime('now', '-85 days')),
-  ('a-rtw-03', 'tl-pb-rtw', 'Right-to-win framework doc',     'Synthesize research into the right-to-win positioning framework.',   '#F97316', 'file-text',      datetime('now', '-90 days'),  datetime('now', '-70 days'),  's-rtw-done', 'u-brian-rieb', datetime('now', '-90 days'),  datetime('now', '-70 days')),
-  ('a-rtw-04', 'tl-pb-rtw', 'Leadership presentation',        'Present findings and recommendation to exec team.',                  '#8B5CF6', 'award',          datetime('now', '-72 days'),  datetime('now', '-62 days'),  's-rtw-done', 'u-codi-k',    datetime('now', '-72 days'),  datetime('now', '-62 days'));
-
--- ── Displacement GTM (4 activities, Default statuses) ────────────────────────
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
-  ('a-gtm-01', 'tl-pb-gtm', 'Displacement playbook draft',    'End-to-end playbook: triggers, objections, migration path.',         '#EF4444', 'flag',        datetime('now', '-148 days'), datetime('now', '-120 days'), 's-gtm-done', 'u-codi-k',           datetime('now', '-148 days'), datetime('now', '-120 days')),
-  ('a-gtm-02', 'tl-pb-gtm', 'Migration ROI calculator',       'Build ROI model showing TCO advantage of switching.',               '#22C55E', 'trending-up', datetime('now', '-125 days'), datetime('now', '-95 days'),  's-gtm-done', 'u-dan-s',            datetime('now', '-125 days'), datetime('now', '-95 days')),
-  ('a-gtm-03', 'tl-pb-gtm', 'Sales enablement training',      'Train AEs on displacement selling motion and objection handling.',   '#F59E0B', 'users',       datetime('now', '-100 days'), datetime('now', '-75 days'),  's-gtm-done', 'u-jamie-f',          datetime('now', '-100 days'), datetime('now', '-75 days')),
-  ('a-gtm-04', 'tl-pb-gtm', 'Pilot program launch',           'Identify 3 pilot accounts and run displacement proof-of-concept.',  '#3B82F6', 'target',      datetime('now', '-80 days'),  datetime('now', '-62 days'),  's-gtm-done', 'u-scott-fitzgerald', datetime('now', '-80 days'),  datetime('now', '-62 days'));
-
--- ── Web Site Rebrand (15 activities, Workload statuses) ──────────────────────
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, created_by, created_at, updated_at) VALUES
-  ('a-reb-01', 'tl-mcf-rebrand', 'Brand audit and gap analysis',        'Audit current brand assets against new brand strategy.',              '#8B5CF6', 'search',       datetime('now', '-58 days'), datetime('now', '-42 days'), 's-reb-done',       'u-scott-fitzgerald', datetime('now', '-58 days'), datetime('now', '-42 days')),
-  ('a-reb-02', 'tl-mcf-rebrand', 'Design system v2',                    'New component library: typography, color, spacing, elevation.',       '#3B82F6', 'grid',         datetime('now', '-50 days'), datetime('now', '-25 days'), 's-reb-done',       'u-paula-h',          datetime('now', '-50 days'), datetime('now', '-25 days')),
-  ('a-reb-03', 'tl-mcf-rebrand', 'Homepage hero redesign',              'New hero section: headline, value prop, CTA, and imagery.',           '#EC4899', 'eye',          datetime('now', '-30 days'), datetime('now', '-10 days'), 's-reb-done',       'u-corey-f',          datetime('now', '-30 days'), datetime('now', '-10 days')),
-  ('a-reb-04', 'tl-mcf-rebrand', 'SEO keyword audit',                   'Comprehensive keyword analysis and content gap identification.',      '#22C55E', 'search',       datetime('now', '-45 days'), datetime('now', '-20 days'), 's-reb-done',       'u-rick-s',           datetime('now', '-45 days'), datetime('now', '-20 days')),
-  ('a-reb-05', 'tl-mcf-rebrand', 'Content migration plan',              'Map existing pages to new IA; identify pages to create/retire.',      '#F97316', 'list',         datetime('now', '-35 days'), datetime('now', '-15 days'), 's-reb-done',       'u-dan-b',            datetime('now', '-35 days'), datetime('now', '-15 days')),
-  ('a-reb-06', 'tl-mcf-rebrand', 'Analytics tagging spec',              'Define UTM strategy, event taxonomy, and GA4 configuration.',         '#06B6D4', 'pie-chart',    datetime('now', '-20 days'), datetime('now', '-5 days'),  's-reb-done',       'u-rick-s',           datetime('now', '-20 days'), datetime('now', '-5 days')),
-  ('a-reb-07', 'tl-mcf-rebrand', 'Accessibility audit',                 'WCAG 2.1 AA audit of all new page templates.',                       '#F43F5E', 'shield',       datetime('now', '-10 days'), datetime('now', '+5 days'),  's-reb-inprogress', 'u-corey-f',          datetime('now', '-10 days'), datetime('now', '-2 days')),
-  ('a-reb-08', 'tl-mcf-rebrand', 'Product pages rewrite',               'Rewrite all product/feature pages with new messaging.',               '#A855F7', 'file-text',    datetime('now', '-8 days'),  datetime('now', '+15 days'), 's-reb-inprogress', 'u-scott-fitzgerald', datetime('now', '-8 days'),  datetime('now', '-1 days')),
-  ('a-reb-09', 'tl-mcf-rebrand', 'Blog template redesign',              'New blog index and post templates matching brand refresh.',            '#84CC16', 'edit',         datetime('now', '-5 days'),  datetime('now', '+10 days'), 's-reb-inprogress', 'u-paula-h',          datetime('now', '-5 days'),  datetime('now', '-1 days')),
-  ('a-reb-10', 'tl-mcf-rebrand', 'Stakeholder review — round 1',        'First exec review of homepage, product pages, and navigation.',       '#64748B', 'users',        datetime('now', '+5 days'),  datetime('now', '+8 days'),  's-reb-planning',   'u-scott-fitzgerald', datetime('now', '-3 days'),  datetime('now', '-1 days')),
-  ('a-reb-11', 'tl-mcf-rebrand', 'Photography and illustration sprint', 'Commission new brand photography and custom illustrations.',          '#F59E0B', 'eye',          datetime('now', '+3 days'),  datetime('now', '+25 days'), 's-reb-planning',   'u-paula-h',          datetime('now', '-2 days'),  datetime('now', '-1 days')),
-  ('a-reb-12', 'tl-mcf-rebrand', 'Pricing page overhaul',               'Redesign pricing page with new tier structure and FAQ.',              '#EF4444', 'trending-up',  datetime('now', '+10 days'), datetime('now', '+30 days'), 's-reb-planning',   'u-dan-b',            datetime('now', '-2 days'),  datetime('now', '-1 days')),
-  ('a-reb-13', 'tl-mcf-rebrand', 'Redirect map and 301 plan',           'Map all old URLs to new structure; configure redirects.',             '#78716C', 'link',         datetime('now', '+15 days'), datetime('now', '+35 days'), 's-reb-planning',   'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days')),
-  ('a-reb-14', 'tl-mcf-rebrand', 'Launch readiness checklist',          'Pre-launch verification: performance, SEO, analytics, redirects.',   '#288C9B', 'check-circle', datetime('now', '+30 days'), datetime('now', '+40 days'), 's-reb-planning',   'u-scott-fitzgerald', datetime('now', '-1 days'),  datetime('now', '-1 days')),
-  ('a-reb-15', 'tl-mcf-rebrand', 'Post-launch monitoring plan',         'Week-1 monitoring: traffic, errors, search console, conversions.',   '#F97316', 'activity',     datetime('now', '+40 days'), datetime('now', '+50 days'), 's-reb-planning',   'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days'));
-````
-
 ## File: packages/api/sample_data/08_activity_assignments.sql
 ````sql
 -- Activity assignments: links activities to team members.
@@ -15108,40 +14694,6 @@ INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
   ('a-reb-13', 'tm-mcf-rick'),
   ('a-reb-14', 'tm-mcf-scott'),
   ('a-reb-15', 'tm-mcf-rick');
-````
-
-## File: packages/api/sample_data/10_tags.sql
-````sql
--- Tags: team-scoped labels for activities.
-
--- Product Marketing team tags
-INSERT INTO tags (id, team_id, name, color, created_by, created_at) VALUES
-  ('tag-urgent',      't-product-marketing', 'urgent',      'red',    'u-brian-rieb', datetime('now', '-30 days')),
-  ('tag-design',      't-product-marketing', 'design',      'violet', 'u-brian-rieb', datetime('now', '-30 days')),
-  ('tag-content',     't-product-marketing', 'content',     'teal',   'u-brian-rieb', datetime('now', '-28 days')),
-  ('tag-research',    't-product-marketing', 'research',    'blue',   'u-brian-rieb', datetime('now', '-27 days')),
-  ('tag-launch',      't-product-marketing', 'launch',      'green',  'u-brian-rieb', datetime('now', '-26 days')),
-  ('tag-competitive', 't-product-marketing', 'competitive', 'amber',  'u-brian-rieb', datetime('now', '-25 days')),
-  ('tag-review',      't-product-marketing', 'review',      'indigo', 'u-brian-rieb', datetime('now', '-24 days')),
-  ('tag-blocked',     't-product-marketing', 'blocked',     'red',    'u-brian-rieb', datetime('now', '-20 days'));
-
--- Activity-tag associations: tag a representative subset of activities
-INSERT INTO activity_tags (activity_id, tag_id) VALUES
-  -- Q1 Workload activities
-  ('a-q1-01', 'tag-research'),
-  ('a-q1-01', 'tag-competitive'),
-  ('a-q1-02', 'tag-competitive'),
-  ('a-q1-03', 'tag-content'),
-  ('a-q1-06', 'tag-launch'),
-  ('a-q1-06', 'tag-review'),
-  ('a-q1-08', 'tag-urgent'),
-  ('a-q1-09', 'tag-design'),
-  ('a-q1-09', 'tag-content'),
-  ('a-q1-11', 'tag-content'),
-  ('a-q1-17', 'tag-blocked'),
-  -- SKO activities
-  ('a-sko-01', 'tag-design'),
-  ('a-sko-01', 'tag-launch');
 ````
 
 ## File: packages/api/sample_data/README.md
@@ -15453,6 +15005,125 @@ describe('buildRows — member grouping (group collapse)', () => {
     expect(g?.kind === 'group' && g.collapsed).toBe(true)
   })
 })
+````
+
+## File: packages/web/src/components/layout/TopBar.tsx
+````typescript
+/**
+ * Top toolbar above the active view. Left side: global app navigation
+ * (view switcher) and global object actions (Share). Right side: global
+ * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
+ * then whatever the parent injects into `rightSlot` (typically the profile menu).
+ *
+ * View-specific controls (date nav, zoom) intentionally live elsewhere —
+ * a context-sensitive sub-toolbar hosts them.
+ */
+
+import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
+import FilterDropdown from '@/components/filters/FilterDropdown';
+import FindBar from '@/components/layout/FindBar';
+import { Badge } from '@/components/identity/Badge';
+import { useFind } from '@/contexts/FindContext';
+import { cn } from '@/lib/utils';
+import type { Identity } from '@/components/identity/identity-constants';
+import { DEFAULT_TIMELINE_IDENTITY } from '@/components/identity/identity-constants';
+
+export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
+
+interface Props {
+  view: ViewMode;
+  teamId?: string;
+  timelineName?: string;
+  timelineIdentity?: Identity;
+  onViewChange: (view: ViewMode) => void;
+  onOpenFilterEditor: () => void;
+  rightSlot?: React.ReactNode;
+}
+
+const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
+  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
+  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
+  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
+  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
+];
+
+export default function TopBar({
+  view,
+  teamId,
+  timelineName,
+  timelineIdentity,
+  onViewChange,
+  onOpenFilterEditor,
+  rightSlot,
+}: Props) {
+  const { findBarOpen, setFindBarOpen } = useFind();
+
+  return (
+    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
+      {/* Left zone: view switcher */}
+      <div className="flex items-center justify-start shrink-0">
+        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
+          {VIEWS.map(v => (
+            <button
+              key={v.id}
+              onClick={() => onViewChange(v.id)}
+              className={cn(
+                'flex items-center justify-center gap-[5px]',
+                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
+                'border-none cursor-pointer',
+                view === v.id
+                  ? 'bg-card text-foreground shadow-sm'
+                  : 'bg-transparent text-muted-foreground',
+              )}
+            >
+              {v.icon}
+              {v.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Center zone: timeline identity badge + name */}
+      <div className="flex-1 min-w-0 flex items-center justify-center gap-1.5 px-3">
+        <Badge
+          identity={timelineIdentity ?? DEFAULT_TIMELINE_IDENTITY}
+          name={timelineName ?? ''}
+          shape="square"
+          size={18}
+          className="shrink-0"
+        />
+        <span
+          title={timelineName}
+          className="text-xs font-medium text-muted-foreground truncate select-none"
+        >
+          {timelineName}
+        </span>
+      </div>
+
+      {/* Right zone: Find bar / trigger, Filter, profile slot */}
+      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
+        {findBarOpen ? (
+          <FindBar />
+        ) : (
+          <button
+            onClick={() => setFindBarOpen(true)}
+            title="Find in view (Ctrl+F)"
+            className={cn(
+              'flex items-center justify-center w-7 h-7',
+              'border border-border rounded-md bg-card',
+              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
+              'transition-colors shrink-0',
+            )}
+          >
+            <Search size={13} strokeWidth={1.8} />
+          </button>
+        )}
+        <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} />
+        {rightSlot}
+      </div>
+    </div>
+  );
+}
 ````
 
 ## File: packages/web/src/components/shared/ConfirmDialog.tsx
@@ -17353,90 +17024,6 @@ export default function SetupPage() {
 }
 ````
 
-## File: .repomixignore
-````
-# Ignore dependency locks
-package-lock.json
-yarn.lock
-go.sum
-
-# Ignore media and assets
-public/
-docs/assets/
-*.svg
-*.png
-session-state.md
-
-# Ignore tests if you only want architectural context
-**/*.test.tsx
-**/*.spec.ts
-*_test.go
-````
-
-## File: CLAUDE.md
-````markdown
-# draba
-
-## Overview
-draba is a team coordination and planning tool for small-to-medium teams. It occupies the space between a shared calendar (too simple) and a full project management suite (too complex). The core mental model is **Person + Time Range + Work** — teams see who is working on what, at a glance, in a shared timeline view.
-
-## Context Loading Protocol
-
-**At the start of a session** — read `docs/ai-context/session-state.md` first. It is a short snapshot of current phase status, recent unfiled bug fixes, known open issues, and the recommended starting point. This replaces reading TASKS.md + log.md + ROADMAP.md from scratch.
-
-**Looking up a type, struct field, or component prop** — grep `docs/ai-context/repomap.md` for the symbol name instead of a full codebase search. Do not read the file wholesale; it is 1.3 MB and exceeds the Read tool's limit. Use targeted lookups only:
-```
-Grep("MemberDetail", "docs/ai-context/repomap.md", output_mode="content")
-```
-
-**Before writing code** — if the file in question is listed in the repomap directory structure, read it directly with the Read tool before editing. Do not infer signatures from memory.
-
-## Tech Stack
-- Backend: Go (single binary, self-hosted first)
-- Frontend: React (TypeScript) + shadcn/ui + Tailwind CSS
-- Database: SQLite (default), MySQL/MariaDB, Postgres (configurable)
-- Calendar sync: Google Calendar API, CalDAV (iOS/macOS) — Microsoft/Outlook is v2
-- Deployment: Docker (primary), direct binary install
-- Real-time: WebSockets
-
-## Key Principles
-- **Ruthlessly resist feature creep.** The product succeeds by doing one thing extremely well.
-- **API-first.** Every client (web, CLI, MCP) is a consumer of the same API.
-- **Event-driven.** Every state change emits an internal event. Calendar sync, WebSocket broadcast, and notifications are all event consumers.
-- **Self-hosted by default.** The product must run as a single Docker container with zero external dependencies.
-- **The app is the source of truth.** Calendars are read projections, not the data store.
-- **No paid dependencies without approval.**
-
-## Project Structure
-- `packages/api/` — Go API server (REST + WebSocket)
-- `packages/web/` — React web frontend
-- `packages/shared/` — OpenAPI spec + generated TypeScript types
-- `docs/` — Architecture, requirements, design, tasks
-- `skills/` — Reference docs for Claude (how to do things)
-- `.claude/commands/` — Reusable slash commands
-
-## Working Agreements
-- Always run `golangci-lint run` before committing Go code
-- Always run `pnpm --filter web lint` before committing frontend code
-- Always run `pnpm --filter api test` after changes to the API
-- Read `docs/REQUIREMENTS.md` before starting new features
-- Read `docs/ARCHITECTURE.md` before making structural changes
-- Check `docs/TASKS.md` for current priorities
-- Check `docs/ROADMAP.md` to understand which phase we're in and what the exit criteria are
-
-## References
-- [docs/ai-context/session-state.md](docs/ai-context/session-state.md) — **Read first.** Current phase status, recent fixes, open issues, next steps
-- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — What the app does
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — How the system is built
-- [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — Code style and patterns
-- [docs/TASKS.md](docs/TASKS.md) — Current backlog and priorities
-- [docs/ROADMAP.md](docs/ROADMAP.md) — Phased development timeline with effort estimates and exit criteria
-- [docs/design/DESIGN_SYSTEM.md](docs/design/DESIGN_SYSTEM.md) — Visual design tokens
-- [docs/design/UX_PATTERNS.md](docs/design/UX_PATTERNS.md) — Interaction patterns
-- [skills/go-comments.md](skills/go-comments.md) — Go comment conventions (package headers, exported doc comments, inline why-comments)
-- [skills/ts-comments.md](skills/ts-comments.md) — TypeScript/React comment conventions (file headers, TSDoc on exports, inline why-comments)
-````
-
 ## File: .claude/commands/build-phase.md
 ````markdown
 Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or "Phase 1").
@@ -17466,6 +17053,320 @@ Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or
    - Point **Next phase** at the next ROADMAP item and its plan file.
    - Keep the whole file short. If it grows past ~60 lines you are duplicating log.md — move detail out. The top-of-file contract ("per-phase detail lives in log.md; this is a snapshot only") is the rule; honor it.
 11. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
+````
+
+## File: docs/SAMPLE_DATA.md
+````markdown
+# Sample Data Procedure
+
+Guide for generating and maintaining a sample data SQL script that can flush and reload the database with realistic test data. Run this procedure whenever the schema changes in a way that affects the sample dataset.
+
+## When to regenerate
+
+- A migration adds, removes, or renames a column used by sample data
+- A new table is added that should be populated for a realistic experience
+- Identity system colors or icons change
+- Status template structure changes
+
+## How to run
+
+Sample data lives in `packages/api/sample_data/` as numbered per-table SQL files. Files are concatenated in sort order to form a complete flush-and-reload script.
+
+```bash
+# SQLite CLI
+cat packages/api/sample_data/*.sql | sqlite3 draba.db
+
+# Verify
+go test ./internal/db/ -run TestSampleDataLoads
+```
+
+### Updating a single table
+
+When a schema change affects one table, edit only that file (e.g. add a column to `01_users.sql`). Run the test to verify. No need to regenerate the entire dataset.
+
+---
+
+## Data generation rules
+
+### Passwords
+
+All user passwords must be `password` (minimum 8 characters per the app's validation). Store the bcrypt hash of `password` at cost 12 (the project standard). Generate the hash once and reuse it across all user rows.
+
+Current hash: `$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG`
+
+### Identity fields (color + icon)
+
+Every record that has identity fields (`color` and `icon` columns) gets a randomly chosen color and icon, subject to these rules:
+
+| Entity | color | icon | Notes |
+|---|---|---|---|
+| Teams | Random hex from palette | Random Lucide icon or `__name_2__` | |
+| Timelines | Random hex from palette | Random Lucide icon or `__none__` | |
+| Activities | Random hex from palette | Random Lucide icon or `__none__` | |
+| Users | Random hex from palette | `__name_words__` | Always use `__name_words__` for users |
+| Team members | Random hex from palette | `__name_words__` | Always use `__name_words__` for members |
+
+**Color palette** (16 colors, store as hex):
+
+| ID | Hex |
+|---|---|
+| teal | `#288C9B` |
+| cyan | `#06B6D4` |
+| blue | `#3B82F6` |
+| indigo | `#6366F1` |
+| violet | `#8B5CF6` |
+| purple | `#A855F7` |
+| pink | `#EC4899` |
+| rose | `#F43F5E` |
+| red | `#EF4444` |
+| orange | `#F97316` |
+| amber | `#F59E0B` |
+| yellow | `#EAB308` |
+| lime | `#84CC16` |
+| green | `#22C55E` |
+| slate | `#64748B` |
+| stone | `#78716C` |
+
+**Icon options for non-user/member entities** (pick from 64 Lucide IDs):
+`activity`, `archive`, `award`, `bar-chart`, `bell`, `bookmark`, `briefcase`, `calendar`, `check-circle`, `clipboard`, `clock`, `cloud`, `code`, `coffee`, `compass`, `cpu`, `database`, `download`, `edit`, `eye`, `file-text`, `filter`, `flag`, `folder`, `git-branch`, `globe`, `grid`, `heart`, `help-circle`, `home`, `info`, `layers`, `link`, `list`, `lock`, `mail`, `map`, `message-circle`, `moon`, `package`, `pencil`, `phone`, `pie-chart`, `plug`, `refresh-cw`, `search`, `server`, `settings`, `share`, `shield`, `star`, `sun`, `tag`, `target`, `terminal`, `trash`, `trending-up`, `upload`, `user`, `users`, `wifi`, `zap`, `alert-circle`, `copy`
+
+Or use the special tokens: `__none__` (color only), `__name_1__` (first letter), `__name_2__` (first two letters), `__name_words__` (initials).
+
+### IDs
+
+All IDs are UUIDs (TEXT). Generate deterministic UUIDs for sample data so the script is idempotent.
+
+### Timestamps
+
+Use relative dates anchored to "now" so the data always looks current:
+- `created_at` / `joined_at`: spread across the past few months
+- Timeline `start_date` / `end_date`: see per-timeline specs below
+- Activity date ranges: distributed within their timeline's window
+
+### Deletion order (flush)
+
+See `sample_data/00_flush.sql` — deletes all data in reverse FK dependency order. Tables NOT flushed: `schema_migrations`, `instance_settings`, `saved_filters`.
+
+---
+
+## Dataset specification
+
+### Super admins
+
+Set `is_superadmin = 1` on these users:
+
+| Name | Email |
+|---|---|
+| Brian Rieb | brian@rieb.cc |
+| Scott Fitzgerald | scott@fitzgerald.example |
+
+### Users
+
+Create a user row for every person referenced below. Each user gets:
+- Deterministic UUID
+- Email derived from name (e.g. `brian@rieb.cc` for Brian, `lindsay.k@example.com` for Lindsay K.)
+- `password_hash`: bcrypt of `pass`
+- `color`: random hex from palette
+- `icon`: `__name_words__`
+
+Full user list (deduplicated across all teams):
+- Brian R (super admin)
+- Scott F (super admin)
+- Lindsay K.
+- Erik B
+- Michelle T
+- Codi K
+- Dan S
+- Kristen K
+- Jamie F
+- Paula H
+- Corey F
+- Dan B
+- Rick S
+
+### Teams
+
+#### 1. Product Marketing
+
+- **Slug**: `product-marketing`
+- **Identity**: random color + random icon
+- **Members**:
+
+| Person | Role | Notes |
+|---|---|---|
+| Brian R | `admin` | |
+| Lindsay K | `member` | |
+| Erik B | `admin` | |
+| Michelle T | `member` | |
+| Contractor | `member` | Participant: `user_id = NULL`, `display_name = 'Contractor'` |
+
+- **Status templates**:
+  - **Default**: Planning, In Progress, Done
+  - **Workload**: Planning, In Progress, Blockers, Done, Deferred, Cancelled
+
+- **Timelines**:
+
+  **Q1 Workload**
+  - 3-month window (e.g. now − 1 month → now + 2 months)
+  - ~20 activities: PMM work (competitive analysis, messaging docs, launch plans, analyst briefings, content reviews, etc.)
+  - Most activities assigned to one person
+  - Uses **Workload** statuses
+  - Distribute statuses realistically (some done, some in progress, a few planning)
+
+  **Sales Kick Off**
+  - 2-month window
+  - ~10 activities: sales enablement prep (deck creation, battle cards, demo scripts, training sessions, etc.)
+  - Activities assigned to multiple people
+  - Uses **Default** statuses
+
+  **Q2 Workload** *(archived)*
+  - 3-month window in the past (set `archived_at`)
+  - ~5 activities: high-level PMM tasks
+  - Most assigned to one person
+  - Uses **Workload** statuses
+
+#### 2. P&B Tiger Team *(archived)*
+
+- **Slug**: `pb-tiger-team`
+- **Identity**: random color + random icon
+- **`archived_at`**: set to a past date
+- **Members**:
+
+| Person | Role |
+|---|---|
+| Brian R | `admin` |
+| Scott F | `member` |
+| Codi K | `admin` |
+| Dan S | `member` |
+| Kristen K | `member` |
+| Jamie F | `member` |
+
+Note: Kristen K is described as a "participant" in the brief, but the schema only supports `admin` and `member` roles. External participants use `user_id = NULL`. Since Kristen is a named user, she is a `member`.
+
+- **Status templates**:
+  - **Default**: Planning, In Progress, Done
+
+- **Timelines**:
+
+  **Right to Win Initiative**
+  - 2-month window
+  - ~4 activities: researching and presenting the right-to-win for a product
+  - Uses **Default** statuses
+
+  **Displacement GTM**
+  - 3-month window
+  - ~4 activities: building a GTM for a displacement play, sales enablement
+  - Uses **Default** statuses
+
+#### 3. Marketing Cross Functional
+
+- **Slug**: `marketing-cross-functional`
+- **Identity**: random color + random icon
+- **Members**:
+
+| Person | Role |
+|---|---|
+| Scott F | `admin` |
+| Paula H | `admin` |
+| Corey F | `member` |
+| Dan B | `member` |
+| Rick S | `member` |
+
+- **Status templates**:
+  - **Default**: Planning, In Progress, Done
+  - **Workload**: Planning, In Progress, Blockers, Done, Deferred, Cancelled
+
+- **Timelines**:
+
+  **Web Site Rebrand**
+  - 6-month window
+  - ~15 activities: rebranding and rebuilding the corporate website (design system, content migration, SEO audit, stakeholder reviews, launch prep, etc.)
+  - Uses **Workload** statuses
+
+---
+
+## Activity content guidelines
+
+When generating activity titles and descriptions, make them sound like real PMM / marketing work:
+
+- **PMM activities**: Competitive battlecard update, Analyst briefing prep, Q1 messaging framework, Product launch checklist, Win/loss interview synthesis, Pricing positioning doc, Sales one-pager refresh
+- **Sales enablement**: SKO keynote deck, Demo environment setup, Objection handling workshop, New rep onboarding kit, Customer story video
+- **Website/brand**: Brand guidelines v2, Homepage hero redesign, SEO keyword audit, Content migration plan, Analytics tagging spec, Stakeholder review meeting, Accessibility audit, Launch readiness checklist
+
+Activities should have realistic date ranges (a few days to a few weeks each), spread across their timeline window without excessive overlap.
+
+---
+
+## Tags
+
+Each team has its own tag vocabulary. Tags are team-scoped (`team_id`) and referenced from `activity_tags` via `tag_id`.
+
+### Product Marketing tags
+`urgent`, `design`, `content`, `research`, `launch`, `competitive`, `review`, `blocked`
+
+### P&B Tiger Team tags
+`positioning`, `strategy`, `research`, `competitive`, `enablement`, `executive`
+
+### Marketing Cross Functional tags
+`design`, `seo`, `analytics`, `brand`, `content`, `launch`
+
+A representative subset of activities across all timelines is tagged. Coverage is intentionally partial — not every activity is tagged, mirroring real-world usage.
+
+---
+
+## Activity parent-child relationships
+
+A few natural sub-task pairs are set via `parent_activity_id`:
+
+| Child activity | Parent activity | Rationale |
+|---|---|---|
+| Competitive battlecard refresh (a-q1-02) | Competitive landscape analysis (a-q1-01) | Battlecard updates follow from the research |
+| AR/PR coordination — Q1 launch (a-q1-14) | Product launch checklist — v4.2 (a-q1-06) | PR work is a sub-track of launch prep |
+| Demo environment setup (a-q1-17) | Product launch checklist — v4.2 (a-q1-06) | Demo env is a launch dependency |
+| Sales training session — pricing (a-sko-07) | Objection handling playbook (a-sko-05) | Training draws on the playbook |
+| Product pages rewrite (a-reb-08) | Design system v2 (a-reb-02) | Pages are implemented against the design system |
+| Blog template redesign (a-reb-09) | Design system v2 (a-reb-02) | Same — template uses design system components |
+
+---
+
+## Schema reference (current as of migration 017)
+
+This section summarizes the tables and columns that sample data touches. Regenerate this section if migrations change the schema.
+
+### Core tables
+
+```
+users (id, email, password_hash, display_name, avatar_url, color, icon, is_superadmin, created_at, updated_at, archived_at)
+teams (id, name, slug, color, icon, description, notes, archived_at, invite_link_token, created_at, updated_at)
+team_members (id, team_id, user_id, display_name, role, color, icon, joined_at, archived_at)
+timelines (id, team_id, name, start_date, end_date, description, notes, color, icon, share_token, ical_token, created_by, created_at, updated_at, archived_at)
+activities (id, timeline_id, title, description, icon, color, start_at, end_at, all_day, status_id, parent_activity_id, percent_complete, location, url, created_by, created_at, updated_at, archived_at)
+tags (id, team_id, name, color, created_by, created_at)
+```
+
+### Junction / child tables
+
+```
+activity_assignments (activity_id, team_member_id)
+activity_tags (activity_id, tag_id)
+timeline_access (timeline_id, team_member_id, role)
+status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
+status_template_items (id, template_id, name, color, icon, is_closed, position)
+statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+```
+
+### Tables NOT in sample data scope
+
+```
+schema_migrations — managed by the migration runner
+instance_settings — configured per deployment
+saved_filters — user-generated at runtime
+calendar_connections — requires real OAuth credentials
+api_tokens — generated at runtime
+invites — generated at runtime
+password_reset_tokens — generated at runtime
+user_preferences — set by users at runtime
+```
 ````
 
 ## File: docs/TESTING.md
@@ -19575,6 +19476,30 @@ func doSend(c *smtp.Client, from, to, msg string) error {
 }
 ````
 
+## File: packages/api/sample_data/00_flush.sql
+````sql
+-- Flush all sample-data tables in FK-safe (reverse dependency) order.
+-- Tables NOT flushed: schema_migrations, instance_settings, saved_filters.
+
+DELETE FROM activity_assignments;
+DELETE FROM activity_tags;
+DELETE FROM activities;
+DELETE FROM tags;
+DELETE FROM statuses;
+DELETE FROM status_template_items;
+DELETE FROM status_templates;
+DELETE FROM timeline_access;
+DELETE FROM timelines;
+DELETE FROM team_members;
+DELETE FROM teams;
+DELETE FROM user_preferences;
+DELETE FROM password_reset_tokens;
+DELETE FROM invites;
+DELETE FROM api_tokens;
+DELETE FROM calendar_connections;
+DELETE FROM users;
+````
+
 ## File: packages/api/sample_data/03_team_members.sql
 ````sql
 -- Team members: 16 total (includes 1 external participant with user_id=NULL).
@@ -19604,6 +19529,107 @@ INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon,
   ('tm-mcf-corey', 't-marketing-cross-func', 'u-corey-f',         NULL, 'member', '#EF4444', '__name_words__', datetime('now', '-75 days')),
   ('tm-mcf-dan',   't-marketing-cross-func', 'u-dan-b',           NULL, 'member', '#6366F1', '__name_words__', datetime('now', '-75 days')),
   ('tm-mcf-rick',  't-marketing-cross-func', 'u-rick-s',          NULL, 'member', '#288C9B', '__name_words__', datetime('now', '-75 days'));
+````
+
+## File: packages/api/sample_data/07_activities.sql
+````sql
+-- Activities: 58 total across 6 timelines.
+-- Columns: id, timeline_id, title, description, color, icon,
+--          start_at, end_at, status_id,
+--          parent_activity_id (NULL or sibling ID for sub-tasks),
+--          percent_complete (0-100),
+--          created_by, created_at, updated_at
+
+-- ── Q1 Workload (20 activities, Workload statuses) ───────────────────────────
+-- Parent-child pairs:
+--   a-q1-02 (battlecard refresh) → a-q1-01 (competitive landscape)
+--   a-q1-14 (AR/PR coordination) → a-q1-06 (launch checklist)
+--   a-q1-17 (demo env setup)     → a-q1-06 (launch checklist)
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-q1-01', 'tl-pm-q1', 'Competitive landscape analysis',      'Deep-dive on top 5 competitors — positioning, pricing, recent launches.', '#3B82F6', 'search',         datetime('now', '-28 days'), datetime('now', '-18 days'), 's-q1-done',       NULL,       100, 'u-brian-rieb',  datetime('now', '-28 days'), datetime('now', '-18 days')),
+  ('a-q1-02', 'tl-pm-q1', 'Competitive battlecard refresh',      'Update sales battlecards with latest competitive intel.',                  '#06B6D4', 'shield',         datetime('now', '-20 days'), datetime('now', '-12 days'), 's-q1-done',       'a-q1-01',  100, 'u-brian-rieb',  datetime('now', '-20 days'), datetime('now', '-12 days')),
+  ('a-q1-03', 'tl-pm-q1', 'Q1 messaging framework',              'Core positioning and messaging for Q1 product launches.',                  '#8B5CF6', 'file-text',      datetime('now', '-25 days'), datetime('now', '-10 days'), 's-q1-done',       NULL,       100, 'u-lindsay-k',   datetime('now', '-25 days'), datetime('now', '-10 days')),
+  ('a-q1-04', 'tl-pm-q1', 'Analyst briefing prep — Gartner',     'Slide deck and talking points for Gartner analyst meeting.',               '#F97316', 'briefcase',      datetime('now', '-15 days'), datetime('now', '-8 days'),  's-q1-done',       NULL,       100, 'u-erik-b',      datetime('now', '-15 days'), datetime('now', '-8 days')),
+  ('a-q1-05', 'tl-pm-q1', 'Analyst briefing prep — Forrester',   'Deck and prep for Forrester wave discussion.',                             '#F97316', 'briefcase',      datetime('now', '-12 days'), datetime('now', '-5 days'),  's-q1-done',       NULL,       100, 'u-erik-b',      datetime('now', '-12 days'), datetime('now', '-5 days')),
+  ('a-q1-06', 'tl-pm-q1', 'Product launch checklist — v4.2',     'End-to-end launch readiness: docs, blog, enablement, PR.',                 '#22C55E', 'check-circle',   datetime('now', '-20 days'), datetime('now', '-3 days'),  's-q1-done',       NULL,       100, 'u-brian-rieb',  datetime('now', '-20 days'), datetime('now', '-3 days')),
+  ('a-q1-07', 'tl-pm-q1', 'Win/loss interview synthesis',        'Summarize Q4 win/loss interviews into themes and recommendations.',         '#EC4899', 'message-circle', datetime('now', '-18 days'), datetime('now', '-7 days'),  's-q1-done',       NULL,       100, 'u-michelle-t',  datetime('now', '-18 days'), datetime('now', '-7 days')),
+  ('a-q1-08', 'tl-pm-q1', 'Pricing positioning doc',             'Updated pricing rationale and competitive positioning matrix.',             '#F43F5E', 'trending-up',    datetime('now', '-10 days'), datetime('now', '+5 days'),  's-q1-inprogress', NULL,        60, 'u-brian-rieb',  datetime('now', '-10 days'), datetime('now', '-2 days')),
+  ('a-q1-09', 'tl-pm-q1', 'Sales one-pager refresh',             'Refresh the 2-sided sales leave-behind for Q1 messaging.',                 '#84CC16', 'file-text',      datetime('now', '-8 days'),  datetime('now', '+3 days'),  's-q1-inprogress', NULL,        45, 'u-lindsay-k',   datetime('now', '-8 days'),  datetime('now', '-2 days')),
+  ('a-q1-10', 'tl-pm-q1', 'Customer story — Acme Corp',          'Draft case study from Acme Corp expansion deal.',                          '#288C9B', 'star',           datetime('now', '-14 days'), datetime('now', '-4 days'),  's-q1-done',       NULL,       100, 'u-michelle-t',  datetime('now', '-14 days'), datetime('now', '-4 days')),
+  ('a-q1-11', 'tl-pm-q1', 'Content calendar planning',           'Map out blog, social, and email content for next 6 weeks.',                '#A855F7', 'calendar',       datetime('now', '-5 days'),  datetime('now', '+7 days'),  's-q1-inprogress', NULL,        50, 'u-lindsay-k',   datetime('now', '-5 days'),  datetime('now', '-1 days')),
+  ('a-q1-12', 'tl-pm-q1', 'Webinar script — platform overview',  'Script and slide deck for monthly product webinar.',                       '#6366F1', 'edit',           datetime('now', '-3 days'),  datetime('now', '+10 days'), 's-q1-planning',   NULL,         0, 'u-erik-b',      datetime('now', '-3 days'),  datetime('now', '-1 days')),
+  ('a-q1-13', 'tl-pm-q1', 'Partner co-marketing brief',          'Joint value prop and co-marketing plan with PartnerCo.',                   '#F59E0B', 'share',          datetime('now', '-7 days'),  datetime('now', '+4 days'),  's-q1-inprogress', NULL,        35, 'u-brian-rieb',  datetime('now', '-7 days'),  datetime('now', '-1 days')),
+  ('a-q1-14', 'tl-pm-q1', 'AR/PR coordination — Q1 launch',     'Coordinate PR release and analyst outreach for v4.2 launch.',              '#EF4444', 'globe',          datetime('now', '-6 days'),  datetime('now', '+5 days'),  's-q1-inprogress', 'a-q1-06',   40, 'u-erik-b',      datetime('now', '-6 days'),  datetime('now', '-1 days')),
+  ('a-q1-15', 'tl-pm-q1', 'Persona refresh workshop',            'Internal workshop to validate and update buyer personas.',                 '#78716C', 'users',          datetime('now', '+2 days'),  datetime('now', '+5 days'),  's-q1-planning',   NULL,         0, 'u-michelle-t',  datetime('now', '-2 days'),  datetime('now', '-1 days')),
+  ('a-q1-16', 'tl-pm-q1', 'ROI calculator update',               'Refresh the interactive ROI calculator with new benchmark data.',          '#06B6D4', 'pie-chart',      datetime('now', '+5 days'),  datetime('now', '+18 days'), 's-q1-planning',   NULL,         0, 'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-q1-17', 'tl-pm-q1', 'Demo environment setup',              'Provision and configure demo environment for Q1 launches.',                '#288C9B', 'server',         datetime('now', '-4 days'),  datetime('now', '+3 days'),  's-q1-blockers',   'a-q1-06',   30, 'u-erik-b',      datetime('now', '-4 days'),  datetime('now', '-1 days')),
+  ('a-q1-18', 'tl-pm-q1', 'Competitive teardown — NewCo launch', 'Rapid response analysis of NewCo product announcement.',                  '#EF4444', 'alert-circle',   datetime('now', '+7 days'),  datetime('now', '+14 days'), 's-q1-planning',   NULL,         0, 'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-q1-19', 'tl-pm-q1', 'Sales enablement newsletter — March', 'Monthly enablement digest: new assets, competitive updates, wins.',        '#22C55E', 'mail',           datetime('now', '+10 days'), datetime('now', '+14 days'), 's-q1-planning',   NULL,         0, 'u-lindsay-k',   datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-q1-20', 'tl-pm-q1', 'Quarterly business review deck',      'PMM section of the QBR deck: pipeline impact, content metrics.',           '#F97316', 'bar-chart',      datetime('now', '+14 days'), datetime('now', '+21 days'), 's-q1-planning',   NULL,         0, 'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days'));
+
+-- ── Sales Kick Off (10 activities, Default statuses) ─────────────────────────
+-- Parent-child pair:
+--   a-sko-07 (sales training — pricing) → a-sko-05 (objection handling playbook)
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-sko-01', 'tl-pm-sko', 'SKO keynote deck',                    'Main stage presentation — product vision and roadmap.',                  '#3B82F6', 'star',           datetime('now', '+2 days'),  datetime('now', '+14 days'), 's-sko-inprogress', NULL,        55, 'u-erik-b',     datetime('now', '-10 days'), datetime('now', '-1 days')),
+  ('a-sko-02', 'tl-pm-sko', 'Competitive battle card workshop',    'Interactive session: how to use battlecards in live deals.',             '#EF4444', 'shield',         datetime('now', '+7 days'),  datetime('now', '+12 days'), 's-sko-planning',   NULL,         0, 'u-brian-rieb', datetime('now', '-10 days'), datetime('now', '-1 days')),
+  ('a-sko-03', 'tl-pm-sko', 'Demo script — enterprise tier',       'Step-by-step demo flow for enterprise prospects.',                       '#22C55E', 'code',           datetime('now', '+3 days'),  datetime('now', '+10 days'), 's-sko-inprogress', NULL,        40, 'u-erik-b',     datetime('now', '-8 days'),  datetime('now', '-1 days')),
+  ('a-sko-04', 'tl-pm-sko', 'New rep onboarding kit',              'Welcome pack: product overview, personas, competitive cheat sheet.',     '#F97316', 'package',        datetime('now', '+5 days'),  datetime('now', '+15 days'), 's-sko-planning',   NULL,         0, 'u-lindsay-k',  datetime('now', '-7 days'),  datetime('now', '-1 days')),
+  ('a-sko-05', 'tl-pm-sko', 'Objection handling playbook',         'Top 15 objections with response frameworks and proof points.',           '#8B5CF6', 'message-circle', datetime('now', '+8 days'),  datetime('now', '+18 days'), 's-sko-planning',   NULL,         0, 'u-brian-rieb', datetime('now', '-6 days'),  datetime('now', '-1 days')),
+  ('a-sko-06', 'tl-pm-sko', 'Customer story video — GlobalTech',   'Film and edit 3-minute customer testimonial video.',                     '#EC4899', 'eye',            datetime('now', '+1 days'),  datetime('now', '+20 days'), 's-sko-inprogress', NULL,        70, 'u-michelle-t', datetime('now', '-12 days'), datetime('now', '-1 days')),
+  ('a-sko-07', 'tl-pm-sko', 'Sales training session — pricing',    'Live training: positioning premium tier and handling price objections.', '#F59E0B', 'trending-up',    datetime('now', '+14 days'), datetime('now', '+16 days'), 's-sko-planning',   'a-sko-05',   0, 'u-brian-rieb', datetime('now', '-5 days'),  datetime('now', '-1 days')),
+  ('a-sko-08', 'tl-pm-sko', 'SKO swag and logistics',              'Coordinate branded materials, venue AV, and printed collateral.',        '#64748B', 'package',        datetime('now'),             datetime('now', '+25 days'), 's-sko-inprogress', NULL,        25, 'u-lindsay-k',  datetime('now', '-14 days'), datetime('now', '-1 days')),
+  ('a-sko-09', 'tl-pm-sko', 'Breakout session — vertical selling', 'Prep for healthcare and finserv vertical breakout sessions.',            '#06B6D4', 'layers',         datetime('now', '+10 days'), datetime('now', '+18 days'), 's-sko-planning',   NULL,         0, 'u-erik-b',     datetime('now', '-4 days'),  datetime('now', '-1 days')),
+  ('a-sko-10', 'tl-pm-sko', 'Post-SKO follow-up plan',             'Email sequences and resource hub for post-event reinforcement.',         '#84CC16', 'mail',           datetime('now', '+20 days'), datetime('now', '+30 days'), 's-sko-planning',   NULL,         0, 'u-michelle-t', datetime('now', '-3 days'),  datetime('now', '-1 days'));
+
+-- ── Q2 Workload (5 activities, archived, Workload statuses) ──────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-q2-01', 'tl-pm-q2', 'Q2 product launch plan',           'High-level launch timeline and DRI assignments for Q2 releases.',     '#3B82F6', 'calendar',     datetime('now', '-175 days'), datetime('now', '-140 days'), 's-q2-done',     NULL, 100, 'u-brian-rieb', datetime('now', '-178 days'), datetime('now', '-140 days')),
+  ('a-q2-02', 'tl-pm-q2', 'Analyst day preparation',           'Materials and dry-run for annual analyst day event.',                 '#F97316', 'briefcase',    datetime('now', '-160 days'), datetime('now', '-130 days'), 's-q2-done',     NULL, 100, 'u-erik-b',     datetime('now', '-165 days'), datetime('now', '-130 days')),
+  ('a-q2-03', 'tl-pm-q2', 'Mid-year messaging audit',          'Review all external messaging for consistency with Q2 positioning.', '#EC4899', 'eye',          datetime('now', '-145 days'), datetime('now', '-115 days'), 's-q2-done',     NULL, 100, 'u-lindsay-k',  datetime('now', '-150 days'), datetime('now', '-115 days')),
+  ('a-q2-04', 'tl-pm-q2', 'Competitive intel digest — June',   'Monthly competitive summary for sales and leadership.',              '#EF4444', 'alert-circle', datetime('now', '-120 days'), datetime('now', '-100 days'), 's-q2-done',     NULL, 100, 'u-brian-rieb', datetime('now', '-125 days'), datetime('now', '-100 days')),
+  ('a-q2-05', 'tl-pm-q2', 'Customer advisory board planning',  'Agenda and invite list for H2 customer advisory board session.',     '#22C55E', 'users',        datetime('now', '-110 days'), datetime('now', '-92 days'),  's-q2-deferred', NULL,   0, 'u-michelle-t', datetime('now', '-115 days'), datetime('now', '-92 days'));
+
+-- ── Right to Win Initiative (4 activities, Default statuses) ─────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-rtw-01', 'tl-pb-rtw', 'Market sizing research',         'TAM/SAM/SOM analysis for the target segment.',                       '#3B82F6', 'pie-chart',      datetime('now', '-118 days'), datetime('now', '-100 days'), 's-rtw-done', NULL, 100, 'u-dan-s',     datetime('now', '-118 days'), datetime('now', '-100 days')),
+  ('a-rtw-02', 'tl-pb-rtw', 'Customer interview round',       'Interview 8 target-segment customers on needs and pain points.',     '#22C55E', 'message-circle', datetime('now', '-105 days'), datetime('now', '-85 days'),  's-rtw-done', NULL, 100, 'u-kristen-k', datetime('now', '-105 days'), datetime('now', '-85 days')),
+  ('a-rtw-03', 'tl-pb-rtw', 'Right-to-win framework doc',     'Synthesize research into the right-to-win positioning framework.',   '#F97316', 'file-text',      datetime('now', '-90 days'),  datetime('now', '-70 days'),  's-rtw-done', NULL, 100, 'u-brian-rieb', datetime('now', '-90 days'),  datetime('now', '-70 days')),
+  ('a-rtw-04', 'tl-pb-rtw', 'Leadership presentation',        'Present findings and recommendation to exec team.',                  '#8B5CF6', 'award',          datetime('now', '-72 days'),  datetime('now', '-62 days'),  's-rtw-done', NULL, 100, 'u-codi-k',    datetime('now', '-72 days'),  datetime('now', '-62 days'));
+
+-- ── Displacement GTM (4 activities, Default statuses) ────────────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-gtm-01', 'tl-pb-gtm', 'Displacement playbook draft',    'End-to-end playbook: triggers, objections, migration path.',         '#EF4444', 'flag',        datetime('now', '-148 days'), datetime('now', '-120 days'), 's-gtm-done', NULL, 100, 'u-codi-k',           datetime('now', '-148 days'), datetime('now', '-120 days')),
+  ('a-gtm-02', 'tl-pb-gtm', 'Migration ROI calculator',       'Build ROI model showing TCO advantage of switching.',               '#22C55E', 'trending-up', datetime('now', '-125 days'), datetime('now', '-95 days'),  's-gtm-done', NULL, 100, 'u-dan-s',            datetime('now', '-125 days'), datetime('now', '-95 days')),
+  ('a-gtm-03', 'tl-pb-gtm', 'Sales enablement training',      'Train AEs on displacement selling motion and objection handling.',   '#F59E0B', 'users',       datetime('now', '-100 days'), datetime('now', '-75 days'),  's-gtm-done', NULL, 100, 'u-jamie-f',          datetime('now', '-100 days'), datetime('now', '-75 days')),
+  ('a-gtm-04', 'tl-pb-gtm', 'Pilot program launch',           'Identify 3 pilot accounts and run displacement proof-of-concept.',  '#3B82F6', 'target',      datetime('now', '-80 days'),  datetime('now', '-62 days'),  's-gtm-done', NULL, 100, 'u-scott-fitzgerald', datetime('now', '-80 days'),  datetime('now', '-62 days'));
+
+-- ── Web Site Rebrand (15 activities, Workload statuses) ──────────────────────
+-- Parent-child pairs:
+--   a-reb-08 (product pages rewrite) → a-reb-02 (design system v2)
+--   a-reb-09 (blog template redesign) → a-reb-02 (design system v2)
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-reb-01', 'tl-mcf-rebrand', 'Brand audit and gap analysis',        'Audit current brand assets against new brand strategy.',              '#8B5CF6', 'search',       datetime('now', '-58 days'), datetime('now', '-42 days'), 's-reb-done',       NULL,       100, 'u-scott-fitzgerald', datetime('now', '-58 days'), datetime('now', '-42 days')),
+  ('a-reb-02', 'tl-mcf-rebrand', 'Design system v2',                    'New component library: typography, color, spacing, elevation.',       '#3B82F6', 'grid',         datetime('now', '-50 days'), datetime('now', '-25 days'), 's-reb-done',       NULL,       100, 'u-paula-h',          datetime('now', '-50 days'), datetime('now', '-25 days')),
+  ('a-reb-03', 'tl-mcf-rebrand', 'Homepage hero redesign',              'New hero section: headline, value prop, CTA, and imagery.',           '#EC4899', 'eye',          datetime('now', '-30 days'), datetime('now', '-10 days'), 's-reb-done',       NULL,       100, 'u-corey-f',          datetime('now', '-30 days'), datetime('now', '-10 days')),
+  ('a-reb-04', 'tl-mcf-rebrand', 'SEO keyword audit',                   'Comprehensive keyword analysis and content gap identification.',      '#22C55E', 'search',       datetime('now', '-45 days'), datetime('now', '-20 days'), 's-reb-done',       NULL,       100, 'u-rick-s',           datetime('now', '-45 days'), datetime('now', '-20 days')),
+  ('a-reb-05', 'tl-mcf-rebrand', 'Content migration plan',              'Map existing pages to new IA; identify pages to create/retire.',      '#F97316', 'list',         datetime('now', '-35 days'), datetime('now', '-15 days'), 's-reb-done',       NULL,       100, 'u-dan-b',            datetime('now', '-35 days'), datetime('now', '-15 days')),
+  ('a-reb-06', 'tl-mcf-rebrand', 'Analytics tagging spec',              'Define UTM strategy, event taxonomy, and GA4 configuration.',         '#06B6D4', 'pie-chart',    datetime('now', '-20 days'), datetime('now', '-5 days'),  's-reb-done',       NULL,       100, 'u-rick-s',           datetime('now', '-20 days'), datetime('now', '-5 days')),
+  ('a-reb-07', 'tl-mcf-rebrand', 'Accessibility audit',                 'WCAG 2.1 AA audit of all new page templates.',                       '#F43F5E', 'shield',       datetime('now', '-10 days'), datetime('now', '+5 days'),  's-reb-inprogress', NULL,        60, 'u-corey-f',          datetime('now', '-10 days'), datetime('now', '-2 days')),
+  ('a-reb-08', 'tl-mcf-rebrand', 'Product pages rewrite',               'Rewrite all product/feature pages with new messaging.',               '#A855F7', 'file-text',    datetime('now', '-8 days'),  datetime('now', '+15 days'), 's-reb-inprogress', 'a-reb-02',  30, 'u-scott-fitzgerald', datetime('now', '-8 days'),  datetime('now', '-1 days')),
+  ('a-reb-09', 'tl-mcf-rebrand', 'Blog template redesign',              'New blog index and post templates matching brand refresh.',            '#84CC16', 'edit',         datetime('now', '-5 days'),  datetime('now', '+10 days'), 's-reb-inprogress', 'a-reb-02',  45, 'u-paula-h',          datetime('now', '-5 days'),  datetime('now', '-1 days')),
+  ('a-reb-10', 'tl-mcf-rebrand', 'Stakeholder review — round 1',        'First exec review of homepage, product pages, and navigation.',       '#64748B', 'users',        datetime('now', '+5 days'),  datetime('now', '+8 days'),  's-reb-planning',   NULL,         0, 'u-scott-fitzgerald', datetime('now', '-3 days'),  datetime('now', '-1 days')),
+  ('a-reb-11', 'tl-mcf-rebrand', 'Photography and illustration sprint', 'Commission new brand photography and custom illustrations.',          '#F59E0B', 'eye',          datetime('now', '+3 days'),  datetime('now', '+25 days'), 's-reb-planning',   NULL,         0, 'u-paula-h',          datetime('now', '-2 days'),  datetime('now', '-1 days')),
+  ('a-reb-12', 'tl-mcf-rebrand', 'Pricing page overhaul',               'Redesign pricing page with new tier structure and FAQ.',              '#EF4444', 'trending-up',  datetime('now', '+10 days'), datetime('now', '+30 days'), 's-reb-planning',   NULL,         0, 'u-dan-b',            datetime('now', '-2 days'),  datetime('now', '-1 days')),
+  ('a-reb-13', 'tl-mcf-rebrand', 'Redirect map and 301 plan',           'Map all old URLs to new structure; configure redirects.',             '#78716C', 'link',         datetime('now', '+15 days'), datetime('now', '+35 days'), 's-reb-planning',   NULL,         0, 'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-reb-14', 'tl-mcf-rebrand', 'Launch readiness checklist',          'Pre-launch verification: performance, SEO, analytics, redirects.',   '#288C9B', 'check-circle', datetime('now', '+30 days'), datetime('now', '+40 days'), 's-reb-planning',   NULL,         0, 'u-scott-fitzgerald', datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-reb-15', 'tl-mcf-rebrand', 'Post-launch monitoring plan',         'Week-1 monitoring: traffic, errors, search console, conversions.',   '#F97316', 'activity',     datetime('now', '+40 days'), datetime('now', '+50 days'), 's-reb-planning',   NULL,         0, 'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days'));
 ````
 
 ## File: packages/api/sample_data/09_timeline_access.sql
@@ -19651,6 +19677,115 @@ INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
   ('tl-mcf-rebrand', 'tm-mcf-corey', 'member'),
   ('tl-mcf-rebrand', 'tm-mcf-dan',   'member'),
   ('tl-mcf-rebrand', 'tm-mcf-rick',  'member');
+````
+
+## File: packages/api/sample_data/10_tags.sql
+````sql
+-- Tags: team-scoped labels for activities.
+-- Each team gets 6-8 tags reflecting its domain vocabulary.
+
+-- ── Product Marketing tags ────────────────────────────────────────────────────
+
+INSERT INTO tags (id, team_id, name, color, created_by, created_at) VALUES
+  ('tag-pm-urgent',      't-product-marketing', 'urgent',      'red',    'u-brian-rieb', datetime('now', '-30 days')),
+  ('tag-pm-design',      't-product-marketing', 'design',      'violet', 'u-brian-rieb', datetime('now', '-30 days')),
+  ('tag-pm-content',     't-product-marketing', 'content',     'teal',   'u-brian-rieb', datetime('now', '-28 days')),
+  ('tag-pm-research',    't-product-marketing', 'research',    'blue',   'u-brian-rieb', datetime('now', '-27 days')),
+  ('tag-pm-launch',      't-product-marketing', 'launch',      'green',  'u-brian-rieb', datetime('now', '-26 days')),
+  ('tag-pm-competitive', 't-product-marketing', 'competitive', 'amber',  'u-brian-rieb', datetime('now', '-25 days')),
+  ('tag-pm-review',      't-product-marketing', 'review',      'indigo', 'u-brian-rieb', datetime('now', '-24 days')),
+  ('tag-pm-blocked',     't-product-marketing', 'blocked',     'red',    'u-brian-rieb', datetime('now', '-20 days'));
+
+-- ── P&B Tiger Team tags ───────────────────────────────────────────────────────
+
+INSERT INTO tags (id, team_id, name, color, created_by, created_at) VALUES
+  ('tag-pb-positioning', 't-pb-tiger-team', 'positioning', 'amber',  'u-brian-rieb', datetime('now', '-140 days')),
+  ('tag-pb-strategy',    't-pb-tiger-team', 'strategy',    'indigo', 'u-brian-rieb', datetime('now', '-140 days')),
+  ('tag-pb-research',    't-pb-tiger-team', 'research',    'blue',   'u-brian-rieb', datetime('now', '-138 days')),
+  ('tag-pb-competitive', 't-pb-tiger-team', 'competitive', 'red',    'u-brian-rieb', datetime('now', '-137 days')),
+  ('tag-pb-enablement',  't-pb-tiger-team', 'enablement',  'green',  'u-codi-k',     datetime('now', '-135 days')),
+  ('tag-pb-executive',   't-pb-tiger-team', 'executive',   'violet', 'u-codi-k',     datetime('now', '-134 days'));
+
+-- ── Marketing Cross Functional tags ──────────────────────────────────────────
+
+INSERT INTO tags (id, team_id, name, color, created_by, created_at) VALUES
+  ('tag-mcf-design',     't-marketing-cross-func', 'design',     'violet', 'u-scott-fitzgerald', datetime('now', '-60 days')),
+  ('tag-mcf-seo',        't-marketing-cross-func', 'seo',        'teal',   'u-scott-fitzgerald', datetime('now', '-60 days')),
+  ('tag-mcf-analytics',  't-marketing-cross-func', 'analytics',  'blue',   'u-scott-fitzgerald', datetime('now', '-58 days')),
+  ('tag-mcf-brand',      't-marketing-cross-func', 'brand',      'purple', 'u-paula-h',          datetime('now', '-57 days')),
+  ('tag-mcf-content',    't-marketing-cross-func', 'content',    'green',  'u-paula-h',          datetime('now', '-56 days')),
+  ('tag-mcf-launch',     't-marketing-cross-func', 'launch',     'rose',   'u-scott-fitzgerald', datetime('now', '-55 days'));
+
+-- ── Activity-tag associations ─────────────────────────────────────────────────
+
+-- Product Marketing: Q1 Workload
+INSERT INTO activity_tags (activity_id, tag_id) VALUES
+  ('a-q1-01', 'tag-pm-research'),
+  ('a-q1-01', 'tag-pm-competitive'),
+  ('a-q1-02', 'tag-pm-competitive'),
+  ('a-q1-02', 'tag-pm-review'),
+  ('a-q1-03', 'tag-pm-content'),
+  ('a-q1-04', 'tag-pm-review'),
+  ('a-q1-05', 'tag-pm-review'),
+  ('a-q1-06', 'tag-pm-launch'),
+  ('a-q1-06', 'tag-pm-review'),
+  ('a-q1-08', 'tag-pm-urgent'),
+  ('a-q1-09', 'tag-pm-design'),
+  ('a-q1-09', 'tag-pm-content'),
+  ('a-q1-11', 'tag-pm-content'),
+  ('a-q1-13', 'tag-pm-content'),
+  ('a-q1-14', 'tag-pm-launch'),
+  ('a-q1-17', 'tag-pm-blocked'),
+  ('a-q1-17', 'tag-pm-urgent'),
+  ('a-q1-18', 'tag-pm-competitive'),
+  ('a-q1-18', 'tag-pm-research');
+
+-- Product Marketing: Sales Kick Off
+INSERT INTO activity_tags (activity_id, tag_id) VALUES
+  ('a-sko-01', 'tag-pm-design'),
+  ('a-sko-01', 'tag-pm-launch'),
+  ('a-sko-02', 'tag-pm-competitive'),
+  ('a-sko-04', 'tag-pm-content'),
+  ('a-sko-05', 'tag-pm-content'),
+  ('a-sko-07', 'tag-pm-review');
+
+-- P&B Tiger Team: Right to Win Initiative
+INSERT INTO activity_tags (activity_id, tag_id) VALUES
+  ('a-rtw-01', 'tag-pb-research'),
+  ('a-rtw-01', 'tag-pb-competitive'),
+  ('a-rtw-02', 'tag-pb-research'),
+  ('a-rtw-03', 'tag-pb-positioning'),
+  ('a-rtw-03', 'tag-pb-strategy'),
+  ('a-rtw-04', 'tag-pb-executive'),
+  ('a-rtw-04', 'tag-pb-strategy');
+
+-- P&B Tiger Team: Displacement GTM
+INSERT INTO activity_tags (activity_id, tag_id) VALUES
+  ('a-gtm-01', 'tag-pb-strategy'),
+  ('a-gtm-01', 'tag-pb-competitive'),
+  ('a-gtm-01', 'tag-pb-enablement'),
+  ('a-gtm-02', 'tag-pb-competitive'),
+  ('a-gtm-03', 'tag-pb-enablement'),
+  ('a-gtm-04', 'tag-pb-strategy');
+
+-- Marketing Cross Functional: Web Site Rebrand
+INSERT INTO activity_tags (activity_id, tag_id) VALUES
+  ('a-reb-01', 'tag-mcf-brand'),
+  ('a-reb-02', 'tag-mcf-design'),
+  ('a-reb-02', 'tag-mcf-brand'),
+  ('a-reb-03', 'tag-mcf-design'),
+  ('a-reb-04', 'tag-mcf-seo'),
+  ('a-reb-05', 'tag-mcf-content'),
+  ('a-reb-05', 'tag-mcf-seo'),
+  ('a-reb-06', 'tag-mcf-analytics'),
+  ('a-reb-07', 'tag-mcf-design'),
+  ('a-reb-08', 'tag-mcf-content'),
+  ('a-reb-09', 'tag-mcf-design'),
+  ('a-reb-09', 'tag-mcf-content'),
+  ('a-reb-12', 'tag-mcf-design'),
+  ('a-reb-14', 'tag-mcf-launch'),
+  ('a-reb-15', 'tag-mcf-analytics'),
+  ('a-reb-15', 'tag-mcf-launch');
 ````
 
 ## File: packages/web/src/components/filters/FilterDropdown.tsx
@@ -32085,6 +32220,288 @@ export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
 }
 ````
 
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
+````
+
 ## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
 ````typescript
 /**
@@ -32832,6 +33249,7 @@ export default function ActivityDetailPanel({
                     aria-label="Percent complete"
                     style={{
                       width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
+                      marginLeft: 'auto',
                       color: 'var(--foreground)', border: '1px solid var(--primary)',
                       borderRadius: 4, padding: '2px 4px', outline: 'none',
                       background: 'var(--background)', fontFamily: 'var(--font-sans)',
@@ -32847,6 +33265,7 @@ export default function ActivityDetailPanel({
                     style={{
                       fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
                       textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
+                      marginLeft: 'auto',
                       padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
                     }}
                     onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
@@ -32967,288 +33386,6 @@ export default function ActivityDetailPanel({
       </div>
     </div>
   )
-}
-````
-
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
 }
 ````
 
@@ -43829,8 +43966,10 @@ function DashboardShell() {
   const activeTeams = allTeams.filter(t => !t.archivedAt)
   const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
 
-  // Explicit team selection state — initialized from global prefs or first active team.
-  const [activeTeamId, setActiveTeamId] = useState<string>('')
+  // Explicit team selection state — null until the global pref is applied so
+  // that timelines (and the timeline init effect) don't fire against the wrong
+  // fallback team before the saved team pref resolves.
+  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
   const teamIdInitialized = useRef(false)
   useEffect(() => {
     if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
@@ -43840,7 +43979,12 @@ function DashboardShell() {
     setActiveTeamId(exists ? saved : activeTeams[0].id)
   }, [activeTeams, globalPrefsSettled, globalPrefMap])
 
-  const activeTeam = activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0]
+  // Only derive an active team once the pref has been applied (activeTeamId !== null).
+  // The activeTeams[0] fallback here handles the edge case where the saved team
+  // was archived or deleted between sessions.
+  const activeTeam = activeTeamId !== null
+    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? null)
+    : null
   const teamId = activeTeam?.id ?? ''
 
   // Check whether the current user is an admin of the active team.
@@ -43851,6 +43995,12 @@ function DashboardShell() {
 
   const handleSelectTeam = useCallback((id: string) => {
     setActiveTeamId(id)
+    // Clear the stale timeline selection so the init effect re-fires with the
+    // new team's timeline list. Without this, the old timeline ID leaks into
+    // the new team's API requests and produces 404s.
+    setActiveTimelineId(undefined)
+    prefsAppliedForTimeline.current = null
+    timelineIdInitialized.current = false
   }, [])
 
   const unarchiveTimeline = useUnarchiveTimeline(teamId)
@@ -43875,6 +44025,10 @@ function DashboardShell() {
   // Derived so they stay in sync after edits without needing separate state.
   const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
   const activeTimelineName = activeTimeline?.name ?? ''
+  const activeTimelineIdentity: Identity = {
+    color: activeTimeline?.color ?? '#288C9B',
+    icon: activeTimeline?.icon ?? '__none__',
+  }
 
   const handleTimelineChange = useCallback((id: string) => {
     prefsAppliedForTimeline.current = null
@@ -43988,6 +44142,7 @@ function DashboardShell() {
           view={view}
           teamId={teamId}
           timelineName={activeTimelineName}
+          timelineIdentity={activeTimelineIdentity}
           onViewChange={setView}
           onOpenFilterEditor={() => setFilterEditorOpen(true)}
           rightSlot={
@@ -47599,4 +47754,12 @@ GitHub Actions warned that `actions/checkout`, `setup-go`, `setup-node`, etc. ru
 **Port conflict in homelab**
 Port 8080 was already in use on the host.
 → Mapped container port 8080 to host port 8081 in Portainer. No code changes needed.
+
+---
+
+## 2026-05-30 — /test-phase 10.4.5
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (web-e2e partial — code-verified, no live server; ws-smoke cross-team isolation skipped, covered by unit tests)
+- Smoke target: http://epcot.lan:8081
+- Note: type-sync initially failed (4 tag endpoints missing from openapi.yaml); fixed and committed before logging
 ````
