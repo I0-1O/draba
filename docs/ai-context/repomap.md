@@ -6176,6 +6176,376 @@ func (s *Server) handleDeleteAPIToken(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
+## File: packages/api/internal/api/auth_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+	"unicode"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleRegister handles POST /auth/register. The first user on a fresh
+// install registers without an invite (bootstrap); every subsequent user
+// must present a valid invite token. Tier user limits are enforced before
+// hashing the password to avoid wasted bcrypt work.
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var req RegisterJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+
+	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
+		return
+	}
+	if !isValidPassword(req.Password) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	// First user may register without an invite; all subsequent users require one.
+	count, err := s.users.Count()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	if err := s.tier.CheckUserLimit(count); err != nil {
+		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
+		return
+	}
+
+	var invite *models.Invite
+	var inviteLinkTeamID string // non-empty when a reusable invite link was used
+	if count > 0 {
+		if req.InviteToken == nil || *req.InviteToken == "" {
+			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
+			return
+		}
+		// Try as a one-time invite first.
+		inv, err := s.invites.GetValid(*req.InviteToken)
+		if err != nil {
+			// Not a valid one-time invite — check if it's a reusable invite link token.
+			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
+			if linkErr != nil {
+				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
+				return
+			}
+			inviteLinkTeamID = team.ID
+		} else {
+			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
+				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
+				return
+			}
+			invite = inv
+		}
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	now := time.Now()
+	user := &models.User{
+		ID:           newID(),
+		Email:        string(req.Email),
+		PasswordHash: hash,
+		DisplayName:  req.DisplayName,
+		IsSuperadmin: count == 0,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.users.Create(user); err != nil {
+		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
+		return
+	}
+
+	if invite != nil {
+		if err := s.invites.MarkAccepted(invite.ID); err != nil {
+			// User and tokens are still returned — email uniqueness prevents a
+			// second registration. Log so the open invite is visible in monitoring.
+			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
+		}
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   invite.TeamID,
+			UserID:   &userID,
+			Role:     invite.Role,
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
+		}
+	} else if inviteLinkTeamID != "" {
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   inviteLinkTeamID,
+			UserID:   &userID,
+			Role:     "member",
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
+		}
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleLogin handles POST /auth/login. Returns the same generic
+// INVALID_CREDENTIALS error for both unknown email and bad password so
+// the endpoint cannot be used as an account-existence oracle.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req LoginJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	if req.Email == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
+		return
+	}
+
+	user, err := s.users.GetByEmail(string(req.Email))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	if user.ArchivedAt != nil {
+		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
+		return
+	}
+
+	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
+// token for a new access token; the refresh token itself is not rotated.
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	var req RefreshTokenJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accessToken": access,
+	})
+}
+
+// handleMe handles GET /auth/me and returns the authenticated user's
+// profile. Must be mounted behind authMiddleware.
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
+// address, generates a 1-hour reset token, stores the hash, and sends a
+// reset link via SMTP. Always returns 200 to prevent email enumeration.
+// When SMTP is not configured the email is silently skipped.
+func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+	if body.Email == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
+		return
+	}
+
+	// Always return 200 regardless of whether the email exists.
+	w.Header().Set("Content-Type", "application/json")
+	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
+
+	user, err := s.users.GetByEmail(body.Email)
+	if err != nil {
+		// No user — return 200 without error (prevent enumeration).
+		return
+	}
+	if user.ArchivedAt != nil {
+		return
+	}
+
+	rawToken := newToken()
+	expiresAt := time.Now().Add(time.Hour)
+	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
+		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
+		return
+	}
+
+	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
+	// when not set so the email still contains useful info.
+	baseURL := strings.TrimRight(getBaseURL(), "/")
+	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
+
+	subject := "Reset your draba password"
+	body2 := "<html><body>" +
+		"<p>You requested a password reset for your draba account.</p>" +
+		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
+		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
+		"</body></html>"
+
+	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
+		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
+	}
+}
+
+// handleResetPassword handles POST /auth/reset-password. Accepts a token and
+// new password; validates the token, hashes the new password, and marks the
+// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
+// or already used.
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token       string `json:"token"`
+		NewPassword string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.Token == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	resetToken, err := s.passwordTokens.GetValid(body.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
+		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
+func getBaseURL() string {
+	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:8080"
+}
+
+// isValidPassword applies the minimum policy: at least 8 characters and
+// no whitespace. Strength rules beyond length are intentionally lenient —
+// length is what matters most against offline cracking.
+func isValidPassword(p string) bool {
+	if len(p) < 8 {
+		return false
+	}
+	for _, r := range p {
+		if unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
+````
+
 ## File: packages/api/internal/api/middleware.go
 ````go
 package api
@@ -7695,6 +8065,301 @@ func (b *Bus) Publish(msg Message) {
 			// Slow subscriber — drop rather than block the publisher.
 		}
 	}
+}
+````
+
+## File: packages/api/internal/mailer/mailer.go
+````go
+// Package mailer sends email via SMTP. Configuration is read from
+// instance_settings at send time so changes take effect without a restart.
+// When SMTP is not configured, Send returns nil (not an error) so callers
+// can treat "no mailer" as a no-op — the forgot-password flow still returns
+// 200 to prevent email enumeration.
+package mailer
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/smtp"
+	"strings"
+)
+
+// encPrefix marks values encrypted with AES-256-GCM so LoadConfig can
+// distinguish them from legacy plaintext values written before encryption
+// was introduced.
+const encPrefix = "enc:v1:"
+
+// SMTPConfig holds the full SMTP configuration for the instance.
+type SMTPConfig struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Username   string `json:"username"`
+	Password   string `json:"password"` // stored encrypted at rest via AES-256-GCM
+	FromName   string `json:"fromName"`
+	FromEmail  string `json:"fromEmail"`
+	Encryption string `json:"encryption"` // "none" | "tls" | "starttls"
+}
+
+// SettingsReader is the subset of InstanceSettingsRepo used by Mailer.
+type SettingsReader interface {
+	Get(key string) (string, error)
+	Set(key, value string) error
+}
+
+// Mailer sends email via SMTP. The zero value is valid; calling Send on an
+// unconfigured Mailer is a no-op.
+type Mailer struct {
+	settings SettingsReader
+	encKey   []byte // 32-byte AES-256 key derived from keyMaterial; nil disables encryption
+}
+
+// New returns a Mailer that reads config from settings at send time.
+// keyMaterial is used to derive an AES-256 key for encrypting stored SMTP
+// passwords. Pass nil to disable encryption (tests, zero-value usage).
+func New(settings SettingsReader, keyMaterial []byte) *Mailer {
+	var encKey []byte
+	if len(keyMaterial) > 0 {
+		k := sha256.Sum256(keyMaterial)
+		encKey = k[:]
+	}
+	return &Mailer{settings: settings, encKey: encKey}
+}
+
+// LoadConfig reads the SMTP configuration from instance_settings.
+// Returns nil when SMTP has not been configured.
+func (m *Mailer) LoadConfig() (*SMTPConfig, error) {
+	raw, err := m.settings.Get("smtp_config")
+	if err != nil {
+		return nil, fmt.Errorf("loading smtp config: %w", err)
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	var cfg SMTPConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return nil, fmt.Errorf("parsing smtp config: %w", err)
+	}
+	if cfg.Password != "" {
+		dec, err := m.decryptPassword(cfg.Password)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting smtp password: %w", err)
+		}
+		cfg.Password = dec
+	}
+	return &cfg, nil
+}
+
+// IsConfigured reports whether SMTP has been set up.
+func (m *Mailer) IsConfigured() bool {
+	cfg, err := m.LoadConfig()
+	return err == nil && cfg != nil && cfg.Host != ""
+}
+
+// SaveConfig serialises cfg and stores it in instance_settings.
+// The password field is encrypted before storage when an encryption key is set.
+func (m *Mailer) SaveConfig(cfg *SMTPConfig) error {
+	toStore := *cfg
+	if cfg.Password != "" {
+		enc, err := m.encryptPassword(cfg.Password)
+		if err != nil {
+			return fmt.Errorf("encrypting smtp password: %w", err)
+		}
+		toStore.Password = enc
+	}
+	b, err := json.Marshal(toStore)
+	if err != nil {
+		return fmt.Errorf("serialising smtp config: %w", err)
+	}
+	return m.settings.Set("smtp_config", string(b))
+}
+
+// DeleteConfig removes the SMTP configuration.
+func (m *Mailer) DeleteConfig() error {
+	return m.settings.Set("smtp_config", "")
+}
+
+// Send sends a plain-text / HTML email to a single recipient.
+// Returns nil without sending when SMTP is not configured.
+func (m *Mailer) Send(to, subject, htmlBody string) error {
+	cfg, err := m.LoadConfig()
+	if err != nil {
+		slog.Warn("mailer: failed to load config", "err", err)
+		return nil
+	}
+	if cfg == nil || cfg.Host == "" {
+		slog.Debug("mailer: no smtp config — email skipped", "subject", subject)
+		return nil
+	}
+
+	return sendViaConfig(cfg, to, subject, htmlBody)
+}
+
+// SendWithConfig sends using an explicit config object, bypassing the stored
+// config. Used by the SMTP test endpoint before saving.
+func SendWithConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
+	return sendViaConfig(cfg, to, subject, htmlBody)
+}
+
+// encryptPassword encrypts plaintext with AES-256-GCM and returns a
+// base64-encoded ciphertext prefixed with encPrefix. Returns plaintext
+// unchanged when no encryption key is set.
+func (m *Mailer) encryptPassword(plaintext string) (string, error) {
+	if len(m.encKey) == 0 {
+		return plaintext, nil
+	}
+	block, err := aes.NewCipher(m.encKey)
+	if err != nil {
+		return "", fmt.Errorf("creating cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("creating gcm: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", fmt.Errorf("generating nonce: %w", err)
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return encPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// decryptPassword reverses encryptPassword. Values without encPrefix are
+// returned as-is — this handles configs saved before encryption was added.
+func (m *Mailer) decryptPassword(encoded string) (string, error) {
+	if !strings.HasPrefix(encoded, encPrefix) {
+		// Plaintext fallback — encrypts on next SaveConfig call.
+		return encoded, nil
+	}
+	if len(m.encKey) == 0 {
+		return "", fmt.Errorf("encryption key not set; cannot decrypt smtp password")
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(encoded, encPrefix))
+	if err != nil {
+		return "", fmt.Errorf("decoding encrypted password: %w", err)
+	}
+	block, err := aes.NewCipher(m.encKey)
+	if err != nil {
+		return "", fmt.Errorf("creating cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("creating gcm: %w", err)
+	}
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	plain, err := gcm.Open(nil, data[:nonceSize], data[nonceSize:], nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypting password: %w", err)
+	}
+	return string(plain), nil
+}
+
+func sendViaConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
+	from := fmt.Sprintf("%s <%s>", cfg.FromName, cfg.FromEmail)
+	msg := buildMessage(from, to, subject, htmlBody)
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+
+	switch strings.ToLower(cfg.Encryption) {
+	case "tls":
+		return sendTLS(cfg, addr, from, to, msg)
+	case "starttls":
+		return sendSTARTTLS(cfg, addr, from, to, msg)
+	default:
+		return sendPlain(cfg, addr, from, to, msg)
+	}
+}
+
+func buildMessage(from, to, subject, htmlBody string) string {
+	var b strings.Builder
+	b.WriteString("From: " + from + "\r\n")
+	b.WriteString("To: " + to + "\r\n")
+	b.WriteString("Subject: " + subject + "\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	b.WriteString("\r\n")
+	b.WriteString(htmlBody)
+	return b.String()
+}
+
+func sendPlain(cfg *SMTPConfig, addr, from, to, msg string) error {
+	var auth smtp.Auth
+	if cfg.Username != "" {
+		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+	}
+	if err := smtp.SendMail(addr, auth, cfg.FromEmail, []string{to}, []byte(msg)); err != nil {
+		return fmt.Errorf("smtp send: %w", err)
+	}
+	return nil
+}
+
+func sendTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
+	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; ServerName ensures cert validation
+	conn, err := tls.Dial("tcp", addr, tlsCfg)
+	if err != nil {
+		return fmt.Errorf("smtp tls dial: %w", err)
+	}
+	defer conn.Close()
+
+	c, err := smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		return fmt.Errorf("smtp new client: %w", err)
+	}
+	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
+
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err := c.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+	return doSend(c, cfg.FromEmail, to, msg)
+}
+
+func sendSTARTTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		return fmt.Errorf("smtp dial: %w", err)
+	}
+	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
+
+	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; this is standard TLS
+	if err := c.StartTLS(tlsCfg); err != nil {
+		return fmt.Errorf("smtp starttls: %w", err)
+	}
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err := c.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+	return doSend(c, cfg.FromEmail, to, msg)
+}
+
+func doSend(c *smtp.Client, from, to, msg string) error {
+	if err := c.Mail(from); err != nil {
+		return fmt.Errorf("smtp MAIL: %w", err)
+	}
+	if err := c.Rcpt(to); err != nil {
+		return fmt.Errorf("smtp RCPT: %w", err)
+	}
+	w, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("smtp DATA: %w", err)
+	}
+	if _, err := fmt.Fprint(w, msg); err != nil {
+		return fmt.Errorf("smtp write body: %w", err)
+	}
+	return w.Close()
 }
 ````
 
@@ -10429,6 +11094,715 @@ export function cn(...inputs: ClassValue[]) {
 }
 ````
 
+## File: packages/web/src/pages/settings/AdminUsersPage.tsx
+````typescript
+/**
+ * /settings/users — Superadmin: view and search all users; orphaned-user alert.
+ */
+
+import { useState } from 'react'
+import { useAdminUsers } from '@/hooks/useSettings'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { Input } from '@/components/ui/input'
+import { AlertTriangle } from 'lucide-react'
+
+export default function AdminUsersPage() {
+  const [orphanedOnly, setOrphanedOnly] = useState(false)
+  const [search, setSearch] = useState('')
+  const { data: allData, error: allError } = useAdminUsers(false)
+  const { data: orphanData } = useAdminUsers(true)
+
+  const allUsers = allData?.users ?? []
+  const orphanedCount = orphanData?.users?.length ?? 0
+  const displayed = (orphanedOnly ? orphanData?.users ?? [] : allUsers)
+    .filter(u => {
+      if (!search) return true
+      const q = search.toLowerCase()
+      return u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
+    })
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Users</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        All accounts in this organization. Use team management to assign or remove memberships.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        {orphanedCount > 0 && !orphanedOnly && (
+          <div className="flex items-center gap-2.5 px-3.5 py-2.5 mb-4 bg-warning/10 border border-warning/30 rounded-lg">
+            <AlertTriangle size={16} className="text-warning shrink-0" />
+            <span className="text-[13px] text-warning">
+              {orphanedCount} user{orphanedCount > 1 ? 's' : ''} with no team memberships.
+            </span>
+            <button
+              onClick={() => setOrphanedOnly(true)}
+              className="ml-auto text-xs text-warning bg-transparent border-none cursor-pointer underline"
+            >
+              View
+            </button>
+          </div>
+        )}
+
+        {allError && (
+          <div className="px-4 py-3 mb-4 bg-destructive/10 border border-destructive/30 rounded-lg text-[13px] text-destructive">
+            Failed to load users. This endpoint requires the Phase 10.1.3 backend — rebuild and redeploy the Docker container.
+          </div>
+        )}
+
+        <div className="flex gap-2 mb-4 items-center">
+          <Input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search by name or email…"
+            className="max-w-[300px]"
+          />
+          <div className="flex gap-1">
+            {[
+              { label: `All (${allUsers.length})`, v: false },
+              { label: `Orphaned (${orphanedCount})`, v: true },
+            ].map(({ label, v }) => (
+              <button
+                key={String(v)}
+                onClick={() => setOrphanedOnly(v)}
+                className={`px-3 py-1.5 rounded-md text-xs border cursor-pointer ${
+                  orphanedOnly === v
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {displayed.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No users found.</p>
+        ) : (
+          <table className="w-full border-collapse">
+            <thead>
+              <tr>
+                {['User', 'Email', 'Teams', 'Status'].map(h => (
+                  <th key={h} className="text-left text-[11px] text-muted-foreground font-semibold pb-2.5 px-2 tracking-[0.4px]">
+                    {h.toUpperCase()}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {displayed.map(u => (
+                <tr key={u.id} className="border-t border-card">
+                  <td className="py-2.5 px-2 flex items-center gap-2.5">
+                    <Badge identity={{ color: u.color ?? '#288C9B', icon: u.icon ?? '__none__' } satisfies Identity} name={u.displayName} size={28} shape="circle" />
+                    <span className="text-[13px] text-foreground">{u.displayName}</span>
+                    {u.isSuperadmin && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-primary/15 text-primary">
+                        superadmin
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-2.5 px-2 text-[13px] text-muted-foreground">{u.email}</td>
+                  <td className="py-2.5 px-2 text-[13px] text-muted-foreground">{u.teamCount}</td>
+                  <td className="py-2.5 px-2">
+                    {u.archivedAt ? (
+                      <span className="text-xs px-2 py-0.5 rounded bg-destructive/15 text-destructive">
+                        Inactive
+                      </span>
+                    ) : (
+                      <span className="text-xs px-2 py-0.5 rounded bg-success/15 text-success">
+                        Active
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/AiKeysPage.tsx
+````typescript
+/**
+ * /settings/ai — Superadmin: AI / LLM API key configuration.
+ * Stub for Phase 10.6 — AI Key Management. Key storage, model routing, and
+ * usage tracking are deferred to that phase.
+ */
+
+import { Sparkles } from 'lucide-react'
+
+export default function AiKeysPage() {
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">AI / LLM Keys</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Connect AI providers to enable AI-assisted features in draba.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-10 h-10 rounded-[10px] bg-primary/10 border border-primary/20 flex items-center justify-center">
+            <Sparkles size={18} className="text-primary" />
+          </div>
+          <div>
+            <div className="text-sm font-semibold text-foreground">AI features coming in Phase 10.6</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Configure an API key when AI functionality is available.</div>
+          </div>
+        </div>
+
+        <p className="text-[13px] text-muted-foreground mb-4">
+          When AI features are enabled, you'll be able to add API keys for providers such as Anthropic, OpenAI, and others. Keys are stored encrypted and used only for organization-wide AI requests.
+        </p>
+
+        <div className="flex flex-col gap-2">
+          {['Anthropic (Claude)', 'OpenAI (GPT)', 'Google (Gemini)', 'Custom / self-hosted'].map(provider => (
+            <div
+              key={provider}
+              className="flex items-center justify-between px-4 py-3 rounded-lg border border-border bg-background opacity-50"
+            >
+              <span className="text-[13px] text-foreground">{provider}</span>
+              <span className="text-[11px] text-muted-foreground px-2 py-0.5 rounded border border-border">
+                Not configured
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/CommunicationPage.tsx
+````typescript
+/**
+ * /settings/communication — Superadmin: email / SMTP configuration.
+ */
+
+import { useState, useEffect } from 'react'
+import { useAdminSMTP, useSaveSMTP, useTestSMTP, useDeleteSMTP } from '@/hooks/useSettings'
+import type { components } from '@draba/shared'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+import { Eye, EyeOff } from 'lucide-react'
+
+type SMTPConfig = components['schemas']['SMTPConfig']
+
+export default function CommunicationPage() {
+  const { data } = useAdminSMTP()
+  const saveSMTP = useSaveSMTP()
+  const testSMTP = useTestSMTP()
+  const deleteSMTP = useDeleteSMTP()
+
+  const [host, setHost] = useState('')
+  const [port, setPort] = useState('587')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [fromName, setFromName] = useState('')
+  const [fromEmail, setFromEmail] = useState('')
+  const [encryption, setEncryption] = useState<'none' | 'tls' | 'starttls'>('starttls')
+  const [showPw, setShowPw] = useState(false)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [testState, setTestState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
+
+  useEffect(() => {
+    const cfg = data?.smtp
+    if (cfg) {
+      setHost(cfg.host ?? '')
+      setPort(String(cfg.port ?? 587))
+      setUsername(cfg.username ?? '')
+      setFromName(cfg.fromName ?? '')
+      setFromEmail(cfg.fromEmail ?? '')
+      setEncryption((cfg.encryption as 'none' | 'tls' | 'starttls') ?? 'starttls')
+    }
+  }, [data])
+
+  function buildConfig(): SMTPConfig {
+    return { host, port: parseInt(port, 10), username, password, fromName, fromEmail, encryption }
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await saveSMTP.mutateAsync(buildConfig())
+      setFeedback({ type: 'success', msg: 'SMTP settings saved and validated.' })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to save SMTP settings.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  async function handleTest() {
+    setTestState('sending')
+    try {
+      const res = await testSMTP.mutateAsync(buildConfig())
+      setTestState('sent')
+      setFeedback({ type: 'success', msg: `Test email sent to ${res.to}` })
+    } catch (err) {
+      setTestState('failed')
+      const msg = err instanceof ApiError ? err.message : 'SMTP test failed.'
+      setFeedback({ type: 'error', msg })
+    }
+    setTimeout(() => setTestState('idle'), 3000)
+  }
+
+  async function handleDelete() {
+    await deleteSMTP.mutateAsync()
+    setHost(''); setPort('587'); setUsername(''); setPassword('')
+    setFromName(''); setFromEmail(''); setEncryption('starttls')
+    setFeedback({ type: 'success', msg: 'SMTP configuration cleared.' })
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Communication</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Configure outbound email for password resets and invitations.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          SMTP / Email
+        </h3>
+
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="flex flex-col gap-1.5">
+            <Label>SMTP host</Label>
+            <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>Port</Label>
+            <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Username</Label>
+          <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" className="max-w-[360px]" />
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Password</Label>
+          <div className="relative max-w-[360px]">
+            <Input
+              type={showPw ? 'text' : 'password'}
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
+            />
+            <button
+              onClick={() => setShowPw(v => !v)}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 bg-transparent border-none text-muted-foreground cursor-pointer"
+            >
+              {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="flex flex-col gap-1.5">
+            <Label>From name</Label>
+            <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>From email</Label>
+            <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Encryption</Label>
+          <select
+            value={encryption}
+            onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[200px]"
+          >
+            <option value="none">None</option>
+            <option value="tls">TLS</option>
+            <option value="starttls">STARTTLS</option>
+          </select>
+        </div>
+
+        {feedback && (
+          <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+            {feedback.msg}
+          </p>
+        )}
+
+        <div className="flex gap-2 flex-wrap">
+          <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
+            {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
+          </Button>
+          <Button variant="outline" onClick={handleTest} disabled={testSMTP.isPending || !host}>
+            {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
+          </Button>
+          {data?.smtp && (
+            <Button variant="ghost" className="text-destructive" onClick={handleDelete}>
+              Clear config
+            </Button>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground mt-3">
+          When SMTP is not configured, password resets and email invitations are unavailable.
+        </p>
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/SecurityPage.tsx
+````typescript
+/**
+ * /settings/security — Change password form.
+ */
+
+import { useState } from 'react'
+import { useChangePassword } from '@/hooks/useSettings'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+export default function SecurityPage() {
+  const changePassword = useChangePassword()
+
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  const mismatch = next !== confirm && confirm !== ''
+  const tooShort = next.length > 0 && next.length < 8
+  const canSave = current !== '' && next.length >= 8 && next === confirm
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!canSave) return
+    setFeedback(null)
+    try {
+      await changePassword.mutateAsync({ currentPassword: current, newPassword: next })
+      setFeedback({ type: 'success', msg: 'Password updated successfully.' })
+      setCurrent('')
+      setNext('')
+      setConfirm('')
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : ''
+      const msg =
+        code === 'WRONG_PASSWORD'
+          ? 'Current password is incorrect.'
+          : err instanceof ApiError
+          ? err.message
+          : 'Failed to change password.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Security</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Update your password. You'll need to enter your current password to confirm the change.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <form onSubmit={handleSubmit}>
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="currentPw">Current password</Label>
+            <Input
+              id="currentPw"
+              type="password"
+              value={current}
+              onChange={e => setCurrent(e.target.value)}
+              autoComplete="current-password"
+              className="max-w-[360px]"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="newPw">New password</Label>
+            <Input
+              id="newPw"
+              type="password"
+              value={next}
+              onChange={e => setNext(e.target.value)}
+              autoComplete="new-password"
+              className={`max-w-[360px]${tooShort ? ' border-destructive' : ''}`}
+            />
+            {tooShort && (
+              <p className="text-xs text-destructive m-0">
+                Password must be at least 8 characters.
+              </p>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="confirmPw">Confirm new password</Label>
+            <Input
+              id="confirmPw"
+              type="password"
+              value={confirm}
+              onChange={e => setConfirm(e.target.value)}
+              autoComplete="new-password"
+              className={`max-w-[360px]${mismatch ? ' border-destructive' : ''}`}
+            />
+            {mismatch && (
+              <p className="text-xs text-destructive m-0">Passwords don't match.</p>
+            )}
+          </div>
+
+          {feedback && (
+            <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+              {feedback.msg}
+            </p>
+          )}
+
+          <Button type="submit" disabled={!canSave || changePassword.isPending}>
+            {changePassword.isPending ? 'Updating…' : 'Update password'}
+          </Button>
+        </form>
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/TokensPage.tsx
+````typescript
+/**
+ * /settings/tokens — API token management. Create, list, and revoke tokens.
+ * The raw token value is shown exactly once on creation.
+ */
+
+import { useState } from 'react'
+import { useTokens, useCreateToken, useRevokeToken } from '@/hooks/useSettings'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+import { Key, Copy, Check, Trash2 } from 'lucide-react'
+
+const SCOPES: { value: string; label: string; desc: string }[] = [
+  { value: 'read', label: 'Read-only', desc: 'Can read data but not create or modify.' },
+  { value: 'add', label: 'Add', desc: 'Can create new activities and timelines.' },
+  { value: 'edit_own', label: 'Edit own', desc: 'Can edit activities created by this user.' },
+  { value: 'edit_all', label: 'Edit all', desc: 'Full read-write access.' },
+]
+
+function relativeTime(dateStr: string) {
+  const ms = Date.now() - new Date(dateStr).getTime()
+  const days = Math.floor(ms / 86400000)
+  if (days === 0) return 'today'
+  if (days === 1) return 'yesterday'
+  if (days < 30) return `${days} days ago`
+  const months = Math.floor(days / 30)
+  return `${months} month${months > 1 ? 's' : ''} ago`
+}
+
+export default function TokensPage() {
+  const { data: tokens = [], isLoading } = useTokens()
+  const createToken = useCreateToken()
+  const revokeToken = useRevokeToken()
+
+  const [showCreate, setShowCreate] = useState(false)
+  const [name, setName] = useState('')
+  const [scope, setScope] = useState('read')
+  const [newSecret, setNewSecret] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null)
+
+  const activeTokens = tokens.filter(t => !t.revokedAt)
+
+  async function handleCreate() {
+    setError(null)
+    try {
+      const result = await createToken.mutateAsync({ name: name.trim(), scope })
+      setNewSecret(result.rawValue)
+      setName('')
+      setScope('read')
+      setShowCreate(false)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to create token.')
+    }
+  }
+
+  async function handleCopy() {
+    if (!newSecret) return
+    await navigator.clipboard.writeText(newSecret)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  async function handleRevoke(id: string) {
+    await revokeToken.mutateAsync(id)
+    setConfirmRevoke(null)
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">API Tokens</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Long-lived tokens for programmatic access. The raw value is shown once — copy it before closing.
+      </p>
+
+      {/* One-time secret reveal */}
+      {newSecret && (
+        <div className="bg-success/10 border border-success/30 rounded-[10px] p-6 mb-5">
+          <p className="text-sm text-success font-semibold mb-3">
+            Token created — copy it now, it won't be shown again.
+          </p>
+          <div className="flex gap-2 items-center">
+            <code className="flex-1 px-3 py-2 bg-background rounded-md text-xs text-foreground border border-border break-all">
+              {newSecret}
+            </code>
+            <Button size="sm" variant="outline" onClick={handleCopy} className="gap-1.5 min-w-[80px]">
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+              {copied ? 'Copied!' : 'Copy'}
+            </Button>
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="mt-3 text-muted-foreground"
+            onClick={() => setNewSecret(null)}
+          >
+            Dismiss
+          </Button>
+        </div>
+      )}
+
+      {/* Token list */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : activeTokens.length === 0 ? (
+          <div className="text-center py-6">
+            <Key size={32} className="text-border mx-auto mb-3" />
+            <p className="text-sm text-muted-foreground">No API tokens yet.</p>
+          </div>
+        ) : (
+          <table className="w-full border-collapse">
+            <thead>
+              <tr>
+                {['Name', 'Scope', 'Last used', 'Created', ''].map(h => (
+                  <th key={h} className="text-left text-[11px] text-muted-foreground font-semibold pb-2.5 tracking-[0.4px]">
+                    {h.toUpperCase()}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {activeTokens.map(tok => (
+                <tr key={tok.id} className="border-t border-card">
+                  <td className="py-3 text-[13px] text-foreground font-medium">{tok.name}</td>
+                  <td className="py-3 px-2 text-xs">
+                    <span className="px-2 py-0.5 rounded bg-muted text-muted-foreground">
+                      {tok.scope}
+                    </span>
+                  </td>
+                  <td className="py-3 px-2 text-[13px] text-muted-foreground">
+                    {tok.lastUsedAt ? relativeTime(tok.lastUsedAt) : 'Never'}
+                  </td>
+                  <td className="py-3 px-2 text-[13px] text-muted-foreground">
+                    {relativeTime(tok.createdAt)}
+                  </td>
+                  <td className="py-3 text-right">
+                    {confirmRevoke === tok.id ? (
+                      <span className="text-xs flex gap-2 justify-end items-center">
+                        <span className="text-destructive">Revoke?</span>
+                        <button
+                          onClick={() => void handleRevoke(tok.id)}
+                          className="text-destructive bg-transparent border-none cursor-pointer text-xs p-0"
+                        >
+                          Yes
+                        </button>
+                        <button
+                          onClick={() => setConfirmRevoke(null)}
+                          className="text-muted-foreground bg-transparent border-none cursor-pointer text-xs p-0"
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmRevoke(tok.id)}
+                        className="text-muted-foreground bg-transparent border-none cursor-pointer p-1"
+                        title="Revoke"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <Button
+          size="sm"
+          variant="outline"
+          className={activeTokens.length > 0 ? 'mt-4' : ''}
+          onClick={() => setShowCreate(v => !v)}
+        >
+          {showCreate ? 'Cancel' : 'New token'}
+        </Button>
+
+        {showCreate && (
+          <div className="mt-4 pt-4 border-t border-border">
+            <div className="flex flex-col gap-1.5 mb-4">
+              <Label>Token name</Label>
+              <Input
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="e.g. CI bot, personal script"
+                className="max-w-xs"
+              />
+            </div>
+            <div className="flex flex-col gap-2 mb-4">
+              <Label>Scope</Label>
+              {SCOPES.map(s => (
+                <label key={s.value} className="flex gap-2.5 cursor-pointer items-start">
+                  <input
+                    type="radio"
+                    name="scope"
+                    value={s.value}
+                    checked={scope === s.value}
+                    onChange={() => setScope(s.value)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    <span className="text-[13px] text-foreground font-medium">{s.label}</span>
+                    <span className="text-xs text-muted-foreground block">{s.desc}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            {error && <p className="text-[13px] text-destructive mb-3">{error}</p>}
+            <Button
+              size="sm"
+              onClick={handleCreate}
+              disabled={!name.trim() || createToken.isPending}
+            >
+              {createToken.isPending ? 'Creating…' : 'Create token'}
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/pages/ForgotPasswordPage.tsx
 ````typescript
 /**
@@ -10819,6 +12193,127 @@ export default function ResetPasswordPage() {
           </form>
         </CardContent>
       </Card>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/SettingsPage.tsx
+````typescript
+/**
+ * SettingsPage — shell with left-nav and nested sub-routes.
+ *
+ * Phase 10.1.1: initial shell + Teams link.
+ * Phase 10.1.3: full settings — Profile, Security, Preferences, API Tokens,
+ * and Organization section (superadmin only): Organization, Communication,
+ * Users, AI Keys (Phase 10.6 stub).
+ */
+
+import { Link, useLocation, Navigate, Routes, Route } from 'react-router-dom'
+import { ArrowLeft, User, Settings, Key, Lock, MessageSquare, Users, Sparkles, Building2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useNavigate } from 'react-router-dom'
+import ProfilePage from '@/pages/settings/ProfilePage'
+import SecurityPage from '@/pages/settings/SecurityPage'
+import PreferencesPage from '@/pages/settings/PreferencesPage'
+import TokensPage from '@/pages/settings/TokensPage'
+import OrganizationPage from '@/pages/settings/OrganizationPage'
+import CommunicationPage from '@/pages/settings/CommunicationPage'
+import AdminUsersPage from '@/pages/settings/AdminUsersPage'
+import AiKeysPage from '@/pages/settings/AiKeysPage'
+
+function NavLink({ to, active, children }: { to: string; active: boolean; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] no-underline cursor-pointer ${
+        active
+          ? 'bg-muted text-foreground font-medium'
+          : 'text-muted-foreground font-normal hover:text-foreground'
+      }`}
+    >
+      {children}
+    </Link>
+  )
+}
+
+export default function SettingsPage() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const path = location.pathname
+
+  function isActive(prefix: string) {
+    return path === prefix || path.startsWith(prefix + '/')
+  }
+
+  return (
+    <div className="flex min-h-screen bg-background text-foreground font-sans">
+      {/* Left nav */}
+      <div className="w-[220px] border-r border-border px-3 py-4 flex flex-col gap-0.5 shrink-0">
+        <button
+          onClick={() => navigate('/')}
+          className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] text-muted-foreground mb-3 bg-transparent border-none cursor-pointer w-full font-inherit hover:text-foreground"
+        >
+          <ArrowLeft size={14} />
+          Back to app
+        </button>
+
+        <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
+          Account
+        </div>
+
+        <NavLink to="/settings/profile" active={isActive('/settings/profile')}>
+          <User size={14} /> Profile
+        </NavLink>
+        <NavLink to="/settings/security" active={isActive('/settings/security')}>
+          <Lock size={14} /> Security
+        </NavLink>
+        <NavLink to="/settings/preferences" active={isActive('/settings/preferences')}>
+          <Settings size={14} /> Preferences
+        </NavLink>
+        <NavLink to="/settings/tokens" active={isActive('/settings/tokens')}>
+          <Key size={14} /> API Tokens
+        </NavLink>
+
+        {user?.isSuperadmin && (
+          <>
+            <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
+              Organization
+            </div>
+            <NavLink to="/settings/organization" active={isActive('/settings/organization')}>
+              <Building2 size={14} /> Organization
+            </NavLink>
+            <NavLink to="/settings/communication" active={isActive('/settings/communication')}>
+              <MessageSquare size={14} /> Communication
+            </NavLink>
+            <NavLink to="/settings/users" active={isActive('/settings/users')}>
+              <Users size={14} /> Users
+            </NavLink>
+            <NavLink to="/settings/ai" active={isActive('/settings/ai')}>
+              <Sparkles size={14} /> AI Keys
+            </NavLink>
+          </>
+        )}
+      </div>
+
+      {/* Content area */}
+      <div className="flex-1 px-10 py-8 max-w-[800px] min-w-0">
+        <Routes>
+          <Route path="profile" element={<ProfilePage />} />
+          <Route path="security" element={<SecurityPage />} />
+          <Route path="preferences" element={<PreferencesPage />} />
+          <Route path="tokens" element={<TokensPage />} />
+          <Route path="organization" element={user?.isSuperadmin ? <OrganizationPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="communication" element={user?.isSuperadmin ? <CommunicationPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="users" element={user?.isSuperadmin ? <AdminUsersPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="ai" element={user?.isSuperadmin ? <AiKeysPage /> : <Navigate to="/settings/profile" replace />} />
+          {/* Legacy redirect: old /settings/admin deep links fall to organization */}
+          <Route path="admin/*" element={user?.isSuperadmin ? <Navigate to="/settings/organization" replace /> : <Navigate to="/settings/profile" replace />} />
+          <Route index element={<Navigate to="/settings/profile" replace />} />
+          <Route path="*" element={<Navigate to="/settings/profile" replace />} />
+        </Routes>
+      </div>
     </div>
   )
 }
@@ -14076,376 +15571,6 @@ Safe to pause when:
 *Once you've reviewed and tweaked, the agreed version replaces the "Phase 11.1 — Web — List / Spreadsheet View" section in [ROADMAP.md](../ROADMAP.md).*
 ````
 
-## File: packages/api/internal/api/auth_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"log/slog"
-	"net/http"
-	"net/url"
-	"os"
-	"strings"
-	"time"
-	"unicode"
-
-	openapi_types "github.com/oapi-codegen/runtime/types"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleRegister handles POST /auth/register. The first user on a fresh
-// install registers without an invite (bootstrap); every subsequent user
-// must present a valid invite token. Tier user limits are enforced before
-// hashing the password to avoid wasted bcrypt work.
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req RegisterJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	req.DisplayName = strings.TrimSpace(req.DisplayName)
-
-	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
-		return
-	}
-	if !isValidPassword(req.Password) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	// First user may register without an invite; all subsequent users require one.
-	count, err := s.users.Count()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	if err := s.tier.CheckUserLimit(count); err != nil {
-		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
-		return
-	}
-
-	var invite *models.Invite
-	var inviteLinkTeamID string // non-empty when a reusable invite link was used
-	if count > 0 {
-		if req.InviteToken == nil || *req.InviteToken == "" {
-			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
-			return
-		}
-		// Try as a one-time invite first.
-		inv, err := s.invites.GetValid(*req.InviteToken)
-		if err != nil {
-			// Not a valid one-time invite — check if it's a reusable invite link token.
-			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
-			if linkErr != nil {
-				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
-				return
-			}
-			inviteLinkTeamID = team.ID
-		} else {
-			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
-				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
-				return
-			}
-			invite = inv
-		}
-	}
-
-	hash, err := auth.HashPassword(req.Password)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	now := time.Now()
-	user := &models.User{
-		ID:           newID(),
-		Email:        string(req.Email),
-		PasswordHash: hash,
-		DisplayName:  req.DisplayName,
-		IsSuperadmin: count == 0,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.users.Create(user); err != nil {
-		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
-		return
-	}
-
-	if invite != nil {
-		if err := s.invites.MarkAccepted(invite.ID); err != nil {
-			// User and tokens are still returned — email uniqueness prevents a
-			// second registration. Log so the open invite is visible in monitoring.
-			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
-		}
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   invite.TeamID,
-			UserID:   &userID,
-			Role:     invite.Role,
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
-		}
-	} else if inviteLinkTeamID != "" {
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   inviteLinkTeamID,
-			UserID:   &userID,
-			Role:     "member",
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
-		}
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleLogin handles POST /auth/login. Returns the same generic
-// INVALID_CREDENTIALS error for both unknown email and bad password so
-// the endpoint cannot be used as an account-existence oracle.
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req LoginJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	if req.Email == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
-		return
-	}
-
-	user, err := s.users.GetByEmail(string(req.Email))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	if user.ArchivedAt != nil {
-		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
-		return
-	}
-
-	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
-// token for a new access token; the refresh token itself is not rotated.
-func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	var req RefreshTokenJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"accessToken": access,
-	})
-}
-
-// handleMe handles GET /auth/me and returns the authenticated user's
-// profile. Must be mounted behind authMiddleware.
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
-		return
-	}
-	writeJSON(w, http.StatusOK, user)
-}
-
-// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
-// address, generates a 1-hour reset token, stores the hash, and sends a
-// reset link via SMTP. Always returns 200 to prevent email enumeration.
-// When SMTP is not configured the email is silently skipped.
-func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Email string `json:"email"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
-	if body.Email == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
-		return
-	}
-
-	// Always return 200 regardless of whether the email exists.
-	w.Header().Set("Content-Type", "application/json")
-	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
-
-	user, err := s.users.GetByEmail(body.Email)
-	if err != nil {
-		// No user — return 200 without error (prevent enumeration).
-		return
-	}
-	if user.ArchivedAt != nil {
-		return
-	}
-
-	rawToken := newToken()
-	expiresAt := time.Now().Add(time.Hour)
-	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
-		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
-		return
-	}
-
-	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
-	// when not set so the email still contains useful info.
-	baseURL := strings.TrimRight(getBaseURL(), "/")
-	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
-
-	subject := "Reset your draba password"
-	body2 := "<html><body>" +
-		"<p>You requested a password reset for your draba account.</p>" +
-		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
-		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
-		"</body></html>"
-
-	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
-		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
-	}
-}
-
-// handleResetPassword handles POST /auth/reset-password. Accepts a token and
-// new password; validates the token, hashes the new password, and marks the
-// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
-// or already used.
-func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Token       string `json:"token"`
-		NewPassword string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if body.Token == "" || body.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
-		return
-	}
-	if !isValidPassword(body.NewPassword) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	resetToken, err := s.passwordTokens.GetValid(body.Token)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
-		return
-	}
-
-	hash, err := auth.HashPassword(body.NewPassword)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
-		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
-func getBaseURL() string {
-	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
-		return v
-	}
-	return "http://localhost:8080"
-}
-
-// isValidPassword applies the minimum policy: at least 8 characters and
-// no whitespace. Strength rules beyond length are intentionally lenient —
-// length is what matters most against offline cracking.
-func isValidPassword(p string) bool {
-	if len(p) < 8 {
-		return false
-	}
-	for _, r := range p {
-		if unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
-}
-````
-
 ## File: packages/api/internal/api/helpers.go
 ````go
 package api
@@ -15070,301 +16195,6 @@ func ptrEqual(a, b *string) bool {
 		return false
 	}
 	return *a == *b
-}
-````
-
-## File: packages/api/internal/mailer/mailer.go
-````go
-// Package mailer sends email via SMTP. Configuration is read from
-// instance_settings at send time so changes take effect without a restart.
-// When SMTP is not configured, Send returns nil (not an error) so callers
-// can treat "no mailer" as a no-op — the forgot-password flow still returns
-// 200 to prevent email enumeration.
-package mailer
-
-import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/tls"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log/slog"
-	"net/smtp"
-	"strings"
-)
-
-// encPrefix marks values encrypted with AES-256-GCM so LoadConfig can
-// distinguish them from legacy plaintext values written before encryption
-// was introduced.
-const encPrefix = "enc:v1:"
-
-// SMTPConfig holds the full SMTP configuration for the instance.
-type SMTPConfig struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	Username   string `json:"username"`
-	Password   string `json:"password"` // stored encrypted at rest via AES-256-GCM
-	FromName   string `json:"fromName"`
-	FromEmail  string `json:"fromEmail"`
-	Encryption string `json:"encryption"` // "none" | "tls" | "starttls"
-}
-
-// SettingsReader is the subset of InstanceSettingsRepo used by Mailer.
-type SettingsReader interface {
-	Get(key string) (string, error)
-	Set(key, value string) error
-}
-
-// Mailer sends email via SMTP. The zero value is valid; calling Send on an
-// unconfigured Mailer is a no-op.
-type Mailer struct {
-	settings SettingsReader
-	encKey   []byte // 32-byte AES-256 key derived from keyMaterial; nil disables encryption
-}
-
-// New returns a Mailer that reads config from settings at send time.
-// keyMaterial is used to derive an AES-256 key for encrypting stored SMTP
-// passwords. Pass nil to disable encryption (tests, zero-value usage).
-func New(settings SettingsReader, keyMaterial []byte) *Mailer {
-	var encKey []byte
-	if len(keyMaterial) > 0 {
-		k := sha256.Sum256(keyMaterial)
-		encKey = k[:]
-	}
-	return &Mailer{settings: settings, encKey: encKey}
-}
-
-// LoadConfig reads the SMTP configuration from instance_settings.
-// Returns nil when SMTP has not been configured.
-func (m *Mailer) LoadConfig() (*SMTPConfig, error) {
-	raw, err := m.settings.Get("smtp_config")
-	if err != nil {
-		return nil, fmt.Errorf("loading smtp config: %w", err)
-	}
-	if raw == "" {
-		return nil, nil
-	}
-	var cfg SMTPConfig
-	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return nil, fmt.Errorf("parsing smtp config: %w", err)
-	}
-	if cfg.Password != "" {
-		dec, err := m.decryptPassword(cfg.Password)
-		if err != nil {
-			return nil, fmt.Errorf("decrypting smtp password: %w", err)
-		}
-		cfg.Password = dec
-	}
-	return &cfg, nil
-}
-
-// IsConfigured reports whether SMTP has been set up.
-func (m *Mailer) IsConfigured() bool {
-	cfg, err := m.LoadConfig()
-	return err == nil && cfg != nil && cfg.Host != ""
-}
-
-// SaveConfig serialises cfg and stores it in instance_settings.
-// The password field is encrypted before storage when an encryption key is set.
-func (m *Mailer) SaveConfig(cfg *SMTPConfig) error {
-	toStore := *cfg
-	if cfg.Password != "" {
-		enc, err := m.encryptPassword(cfg.Password)
-		if err != nil {
-			return fmt.Errorf("encrypting smtp password: %w", err)
-		}
-		toStore.Password = enc
-	}
-	b, err := json.Marshal(toStore)
-	if err != nil {
-		return fmt.Errorf("serialising smtp config: %w", err)
-	}
-	return m.settings.Set("smtp_config", string(b))
-}
-
-// DeleteConfig removes the SMTP configuration.
-func (m *Mailer) DeleteConfig() error {
-	return m.settings.Set("smtp_config", "")
-}
-
-// Send sends a plain-text / HTML email to a single recipient.
-// Returns nil without sending when SMTP is not configured.
-func (m *Mailer) Send(to, subject, htmlBody string) error {
-	cfg, err := m.LoadConfig()
-	if err != nil {
-		slog.Warn("mailer: failed to load config", "err", err)
-		return nil
-	}
-	if cfg == nil || cfg.Host == "" {
-		slog.Debug("mailer: no smtp config — email skipped", "subject", subject)
-		return nil
-	}
-
-	return sendViaConfig(cfg, to, subject, htmlBody)
-}
-
-// SendWithConfig sends using an explicit config object, bypassing the stored
-// config. Used by the SMTP test endpoint before saving.
-func SendWithConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
-	return sendViaConfig(cfg, to, subject, htmlBody)
-}
-
-// encryptPassword encrypts plaintext with AES-256-GCM and returns a
-// base64-encoded ciphertext prefixed with encPrefix. Returns plaintext
-// unchanged when no encryption key is set.
-func (m *Mailer) encryptPassword(plaintext string) (string, error) {
-	if len(m.encKey) == 0 {
-		return plaintext, nil
-	}
-	block, err := aes.NewCipher(m.encKey)
-	if err != nil {
-		return "", fmt.Errorf("creating cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("creating gcm: %w", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", fmt.Errorf("generating nonce: %w", err)
-	}
-	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return encPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
-}
-
-// decryptPassword reverses encryptPassword. Values without encPrefix are
-// returned as-is — this handles configs saved before encryption was added.
-func (m *Mailer) decryptPassword(encoded string) (string, error) {
-	if !strings.HasPrefix(encoded, encPrefix) {
-		// Plaintext fallback — encrypts on next SaveConfig call.
-		return encoded, nil
-	}
-	if len(m.encKey) == 0 {
-		return "", fmt.Errorf("encryption key not set; cannot decrypt smtp password")
-	}
-	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(encoded, encPrefix))
-	if err != nil {
-		return "", fmt.Errorf("decoding encrypted password: %w", err)
-	}
-	block, err := aes.NewCipher(m.encKey)
-	if err != nil {
-		return "", fmt.Errorf("creating cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("creating gcm: %w", err)
-	}
-	nonceSize := gcm.NonceSize()
-	if len(data) < nonceSize {
-		return "", fmt.Errorf("ciphertext too short")
-	}
-	plain, err := gcm.Open(nil, data[:nonceSize], data[nonceSize:], nil)
-	if err != nil {
-		return "", fmt.Errorf("decrypting password: %w", err)
-	}
-	return string(plain), nil
-}
-
-func sendViaConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
-	from := fmt.Sprintf("%s <%s>", cfg.FromName, cfg.FromEmail)
-	msg := buildMessage(from, to, subject, htmlBody)
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-
-	switch strings.ToLower(cfg.Encryption) {
-	case "tls":
-		return sendTLS(cfg, addr, from, to, msg)
-	case "starttls":
-		return sendSTARTTLS(cfg, addr, from, to, msg)
-	default:
-		return sendPlain(cfg, addr, from, to, msg)
-	}
-}
-
-func buildMessage(from, to, subject, htmlBody string) string {
-	var b strings.Builder
-	b.WriteString("From: " + from + "\r\n")
-	b.WriteString("To: " + to + "\r\n")
-	b.WriteString("Subject: " + subject + "\r\n")
-	b.WriteString("MIME-Version: 1.0\r\n")
-	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
-	b.WriteString("\r\n")
-	b.WriteString(htmlBody)
-	return b.String()
-}
-
-func sendPlain(cfg *SMTPConfig, addr, from, to, msg string) error {
-	var auth smtp.Auth
-	if cfg.Username != "" {
-		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-	}
-	if err := smtp.SendMail(addr, auth, cfg.FromEmail, []string{to}, []byte(msg)); err != nil {
-		return fmt.Errorf("smtp send: %w", err)
-	}
-	return nil
-}
-
-func sendTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
-	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; ServerName ensures cert validation
-	conn, err := tls.Dial("tcp", addr, tlsCfg)
-	if err != nil {
-		return fmt.Errorf("smtp tls dial: %w", err)
-	}
-	defer conn.Close()
-
-	c, err := smtp.NewClient(conn, cfg.Host)
-	if err != nil {
-		return fmt.Errorf("smtp new client: %w", err)
-	}
-	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
-
-	if cfg.Username != "" {
-		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
-		}
-	}
-	return doSend(c, cfg.FromEmail, to, msg)
-}
-
-func sendSTARTTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
-	c, err := smtp.Dial(addr)
-	if err != nil {
-		return fmt.Errorf("smtp dial: %w", err)
-	}
-	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
-
-	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; this is standard TLS
-	if err := c.StartTLS(tlsCfg); err != nil {
-		return fmt.Errorf("smtp starttls: %w", err)
-	}
-	if cfg.Username != "" {
-		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
-		}
-	}
-	return doSend(c, cfg.FromEmail, to, msg)
-}
-
-func doSend(c *smtp.Client, from, to, msg string) error {
-	if err := c.Mail(from); err != nil {
-		return fmt.Errorf("smtp MAIL: %w", err)
-	}
-	if err := c.Rcpt(to); err != nil {
-		return fmt.Errorf("smtp RCPT: %w", err)
-	}
-	w, err := c.Data()
-	if err != nil {
-		return fmt.Errorf("smtp DATA: %w", err)
-	}
-	if _, err := fmt.Fprint(w, msg); err != nil {
-		return fmt.Errorf("smtp write body: %w", err)
-	}
-	return w.Close()
 }
 ````
 
@@ -16210,1747 +17040,6 @@ describe('filterOpenActivities', () => {
     expect(result).toHaveLength(0)
   })
 })
-````
-
-## File: packages/web/src/components/gantt/GanttView.tree.test.ts
-````typescript
-/**
- * buildRows — tree nesting and collapse behaviour.
- *
- * Covers the parent→child depth nesting (arbitrary levels), parent subtree
- * collapse, and member-group collapse added for the Gantt expand/contract work.
- */
-
-import { describe, it, expect } from 'vitest'
-import { buildRows, type RichActivity } from './GanttView'
-import type { GanttRow } from './GanttGrid'
-import type { Member } from '@/types'
-
-// Minimal RichActivity factory — only the fields buildRows reads matter.
-function act(id: string, parentActivityId: string | null, memberId: string | null = null): RichActivity {
-  return {
-    id,
-    title: id,
-    startCol: 0,
-    span: 1,
-    color: '#000',
-    members: [],
-    isChild: false,
-    startAtMs: 0,
-    endAtMs: 0,
-    parentActivityId,
-    primaryMemberId: memberId,
-    assignedMemberIds: memberId ? [memberId] : [],
-  }
-}
-
-const NONE = new Set<string>()
-
-// Pull the activity rows out as [id, depth] tuples for concise assertions.
-function activityTuples(rows: GanttRow[]): Array<[string, number]> {
-  return rows
-    .filter((r): r is Extract<GanttRow, { kind: 'activity' }> => r.kind === 'activity')
-    .map(r => [r.event.id, r.event.depth ?? 0])
-}
-
-describe('buildRows — parent grouping (tree nesting)', () => {
-  // a → b → c (grandchild), plus a standalone root d
-  const activities = [act('a', null), act('b', 'a'), act('c', 'b'), act('d', null)]
-
-  it('nests grandchildren at increasing depth', () => {
-    const rows = buildRows(activities, [], 'parent', 'title', NONE, NONE)
-    expect(activityTuples(rows)).toEqual([
-      ['a', 0],
-      ['b', 1],
-      ['c', 2],
-      ['d', 0],
-    ])
-  })
-
-  it('marks parents as hasChildren and leaves as not', () => {
-    const rows = buildRows(activities, [], 'parent', 'title', NONE, NONE).filter(
-      (r): r is Extract<GanttRow, { kind: 'activity' }> => r.kind === 'activity',
-    )
-    const byId = Object.fromEntries(rows.map(r => [r.event.id, r.event]))
-    expect(byId.a.hasChildren).toBe(true)
-    expect(byId.b.hasChildren).toBe(true)
-    expect(byId.c.hasChildren).toBe(false)
-    expect(byId.d.hasChildren).toBe(false)
-  })
-
-  it('hides the whole subtree when a parent is collapsed', () => {
-    const rows = buildRows(activities, [], 'parent', 'title', new Set(['a']), NONE)
-    // a stays (marked collapsed); b and c are hidden; d unaffected.
-    expect(activityTuples(rows)).toEqual([
-      ['a', 0],
-      ['d', 0],
-    ])
-    const a = rows.find(r => r.kind === 'activity' && r.event.id === 'a')
-    expect(a?.kind === 'activity' && a.event.collapsed).toBe(true)
-  })
-
-  it('collapsing a mid-level parent hides only its descendants', () => {
-    const rows = buildRows(activities, [], 'parent', 'title', new Set(['b']), NONE)
-    expect(activityTuples(rows)).toEqual([
-      ['a', 0],
-      ['b', 1],
-      ['d', 0],
-    ])
-  })
-
-  it('treats an activity whose parent is out of view as a root', () => {
-    // orphan's parent "missing" is not in the set → orphan renders at depth 0.
-    const rows = buildRows([act('orphan', 'missing')], [], 'parent', 'title', NONE, NONE)
-    expect(activityTuples(rows)).toEqual([['orphan', 0]])
-  })
-
-  it('does not infinite-loop on a parent-pointer cycle', () => {
-    const x = act('x', 'y')
-    const y = act('y', 'x')
-    const rows = buildRows([x, y], [], 'parent', 'title', NONE, NONE)
-    // Both appear exactly once; exact ordering depends on sort but no dupes/hang.
-    const ids = activityTuples(rows).map(t => t[0]).sort()
-    expect(ids).toEqual(['x', 'y'])
-  })
-})
-
-describe('buildRows — member grouping (group collapse)', () => {
-  const members: Member[] = [
-    { id: 'm1', name: 'Alice', initials: 'A', color: '#111' },
-    { id: 'm2', name: 'Bob', initials: 'B', color: '#222' },
-  ]
-  const activities = [act('a1', null, 'm1'), act('a2', null, 'm1'), act('b1', null, 'm2')]
-
-  it('emits a group header per member followed by its activities', () => {
-    const rows = buildRows(activities, members, 'member', 'title', NONE, NONE)
-    expect(rows.map(r => (r.kind === 'group' ? `G:${r.id}` : `A:${r.event.id}`))).toEqual([
-      'G:m1',
-      'A:a1',
-      'A:a2',
-      'G:m2',
-      'A:b1',
-    ])
-  })
-
-  it('hides a collapsed group’s activities but keeps the header', () => {
-    const rows = buildRows(activities, members, 'member', 'title', NONE, new Set(['m1']))
-    expect(rows.map(r => (r.kind === 'group' ? `G:${r.id}` : `A:${r.event.id}`))).toEqual([
-      'G:m1',
-      'G:m2',
-      'A:b1',
-    ])
-    const g = rows.find(r => r.kind === 'group' && r.id === 'm1')
-    expect(g?.kind === 'group' && g.collapsed).toBe(true)
-  })
-})
-````
-
-## File: packages/web/src/components/list/ListToolbar.tsx
-````typescript
-/**
- * ListToolbar — sub-toolbar for the List view.
- *
- * Provides Columns (hide/show menu), Density toggle, Group by, Sort by, and
- * Color by controls. The Columns menu includes drag-reorder handles (implemented
- * via @dnd-kit) so column order can be changed from the menu as well as by
- * dragging the table headers.
- */
-
-import { useState, useRef, useEffect } from 'react';
-import { Columns2, ChevronDown, Download, Share2 } from 'lucide-react';
-import { cn } from '@/lib/utils';
-
-export type ListGroupBy = 'none' | 'member' | 'parent' | 'status';
-export type ListSortBy = 'startDate' | 'endDate' | 'title' | 'status' | 'progress';
-export type ListColorBy = 'activity' | 'member' | 'status';
-export type ListDensity = 'comfortable' | 'compact';
-
-export interface ColumnConfig {
-  id: string;
-  label: string;
-  visible: boolean;
-}
-
-interface Props {
-  columns: ColumnConfig[];
-  onColumnVisibilityChange: (columnId: string, visible: boolean) => void;
-  density: ListDensity;
-  onDensityChange: (d: ListDensity) => void;
-  groupBy: ListGroupBy;
-  onGroupByChange: (g: ListGroupBy) => void;
-  sortBy: ListSortBy;
-  onSortByChange: (s: ListSortBy) => void;
-  colorBy: ListColorBy;
-  onColorByChange: (c: ListColorBy) => void;
-  onExport?: () => void;
-  onShare?: () => void;
-}
-
-const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
-const divider  = 'w-px h-4 bg-border shrink-0';
-const label    = 'text-[11px] text-muted-foreground shrink-0';
-const select   = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-export default function ListToolbar({
-  columns,
-  onColumnVisibilityChange,
-  density,
-  onDensityChange,
-  groupBy,
-  onGroupByChange,
-  sortBy,
-  onSortByChange,
-  colorBy,
-  onColorByChange,
-  onExport,
-  onShare,
-}: Props) {
-  const [colMenuOpen, setColMenuOpen] = useState(false);
-  const colMenuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (colMenuRef.current && !colMenuRef.current.contains(e.target as Node)) {
-        setColMenuOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  return (
-    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
-      {/* Columns menu */}
-      <div ref={colMenuRef} className="relative">
-        <button
-          onClick={() => setColMenuOpen(o => !o)}
-          className={cn(ctrlBtn, colMenuOpen && 'bg-muted')}
-          title="Show/hide columns"
-        >
-          <Columns2 size={13} strokeWidth={1.8} />
-          Columns
-          <ChevronDown size={11} strokeWidth={2} className={cn('transition-transform', colMenuOpen && 'rotate-180')} />
-        </button>
-
-        {colMenuOpen && (
-          <div
-            style={{
-              position: 'absolute',
-              top: 'calc(100% + 4px)',
-              left: 0,
-              zIndex: 50,
-              background: 'var(--card)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-              minWidth: 180,
-              padding: '6px 0',
-            }}
-          >
-            {columns.map(col => (
-              <label
-                key={col.id}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '5px 12px',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  color: 'var(--foreground)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <input
-                  type="checkbox"
-                  checked={col.visible}
-                  onChange={e => onColumnVisibilityChange(col.id, e.target.checked)}
-                  style={{ cursor: 'pointer' }}
-                />
-                {col.label}
-              </label>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className={divider} />
-
-      {/* Density */}
-      <span className={label}>Density</span>
-      <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
-        {(['comfortable', 'compact'] as const).map(d => (
-          <button
-            key={d}
-            onClick={() => onDensityChange(d)}
-            className={cn(
-              'h-[22px] px-2 rounded-[4px] text-[11px] font-medium cursor-pointer border-none',
-              density === d
-                ? 'bg-card text-foreground shadow-sm'
-                : 'bg-transparent text-muted-foreground',
-            )}
-          >
-            {d === 'comfortable' ? 'Comfortable' : 'Compact'}
-          </button>
-        ))}
-      </div>
-
-      <div className={divider} />
-
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as ListGroupBy)}
-      >
-        <option value="none">None</option>
-        <option value="member">Member</option>
-        <option value="parent">Parent activity</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Sort by */}
-      <span className={label}>Sort by</span>
-      <select
-        className={select}
-        value={sortBy}
-        onChange={e => onSortByChange(e.target.value as ListSortBy)}
-      >
-        <option value="startDate">Start date</option>
-        <option value="endDate">End date</option>
-        <option value="title">Title A–Z</option>
-        <option value="status">Status</option>
-        <option value="progress">Progress</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ListColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className="flex-1" />
-
-      <button className={ctrlBtn} onClick={onExport} title="Export (coming soon)">
-        <Download size={13} strokeWidth={1.8} />
-        Export
-      </button>
-
-      <button className={ctrlBtn} onClick={onShare} title="Share (coming soon)">
-        <Share2 size={13} strokeWidth={1.8} />
-        Share
-      </button>
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/list/ListView.tsx
-````typescript
-/**
- * ListView — inline-editable, curated table view of the active timeline's
- * activities.
- *
- * Uses TanStack Table v8 for column management (visibility, order, sizing,
- * pinning, sorting). Row rendering is manual to support group-by headers
- * interleaved between activity rows and to give full control over
- * keyboard selection/edit behavior.
- *
- * Integrates with FilterContext and FindContext so the same filter and find
- * query that drives the Gantt view also drives this view.
- */
-
-import {
-  useState,
-  useEffect,
-  useRef,
-  useCallback,
-  useMemo,
-  KeyboardEvent,
-} from 'react';
-import {
-  useReactTable,
-  getCoreRowModel,
-  getSortedRowModel,
-  type ColumnDef,
-  type SortingState,
-  type ColumnOrderState,
-  type VisibilityState,
-  type ColumnSizingState,
-  type ColumnPinningState,
-} from '@tanstack/react-table';
-import {
-  DndContext,
-  type DragEndEvent,
-  PointerSensor,
-  useSensor,
-  useSensors,
-} from '@dnd-kit/core';
-import {
-  SortableContext,
-  horizontalListSortingStrategy,
-  useSortable,
-  arrayMove,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
-import { ChevronRight, ChevronDown, GripVertical } from 'lucide-react';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import { usePreferenceMap, useUpsertPreference, usePreferences } from '@/hooks/usePreferences';
-import { useFilter } from '@/contexts/FilterContext';
-import { useFind } from '@/contexts/FindContext';
-import { applyActiveFilter } from '@/lib/presetFilters';
-import { matchEvents } from '@/lib/findMatcher';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import { Badge } from '@/components/identity/Badge';
-import type { components } from '@draba/shared';
-import type { Member } from '@/types';
-import type { ListGroupBy, ListSortBy, ListColorBy, ListDensity, ColumnConfig } from './ListToolbar';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-// ── Column catalog ─────────────────────────────────────────────────────────────
-
-interface ColMeta {
-  id: string;
-  label: string;
-  defaultVisible: boolean;
-  defaultWidth: number;
-  editable: boolean;
-  editType: 'text' | 'date' | 'status' | 'number' | 'none';
-}
-
-const COL_CATALOG: ColMeta[] = [
-  { id: 'title',       label: 'Title',       defaultVisible: true,  defaultWidth: 280, editable: true,  editType: 'text' },
-  { id: 'startAt',     label: 'Start',       defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
-  { id: 'endAt',       label: 'End',         defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
-  { id: 'duration',    label: 'Duration',    defaultVisible: true,  defaultWidth: 90,  editable: false, editType: 'none' },
-  { id: 'status',      label: 'Status',      defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'status' },
-  { id: 'assignees',   label: 'Assignees',   defaultVisible: true,  defaultWidth: 130, editable: false, editType: 'none' },
-  { id: 'tags',        label: 'Tags',        defaultVisible: true,  defaultWidth: 130, editable: false, editType: 'none' },
-  { id: 'progress',    label: 'Progress',    defaultVisible: false, defaultWidth: 90,  editable: true,  editType: 'number' },
-  { id: 'parent',      label: 'Parent',      defaultVisible: false, defaultWidth: 150, editable: false, editType: 'none' },
-  { id: 'description', label: 'Description', defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
-  { id: 'location',    label: 'Location',    defaultVisible: false, defaultWidth: 130, editable: true,  editType: 'text' },
-  { id: 'url',         label: 'URL',         defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'text' },
-  { id: 'createdAt',   label: 'Created',     defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
-  { id: 'updatedAt',   label: 'Updated',     defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
-];
-
-const DEFAULT_COLUMN_ORDER = COL_CATALOG.map(c => c.id);
-const DEFAULT_VISIBILITY: VisibilityState = Object.fromEntries(
-  COL_CATALOG.map(c => [c.id, c.defaultVisible]),
-);
-const DEFAULT_WIDTHS: ColumnSizingState = Object.fromEntries(
-  COL_CATALOG.map(c => [c.id, c.defaultWidth]),
-);
-
-// ── Props ──────────────────────────────────────────────────────────────────────
-
-interface Props {
-  teamId: string;
-  timelineId: string;
-  groupBy: ListGroupBy;
-  sortBy: ListSortBy;
-  colorBy: ListColorBy;
-  density: ListDensity;
-  timelineStatuses?: Status[];
-  savedFilters?: SavedFilter[];
-  tags?: Tag[];
-  onColumnsChange?: (configs: ColumnConfig[]) => void;
-  /** When set, the component applies the toggle and clears it on the next render. */
-  pendingColumnToggle?: { colId: string; visible: boolean; seq: number } | null;
-  onSelectActivity?: (id: string | null) => void;
-  onSelectApiActivity?: (a: ApiActivity | null) => void;
-  selectedActivityId?: string | null;
-  onMembersLoaded?: (members: Member[]) => void;
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-function formatDate(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
-  if (!startAt || !endAt) return '—';
-  const start = new Date(startAt);
-  const end = new Date(endAt);
-  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
-  if (days < 0) return '—';
-  if (days === 0) return '1 day';
-  return `${days + 1} days`;
-}
-
-function toDateInput(iso: string | null | undefined): string {
-  if (!iso) return '';
-  return iso.slice(0, 10);
-}
-
-// ── Draggable column header ────────────────────────────────────────────────────
-
-function SortableColHeader({ colId, children, style, className, onSort, sortDir }: {
-  colId: string;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-  className?: string;
-  onSort?: () => void;
-  sortDir?: 'asc' | 'desc' | false;
-}) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: colId });
-
-  return (
-    <th
-      ref={setNodeRef}
-      style={{
-        ...style,
-        transform: CSS.Transform.toString(transform),
-        transition,
-        opacity: isDragging ? 0.5 : 1,
-        position: 'sticky',
-        top: 0,
-        zIndex: colId === 'title' ? 20 : 10,
-        background: 'var(--card)',
-        borderBottom: '2px solid var(--border)',
-        userSelect: 'none',
-        whiteSpace: 'nowrap',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        cursor: onSort ? 'pointer' : 'default',
-        fontWeight: 600,
-        fontSize: 11,
-        color: 'var(--muted-foreground)',
-        padding: '0 8px',
-        textTransform: 'uppercase',
-        letterSpacing: '0.05em',
-      }}
-      className={className}
-      onClick={onSort}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-        {/* drag handle */}
-        <span
-          {...attributes}
-          {...listeners}
-          style={{ cursor: 'grab', color: 'var(--muted-foreground)', opacity: 0.4, flexShrink: 0, paddingRight: 2 }}
-          onClick={e => e.stopPropagation()}
-          title="Drag to reorder"
-        >
-          <GripVertical size={12} />
-        </span>
-        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{children}</span>
-        {sortDir === 'asc' && <span style={{ opacity: 0.7 }}>↑</span>}
-        {sortDir === 'desc' && <span style={{ opacity: 0.7 }}>↓</span>}
-      </div>
-    </th>
-  );
-}
-
-// ── Status pill popover ────────────────────────────────────────────────────────
-
-function StatusPicker({
-  value,
-  statuses,
-  onChange,
-  onClose,
-}: {
-  value: string | null | undefined;
-  statuses: Status[];
-  onChange: (id: string | null) => void;
-  onClose: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [onClose]);
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        position: 'absolute',
-        zIndex: 100,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 160,
-        padding: '6px 0',
-        top: '100%',
-        left: 0,
-      }}
-    >
-      <div
-        onClick={() => { onChange(null); onClose(); }}
-        style={{
-          padding: '6px 12px',
-          cursor: 'pointer',
-          fontSize: 12,
-          color: 'var(--muted-foreground)',
-        }}
-        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-      >
-        No status
-      </div>
-      {statuses.map(s => (
-        <div
-          key={s.id}
-          onClick={() => { onChange(s.id); onClose(); }}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            padding: '6px 12px',
-            cursor: 'pointer',
-            fontSize: 12,
-            color: 'var(--foreground)',
-            background: value === s.id ? 'var(--muted)' : 'transparent',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = value === s.id ? 'var(--muted)' : 'transparent')}
-        >
-          <span
-            style={{
-              width: 10,
-              height: 10,
-              borderRadius: '50%',
-              background: resolveColorHex(s.color ?? null) ?? '#888',
-              flexShrink: 0,
-            }}
-          />
-          {s.name}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Main component ─────────────────────────────────────────────────────────────
-
-export default function ListView({
-  teamId,
-  timelineId,
-  groupBy,
-  sortBy,
-  colorBy,
-  density,
-  timelineStatuses = [],
-  savedFilters = [],
-  tags = [],
-  onColumnsChange,
-  pendingColumnToggle,
-  onSelectActivity,
-  onSelectApiActivity,
-  selectedActivityId,
-  onMembersLoaded,
-}: Props) {
-  const { activeFilter } = useFilter();
-  const { debouncedQuery, registerMatches, matchedIds, activeMatchId } = useFind();
-
-  // ── Data fetching ──────────────────────────────────────────────────────────
-  const { data: rawActivities = [] } = useTimelineActivities(teamId, timelineId);
-  const { data: rawMembers = [] } = useTeamMembers(teamId);
-  const update = useUpdateActivity(timelineId);
-
-  useEffect(() => {
-    if (rawMembers.length > 0 && onMembersLoaded) {
-      onMembersLoaded(rawMembers.map(m => ({
-        id: m.id,
-        name: m.displayName,
-        initials: m.displayName.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase(),
-        color: resolveColorHex(m.color ?? null) ?? '#888',
-      })));
-    }
-  }, [rawMembers, onMembersLoaded]);
-
-  function initialsFrom(name: string): string {
-    return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
-  }
-
-  const members: Member[] = useMemo(
-    () => rawMembers.map(m => ({
-      id: m.id,
-      name: m.displayName,
-      initials: initialsFrom(m.displayName),
-      color: resolveColorHex(m.color ?? null) ?? '#888',
-    })),
-    [rawMembers],
-  );
-
-  // ── Preference persistence ────────────────────────────────────────────────
-  const { isSuccess: prefsSettled } = usePreferences(timelineId);
-  const prefMap = usePreferenceMap(timelineId);
-  const upsert = useUpsertPreference();
-  const prefsApplied = useRef(false);
-
-  // Column state (managed by TanStack Table)
-  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(DEFAULT_VISIBILITY);
-  const [columnOrder, setColumnOrder] = useState<ColumnOrderState>(DEFAULT_COLUMN_ORDER);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(DEFAULT_WIDTHS);
-  const [sorting, setSorting] = useState<SortingState>([]);
-
-  // Apply saved column prefs once after they load
-  useEffect(() => {
-    if (!prefsSettled || prefsApplied.current) return;
-    prefsApplied.current = true;
-    const raw = prefMap['list_columns'];
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-      const config = raw as { order?: string[]; hidden?: string[]; widths?: Record<string, number> };
-      if (Array.isArray(config.order) && config.order.length > 0) {
-        // Merge saved order with any new columns added since the pref was saved
-        const saved = config.order as string[];
-        const allIds = COL_CATALOG.map(c => c.id);
-        const newCols = allIds.filter(id => !saved.includes(id));
-        setColumnOrder([...saved, ...newCols]);
-      }
-      if (Array.isArray(config.hidden)) {
-        const vis: VisibilityState = { ...DEFAULT_VISIBILITY };
-        for (const id of config.hidden as string[]) {
-          if (id in vis) vis[id] = false;
-        }
-        setColumnVisibility(vis);
-      }
-      if (config.widths && typeof config.widths === 'object') {
-        setColumnSizing(prev => ({ ...prev, ...config.widths }));
-      }
-    }
-  }, [prefsSettled, prefMap]);
-
-  // Persist column config on change (debounced via a ref guard)
-  const saveCols = useCallback(
-    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
-      if (!timelineId) return;
-      const hidden = Object.entries(vis).filter(([, v]) => !v).map(([k]) => k);
-      const config = { order, hidden, widths: sizing };
-      upsert.mutate({ key: 'list_columns', value: JSON.stringify(config), timelineId });
-    },
-    [timelineId, upsert.mutate], // eslint-disable-line react-hooks/exhaustive-deps
-  );
-
-  // Debounce column-config saves
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const debouncedSaveCols = useCallback(
-    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => saveCols(vis, order, sizing), 400);
-    },
-    [saveCols],
-  );
-
-  const handleVisibilityChange = useCallback(
-    (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
-      setColumnVisibility(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
-        return next;
-      });
-    },
-    [columnOrder, columnSizing, debouncedSaveCols],
-  );
-
-  const handleOrderChange = useCallback(
-    (updater: ColumnOrderState | ((prev: ColumnOrderState) => ColumnOrderState)) => {
-      setColumnOrder(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
-        return next;
-      });
-    },
-    [columnVisibility, columnSizing, debouncedSaveCols],
-  );
-
-  const handleSizingChange = useCallback(
-    (updater: ColumnSizingState | ((prev: ColumnSizingState) => ColumnSizingState)) => {
-      setColumnSizing(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(columnVisibility, columnOrder, next);
-        return next;
-      });
-    },
-    [columnVisibility, columnOrder, debouncedSaveCols],
-  );
-
-  // ── TanStack Table ─────────────────────────────────────────────────────────
-
-  const columnDefs = useMemo<ColumnDef<ApiActivity>[]>(
-    () =>
-      COL_CATALOG.map(meta => ({
-        id: meta.id,
-        header: meta.label,
-        size: DEFAULT_WIDTHS[meta.id] ?? 120,
-        minSize: 60,
-        maxSize: 600,
-        enableResizing: true,
-        enableSorting: meta.editType !== 'none' || meta.id === 'duration',
-      })),
-    [],
-  );
-
-  const table = useReactTable({
-    data: rawActivities,
-    columns: columnDefs,
-    state: {
-      columnVisibility,
-      columnOrder,
-      columnSizing,
-      columnPinning: { left: ['title'] } as ColumnPinningState,
-      sorting,
-    },
-    onSortingChange: setSorting,
-    onColumnVisibilityChange: handleVisibilityChange,
-    onColumnOrderChange: handleOrderChange,
-    onColumnSizingChange: handleSizingChange,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    columnResizeMode: 'onChange',
-  });
-
-  // Apply external column toggle from the toolbar (via DashboardPage)
-  const lastAppliedSeq = useRef<number | null>(null);
-  useEffect(() => {
-    if (!pendingColumnToggle) return;
-    if (pendingColumnToggle.seq === lastAppliedSeq.current) return;
-    lastAppliedSeq.current = pendingColumnToggle.seq;
-    setColumnVisibility(prev => {
-      const next = { ...prev, [pendingColumnToggle.colId]: pendingColumnToggle.visible };
-      if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
-      return next;
-    });
-  }, [pendingColumnToggle, columnOrder, columnSizing, debouncedSaveCols]);
-
-  // Expose column configs to toolbar via callback
-  useEffect(() => {
-    if (!onColumnsChange) return;
-    const configs: ColumnConfig[] = table.getLeafHeaders().map(h => ({
-      id: h.id,
-      label: COL_CATALOG.find(c => c.id === h.id)?.label ?? h.id,
-      visible: h.column.getIsVisible(),
-    }));
-    onColumnsChange(configs);
-  }); // runs every render — intentional, keeps toolbar in sync
-
-  // ── Filter + sort ──────────────────────────────────────────────────────────
-
-  const memberIdsByUserId = useMemo<Map<string, string[]>>(() => {
-    const map = new Map<string, string[]>();
-    for (const m of rawMembers) {
-      if (!m.userId) continue;
-      const list = map.get(m.userId) ?? [];
-      list.push(m.id);
-      map.set(m.userId, list);
-    }
-    return map;
-  }, [rawMembers]);
-
-  const closedStatusIds = useMemo(
-    () => new Set(timelineStatuses.filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-
-  const filteredActivities = useMemo(
-    () =>
-      applyActiveFilter(rawActivities, activeFilter, memberIdsByUserId, {
-        closedStatusIds,
-        savedFilters,
-        statuses: statusesByTimeline,
-        tags,
-      }),
-    [rawActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
-  );
-
-  // Apply TanStack sorting
-  const sortedActivities = useMemo(() => {
-    const acts = [...filteredActivities];
-    const col = sorting[0];
-    if (!col) {
-      // default sort by sortBy prop
-      return acts.sort((a, b) => {
-        if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '');
-        if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '');
-        if (sortBy === 'title') return a.title.localeCompare(b.title);
-        if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '');
-        if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0);
-        return 0;
-      });
-    }
-    // column header sort
-    return acts.sort((a, b) => {
-      let av: string | number = '';
-      let bv: string | number = '';
-      switch (col.id) {
-        case 'title': av = a.title; bv = b.title; break;
-        case 'startAt': av = a.startAt ?? ''; bv = b.startAt ?? ''; break;
-        case 'endAt': av = a.endAt ?? ''; bv = b.endAt ?? ''; break;
-        case 'status': av = a.statusId ?? ''; bv = b.statusId ?? ''; break;
-        case 'progress': av = a.percentComplete ?? 0; bv = b.percentComplete ?? 0; break;
-        default: av = a.title; bv = b.title;
-      }
-      const cmp = typeof av === 'number' ? av - (bv as number) : (av as string).localeCompare(bv as string);
-      return col.desc ? -cmp : cmp;
-    });
-  }, [filteredActivities, sorting, sortBy]);
-
-  // ── Group-by ───────────────────────────────────────────────────────────────
-
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-  const toggleGroup = useCallback((key: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
-    });
-  }, []);
-
-  const memberById = useMemo<Map<string, TeamMemberWithUser>>(
-    () => new Map(rawMembers.map(m => [m.id, m])),
-    [rawMembers],
-  );
-  const statusById = useMemo<Map<string, Status>>(
-    () => new Map(timelineStatuses.map(s => [s.id, s])),
-    [timelineStatuses],
-  );
-  const activityById = useMemo<Map<string, ApiActivity>>(
-    () => new Map(rawActivities.map(a => [a.id, a])),
-    [rawActivities],
-  );
-
-  type DisplayRow =
-    | { kind: 'group'; key: string; label: string; count: number }
-    | { kind: 'activity'; activity: ApiActivity };
-
-  const displayRows = useMemo<DisplayRow[]>(() => {
-    if (groupBy === 'none') {
-      return sortedActivities.map(a => ({ kind: 'activity' as const, activity: a }));
-    }
-
-    // Build groups
-    const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
-
-    for (const activity of sortedActivities) {
-      let key = '';
-      let label = '';
-
-      if (groupBy === 'member') {
-        const ids = activity.assignedMemberIds ?? [];
-        if (ids.length === 0) {
-          key = '__unassigned__';
-          label = 'Unassigned';
-        } else {
-          // Use first assignee
-          key = ids[0];
-          label = memberById.get(ids[0])?.displayName ?? 'Unknown';
-        }
-      } else if (groupBy === 'parent') {
-        if (!activity.parentActivityId) {
-          key = '__no_parent__';
-          label = 'No parent';
-        } else {
-          key = activity.parentActivityId;
-          label = activityById.get(activity.parentActivityId)?.title ?? 'Unknown parent';
-        }
-      } else if (groupBy === 'status') {
-        if (!activity.statusId) {
-          key = '__no_status__';
-          label = 'No status';
-        } else {
-          key = activity.statusId;
-          label = statusById.get(activity.statusId)?.name ?? 'Unknown status';
-        }
-      }
-
-      const group = groups.get(key) ?? { label, activities: [] };
-      group.activities.push(activity);
-      groups.set(key, group);
-    }
-
-    const rows: DisplayRow[] = [];
-    for (const [key, { label, activities }] of groups) {
-      rows.push({ kind: 'group', key, label, count: activities.length });
-      if (!collapsedGroups.has(key)) {
-        for (const a of activities) rows.push({ kind: 'activity', activity: a });
-      }
-    }
-    return rows;
-  }, [sortedActivities, groupBy, memberById, statusById, activityById, collapsedGroups]);
-
-  // Flat list of activity rows (for keyboard navigation indices)
-  const activityRows = useMemo(
-    () => displayRows.filter((r): r is { kind: 'activity'; activity: ApiActivity } => r.kind === 'activity'),
-    [displayRows],
-  );
-
-  // ── Find integration ───────────────────────────────────────────────────────
-
-  useEffect(() => {
-    if (!debouncedQuery) {
-      registerMatches([], new Map());
-      return;
-    }
-    const results = matchEvents(debouncedQuery, filteredActivities, members, rawActivities);
-    const ids = results.map(r => r.activityId);
-    const reasons = new Map(results.map(r => [r.activityId, r.reasons]));
-    registerMatches(ids, reasons);
-  }, [debouncedQuery, filteredActivities, members, rawActivities, registerMatches]);
-
-  // Auto-scroll to active match
-  const activeRowRef = useRef<HTMLTableRowElement | null>(null);
-  useEffect(() => {
-    if (activeMatchId && activeRowRef.current) {
-      activeRowRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
-  }, [activeMatchId]);
-
-  // ── Selection & editing state ──────────────────────────────────────────────
-
-  // Indices into activityRows (not displayRows)
-  const [selectedRowIdx, setSelectedRowIdx] = useState<number | null>(null);
-  const [selectedColIdx, setSelectedColIdx] = useState<number>(0);
-  const [editingCell, setEditingCell] = useState<{
-    rowIdx: number;
-    colIdx: number;
-    value: string;
-  } | null>(null);
-  const editInputRef = useRef<HTMLInputElement | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  // When a new activity is selected externally (e.g. detail panel), sync row idx
-  useEffect(() => {
-    if (!selectedActivityId) { setSelectedRowIdx(null); return; }
-    const idx = activityRows.findIndex(r => r.activity.id === selectedActivityId);
-    if (idx >= 0) setSelectedRowIdx(idx);
-  }, [selectedActivityId, activityRows]);
-
-  // Focus the edit input when entering edit mode
-  useEffect(() => {
-    if (editingCell && editInputRef.current) {
-      editInputRef.current.focus();
-      editInputRef.current.select();
-    }
-  }, [editingCell]);
-
-  // Visible column ids (in order)
-  const visibleColIds = useMemo(
-    () => table.getVisibleLeafColumns().map(c => c.id),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [columnOrder, columnVisibility],
-  );
-
-  const commitEdit = useCallback(
-    (rowIdx: number, colId: string, value: string) => {
-      const row = activityRows[rowIdx];
-      if (!row) return;
-      const a = row.activity;
-
-      const patch: Partial<ApiActivity> = {};
-      if (colId === 'title' && value.trim() !== '') patch.title = value.trim();
-      else if (colId === 'startAt') patch.startAt = value ? `${value}T00:00:00Z` : undefined;
-      else if (colId === 'endAt') patch.endAt = value ? `${value}T00:00:00Z` : undefined;
-      else if (colId === 'description') patch.description = value || undefined;
-      else if (colId === 'location') patch.location = value || undefined;
-      else if (colId === 'url') patch.url = value || undefined;
-      else if (colId === 'progress') {
-        const n = parseInt(value, 10);
-        if (!isNaN(n) && n >= 0 && n <= 100) patch.percentComplete = n;
-      }
-
-      if (Object.keys(patch).length > 0) {
-        update.mutate({ activityId: a.id, patch });
-      }
-    },
-    [activityRows, update],
-  );
-
-  const enterEdit = useCallback((rowIdx: number, colIdx: number) => {
-    const row = activityRows[rowIdx];
-    if (!row) return;
-    const colId = visibleColIds[colIdx];
-    const meta = COL_CATALOG.find(c => c.id === colId);
-    if (!meta?.editable || meta.editType === 'status') return; // status handled separately
-    const a = row.activity;
-    let val = '';
-    if (colId === 'title') val = a.title;
-    else if (colId === 'startAt') val = toDateInput(a.startAt);
-    else if (colId === 'endAt') val = toDateInput(a.endAt);
-    else if (colId === 'description') val = a.description ?? '';
-    else if (colId === 'location') val = a.location ?? '';
-    else if (colId === 'url') val = a.url ?? '';
-    else if (colId === 'progress') val = String(a.percentComplete ?? 0);
-    setEditingCell({ rowIdx, colIdx, value: val });
-  }, [activityRows, visibleColIds]);
-
-  const cancelEdit = useCallback(() => setEditingCell(null), []);
-
-  const commitAndMove = useCallback(
-    (dir: 'down' | 'right' | 'left') => {
-      if (!editingCell) return;
-      commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
-      setEditingCell(null);
-
-      if (dir === 'down') {
-        const nextRow = Math.min(editingCell.rowIdx + 1, activityRows.length - 1);
-        setSelectedRowIdx(nextRow);
-      } else if (dir === 'right') {
-        const nextColIdx = editingCell.colIdx + 1;
-        if (nextColIdx < visibleColIds.length) {
-          setSelectedColIdx(nextColIdx);
-          const colId = visibleColIds[nextColIdx];
-          const meta = COL_CATALOG.find(c => c.id === colId);
-          if (meta?.editable && meta.editType !== 'status' && meta.editType !== 'none') {
-            enterEdit(editingCell.rowIdx, nextColIdx);
-          }
-        }
-      } else if (dir === 'left') {
-        const prevColIdx = editingCell.colIdx - 1;
-        if (prevColIdx >= 0) {
-          setSelectedColIdx(prevColIdx);
-          const colId = visibleColIds[prevColIdx];
-          const meta = COL_CATALOG.find(c => c.id === colId);
-          if (meta?.editable && meta.editType !== 'status' && meta.editType !== 'none') {
-            enterEdit(editingCell.rowIdx, prevColIdx);
-          }
-        }
-      }
-    },
-    [editingCell, commitEdit, visibleColIds, activityRows.length, enterEdit],
-  );
-
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLDivElement>) => {
-      // In edit mode
-      if (editingCell) {
-        if (e.key === 'Escape') { cancelEdit(); e.preventDefault(); }
-        else if (e.key === 'Enter') { commitAndMove('down'); e.preventDefault(); }
-        else if (e.key === 'Tab') {
-          commitAndMove(e.shiftKey ? 'left' : 'right');
-          e.preventDefault();
-        }
-        return;
-      }
-
-      // In selection mode
-      if (selectedRowIdx === null) {
-        if (e.key === 'ArrowDown') { setSelectedRowIdx(0); e.preventDefault(); }
-        return;
-      }
-
-      if (e.key === 'ArrowDown') {
-        setSelectedRowIdx(r => Math.min((r ?? 0) + 1, activityRows.length - 1));
-        e.preventDefault();
-      } else if (e.key === 'ArrowUp') {
-        setSelectedRowIdx(r => Math.max((r ?? 0) - 1, 0));
-        e.preventDefault();
-      } else if (e.key === 'ArrowRight') {
-        setSelectedColIdx(c => Math.min(c + 1, visibleColIds.length - 1));
-        e.preventDefault();
-      } else if (e.key === 'ArrowLeft') {
-        setSelectedColIdx(c => Math.max(c - 1, 0));
-        e.preventDefault();
-      } else if (e.key === 'Enter' || e.key === 'F2') {
-        const colId = visibleColIds[selectedColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        if (meta?.editable && meta.editType !== 'none' && meta.editType !== 'status') {
-          enterEdit(selectedRowIdx, selectedColIdx);
-        }
-        e.preventDefault();
-      } else if (e.key === ' ') {
-        // Space — open detail panel
-        const row = activityRows[selectedRowIdx];
-        if (row) {
-          onSelectActivity?.(row.activity.id);
-          onSelectApiActivity?.(row.activity);
-        }
-        e.preventDefault();
-      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-        // Start typing to enter edit mode
-        const colId = visibleColIds[selectedColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        if (meta?.editable && meta.editType !== 'none' && meta.editType !== 'status') {
-          setEditingCell({ rowIdx: selectedRowIdx, colIdx: selectedColIdx, value: e.key });
-        }
-      }
-    },
-    [editingCell, selectedRowIdx, selectedColIdx, activityRows, visibleColIds, cancelEdit, commitAndMove, enterEdit, onSelectActivity, onSelectApiActivity],
-  );
-
-  // ── Color-by resolution ────────────────────────────────────────────────────
-
-  const getRowAccentColor = useCallback(
-    (activity: ApiActivity): string | null => {
-      if (colorBy === 'activity') return resolveColorHex(activity.color ?? null);
-      if (colorBy === 'member') {
-        const firstId = (activity.assignedMemberIds ?? [])[0];
-        if (!firstId) return null;
-        const m = memberById.get(firstId);
-        return resolveColorHex(m?.color ?? null);
-      }
-      if (colorBy === 'status') {
-        if (!activity.statusId) return null;
-        const s = statusById.get(activity.statusId);
-        return resolveColorHex(s?.color ?? null);
-      }
-      return null;
-    },
-    [colorBy, memberById, statusById],
-  );
-
-  // ── Status inline edit state ───────────────────────────────────────────────
-
-  const [statusPickerFor, setStatusPickerFor] = useState<string | null>(null); // activity id
-
-  // ── DnD column reorder ─────────────────────────────────────────────────────
-
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
-
-  function handleDragEnd(event: DragEndEvent) {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    setColumnOrder(prev => {
-      const oldIdx = prev.indexOf(String(active.id));
-      const newIdx = prev.indexOf(String(over.id));
-      if (oldIdx === -1 || newIdx === -1) return prev;
-      // Don't allow reordering before the pinned title column
-      if (newIdx === 0 || oldIdx === 0) return prev;
-      const next = arrayMove(prev, oldIdx, newIdx);
-      if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
-      return next;
-    });
-  }
-
-  // ── Render ─────────────────────────────────────────────────────────────────
-
-  const rowH = density === 'compact' ? 32 : 40;
-
-  const visibleHeaders = table.getHeaderGroups()[0]?.headers ?? [];
-
-  // Build a map from colId → left offset for sticky pinning
-  const pinnedLeft = useMemo(() => {
-    let left = 0;
-    const offsets: Record<string, number> = {};
-    for (const h of visibleHeaders) {
-      if (h.column.getIsPinned() === 'left') {
-        offsets[h.id] = left;
-        left += h.getSize();
-      }
-    }
-    return offsets;
-  }, [visibleHeaders]);
-
-  const tableWidth = visibleHeaders.reduce((acc, h) => acc + h.getSize(), 0);
-
-  return (
-    <div
-      ref={containerRef}
-      tabIndex={0}
-      onKeyDown={handleKeyDown}
-      style={{
-        flex: 1,
-        overflow: 'auto',
-        outline: 'none',
-        background: 'var(--background)',
-        position: 'relative',
-      }}
-      // click on non-cell area deselects
-      onClick={e => {
-        if ((e.target as HTMLElement) === containerRef.current) {
-          setSelectedRowIdx(null);
-          setEditingCell(null);
-          onSelectActivity?.(null);
-          onSelectApiActivity?.(null);
-        }
-      }}
-    >
-      <table
-        style={{
-          width: tableWidth,
-          minWidth: '100%',
-          borderCollapse: 'separate',
-          borderSpacing: 0,
-          tableLayout: 'fixed',
-        }}
-      >
-        {/* Column sizing */}
-        <colgroup>
-          {visibleHeaders.map(h => (
-            <col key={h.id} style={{ width: h.getSize() }} />
-          ))}
-        </colgroup>
-
-        {/* Header */}
-        <thead>
-          <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
-            <SortableContext
-              items={visibleHeaders.map(h => h.id)}
-              strategy={horizontalListSortingStrategy}
-            >
-              <tr style={{ height: 36 }}>
-                {visibleHeaders.map(header => {
-                  const colId = header.id;
-                  const isPinned = header.column.getIsPinned() === 'left';
-                  const sortState = sorting[0];
-                  const sortDir = sortState?.id === colId ? (sortState.desc ? 'desc' : 'asc') : false;
-                  const meta = COL_CATALOG.find(c => c.id === colId);
-
-                  return (
-                    <SortableColHeader
-                      key={colId}
-                      colId={colId}
-                      style={{
-                        width: header.getSize(),
-                        left: isPinned ? pinnedLeft[colId] : undefined,
-                        position: isPinned ? 'sticky' : 'sticky',
-                        zIndex: isPinned ? 20 : 10,
-                        boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
-                      }}
-                      sortDir={meta?.editType !== 'none' ? sortDir : false}
-                      onSort={meta?.editType !== 'none' ? () => {
-                        setSorting(prev => {
-                          if (prev[0]?.id !== colId) return [{ id: colId, desc: false }];
-                          if (!prev[0].desc) return [{ id: colId, desc: true }];
-                          return [];
-                        });
-                      } : undefined}
-                    >
-                      {header.column.columnDef.header as string}
-                    </SortableColHeader>
-                  );
-                })}
-              </tr>
-            </SortableContext>
-          </DndContext>
-        </thead>
-
-        {/* Body */}
-        <tbody>
-          {displayRows.length === 0 && (
-            <tr>
-              <td
-                colSpan={visibleHeaders.length}
-                style={{
-                  textAlign: 'center',
-                  padding: '48px 0',
-                  color: 'var(--muted-foreground)',
-                  fontSize: 13,
-                }}
-              >
-                No activities to show.
-              </td>
-            </tr>
-          )}
-
-          {displayRows.map((row, displayIdx) => {
-            // ── Group header row ─────────────────────────────────────────────
-            if (row.kind === 'group') {
-              const collapsed = collapsedGroups.has(row.key);
-              return (
-                <tr key={`group-${row.key}`}>
-                  <td
-                    colSpan={visibleHeaders.length}
-                    style={{
-                      padding: '4px 8px',
-                      background: 'var(--muted)',
-                      borderBottom: '1px solid var(--border)',
-                      borderTop: displayIdx > 0 ? '1px solid var(--border)' : undefined,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      color: 'var(--muted-foreground)',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.05em',
-                      cursor: 'pointer',
-                      userSelect: 'none',
-                    }}
-                    onClick={() => toggleGroup(row.key)}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-                      {row.label}
-                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
-                    </div>
-                  </td>
-                </tr>
-              );
-            }
-
-            // ── Activity row ─────────────────────────────────────────────────
-            const { activity } = row;
-            const actRowIdx = activityRows.indexOf(row);
-            const isSelected = actRowIdx === selectedRowIdx;
-            const isDetailOpen = activity.id === selectedActivityId;
-            const accentColor = getRowAccentColor(activity);
-
-            // Find state
-            const isMatch = debouncedQuery && matchedIds.includes(activity.id);
-            const isActiveMatch = activity.id === activeMatchId;
-            const isDimmed = debouncedQuery && matchedIds.length > 0 && !isMatch;
-
-            const rowStyle: React.CSSProperties = {
-              height: rowH,
-              opacity: isDimmed ? 0.3 : 1,
-              background: isDetailOpen
-                ? 'var(--muted)'
-                : isSelected
-                ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
-                : 'transparent',
-              cursor: 'default',
-              outline: isActiveMatch
-                ? '2px solid #f59e0b'
-                : isMatch
-                ? '1px solid rgba(245,158,11,0.6)'
-                : undefined,
-              transition: 'background 0.1s ease, opacity 0.15s ease',
-            };
-
-            return (
-              <tr
-                key={activity.id}
-                ref={isActiveMatch ? el => { (activeRowRef as React.MutableRefObject<HTMLTableRowElement | null>).current = el } : undefined}
-                style={rowStyle}
-                onClick={e => {
-                  e.stopPropagation();
-                  setSelectedRowIdx(actRowIdx);
-                  onSelectActivity?.(activity.id);
-                  onSelectApiActivity?.(activity);
-                }}
-              >
-                {visibleHeaders.map((header, colIdx) => {
-                  const colId = header.id;
-                  const isPinned = header.column.getIsPinned() === 'left';
-                  const isCellSelected = isSelected && colIdx === selectedColIdx;
-                  const isEditing = editingCell?.rowIdx === actRowIdx && editingCell.colIdx === colIdx;
-                  const meta = COL_CATALOG.find(c => c.id === colId)!;
-
-                  const cellStyle: React.CSSProperties = {
-                    width: header.getSize(),
-                    maxWidth: header.getSize(),
-                    padding: '0 8px',
-                    borderBottom: '1px solid var(--border)',
-                    fontSize: 12,
-                    color: 'var(--foreground)',
-                    overflow: 'hidden',
-                    whiteSpace: 'nowrap',
-                    textOverflow: 'ellipsis',
-                    position: isPinned ? 'sticky' : undefined,
-                    left: isPinned ? pinnedLeft[colId] : undefined,
-                    zIndex: isPinned ? 5 : undefined,
-                    background: isPinned
-                      ? (isDetailOpen ? 'var(--muted)' : isSelected ? 'color-mix(in srgb, var(--primary) 8%, var(--background))' : 'var(--background)')
-                      : undefined,
-                    boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
-                    outline: isCellSelected && !isEditing ? '2px solid var(--primary)' : undefined,
-                    outlineOffset: '-2px',
-                    borderLeft: colIdx === 0 && accentColor ? `3px solid ${accentColor}` : undefined,
-                    verticalAlign: 'middle',
-                    cursor: meta.editable ? 'text' : 'default',
-                  };
-
-                  // ── Cell content ──────────────────────────────────────────
-
-                  // Editing mode — inline input
-                  if (isEditing && meta.editType !== 'none' && meta.editType !== 'status') {
-                    return (
-                      <td key={colId} style={{ ...cellStyle, padding: 0, overflow: 'visible' }}>
-                        <input
-                          ref={editInputRef}
-                          type={meta.editType === 'date' ? 'date' : meta.editType === 'number' ? 'number' : 'text'}
-                          min={meta.editType === 'number' ? 0 : undefined}
-                          max={meta.editType === 'number' ? 100 : undefined}
-                          value={editingCell.value}
-                          onChange={e => setEditingCell(prev => prev ? { ...prev, value: e.target.value } : prev)}
-                          onKeyDown={e => e.stopPropagation()} // let the cell handle it above
-                          style={{
-                            width: '100%',
-                            height: rowH,
-                            padding: '0 8px',
-                            background: 'var(--background)',
-                            border: 'none',
-                            outline: '2px solid var(--primary)',
-                            outlineOffset: '-2px',
-                            fontSize: 12,
-                            color: 'var(--foreground)',
-                            fontFamily: 'var(--font-sans)',
-                          }}
-                          onClick={e => e.stopPropagation()}
-                        />
-                      </td>
-                    );
-                  }
-
-                  // Status cell — click to open picker
-                  if (colId === 'status') {
-                    const status = activity.statusId ? statusById.get(activity.statusId) : null;
-                    return (
-                      <td
-                        key={colId}
-                        style={{ ...cellStyle, position: isPinned ? 'sticky' : 'relative', cursor: 'pointer' }}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          setStatusPickerFor(prev => prev === activity.id ? null : activity.id);
-                        }}
-                      >
-                        <div style={{ position: 'relative' }}>
-                          {status ? (
-                            <span
-                              style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: 5,
-                                padding: '2px 8px',
-                                borderRadius: 4,
-                                fontSize: 11,
-                                fontWeight: 500,
-                                background: `color-mix(in srgb, ${resolveColorHex(status.color ?? null) ?? '#888'} 15%, transparent)`,
-                                color: resolveColorHex(status.color ?? null) ?? 'var(--foreground)',
-                                border: `1px solid ${resolveColorHex(status.color ?? null) ?? '#888'}40`,
-                              }}
-                            >
-                              <span
-                                style={{
-                                  width: 7,
-                                  height: 7,
-                                  borderRadius: '50%',
-                                  background: resolveColorHex(status.color ?? null) ?? '#888',
-                                  flexShrink: 0,
-                                }}
-                              />
-                              {status.name}
-                            </span>
-                          ) : (
-                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                          )}
-
-                          {statusPickerFor === activity.id && (
-                            <StatusPicker
-                              value={activity.statusId}
-                              statuses={timelineStatuses}
-                              onChange={statusId => {
-                                update.mutate({ activityId: activity.id, patch: { statusId } });
-                                setStatusPickerFor(null);
-                              }}
-                              onClose={() => setStatusPickerFor(null)}
-                            />
-                          )}
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Assignees cell
-                  if (colId === 'assignees') {
-                    const ids = activity.assignedMemberIds ?? [];
-                    return (
-                      <td key={colId} style={cellStyle}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden' }}>
-                          {ids.slice(0, 4).map(mid => {
-                            const m = memberById.get(mid);
-                            if (!m) return null;
-                            return (
-                              <Badge
-                                key={mid}
-                                identity={{ color: resolveColorHex(m.color ?? null) ?? '#288C9B', icon: m.icon ?? '__name_2__' }}
-                                name={m.displayName}
-                                shape="circle"
-                                size={22}
-                              />
-                            );
-                          })}
-                          {ids.length > 4 && (
-                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{ids.length - 4}</span>
-                          )}
-                          {ids.length === 0 && (
-                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                          )}
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Tags cell
-                  if (colId === 'tags') {
-                    const tagList = (activity.tagIds ?? [])
-                      .map(tid => tags.find(t => t.id === tid))
-                      .filter(Boolean) as Tag[];
-                    return (
-                      <td key={colId} style={cellStyle}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden', flexWrap: 'nowrap' }}>
-                          {tagList.slice(0, 3).map(t => (
-                            <span
-                              key={t.id}
-                              style={{
-                                padding: '1px 6px',
-                                borderRadius: 4,
-                                fontSize: 10,
-                                background: resolveColorHex(t.color ?? null)
-                                  ? `color-mix(in srgb, ${resolveColorHex(t.color ?? null)} 18%, transparent)`
-                                  : 'var(--muted)',
-                                color: resolveColorHex(t.color ?? null) ?? 'var(--foreground)',
-                                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}40`,
-                                whiteSpace: 'nowrap',
-                              }}
-                            >
-                              {t.name}
-                            </span>
-                          ))}
-                          {tagList.length > 3 && (
-                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tagList.length - 3}</span>
-                          )}
-                          {tagList.length === 0 && (
-                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                          )}
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Progress cell
-                  if (colId === 'progress') {
-                    const pct = activity.percentComplete ?? 0;
-                    return (
-                      <td key={colId} style={cellStyle} onDoubleClick={() => enterEdit(actRowIdx, colIdx)}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <div
-                            style={{
-                              flex: 1,
-                              height: 4,
-                              background: 'var(--border)',
-                              borderRadius: 2,
-                              overflow: 'hidden',
-                            }}
-                          >
-                            <div
-                              style={{
-                                height: '100%',
-                                width: `${pct}%`,
-                                background: 'var(--primary)',
-                                borderRadius: 2,
-                                transition: 'width 0.2s',
-                              }}
-                            />
-                          </div>
-                          <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flexShrink: 0 }}>
-                            {pct}%
-                          </span>
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Parent cell
-                  if (colId === 'parent') {
-                    const parent = activity.parentActivityId ? activityById.get(activity.parentActivityId) : null;
-                    return (
-                      <td key={colId} style={cellStyle}>
-                        <span style={{ color: parent ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
-                          {parent ? parent.title : '—'}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Duration cell
-                  if (colId === 'duration') {
-                    return (
-                      <td key={colId} style={cellStyle}>
-                        <span style={{ color: 'var(--muted-foreground)' }}>
-                          {formatDuration(activity.startAt, activity.endAt)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Date cells
-                  if (colId === 'startAt' || colId === 'endAt') {
-                    const iso = colId === 'startAt' ? activity.startAt : activity.endAt;
-                    return (
-                      <td
-                        key={colId}
-                        style={cellStyle}
-                        onDoubleClick={() => enterEdit(actRowIdx, colIdx)}
-                      >
-                        <span style={{ color: iso ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
-                          {formatDate(iso)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Created/Updated cells
-                  if (colId === 'createdAt' || colId === 'updatedAt') {
-                    const iso = colId === 'createdAt' ? activity.createdAt : activity.updatedAt;
-                    return (
-                      <td key={colId} style={cellStyle}>
-                        <span style={{ color: 'var(--muted-foreground)' }}>
-                          {formatDate(iso)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Text cells (title, description, location, url)
-                  let textVal = '';
-                  if (colId === 'title') textVal = activity.title;
-                  else if (colId === 'description') textVal = activity.description ?? '';
-                  else if (colId === 'location') textVal = activity.location ?? '';
-                  else if (colId === 'url') textVal = activity.url ?? '';
-
-                  return (
-                    <td
-                      key={colId}
-                      style={{ ...cellStyle, fontWeight: colId === 'title' ? 500 : 400 }}
-                      onDoubleClick={() => {
-                        if (meta.editable && meta.editType === 'text') enterEdit(actRowIdx, colIdx);
-                      }}
-                    >
-                      <span
-                        title={textVal}
-                        style={{
-                          display: 'block',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                          color: textVal ? 'var(--foreground)' : 'var(--muted-foreground)',
-                        }}
-                      >
-                        {textVal || '—'}
-                      </span>
-                    </td>
-                  );
-                })}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
 ````
 
 ## File: packages/web/src/components/shared/ConfirmDialog.tsx
@@ -18813,6 +17902,234 @@ export function usePublicSettings() {
     queryKey: ['settings', 'branding'],
     queryFn: () => apiFetch<PublicBranding>('/settings/branding'),
     staleTime: 5 * 60 * 1000,
+  })
+}
+````
+
+## File: packages/web/src/hooks/useSettings.ts
+````typescript
+/**
+ * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
+ * profile, password change, forgot/reset password, SMTP config, instance
+ * settings, and the admin user list.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { apiFetch, createAuthFetch } from '@/lib/api'
+import type { components } from '@draba/shared'
+
+type User = components['schemas']['User']
+type SMTPConfig = components['schemas']['SMTPConfig']
+type APIToken = components['schemas']['APIToken']
+
+// ── Profile ──────────────────────────────────────────────────────────────────
+
+export function useUpdateProfile() {
+  const { getAccessToken, patchUser } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
+      authFetch<User>('/users/me', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: (updated) => {
+      qc.setQueryData(['me'], updated)
+      patchUser(updated)
+      // Invalidate all team member lists so the sidebar reflects the new color/icon.
+      void qc.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+// ── My stats ──────────────────────────────────────────────────────────────────
+
+interface MemberStats {
+  activeTimelines: number
+  archivedTimelines: number
+  pastDue: number
+  running: number
+  upcoming: number
+  unscheduled: number
+  archivedActivities: number
+}
+
+export function useMyStats() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: ['me', 'stats'],
+    queryFn: () => authFetch<MemberStats>('/users/me/stats'),
+  })
+}
+
+// ── Password ──────────────────────────────────────────────────────────────────
+
+export function useChangePassword() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
+      authFetch<{ status: string }>('/users/me/password', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Forgot / reset password (public, no auth required) ───────────────────────
+
+export function useForgotPassword() {
+  return useMutation({
+    mutationFn: (email: string) =>
+      apiFetch<{ status: string }>('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }),
+  })
+}
+
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: (data: { token: string; newPassword: string }) =>
+      apiFetch<{ status: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Admin: SMTP ──────────────────────────────────────────────────────────────
+
+export function useAdminSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'smtp'],
+    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
+  })
+}
+
+export function useSaveSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
+        method: 'PUT',
+        body: JSON.stringify(cfg),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+export function useTestSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
+        method: 'POST',
+        body: JSON.stringify(cfg),
+      }),
+  })
+}
+
+export function useDeleteSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: () =>
+      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+// ── Admin: Instance settings ──────────────────────────────────────────────────
+
+export function useAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'settings'],
+    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
+  })
+}
+
+export function usePatchAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: Record<string, string>) =>
+      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
+  })
+}
+
+// ── API Tokens ────────────────────────────────────────────────────────────────
+
+export function useTokens() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: ['tokens'],
+    queryFn: () => authFetch<APIToken[]>('/tokens'),
+  })
+}
+
+export function useCreateToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { name: string; scope: string }) =>
+      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+export function useRevokeToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+// ── Admin: Users ──────────────────────────────────────────────────────────────
+
+export type AdminUserRow = User & { teamCount: number }
+
+export function useAdminUsers(orphanedOnly = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'users', { orphanedOnly }],
+    queryFn: () =>
+      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
   })
 }
 ````
@@ -19900,469 +19217,155 @@ describe('matchActivities', () => {
 })
 ````
 
-## File: packages/web/src/pages/settings/AdminUsersPage.tsx
+## File: packages/web/src/pages/settings/ProfilePage.tsx
 ````typescript
 /**
- * /settings/users — Superadmin: view and search all users; orphaned-user alert.
- */
-
-import { useState } from 'react'
-import { useAdminUsers } from '@/hooks/useSettings'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { Input } from '@/components/ui/input'
-import { AlertTriangle } from 'lucide-react'
-
-export default function AdminUsersPage() {
-  const [orphanedOnly, setOrphanedOnly] = useState(false)
-  const [search, setSearch] = useState('')
-  const { data: allData, error: allError } = useAdminUsers(false)
-  const { data: orphanData } = useAdminUsers(true)
-
-  const allUsers = allData?.users ?? []
-  const orphanedCount = orphanData?.users?.length ?? 0
-  const displayed = (orphanedOnly ? orphanData?.users ?? [] : allUsers)
-    .filter(u => {
-      if (!search) return true
-      const q = search.toLowerCase()
-      return u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
-    })
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Users</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        All accounts in this organization. Use team management to assign or remove memberships.
-      </p>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        {orphanedCount > 0 && !orphanedOnly && (
-          <div className="flex items-center gap-2.5 px-3.5 py-2.5 mb-4 bg-warning/10 border border-warning/30 rounded-lg">
-            <AlertTriangle size={16} className="text-warning shrink-0" />
-            <span className="text-[13px] text-warning">
-              {orphanedCount} user{orphanedCount > 1 ? 's' : ''} with no team memberships.
-            </span>
-            <button
-              onClick={() => setOrphanedOnly(true)}
-              className="ml-auto text-xs text-warning bg-transparent border-none cursor-pointer underline"
-            >
-              View
-            </button>
-          </div>
-        )}
-
-        {allError && (
-          <div className="px-4 py-3 mb-4 bg-destructive/10 border border-destructive/30 rounded-lg text-[13px] text-destructive">
-            Failed to load users. This endpoint requires the Phase 10.1.3 backend — rebuild and redeploy the Docker container.
-          </div>
-        )}
-
-        <div className="flex gap-2 mb-4 items-center">
-          <Input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search by name or email…"
-            className="max-w-[300px]"
-          />
-          <div className="flex gap-1">
-            {[
-              { label: `All (${allUsers.length})`, v: false },
-              { label: `Orphaned (${orphanedCount})`, v: true },
-            ].map(({ label, v }) => (
-              <button
-                key={String(v)}
-                onClick={() => setOrphanedOnly(v)}
-                className={`px-3 py-1.5 rounded-md text-xs border cursor-pointer ${
-                  orphanedOnly === v
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {displayed.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No users found.</p>
-        ) : (
-          <table className="w-full border-collapse">
-            <thead>
-              <tr>
-                {['User', 'Email', 'Teams', 'Status'].map(h => (
-                  <th key={h} className="text-left text-[11px] text-muted-foreground font-semibold pb-2.5 px-2 tracking-[0.4px]">
-                    {h.toUpperCase()}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {displayed.map(u => (
-                <tr key={u.id} className="border-t border-card">
-                  <td className="py-2.5 px-2 flex items-center gap-2.5">
-                    <Badge identity={{ color: u.color ?? '#288C9B', icon: u.icon ?? '__none__' } satisfies Identity} name={u.displayName} size={28} shape="circle" />
-                    <span className="text-[13px] text-foreground">{u.displayName}</span>
-                    {u.isSuperadmin && (
-                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-primary/15 text-primary">
-                        superadmin
-                      </span>
-                    )}
-                  </td>
-                  <td className="py-2.5 px-2 text-[13px] text-muted-foreground">{u.email}</td>
-                  <td className="py-2.5 px-2 text-[13px] text-muted-foreground">{u.teamCount}</td>
-                  <td className="py-2.5 px-2">
-                    {u.archivedAt ? (
-                      <span className="text-xs px-2 py-0.5 rounded bg-destructive/15 text-destructive">
-                        Inactive
-                      </span>
-                    ) : (
-                      <span className="text-xs px-2 py-0.5 rounded bg-success/15 text-success">
-                        Active
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/AiKeysPage.tsx
-````typescript
-/**
- * /settings/ai — Superadmin: AI / LLM API key configuration.
- * Stub for Phase 10.6 — AI Key Management. Key storage, model routing, and
- * usage tracking are deferred to that phase.
- */
-
-import { Sparkles } from 'lucide-react'
-
-export default function AiKeysPage() {
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">AI / LLM Keys</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Connect AI providers to enable AI-assisted features in draba.
-      </p>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <div className="flex items-center gap-3 mb-5">
-          <div className="w-10 h-10 rounded-[10px] bg-primary/10 border border-primary/20 flex items-center justify-center">
-            <Sparkles size={18} className="text-primary" />
-          </div>
-          <div>
-            <div className="text-sm font-semibold text-foreground">AI features coming in Phase 10.6</div>
-            <div className="text-xs text-muted-foreground mt-0.5">Configure an API key when AI functionality is available.</div>
-          </div>
-        </div>
-
-        <p className="text-[13px] text-muted-foreground mb-4">
-          When AI features are enabled, you'll be able to add API keys for providers such as Anthropic, OpenAI, and others. Keys are stored encrypted and used only for organization-wide AI requests.
-        </p>
-
-        <div className="flex flex-col gap-2">
-          {['Anthropic (Claude)', 'OpenAI (GPT)', 'Google (Gemini)', 'Custom / self-hosted'].map(provider => (
-            <div
-              key={provider}
-              className="flex items-center justify-between px-4 py-3 rounded-lg border border-border bg-background opacity-50"
-            >
-              <span className="text-[13px] text-foreground">{provider}</span>
-              <span className="text-[11px] text-muted-foreground px-2 py-0.5 rounded border border-border">
-                Not configured
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/CommunicationPage.tsx
-````typescript
-/**
- * /settings/communication — Superadmin: email / SMTP configuration.
+ * /settings/profile — Identity, display name, and stats for the current user.
  */
 
 import { useState, useEffect } from 'react'
-import { useAdminSMTP, useSaveSMTP, useTestSMTP, useDeleteSMTP } from '@/hooks/useSettings'
-import type { components } from '@draba/shared'
+import { Calendar, Activity } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useUpdateProfile, useMyStats } from '@/hooks/useSettings'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
 import { ApiError } from '@/lib/api'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-import { Eye, EyeOff } from 'lucide-react'
 
-type SMTPConfig = components['schemas']['SMTPConfig']
+// ── Stat chip ──────────────────────────────────────────────────────────────
 
-export default function CommunicationPage() {
-  const { data } = useAdminSMTP()
-  const saveSMTP = useSaveSMTP()
-  const testSMTP = useTestSMTP()
-  const deleteSMTP = useDeleteSMTP()
+function StatChip({ value, label, color }: { value: number; label: string; color: string }) {
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      padding: '10px 14px', borderRadius: 8, flex: 1, minWidth: 0,
+      border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
+      background: `${color}0a`, textAlign: 'center',
+    }}>
+      <span style={{ fontSize: 20, fontWeight: 700, color }}>{value}</span>
+      <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{label}</span>
+    </div>
+  )
+}
 
-  const [host, setHost] = useState('')
-  const [port, setPort] = useState('587')
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [fromName, setFromName] = useState('')
-  const [fromEmail, setFromEmail] = useState('')
-  const [encryption, setEncryption] = useState<'none' | 'tls' | 'starttls'>('starttls')
-  const [showPw, setShowPw] = useState(false)
+// ── Main ───────────────────────────────────────────────────────────────────
+
+export default function ProfilePage() {
+  const { user } = useAuth()
+  const updateProfile = useUpdateProfile()
+  const { data: stats } = useMyStats()
+
+  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: user?.color ?? '#288C9B',
+    icon: user?.icon ?? '__none__',
+  })
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-  const [testState, setTestState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
 
   useEffect(() => {
-    const cfg = data?.smtp
-    if (cfg) {
-      setHost(cfg.host ?? '')
-      setPort(String(cfg.port ?? 587))
-      setUsername(cfg.username ?? '')
-      setFromName(cfg.fromName ?? '')
-      setFromEmail(cfg.fromEmail ?? '')
-      setEncryption((cfg.encryption as 'none' | 'tls' | 'starttls') ?? 'starttls')
+    if (user) {
+      setDisplayName(user.displayName)
+      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
     }
-  }, [data])
-
-  function buildConfig(): SMTPConfig {
-    return { host, port: parseInt(port, 10), username, password, fromName, fromEmail, encryption }
-  }
+  }, [user])
 
   async function handleSave() {
     setFeedback(null)
     try {
-      await saveSMTP.mutateAsync(buildConfig())
-      setFeedback({ type: 'success', msg: 'SMTP settings saved and validated.' })
+      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
+      setFeedback({ type: 'success', msg: 'Profile updated.' })
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to save SMTP settings.'
+      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
       setFeedback({ type: 'error', msg })
     }
   }
 
-  async function handleTest() {
-    setTestState('sending')
-    try {
-      const res = await testSMTP.mutateAsync(buildConfig())
-      setTestState('sent')
-      setFeedback({ type: 'success', msg: `Test email sent to ${res.to}` })
-    } catch (err) {
-      setTestState('failed')
-      const msg = err instanceof ApiError ? err.message : 'SMTP test failed.'
-      setFeedback({ type: 'error', msg })
-    }
-    setTimeout(() => setTestState('idle'), 3000)
-  }
-
-  async function handleDelete() {
-    await deleteSMTP.mutateAsync()
-    setHost(''); setPort('587'); setUsername(''); setPassword('')
-    setFromName(''); setFromEmail(''); setEncryption('starttls')
-    setFeedback({ type: 'success', msg: 'SMTP configuration cleared.' })
-  }
+  const accentColor = identity.color
 
   return (
     <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Communication</h2>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Profile</h2>
       <p className="text-sm text-muted-foreground mb-6">
-        Configure outbound email for password resets and invitations.
+        Changes to your name and identity propagate across all your team memberships.
       </p>
 
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          SMTP / Email
-        </h3>
-
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="flex flex-col gap-1.5">
-            <Label>SMTP host</Label>
-            <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label>Port</Label>
-            <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Username</Label>
-          <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" className="max-w-[360px]" />
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Password</Label>
-          <div className="relative max-w-[360px]">
-            <Input
-              type={showPw ? 'text' : 'password'}
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              placeholder="••••••••"
+      <div className="bg-card border border-border rounded-[10px] overflow-hidden mb-5">
+        {/* Header banner — identity + name (mirrors MemberModal / TeamModal pattern) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '20px 24px', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ flexShrink: 0 }}>
+            <IdentityWidget
+              identity={identity}
+              name={displayName}
+              shape="circle"
+              onChange={next => setIdentity(next)}
             />
-            <button
-              onClick={() => setShowPw(v => !v)}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 bg-transparent border-none text-muted-foreground cursor-pointer"
-            >
-              {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
-            </button>
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-1">
+              Your profile
+              {user?.isSuperadmin && (
+                <span className="ml-2 text-[11px] px-2 py-0.5 rounded bg-primary/15 text-primary font-semibold tracking-wide normal-case">
+                  Superadmin
+                </span>
+              )}
+            </div>
+            <input
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+              placeholder="Your name"
+              style={{
+                fontSize: 18, fontWeight: 600, color: 'var(--foreground)',
+                background: 'transparent', border: 'none', outline: 'none',
+                padding: '1px 4px', margin: '-1px -4px',
+                borderRadius: 4, fontFamily: 'inherit', width: '100%',
+              }}
+              onFocus={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.outline = `2px solid ${accentColor}44` }}
+              onBlur={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.outline = 'none' }}
+            />
+            <div className="text-xs text-muted-foreground mt-0.5">{user?.email ?? ''}</div>
+          </div>
+          {/* Live badge preview */}
+          <div style={{ flexShrink: 0 }}>
+            <Badge identity={identity} name={displayName} size={44} shape="circle" />
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="flex flex-col gap-1.5">
-            <Label>From name</Label>
-            <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label>From email</Label>
-            <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
-          </div>
-        </div>
+        {/* Stats */}
+        {stats && (
+          <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border)' }}>
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
+              <Calendar size={11} /> Timelines
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              <StatChip value={stats.activeTimelines} label="Active" color="#1A97A2" />
+              <StatChip value={stats.archivedTimelines} label="Archived" color="#484f58" />
+            </div>
 
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Encryption</Label>
-          <select
-            value={encryption}
-            onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[200px]"
-          >
-            <option value="none">None</option>
-            <option value="tls">TLS</option>
-            <option value="starttls">STARTTLS</option>
-          </select>
-        </div>
-
-        {feedback && (
-          <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-            {feedback.msg}
-          </p>
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
+              <Activity size={11} /> Activities
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <StatChip value={stats.pastDue} label="Past due" color={stats.pastDue > 0 ? '#EF4444' : '#484f58'} />
+              <StatChip value={stats.running} label="Running" color="#1A97A2" />
+              <StatChip value={stats.upcoming} label="Upcoming" color="#3B82F6" />
+              <StatChip value={stats.archivedActivities} label="Archived" color="#484f58" />
+            </div>
+          </div>
         )}
 
-        <div className="flex gap-2 flex-wrap">
-          <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
-            {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
-          </Button>
-          <Button variant="outline" onClick={handleTest} disabled={testSMTP.isPending || !host}>
-            {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
-          </Button>
-          {data?.smtp && (
-            <Button variant="ghost" className="text-destructive" onClick={handleDelete}>
-              Clear config
-            </Button>
-          )}
-        </div>
-        <p className="text-xs text-muted-foreground mt-3">
-          When SMTP is not configured, password resets and email invitations are unavailable.
-        </p>
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/SecurityPage.tsx
-````typescript
-/**
- * /settings/security — Change password form.
- */
-
-import { useState } from 'react'
-import { useChangePassword } from '@/hooks/useSettings'
-import { ApiError } from '@/lib/api'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-export default function SecurityPage() {
-  const changePassword = useChangePassword()
-
-  const [current, setCurrent] = useState('')
-  const [next, setNext] = useState('')
-  const [confirm, setConfirm] = useState('')
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  const mismatch = next !== confirm && confirm !== ''
-  const tooShort = next.length > 0 && next.length < 8
-  const canSave = current !== '' && next.length >= 8 && next === confirm
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!canSave) return
-    setFeedback(null)
-    try {
-      await changePassword.mutateAsync({ currentPassword: current, newPassword: next })
-      setFeedback({ type: 'success', msg: 'Password updated successfully.' })
-      setCurrent('')
-      setNext('')
-      setConfirm('')
-    } catch (err) {
-      const code = err instanceof ApiError ? err.code : ''
-      const msg =
-        code === 'WRONG_PASSWORD'
-          ? 'Current password is incorrect.'
-          : err instanceof ApiError
-          ? err.message
-          : 'Failed to change password.'
-      setFeedback({ type: 'error', msg })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Security</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Update your password. You'll need to enter your current password to confirm the change.
-      </p>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <form onSubmit={handleSubmit}>
-          <div className="flex flex-col gap-1.5 mb-4">
-            <Label htmlFor="currentPw">Current password</Label>
+        {/* Fields */}
+        <div style={{ padding: '20px 24px' }}>
+          {/* Email (read-only) */}
+          <div className="flex flex-col gap-1.5 mb-5">
+            <Label>Email</Label>
             <Input
-              id="currentPw"
-              type="password"
-              value={current}
-              onChange={e => setCurrent(e.target.value)}
-              autoComplete="current-password"
-              className="max-w-[360px]"
+              value={user?.email ?? ''}
+              disabled
+              className="max-w-[360px] opacity-60"
             />
-          </div>
-
-          <div className="flex flex-col gap-1.5 mb-4">
-            <Label htmlFor="newPw">New password</Label>
-            <Input
-              id="newPw"
-              type="password"
-              value={next}
-              onChange={e => setNext(e.target.value)}
-              autoComplete="new-password"
-              className={`max-w-[360px]${tooShort ? ' border-destructive' : ''}`}
-            />
-            {tooShort && (
-              <p className="text-xs text-destructive m-0">
-                Password must be at least 8 characters.
-              </p>
-            )}
-          </div>
-
-          <div className="flex flex-col gap-1.5 mb-4">
-            <Label htmlFor="confirmPw">Confirm new password</Label>
-            <Input
-              id="confirmPw"
-              type="password"
-              value={confirm}
-              onChange={e => setConfirm(e.target.value)}
-              autoComplete="new-password"
-              className={`max-w-[360px]${mismatch ? ' border-destructive' : ''}`}
-            />
-            {mismatch && (
-              <p className="text-xs text-destructive m-0">Passwords don't match.</p>
-            )}
+            <p className="text-xs text-muted-foreground m-0">Email changes are not yet supported.</p>
           </div>
 
           {feedback && (
@@ -20371,359 +19374,26 @@ export default function SecurityPage() {
             </p>
           )}
 
-          <Button type="submit" disabled={!canSave || changePassword.isPending}>
-            {changePassword.isPending ? 'Updating…' : 'Update password'}
-          </Button>
-        </form>
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/TokensPage.tsx
-````typescript
-/**
- * /settings/tokens — API token management. Create, list, and revoke tokens.
- * The raw token value is shown exactly once on creation.
- */
-
-import { useState } from 'react'
-import { useTokens, useCreateToken, useRevokeToken } from '@/hooks/useSettings'
-import { ApiError } from '@/lib/api'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-import { Key, Copy, Check, Trash2 } from 'lucide-react'
-
-const SCOPES: { value: string; label: string; desc: string }[] = [
-  { value: 'read', label: 'Read-only', desc: 'Can read data but not create or modify.' },
-  { value: 'add', label: 'Add', desc: 'Can create new activities and timelines.' },
-  { value: 'edit_own', label: 'Edit own', desc: 'Can edit activities created by this user.' },
-  { value: 'edit_all', label: 'Edit all', desc: 'Full read-write access.' },
-]
-
-function relativeTime(dateStr: string) {
-  const ms = Date.now() - new Date(dateStr).getTime()
-  const days = Math.floor(ms / 86400000)
-  if (days === 0) return 'today'
-  if (days === 1) return 'yesterday'
-  if (days < 30) return `${days} days ago`
-  const months = Math.floor(days / 30)
-  return `${months} month${months > 1 ? 's' : ''} ago`
-}
-
-export default function TokensPage() {
-  const { data: tokens = [], isLoading } = useTokens()
-  const createToken = useCreateToken()
-  const revokeToken = useRevokeToken()
-
-  const [showCreate, setShowCreate] = useState(false)
-  const [name, setName] = useState('')
-  const [scope, setScope] = useState('read')
-  const [newSecret, setNewSecret] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null)
-
-  const activeTokens = tokens.filter(t => !t.revokedAt)
-
-  async function handleCreate() {
-    setError(null)
-    try {
-      const result = await createToken.mutateAsync({ name: name.trim(), scope })
-      setNewSecret(result.rawValue)
-      setName('')
-      setScope('read')
-      setShowCreate(false)
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Failed to create token.')
-    }
-  }
-
-  async function handleCopy() {
-    if (!newSecret) return
-    await navigator.clipboard.writeText(newSecret)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
-
-  async function handleRevoke(id: string) {
-    await revokeToken.mutateAsync(id)
-    setConfirmRevoke(null)
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">API Tokens</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Long-lived tokens for programmatic access. The raw value is shown once — copy it before closing.
-      </p>
-
-      {/* One-time secret reveal */}
-      {newSecret && (
-        <div className="bg-success/10 border border-success/30 rounded-[10px] p-6 mb-5">
-          <p className="text-sm text-success font-semibold mb-3">
-            Token created — copy it now, it won't be shown again.
-          </p>
-          <div className="flex gap-2 items-center">
-            <code className="flex-1 px-3 py-2 bg-background rounded-md text-xs text-foreground border border-border break-all">
-              {newSecret}
-            </code>
-            <Button size="sm" variant="outline" onClick={handleCopy} className="gap-1.5 min-w-[80px]">
-              {copied ? <Check size={14} /> : <Copy size={14} />}
-              {copied ? 'Copied!' : 'Copy'}
-            </Button>
-          </div>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="mt-3 text-muted-foreground"
-            onClick={() => setNewSecret(null)}
+          <button
+            onClick={handleSave}
+            disabled={updateProfile.isPending || !displayName.trim()}
+            style={{
+              background: accentColor,
+              color: '#fff',
+              fontWeight: 600,
+              fontSize: 13,
+              padding: '8px 20px',
+              borderRadius: 7,
+              border: 'none',
+              cursor: updateProfile.isPending || !displayName.trim() ? 'not-allowed' : 'pointer',
+              opacity: updateProfile.isPending || !displayName.trim() ? 0.5 : 1,
+              fontFamily: 'inherit',
+              transition: 'opacity 0.15s',
+            }}
           >
-            Dismiss
-          </Button>
+            {updateProfile.isPending ? 'Saving…' : 'Save profile'}
+          </button>
         </div>
-      )}
-
-      {/* Token list */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        {isLoading ? (
-          <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : activeTokens.length === 0 ? (
-          <div className="text-center py-6">
-            <Key size={32} className="text-border mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground">No API tokens yet.</p>
-          </div>
-        ) : (
-          <table className="w-full border-collapse">
-            <thead>
-              <tr>
-                {['Name', 'Scope', 'Last used', 'Created', ''].map(h => (
-                  <th key={h} className="text-left text-[11px] text-muted-foreground font-semibold pb-2.5 tracking-[0.4px]">
-                    {h.toUpperCase()}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {activeTokens.map(tok => (
-                <tr key={tok.id} className="border-t border-card">
-                  <td className="py-3 text-[13px] text-foreground font-medium">{tok.name}</td>
-                  <td className="py-3 px-2 text-xs">
-                    <span className="px-2 py-0.5 rounded bg-muted text-muted-foreground">
-                      {tok.scope}
-                    </span>
-                  </td>
-                  <td className="py-3 px-2 text-[13px] text-muted-foreground">
-                    {tok.lastUsedAt ? relativeTime(tok.lastUsedAt) : 'Never'}
-                  </td>
-                  <td className="py-3 px-2 text-[13px] text-muted-foreground">
-                    {relativeTime(tok.createdAt)}
-                  </td>
-                  <td className="py-3 text-right">
-                    {confirmRevoke === tok.id ? (
-                      <span className="text-xs flex gap-2 justify-end items-center">
-                        <span className="text-destructive">Revoke?</span>
-                        <button
-                          onClick={() => void handleRevoke(tok.id)}
-                          className="text-destructive bg-transparent border-none cursor-pointer text-xs p-0"
-                        >
-                          Yes
-                        </button>
-                        <button
-                          onClick={() => setConfirmRevoke(null)}
-                          className="text-muted-foreground bg-transparent border-none cursor-pointer text-xs p-0"
-                        >
-                          Cancel
-                        </button>
-                      </span>
-                    ) : (
-                      <button
-                        onClick={() => setConfirmRevoke(tok.id)}
-                        className="text-muted-foreground bg-transparent border-none cursor-pointer p-1"
-                        title="Revoke"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        <Button
-          size="sm"
-          variant="outline"
-          className={activeTokens.length > 0 ? 'mt-4' : ''}
-          onClick={() => setShowCreate(v => !v)}
-        >
-          {showCreate ? 'Cancel' : 'New token'}
-        </Button>
-
-        {showCreate && (
-          <div className="mt-4 pt-4 border-t border-border">
-            <div className="flex flex-col gap-1.5 mb-4">
-              <Label>Token name</Label>
-              <Input
-                value={name}
-                onChange={e => setName(e.target.value)}
-                placeholder="e.g. CI bot, personal script"
-                className="max-w-xs"
-              />
-            </div>
-            <div className="flex flex-col gap-2 mb-4">
-              <Label>Scope</Label>
-              {SCOPES.map(s => (
-                <label key={s.value} className="flex gap-2.5 cursor-pointer items-start">
-                  <input
-                    type="radio"
-                    name="scope"
-                    value={s.value}
-                    checked={scope === s.value}
-                    onChange={() => setScope(s.value)}
-                    className="mt-0.5"
-                  />
-                  <span>
-                    <span className="text-[13px] text-foreground font-medium">{s.label}</span>
-                    <span className="text-xs text-muted-foreground block">{s.desc}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-            {error && <p className="text-[13px] text-destructive mb-3">{error}</p>}
-            <Button
-              size="sm"
-              onClick={handleCreate}
-              disabled={!name.trim() || createToken.isPending}
-            >
-              {createToken.isPending ? 'Creating…' : 'Create token'}
-            </Button>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/SettingsPage.tsx
-````typescript
-/**
- * SettingsPage — shell with left-nav and nested sub-routes.
- *
- * Phase 10.1.1: initial shell + Teams link.
- * Phase 10.1.3: full settings — Profile, Security, Preferences, API Tokens,
- * and Organization section (superadmin only): Organization, Communication,
- * Users, AI Keys (Phase 10.6 stub).
- */
-
-import { Link, useLocation, Navigate, Routes, Route } from 'react-router-dom'
-import { ArrowLeft, User, Settings, Key, Lock, MessageSquare, Users, Sparkles, Building2 } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useNavigate } from 'react-router-dom'
-import ProfilePage from '@/pages/settings/ProfilePage'
-import SecurityPage from '@/pages/settings/SecurityPage'
-import PreferencesPage from '@/pages/settings/PreferencesPage'
-import TokensPage from '@/pages/settings/TokensPage'
-import OrganizationPage from '@/pages/settings/OrganizationPage'
-import CommunicationPage from '@/pages/settings/CommunicationPage'
-import AdminUsersPage from '@/pages/settings/AdminUsersPage'
-import AiKeysPage from '@/pages/settings/AiKeysPage'
-
-function NavLink({ to, active, children }: { to: string; active: boolean; children: React.ReactNode }) {
-  return (
-    <Link
-      to={to}
-      className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] no-underline cursor-pointer ${
-        active
-          ? 'bg-muted text-foreground font-medium'
-          : 'text-muted-foreground font-normal hover:text-foreground'
-      }`}
-    >
-      {children}
-    </Link>
-  )
-}
-
-export default function SettingsPage() {
-  const { user } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const path = location.pathname
-
-  function isActive(prefix: string) {
-    return path === prefix || path.startsWith(prefix + '/')
-  }
-
-  return (
-    <div className="flex min-h-screen bg-background text-foreground font-sans">
-      {/* Left nav */}
-      <div className="w-[220px] border-r border-border px-3 py-4 flex flex-col gap-0.5 shrink-0">
-        <button
-          onClick={() => navigate('/')}
-          className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] text-muted-foreground mb-3 bg-transparent border-none cursor-pointer w-full font-inherit hover:text-foreground"
-        >
-          <ArrowLeft size={14} />
-          Back to app
-        </button>
-
-        <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
-          Account
-        </div>
-
-        <NavLink to="/settings/profile" active={isActive('/settings/profile')}>
-          <User size={14} /> Profile
-        </NavLink>
-        <NavLink to="/settings/security" active={isActive('/settings/security')}>
-          <Lock size={14} /> Security
-        </NavLink>
-        <NavLink to="/settings/preferences" active={isActive('/settings/preferences')}>
-          <Settings size={14} /> Preferences
-        </NavLink>
-        <NavLink to="/settings/tokens" active={isActive('/settings/tokens')}>
-          <Key size={14} /> API Tokens
-        </NavLink>
-
-        {user?.isSuperadmin && (
-          <>
-            <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
-              Organization
-            </div>
-            <NavLink to="/settings/organization" active={isActive('/settings/organization')}>
-              <Building2 size={14} /> Organization
-            </NavLink>
-            <NavLink to="/settings/communication" active={isActive('/settings/communication')}>
-              <MessageSquare size={14} /> Communication
-            </NavLink>
-            <NavLink to="/settings/users" active={isActive('/settings/users')}>
-              <Users size={14} /> Users
-            </NavLink>
-            <NavLink to="/settings/ai" active={isActive('/settings/ai')}>
-              <Sparkles size={14} /> AI Keys
-            </NavLink>
-          </>
-        )}
-      </div>
-
-      {/* Content area */}
-      <div className="flex-1 px-10 py-8 max-w-[800px] min-w-0">
-        <Routes>
-          <Route path="profile" element={<ProfilePage />} />
-          <Route path="security" element={<SecurityPage />} />
-          <Route path="preferences" element={<PreferencesPage />} />
-          <Route path="tokens" element={<TokensPage />} />
-          <Route path="organization" element={user?.isSuperadmin ? <OrganizationPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="communication" element={user?.isSuperadmin ? <CommunicationPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="users" element={user?.isSuperadmin ? <AdminUsersPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="ai" element={user?.isSuperadmin ? <AiKeysPage /> : <Navigate to="/settings/profile" replace />} />
-          {/* Legacy redirect: old /settings/admin deep links fall to organization */}
-          <Route path="admin/*" element={user?.isSuperadmin ? <Navigate to="/settings/organization" replace /> : <Navigate to="/settings/profile" replace />} />
-          <Route index element={<Navigate to="/settings/profile" replace />} />
-          <Route path="*" element={<Navigate to="/settings/profile" replace />} />
-        </Routes>
       </div>
     </div>
   )
@@ -21975,6 +20645,397 @@ No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `Event
 2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
 3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
 4. That's it — `/test-phase` will pick it up on the next run.
+````
+
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	tagRepo := db.NewTagRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+````
+
+## File: packages/api/internal/api/admin_handler.go
+````go
+package api
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+)
+
+// requireSuperadmin is a shared guard for admin endpoints. Returns false
+// and writes a 403 if the caller is not a superadmin.
+func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
+		return false
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return false
+	}
+	return true
+}
+
+// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
+// with the password masked. Superadmin-only.
+func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	cfg, err := s.mailer.LoadConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
+		return
+	}
+	if cfg == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
+		return
+	}
+
+	// Mask the password in the response.
+	masked := *cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
+// validates it by sending a test email to the caller's address. Superadmin-only.
+func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
+		return
+	}
+
+	// Fetch caller email for the validation test.
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
+		return
+	}
+
+	// Validate by sending a test email before persisting.
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp validation failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
+		return
+	}
+
+	if err := s.mailer.SaveConfig(&cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
+		return
+	}
+
+	masked := cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
+// provided config without persisting it. Superadmin-only.
+func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
+		return
+	}
+
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp test failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
+}
+
+// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
+// Superadmin-only.
+func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+	if err := s.mailer.DeleteConfig(); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
+// defaults. Superadmin-only.
+func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name", "accent_color"}
+	settings := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := s.instanceSets.Get(k)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
+			return
+		}
+		settings[k] = v
+	}
+
+	// Apply defaults for missing keys.
+	if settings["registration_policy"] == "" {
+		settings["registration_policy"] = "invite_only"
+	}
+	if settings["default_timezone"] == "" {
+		settings["default_timezone"] = "UTC"
+	}
+	if settings["default_date_format"] == "" {
+		settings["default_date_format"] = "MMM D, YYYY"
+	}
+	if settings["default_week_start"] == "" {
+		settings["default_week_start"] = "monday"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+}
+
+// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
+// instance-level settings. Superadmin-only.
+func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Validate known keys and values.
+	allowed := map[string]bool{
+		"registration_policy": true,
+		"default_timezone":    true,
+		"default_date_format": true,
+		"default_week_start":  true,
+		"instance_name":       true,
+		"accent_color":        true,
+	}
+	for k := range body {
+		if !allowed[k] {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
+			return
+		}
+	}
+	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
+		return
+	}
+	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
+		return
+	}
+
+	for k, v := range body {
+		if err := s.instanceSets.Set(k, v); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
+}
+
+// handleGetPublicBranding handles GET /settings/branding. Returns the
+// instance name and accent color without requiring authentication, so the
+// login page and shared timeline views can display branding before sign-in.
+//
+// Only cosmetic settings are exposed here. Never add sensitive keys (SMTP
+// credentials, JWT secrets, registration policy, etc.) to this handler.
+func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
+	name, _ := s.instanceSets.Get("instance_name")
+	accent, _ := s.instanceSets.Get("accent_color")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"instanceName": name,
+		"accentColor":  accent,
+	})
+}
+
+func smtpTestBody() string {
+	return `<html><body>
+<p>This is a test email from <strong>draba</strong>.</p>
+<p>If you received this, your SMTP configuration is working correctly.</p>
+</body></html>`
+}
 ````
 
 ## File: packages/api/internal/api/authz.go
@@ -24253,220 +23314,138 @@ export default function FilterManageModal({
 }
 ````
 
-## File: packages/web/src/components/gantt/GanttToolbar.tsx
+## File: packages/web/src/components/gantt/GanttView.tree.test.ts
 ````typescript
 /**
- * GanttToolbar — the thin sub-toolbar that sits between the top bar and
- * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
- * export stub.
+ * buildRows — tree nesting and collapse behaviour.
+ *
+ * Covers the parent→child depth nesting (arbitrary levels), parent subtree
+ * collapse, and member-group collapse added for the Gantt expand/contract work.
  */
 
-import { Download, Share2, Plus, Minus } from 'lucide-react';
-import type { TimeGranularity } from './granularity';
-import { cn } from '@/lib/utils';
+import { describe, it, expect } from 'vitest'
+import { buildRows, type RichActivity } from './GanttView'
+import type { GanttRow } from './GanttGrid'
+import type { Member } from '@/types'
 
-export type { TimeGranularity } from './granularity';
-export type GroupBy = 'none' | 'member' | 'parent';
-export type SortBy = 'startDate' | 'endDate' | 'title';
-export type ColorBy = 'activity' | 'member' | 'status';
-
-interface Props {
-  groupBy: GroupBy;
-  onGroupByChange: (g: GroupBy) => void;
-  sortBy: SortBy;
-  onSortByChange: (s: SortBy) => void;
-  granularity: TimeGranularity | 'auto';
-  onGranularityChange: (g: TimeGranularity | 'auto') => void;
-  colorBy: ColorBy;
-  onColorByChange: (c: ColorBy) => void;
-  onExport: () => void;
-  onShare?: () => void;
+// Minimal RichActivity factory — only the fields buildRows reads matter.
+function act(id: string, parentActivityId: string | null, memberId: string | null = null): RichActivity {
+  return {
+    id,
+    title: id,
+    startCol: 0,
+    span: 1,
+    color: '#000',
+    members: [],
+    isChild: false,
+    startAtMs: 0,
+    endAtMs: 0,
+    parentActivityId,
+    primaryMemberId: memberId,
+    assignedMemberIds: memberId ? [memberId] : [],
+    statusId: null,
+  }
 }
 
-const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
-const divider = 'w-px h-4 bg-border shrink-0';
-const label   = 'text-[11px] text-muted-foreground shrink-0';
-const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+const NONE = new Set<string>()
 
-export default function GanttToolbar({
-  groupBy,
-  onGroupByChange,
-  sortBy,
-  onSortByChange,
-  granularity,
-  onGranularityChange,
-  colorBy,
-  onColorByChange,
-  onExport,
-  onShare,
-}: Props) {
-  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
-  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
-  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
-    ? granularityMap.indexOf(granularity as never)
-    : 0;
-  const currentLabel = granularityLabels[currentIndex];
-
-  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = parseInt(e.target.value, 10);
-    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
-  };
-
-  return (
-    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
-      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
-      <style>{`
-        .gantt-zoom-slider {
-          -webkit-appearance: none;
-          appearance: none;
-          background: transparent;
-        }
-        .gantt-zoom-slider::-webkit-slider-thumb {
-          -webkit-appearance: none;
-          appearance: none;
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          margin-top: -4px;
-        }
-        .gantt-zoom-slider::-moz-range-thumb {
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          border: none;
-        }
-        .gantt-zoom-slider::-webkit-slider-runnable-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-        .gantt-zoom-slider::-moz-range-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-      `}</style>
-
-      {/* Zoom (granularity) */}
-      <div className="flex items-center gap-1.5 h-[26px]">
-        <button
-          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 0}
-          title="Zoom out"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Minus size={14} />
-        </button>
-
-        <div className="relative w-20 h-[26px] flex items-center">
-          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
-            {[0, 1, 2, 3, 4, 5].map(i => (
-              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
-            ))}
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="5"
-            step="1"
-            value={currentIndex}
-            onChange={handleSliderChange}
-            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
-            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          />
-        </div>
-
-        <button
-          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 5}
-          title="Zoom in"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Plus size={14} />
-        </button>
-
-        <div
-          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          className={cn(
-            'flex items-center justify-center w-[22px] h-[22px]',
-            'bg-card border border-border rounded-sm text-xs font-mono select-none',
-            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
-          )}
-        >
-          {currentLabel}
-        </div>
-      </div>
-
-      <div className={divider} />
-
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as GroupBy)}
-      >
-        <option value="none">None</option>
-        <option value="member">Member</option>
-        <option value="parent">Parent activity</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Sort by */}
-      <span className={label}>Sort by</span>
-      <select
-        className={select}
-        value={sortBy}
-        onChange={e => onSortByChange(e.target.value as SortBy)}
-      >
-        <option value="startDate">Start date</option>
-        <option value="endDate">End date</option>
-        <option value="title">Title A–Z</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className="flex-1" />
-
-      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
-        <Download size={13} strokeWidth={1.8} />
-        Export
-      </button>
-
-      <button className={ctrlBtn} onClick={onShare} title="Share">
-        <Share2 size={13} strokeWidth={1.8} />
-        Share
-      </button>
-    </div>
-  );
+// Pull the activity rows out as [id, depth] tuples for concise assertions.
+function activityTuples(rows: GanttRow[]): Array<[string, number]> {
+  return rows
+    .filter((r): r is Extract<GanttRow, { kind: 'activity' }> => r.kind === 'activity')
+    .map(r => [r.event.id, r.event.depth ?? 0])
 }
+
+describe('buildRows — parent grouping (tree nesting)', () => {
+  // a → b → c (grandchild), plus a standalone root d
+  const activities = [act('a', null), act('b', 'a'), act('c', 'b'), act('d', null)]
+
+  it('nests grandchildren at increasing depth', () => {
+    const rows = buildRows(activities, [], 'parent', 'title', NONE, NONE)
+    expect(activityTuples(rows)).toEqual([
+      ['a', 0],
+      ['b', 1],
+      ['c', 2],
+      ['d', 0],
+    ])
+  })
+
+  it('marks parents as hasChildren and leaves as not', () => {
+    const rows = buildRows(activities, [], 'parent', 'title', NONE, NONE).filter(
+      (r): r is Extract<GanttRow, { kind: 'activity' }> => r.kind === 'activity',
+    )
+    const byId = Object.fromEntries(rows.map(r => [r.event.id, r.event]))
+    expect(byId.a.hasChildren).toBe(true)
+    expect(byId.b.hasChildren).toBe(true)
+    expect(byId.c.hasChildren).toBe(false)
+    expect(byId.d.hasChildren).toBe(false)
+  })
+
+  it('hides the whole subtree when a parent is collapsed', () => {
+    const rows = buildRows(activities, [], 'parent', 'title', new Set(['a']), NONE)
+    // a stays (marked collapsed); b and c are hidden; d unaffected.
+    expect(activityTuples(rows)).toEqual([
+      ['a', 0],
+      ['d', 0],
+    ])
+    const a = rows.find(r => r.kind === 'activity' && r.event.id === 'a')
+    expect(a?.kind === 'activity' && a.event.collapsed).toBe(true)
+  })
+
+  it('collapsing a mid-level parent hides only its descendants', () => {
+    const rows = buildRows(activities, [], 'parent', 'title', new Set(['b']), NONE)
+    expect(activityTuples(rows)).toEqual([
+      ['a', 0],
+      ['b', 1],
+      ['d', 0],
+    ])
+  })
+
+  it('treats an activity whose parent is out of view as a root', () => {
+    // orphan's parent "missing" is not in the set → orphan renders at depth 0.
+    const rows = buildRows([act('orphan', 'missing')], [], 'parent', 'title', NONE, NONE)
+    expect(activityTuples(rows)).toEqual([['orphan', 0]])
+  })
+
+  it('does not infinite-loop on a parent-pointer cycle', () => {
+    const x = act('x', 'y')
+    const y = act('y', 'x')
+    const rows = buildRows([x, y], [], 'parent', 'title', NONE, NONE)
+    // Both appear exactly once; exact ordering depends on sort but no dupes/hang.
+    const ids = activityTuples(rows).map(t => t[0]).sort()
+    expect(ids).toEqual(['x', 'y'])
+  })
+})
+
+describe('buildRows — member grouping (group collapse)', () => {
+  const members: Member[] = [
+    { id: 'm1', name: 'Alice', initials: 'A', color: '#111' },
+    { id: 'm2', name: 'Bob', initials: 'B', color: '#222' },
+  ]
+  const activities = [act('a1', null, 'm1'), act('a2', null, 'm1'), act('b1', null, 'm2')]
+
+  it('emits a group header per member followed by its activities', () => {
+    const rows = buildRows(activities, members, 'member', 'title', NONE, NONE)
+    expect(rows.map(r => (r.kind === 'group' ? `G:${r.id}` : `A:${r.event.id}`))).toEqual([
+      'G:m1',
+      'A:a1',
+      'A:a2',
+      'G:m2',
+      'A:b1',
+    ])
+  })
+
+  it('hides a collapsed group’s activities but keeps the header', () => {
+    const rows = buildRows(activities, members, 'member', 'title', NONE, new Set(['m1']))
+    expect(rows.map(r => (r.kind === 'group' ? `G:${r.id}` : `A:${r.event.id}`))).toEqual([
+      'G:m1',
+      'G:m2',
+      'A:b1',
+    ])
+    const g = rows.find(r => r.kind === 'group' && r.id === 'm1')
+    expect(g?.kind === 'group' && g.collapsed).toBe(true)
+  })
+})
 ````
 
 ## File: packages/web/src/components/gantt/granularity.test.ts
@@ -24824,6 +23803,2438 @@ export function autoFitGranularity(
   }
 
   return best;
+}
+````
+
+## File: packages/web/src/components/list/ListToolbar.tsx
+````typescript
+/**
+ * ListToolbar — sub-toolbar for the List view.
+ *
+ * Provides Columns (hide/show menu), Density toggle, Group by, Sort by, and
+ * Color by controls. The Columns menu includes drag-reorder handles (implemented
+ * via @dnd-kit) so column order can be changed from the menu as well as by
+ * dragging the table headers.
+ */
+
+import { useState, useRef, useEffect } from 'react';
+import { Columns2, ChevronDown, Download, Share2 } from 'lucide-react';
+import { cn } from '@/lib/utils';
+
+export type ListGroupBy = 'none' | 'member' | 'parent' | 'status';
+export type ListSortBy = 'startDate' | 'endDate' | 'title' | 'status' | 'progress';
+export type ListColorBy = 'activity' | 'member' | 'status';
+export type ListDensity = 'comfortable' | 'compact';
+
+export interface ColumnConfig {
+  id: string;
+  label: string;
+  visible: boolean;
+}
+
+interface Props {
+  columns: ColumnConfig[];
+  onColumnVisibilityChange: (columnId: string, visible: boolean) => void;
+  density: ListDensity;
+  onDensityChange: (d: ListDensity) => void;
+  groupBy: ListGroupBy;
+  onGroupByChange: (g: ListGroupBy) => void;
+  sortBy: ListSortBy;
+  onSortByChange: (s: ListSortBy) => void;
+  colorBy: ListColorBy;
+  onColorByChange: (c: ListColorBy) => void;
+  onExport?: () => void;
+  onShare?: () => void;
+}
+
+const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
+const divider  = 'w-px h-4 bg-border shrink-0';
+const label    = 'text-[11px] text-muted-foreground shrink-0';
+const select   = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+export default function ListToolbar({
+  columns,
+  onColumnVisibilityChange,
+  density: _density,
+  onDensityChange: _onDensityChange,
+  groupBy,
+  onGroupByChange,
+  sortBy: _sortBy,
+  onSortByChange: _onSortByChange,
+  colorBy,
+  onColorByChange,
+  onExport,
+  onShare,
+}: Props) {
+  const [colMenuOpen, setColMenuOpen] = useState(false);
+  const colMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (colMenuRef.current && !colMenuRef.current.contains(e.target as Node)) {
+        setColMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0" style={{ position: 'relative', zIndex: 30 }}>
+      {/* Columns menu */}
+      <div ref={colMenuRef} className="relative">
+        <button
+          onClick={() => setColMenuOpen(o => !o)}
+          className={cn(ctrlBtn, colMenuOpen && 'bg-muted')}
+          title="Show/hide columns"
+        >
+          <Columns2 size={13} strokeWidth={1.8} />
+          Columns
+          <ChevronDown size={11} strokeWidth={2} className={cn('transition-transform', colMenuOpen && 'rotate-180')} />
+        </button>
+
+        {colMenuOpen && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 4px)',
+              left: 0,
+              zIndex: 50,
+              background: 'var(--card)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+              minWidth: 180,
+              padding: '6px 0',
+            }}
+          >
+            {columns.map(col => (
+              <label
+                key={col.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '5px 12px',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  color: 'var(--foreground)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <input
+                  type="checkbox"
+                  checked={col.visible}
+                  onChange={e => onColumnVisibilityChange(col.id, e.target.checked)}
+                  style={{ cursor: 'pointer' }}
+                />
+                {col.label}
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className={divider} />
+
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as ListGroupBy)}
+      >
+        <option value="none">None</option>
+        <option value="member">Member</option>
+        <option value="parent">Parent activity</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ListColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className="flex-1" />
+
+      <button className={ctrlBtn} onClick={onExport} title="Export (coming soon)">
+        <Download size={13} strokeWidth={1.8} />
+        Export
+      </button>
+
+      <button className={ctrlBtn} onClick={onShare} title="Share (coming soon)">
+        <Share2 size={13} strokeWidth={1.8} />
+        Share
+      </button>
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/list/ListView.tsx
+````typescript
+/**
+ * ListView — inline-editable, curated table view of the active timeline's
+ * activities.
+ *
+ * Uses TanStack Table v8 for column management (visibility, order, sizing,
+ * pinning, sorting). Row rendering is manual to support group-by headers
+ * interleaved between activity rows and to give full control over
+ * keyboard selection/edit behavior.
+ *
+ * Integrates with FilterContext and FindContext so the same filter and find
+ * query that drives the Gantt view also drives this view.
+ */
+
+import { createPortal } from 'react-dom';
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  KeyboardEvent,
+} from 'react';
+import {
+  useReactTable,
+  getCoreRowModel,
+  getSortedRowModel,
+  type ColumnDef,
+  type SortingState,
+  type ColumnOrderState,
+  type VisibilityState,
+  type ColumnSizingState,
+  type ColumnPinningState,
+} from '@tanstack/react-table';
+import {
+  DndContext,
+  type DragEndEvent,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  horizontalListSortingStrategy,
+  useSortable,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { ChevronRight, ChevronDown, GripVertical, Search, Trash2 } from 'lucide-react';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity, useCreateActivity, useDeleteActivity } from '@/hooks/useTeamActivities';
+import { usePreferenceMap, useUpsertPreference, usePreferences } from '@/hooks/usePreferences';
+import { useFilter } from '@/contexts/FilterContext';
+import { useFind } from '@/contexts/FindContext';
+import { applyActiveFilter } from '@/lib/presetFilters';
+import { matchEvents } from '@/lib/findMatcher';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import { Badge } from '@/components/identity/Badge';
+import { IdentityPicker } from '@/components/identity/IdentityPicker';
+import type { Identity } from '@/components/identity/identity-constants';
+import TagInput from '@/components/TagInput';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+import type { ListGroupBy, ListSortBy, ListColorBy, ColumnConfig } from './ListToolbar';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+// ── Column catalog ─────────────────────────────────────────────────────────────
+
+interface ColMeta {
+  id: string;
+  label: string;
+  defaultVisible: boolean;
+  defaultWidth: number;
+  editable: boolean;
+  editType: 'text' | 'date' | 'status' | 'number' | 'identity' | 'assignees' | 'tags' | 'parent' | 'none';
+  /** Exclude from the columns toggle menu (e.g. fixed structural columns). */
+  noMenu?: boolean;
+}
+
+const COL_CATALOG: ColMeta[] = [
+  { id: 'colorBar',    label: '',             defaultVisible: true,  defaultWidth: 24,  editable: false, editType: 'none', noMenu: true },
+  { id: 'identity',    label: 'Identity',     defaultVisible: true,  defaultWidth: 52,  editable: true,  editType: 'identity' },
+  { id: 'title',       label: 'Title',        defaultVisible: true,  defaultWidth: 280, editable: true,  editType: 'text' },
+  { id: 'startAt',     label: 'Start',        defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
+  { id: 'endAt',       label: 'End',          defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
+  { id: 'duration',    label: 'Duration',     defaultVisible: true,  defaultWidth: 90,  editable: false, editType: 'none' },
+  { id: 'status',      label: 'Status',       defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'status' },
+  { id: 'assignees',   label: 'Assigned To',  defaultVisible: true,  defaultWidth: 140, editable: true,  editType: 'assignees' },
+  { id: 'tags',        label: 'Tags',         defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'tags' },
+  { id: 'progress',    label: 'Progress',     defaultVisible: false, defaultWidth: 90,  editable: true,  editType: 'number' },
+  { id: 'parent',      label: 'Parent',       defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'parent' },
+  { id: 'description', label: 'Description',  defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
+  { id: 'location',    label: 'Location',     defaultVisible: false, defaultWidth: 130, editable: true,  editType: 'text' },
+  { id: 'url',         label: 'URL',          defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'text' },
+  { id: 'notes',       label: 'Notes',        defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
+  { id: 'createdAt',   label: 'Created',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
+  { id: 'updatedAt',   label: 'Updated',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
+];
+
+const DEFAULT_COLUMN_ORDER = COL_CATALOG.map(c => c.id);
+const DEFAULT_VISIBILITY: VisibilityState = Object.fromEntries(
+  COL_CATALOG.map(c => [c.id, c.defaultVisible]),
+);
+const DEFAULT_WIDTHS: ColumnSizingState = Object.fromEntries(
+  COL_CATALOG.map(c => [c.id, c.defaultWidth]),
+);
+
+// ── Props ──────────────────────────────────────────────────────────────────────
+
+interface Props {
+  teamId: string;
+  timelineId: string;
+  groupBy: ListGroupBy;
+  sortBy: ListSortBy;
+  colorBy: ListColorBy;
+  density?: string; // kept for compat; ignored — always comfortable
+  timelineStatuses?: Status[];
+  savedFilters?: SavedFilter[];
+  tags?: Tag[];
+  onColumnsChange?: (configs: ColumnConfig[]) => void;
+  /** When set, the component applies the toggle and clears it on the next render. */
+  pendingColumnToggle?: { colId: string; visible: boolean; seq: number } | null;
+  onSelectActivity?: (id: string | null) => void;
+  onSelectApiActivity?: (a: ApiActivity | null) => void;
+  selectedActivityId?: string | null;
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Increment to trigger inline creation of a new activity row. */
+  triggerNewRow?: number;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+function formatDate(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
+  if (!startAt || !endAt) return '—';
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+  if (days < 0) return '—';
+  if (days === 0) return '1 day';
+  return `${days + 1} days`;
+}
+
+function toDateInput(iso: string | null | undefined): string {
+  if (!iso) return '';
+  return iso.slice(0, 10);
+}
+
+// ── Draggable column header ────────────────────────────────────────────────────
+
+function SortableColHeader({ colId, children, style, onSort, sortDir, resizeHandler, isResizing }: {
+  colId: string;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+  onSort?: () => void;
+  sortDir?: 'asc' | 'desc' | false;
+  resizeHandler?: (e: React.MouseEvent | React.TouchEvent) => void;
+  isResizing?: boolean;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: colId });
+
+  return (
+    <th
+      ref={setNodeRef}
+      style={{
+        ...style,
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.5 : 1,
+        position: 'sticky',
+        top: 0,
+        background: 'var(--card)',
+        borderBottom: '2px solid var(--border)',
+        userSelect: 'none',
+        whiteSpace: 'nowrap',
+        textOverflow: 'ellipsis',
+        cursor: onSort ? 'pointer' : 'default',
+        fontWeight: 600,
+        fontSize: 11,
+        color: 'var(--muted-foreground)',
+        padding: 0,
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
+        textAlign: 'left',
+        overflow: 'visible', // needed for resize handle
+      }}
+      onClick={onSort}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 8px', overflow: 'hidden' }}>
+        {/* drag handle */}
+        <span
+          {...attributes}
+          {...listeners}
+          style={{ cursor: 'grab', color: 'var(--muted-foreground)', opacity: 0.4, flexShrink: 0, paddingRight: 2 }}
+          onClick={e => e.stopPropagation()}
+          title="Drag to reorder"
+        >
+          <GripVertical size={12} />
+        </span>
+        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{children}</span>
+        {sortDir === 'asc' && <span style={{ opacity: 0.7, flexShrink: 0 }}>↑</span>}
+        {sortDir === 'desc' && <span style={{ opacity: 0.7, flexShrink: 0 }}>↓</span>}
+      </div>
+      {/* Resize handle — absolutely positioned on right edge */}
+      {resizeHandler && (
+        <div
+          onMouseDown={resizeHandler}
+          onTouchStart={resizeHandler}
+          onClick={e => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            height: '100%',
+            width: 4,
+            cursor: 'col-resize',
+            background: isResizing ? 'var(--primary)' : 'transparent',
+            zIndex: 1,
+          }}
+          onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'var(--border)'; }}
+          onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+        />
+      )}
+    </th>
+  );
+}
+
+// ── Status pill popover ────────────────────────────────────────────────────────
+
+function StatusPicker({
+  value,
+  statuses,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  value: string | null | undefined;
+  statuses: Status[];
+  onChange: (id: string | null) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 160,
+        padding: '6px 0',
+      }}
+    >
+      <div
+        onClick={() => { onChange(null); onClose(); }}
+        style={{
+          padding: '6px 12px',
+          cursor: 'pointer',
+          fontSize: 12,
+          color: 'var(--muted-foreground)',
+        }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+      >
+        No status
+      </div>
+      {statuses.map(s => (
+        <div
+          key={s.id}
+          onClick={() => { onChange(s.id); onClose(); }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 12px',
+            cursor: 'pointer',
+            fontSize: 12,
+            color: 'var(--foreground)',
+            background: value === s.id ? 'var(--muted)' : 'transparent',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = value === s.id ? 'var(--muted)' : 'transparent')}
+        >
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: '50%',
+              background: resolveColorHex(s.color ?? null) ?? '#888',
+              flexShrink: 0,
+            }}
+          />
+          {s.name}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Assignee picker popover ────────────────────────────────────────────────────
+
+function AssigneePicker({
+  members,
+  selectedIds,
+  onToggle,
+  onClose,
+  positionStyle,
+}: {
+  members: Member[];
+  selectedIds: string[];
+  onToggle: (id: string) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 180,
+        padding: '6px 0',
+      }}
+    >
+      {members.length === 0 && (
+        <div style={{ padding: '6px 12px', fontSize: 12, color: 'var(--muted-foreground)' }}>
+          No team members
+        </div>
+      )}
+      {members.map(m => {
+        const assigned = selectedIds.includes(m.id);
+        return (
+          <div
+            key={m.id}
+            onClick={() => onToggle(m.id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '5px 12px', cursor: 'pointer', fontSize: 12,
+              background: assigned ? 'var(--muted)' : 'transparent',
+              color: 'var(--foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = assigned ? 'var(--muted)' : 'transparent')}
+          >
+            <Badge
+              identity={{ color: m.color, icon: '__name_2__' }}
+              name={m.name}
+              shape="circle"
+              size={20}
+            />
+            <span style={{ flex: 1 }}>{m.name}</span>
+            {assigned && (
+              <span style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: m.color, flexShrink: 0, display: 'inline-block',
+              }} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Tag picker popover ─────────────────────────────────────────────────────────
+
+function TagPicker({
+  teamId,
+  tags,
+  selectedTagIds,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  teamId: string;
+  tags: Tag[];
+  selectedTagIds: string[];
+  onChange: (ids: string[]) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 220,
+        padding: 8,
+      }}
+    >
+      <TagInput teamId={teamId} tags={tags} selectedTagIds={selectedTagIds} onChange={onChange} />
+    </div>
+  );
+}
+
+// ── Parent activity picker popover ─────────────────────────────────────────────
+
+function ParentPicker({
+  activities,
+  value,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  activities: ApiActivity[];
+  value: string | null | undefined;
+  onChange: (id: string | null) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const [query, setQuery] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  const filtered = activities.filter(a =>
+    a.title.toLowerCase().includes(query.trim().toLowerCase()),
+  );
+
+  function choose(id: string | null) {
+    onChange(id);
+    onClose();
+  }
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 220,
+        overflow: 'hidden',
+      }}
+    >
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '6px 8px', borderBottom: '1px solid var(--border)',
+      }}>
+        <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="Search activities…"
+          style={{
+            flex: 1, border: 'none', outline: 'none', background: 'none',
+            fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
+          }}
+        />
+      </div>
+      <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+        <div
+          onClick={() => choose(null)}
+          style={{
+            padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
+            fontStyle: 'italic', cursor: 'pointer',
+            borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        >
+          — None —
+        </div>
+        {filtered.map(a => (
+          <div
+            key={a.id}
+            onClick={() => choose(a.id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '6px 10px', fontSize: 12, cursor: 'pointer',
+              background: a.id === value ? 'var(--muted)' : 'transparent',
+              fontWeight: a.id === value ? 600 : 400,
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
+          >
+            <Badge
+              identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }}
+              name={a.title}
+              size={16}
+            />
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {a.title}
+            </span>
+          </div>
+        ))}
+        {filtered.length === 0 && (
+          <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+            No matching activities
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/** Position a popover below a cell, flipping above if there isn't enough space below. */
+function popoverPos(rect: DOMRect, w: number, h: number): { top: number; left: number } {
+  const spaceBelow = window.innerHeight - rect.bottom - 2;
+  const top = spaceBelow >= h
+    ? rect.bottom + 2
+    : Math.max(4, rect.top - h - 2);
+  return {
+    top,
+    left: Math.min(rect.left, window.innerWidth - w - 8),
+  };
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
+
+export default function ListView({
+  teamId,
+  timelineId,
+  groupBy,
+  sortBy,
+  colorBy,
+  timelineStatuses = [],
+  savedFilters = [],
+  tags = [],
+  onColumnsChange,
+  pendingColumnToggle,
+  onSelectActivity,
+  selectedActivityId,
+  onMembersLoaded,
+  triggerNewRow,
+}: Props) {
+  const { activeFilter } = useFilter();
+  const { debouncedQuery, registerMatches, matchedIds, activeMatchId } = useFind();
+
+  // ── Data fetching ──────────────────────────────────────────────────────────
+  const { data: rawActivities = [] } = useTimelineActivities(teamId, timelineId);
+  const { data: rawMembers = [] } = useTeamMembers(teamId);
+  const update = useUpdateActivity(timelineId);
+  const create = useCreateActivity(teamId, timelineId);
+  const deleteAct = useDeleteActivity(timelineId);
+
+  useEffect(() => {
+    if (rawMembers.length > 0 && onMembersLoaded) {
+      onMembersLoaded(rawMembers.map(m => ({
+        id: m.id,
+        name: m.displayName,
+        initials: m.displayName.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase(),
+        color: resolveColorHex(m.color ?? null) ?? '#888',
+      })));
+    }
+  }, [rawMembers, onMembersLoaded]);
+
+  function initialsFrom(name: string): string {
+    return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
+  }
+
+  const members: Member[] = useMemo(
+    () => rawMembers.map(m => ({
+      id: m.id,
+      name: m.displayName,
+      initials: initialsFrom(m.displayName),
+      color: resolveColorHex(m.color ?? null) ?? '#888',
+    })),
+    [rawMembers],
+  );
+
+  // ── Preference persistence ────────────────────────────────────────────────
+  const { isSuccess: prefsSettled } = usePreferences(timelineId);
+  const prefMap = usePreferenceMap(timelineId);
+  const upsert = useUpsertPreference();
+  const prefsApplied = useRef(false);
+
+  // Column state (managed by TanStack Table)
+  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(DEFAULT_VISIBILITY);
+  const [columnOrder, setColumnOrder] = useState<ColumnOrderState>(DEFAULT_COLUMN_ORDER);
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(DEFAULT_WIDTHS);
+  const [sorting, setSorting] = useState<SortingState>([]);
+
+  // Apply saved column prefs once after they load
+  useEffect(() => {
+    if (!prefsSettled || prefsApplied.current) return;
+    prefsApplied.current = true;
+    const raw = prefMap['list_columns'];
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const config = raw as { order?: string[]; hidden?: string[]; widths?: Record<string, number> };
+      if (Array.isArray(config.order) && config.order.length > 0) {
+        const saved = config.order as string[];
+        const allIds = COL_CATALOG.map(c => c.id);
+        const newCols = allIds.filter(id => !saved.includes(id));
+        setColumnOrder([...saved, ...newCols]);
+      }
+      if (Array.isArray(config.hidden)) {
+        const vis: VisibilityState = { ...DEFAULT_VISIBILITY };
+        for (const id of config.hidden as string[]) {
+          if (id in vis) vis[id] = false;
+        }
+        setColumnVisibility(vis);
+      }
+      if (config.widths && typeof config.widths === 'object') {
+        setColumnSizing(prev => ({ ...prev, ...config.widths }));
+      }
+    }
+  }, [prefsSettled, prefMap]);
+
+  // Persist column config on change (debounced via a ref guard)
+  const saveCols = useCallback(
+    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
+      if (!timelineId) return;
+      const hidden = Object.entries(vis).filter(([, v]) => !v).map(([k]) => k);
+      const config = { order, hidden, widths: sizing };
+      upsert.mutate({ key: 'list_columns', value: JSON.stringify(config), timelineId });
+    },
+    [timelineId, upsert.mutate], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncedSaveCols = useCallback(
+    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => saveCols(vis, order, sizing), 400);
+    },
+    [saveCols],
+  );
+
+  const handleVisibilityChange = useCallback(
+    (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
+      setColumnVisibility(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
+        return next;
+      });
+    },
+    [columnOrder, columnSizing, debouncedSaveCols],
+  );
+
+  const handleOrderChange = useCallback(
+    (updater: ColumnOrderState | ((prev: ColumnOrderState) => ColumnOrderState)) => {
+      setColumnOrder(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
+        return next;
+      });
+    },
+    [columnVisibility, columnSizing, debouncedSaveCols],
+  );
+
+  const handleSizingChange = useCallback(
+    (updater: ColumnSizingState | ((prev: ColumnSizingState) => ColumnSizingState)) => {
+      setColumnSizing(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(columnVisibility, columnOrder, next);
+        return next;
+      });
+    },
+    [columnVisibility, columnOrder, debouncedSaveCols],
+  );
+
+  // ── TanStack Table ─────────────────────────────────────────────────────────
+
+  const columnDefs = useMemo<ColumnDef<ApiActivity>[]>(
+    () =>
+      COL_CATALOG.map(meta => ({
+        id: meta.id,
+        header: meta.label,
+        size: DEFAULT_WIDTHS[meta.id] ?? 120,
+        minSize: 40,
+        maxSize: 800,
+        enableResizing: true,
+        enableSorting: meta.editType !== 'none' || meta.id === 'duration',
+      })),
+    [],
+  );
+
+  const table = useReactTable({
+    data: rawActivities,
+    columns: columnDefs,
+    state: {
+      columnVisibility,
+      columnOrder,
+      columnSizing,
+      columnPinning: { left: ['colorBar', 'identity', 'title'] } as ColumnPinningState,
+      sorting,
+    },
+    onSortingChange: setSorting,
+    onColumnVisibilityChange: handleVisibilityChange,
+    onColumnOrderChange: handleOrderChange,
+    onColumnSizingChange: handleSizingChange,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    columnResizeMode: 'onChange',
+  });
+
+  // Apply external column toggle from the toolbar (via DashboardPage)
+  const lastAppliedSeq = useRef<number | null>(null);
+  useEffect(() => {
+    if (!pendingColumnToggle) return;
+    if (pendingColumnToggle.seq === lastAppliedSeq.current) return;
+    lastAppliedSeq.current = pendingColumnToggle.seq;
+    setColumnVisibility(prev => {
+      const next = { ...prev, [pendingColumnToggle.colId]: pendingColumnToggle.visible };
+      if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
+      return next;
+    });
+  }, [pendingColumnToggle, columnOrder, columnSizing, debouncedSaveCols]);
+
+  // Expose ALL column configs (visible + hidden) to toolbar via callback.
+  // Uses a ref-based equality check to avoid calling onColumnsChange (which
+  // typically calls setListColumns in DashboardPage) with a new array reference
+  // every render — that would create an infinite setState→re-render loop.
+  const lastColConfigsRef = useRef<ColumnConfig[] | null>(null);
+  useEffect(() => {
+    if (!onColumnsChange) return;
+    const configs: ColumnConfig[] = table.getAllLeafColumns()
+      .filter(col => !COL_CATALOG.find(c => c.id === col.id)?.noMenu)
+      .map(col => ({
+        id: col.id,
+        label: COL_CATALOG.find(c => c.id === col.id)?.label ?? col.id,
+        visible: col.getIsVisible(),
+      }));
+    const prev = lastColConfigsRef.current;
+    const changed = !prev || prev.length !== configs.length ||
+      prev.some((c, i) => c.id !== configs[i].id || c.visible !== configs[i].visible || c.label !== configs[i].label);
+    if (changed) {
+      lastColConfigsRef.current = configs;
+      onColumnsChange(configs);
+    }
+  }); // runs every render so order/visibility changes propagate immediately
+
+  // ── Filter + sort ──────────────────────────────────────────────────────────
+
+  const memberIdsByUserId = useMemo<Map<string, string[]>>(() => {
+    const map = new Map<string, string[]>();
+    for (const m of rawMembers) {
+      if (!m.userId) continue;
+      const list = map.get(m.userId) ?? [];
+      list.push(m.id);
+      map.set(m.userId, list);
+    }
+    return map;
+  }, [rawMembers]);
+
+  const closedStatusIds = useMemo(
+    () => new Set(timelineStatuses.filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  const filteredActivities = useMemo(
+    () =>
+      applyActiveFilter(rawActivities, activeFilter, memberIdsByUserId, {
+        closedStatusIds,
+        savedFilters,
+        statuses: statusesByTimeline,
+        tags,
+      }),
+    [rawActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
+  );
+
+  // Apply TanStack sorting
+  const sortedActivities = useMemo(() => {
+    const acts = [...filteredActivities];
+    const col = sorting[0];
+    if (!col) {
+      return acts.sort((a, b) => {
+        if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '');
+        if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '');
+        if (sortBy === 'title') return a.title.localeCompare(b.title);
+        if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '');
+        if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0);
+        return 0;
+      });
+    }
+    return acts.sort((a, b) => {
+      let av: string | number = '';
+      let bv: string | number = '';
+      switch (col.id) {
+        case 'title': av = a.title; bv = b.title; break;
+        case 'startAt': av = a.startAt ?? ''; bv = b.startAt ?? ''; break;
+        case 'endAt': av = a.endAt ?? ''; bv = b.endAt ?? ''; break;
+        case 'status': av = a.statusId ?? ''; bv = b.statusId ?? ''; break;
+        case 'progress': av = a.percentComplete ?? 0; bv = b.percentComplete ?? 0; break;
+        default: av = a.title; bv = b.title;
+      }
+      const cmp = typeof av === 'number' ? av - (bv as number) : (av as string).localeCompare(bv as string);
+      return col.desc ? -cmp : cmp;
+    });
+  }, [filteredActivities, sorting, sortBy]);
+
+  // ── Group-by ───────────────────────────────────────────────────────────────
+
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const toggleGroup = useCallback((key: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const memberById = useMemo<Map<string, TeamMemberWithUser>>(
+    () => new Map(rawMembers.map(m => [m.id, m])),
+    [rawMembers],
+  );
+  const statusById = useMemo<Map<string, Status>>(
+    () => new Map(timelineStatuses.map(s => [s.id, s])),
+    [timelineStatuses],
+  );
+  const activityById = useMemo<Map<string, ApiActivity>>(
+    () => new Map(rawActivities.map(a => [a.id, a])),
+    [rawActivities],
+  );
+
+  type DisplayRow =
+    | { kind: 'group'; key: string; label: string; count: number }
+    | { kind: 'activity'; activity: ApiActivity; depth: number; hasChildren: boolean; groupKey: string };
+
+  const displayRows = useMemo<DisplayRow[]>(() => {
+    const emptyRow = (a: ApiActivity): DisplayRow => ({
+      kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '',
+    });
+
+    if (groupBy === 'none') {
+      return sortedActivities.map(emptyRow);
+    }
+
+    if (groupBy === 'member') {
+      const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
+      for (const activity of sortedActivities) {
+        const ids = activity.assignedMemberIds ?? [];
+        const key = ids.length === 0 ? '__unassigned__' : ids[0];
+        const label = ids.length === 0 ? 'Unassigned' : (memberById.get(ids[0])?.displayName ?? 'Unknown');
+        const group = groups.get(key) ?? { label, activities: [] };
+        group.activities.push(activity);
+        groups.set(key, group);
+      }
+      const rows: DisplayRow[] = [];
+      for (const [key, { label, activities }] of groups) {
+        rows.push({ kind: 'group', key, label, count: activities.length });
+        if (!collapsedGroups.has(key)) {
+          for (const a of activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: key });
+        }
+      }
+      return rows;
+    }
+
+    if (groupBy === 'status') {
+      const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
+      for (const activity of sortedActivities) {
+        const key = activity.statusId ?? '__no_status__';
+        const label = activity.statusId ? (statusById.get(activity.statusId)?.name ?? 'Unknown') : 'No status';
+        const group = groups.get(key) ?? { label, activities: [] };
+        group.activities.push(activity);
+        groups.set(key, group);
+      }
+      // Emit statuses in order, then no-status
+      const rows: DisplayRow[] = [];
+      for (const s of timelineStatuses) {
+        const group = groups.get(s.id);
+        if (!group?.activities.length) continue;
+        rows.push({ kind: 'group', key: s.id, label: s.name, count: group.activities.length });
+        if (!collapsedGroups.has(s.id)) {
+          for (const a of group.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: s.id });
+        }
+      }
+      const noStatus = groups.get('__no_status__');
+      if (noStatus?.activities.length) {
+        rows.push({ kind: 'group', key: '__no_status__', label: 'No status', count: noStatus.activities.length });
+        if (!collapsedGroups.has('__no_status__')) {
+          for (const a of noStatus.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '__no_status__' });
+        }
+      }
+      return rows;
+    }
+
+    if (groupBy === 'parent') {
+      // Build tree like Gantt: parent activity rows are collapsible, children are indented
+      const byId = new Map(sortedActivities.map(a => [a.id, a]));
+      const childrenByParent = new Map<string, ApiActivity[]>();
+      const roots: ApiActivity[] = [];
+
+      for (const a of sortedActivities) {
+        if (a.parentActivityId && byId.has(a.parentActivityId)) {
+          const list = childrenByParent.get(a.parentActivityId) ?? [];
+          list.push(a);
+          childrenByParent.set(a.parentActivityId, list);
+        } else {
+          roots.push(a);
+        }
+      }
+
+      const rows: DisplayRow[] = [];
+      const seen = new Set<string>();
+      const hidden = new Set<string>();
+
+      const markHidden = (a: ApiActivity) => {
+        if (hidden.has(a.id)) return;
+        hidden.add(a.id);
+        for (const k of childrenByParent.get(a.id) ?? []) markHidden(k);
+      };
+
+      const visit = (a: ApiActivity, depth: number) => {
+        if (seen.has(a.id)) return;
+        seen.add(a.id);
+        const kids = childrenByParent.get(a.id) ?? [];
+        const hasChildren = kids.length > 0;
+        const isCollapsed = collapsedGroups.has(a.id);
+        rows.push({ kind: 'activity', activity: a, depth, hasChildren, groupKey: a.id });
+        if (!hasChildren) return;
+        if (isCollapsed) for (const k of kids) markHidden(k);
+        else for (const k of kids) visit(k, depth + 1);
+      };
+
+      for (const r of roots) visit(r, 0);
+      for (const a of sortedActivities) {
+        if (!seen.has(a.id) && !hidden.has(a.id)) visit(a, 0);
+      }
+      return rows;
+    }
+
+    return sortedActivities.map(emptyRow);
+  }, [sortedActivities, groupBy, memberById, statusById, activityById, timelineStatuses, collapsedGroups]);
+
+  // Flat list of activity rows (for keyboard navigation indices)
+  const activityRows = useMemo(
+    () => displayRows.filter((r): r is Extract<DisplayRow, { kind: 'activity' }> => r.kind === 'activity'),
+    [displayRows],
+  );
+
+  // ── Find integration ───────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!debouncedQuery) {
+      registerMatches([], new Map());
+      return;
+    }
+    const results = matchEvents(debouncedQuery, filteredActivities, members, rawActivities);
+    const ids = results.map(r => r.activityId);
+    const reasons = new Map(results.map(r => [r.activityId, r.reasons]));
+    registerMatches(ids, reasons);
+  }, [debouncedQuery, filteredActivities, members, rawActivities, registerMatches]);
+
+  // Auto-scroll to active match
+  const activeRowRef = useRef<HTMLTableRowElement | null>(null);
+  useEffect(() => {
+    if (activeMatchId && activeRowRef.current) {
+      activeRowRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [activeMatchId]);
+
+  // ── Selection & editing state ──────────────────────────────────────────────
+
+  const [selectedRowIdx, setSelectedRowIdx] = useState<number | null>(null);
+  const [selectedColIdx, setSelectedColIdx] = useState<number>(0);
+  const [editingCell, setEditingCell] = useState<{
+    rowIdx: number;
+    colIdx: number;
+    value: string;
+  } | null>(null);
+  const editInputRef = useRef<HTMLInputElement | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // When a new activity is selected externally, sync row idx
+  useEffect(() => {
+    if (!selectedActivityId) { setSelectedRowIdx(null); return; }
+    const idx = activityRows.findIndex(r => r.activity.id === selectedActivityId);
+    if (idx >= 0) setSelectedRowIdx(idx);
+  }, [selectedActivityId, activityRows]);
+
+  useEffect(() => {
+    if (!editingCell || !editInputRef.current) return;
+    const inp = editInputRef.current;
+    inp.focus();
+    inp.scrollIntoView({ block: 'nearest' });
+    const colId = visibleColIds[editingCell.colIdx];
+    const meta = COL_CATALOG.find(c => c.id === colId);
+    if (meta?.editType === 'date') {
+      // showPicker() opens the calendar immediately. Deferred so the browser
+      // has processed the focus event first. Only one date input is ever in
+      // the DOM at a time (single-cell editing), so no range-picker pairing.
+      setTimeout(() => {
+        try { (inp as HTMLInputElement & { showPicker?(): void }).showPicker?.(); } catch { /* not all browsers */ }
+      }, 0);
+    } else {
+      inp.select();
+    }
+  }, [editingCell]); // visibleColIds intentionally excluded — always current in this render cycle
+
+  // Visible column ids, in the SAME order the cells are rendered.
+  //
+  // Cells render from `table.getHeaderGroups()`, which moves pinned-left
+  // columns (colorBar, identity, title) to the front. `getVisibleLeafColumns()`
+  // does NOT apply pinning — it follows raw `columnOrder`. When a persisted
+  // `columnOrder` doesn't place the pinned columns first (e.g. a saved order
+  // from before `colorBar`/`identity` existed appends them at the end), the two
+  // orderings diverge and every colIdx→colId lookup (enterEdit, commitEdit,
+  // showPicker, keyboard nav) targets the wrong column. Deriving from the
+  // header groups keeps colIdx aligned with what the user actually clicked.
+  const visibleColIds = useMemo(
+    () => (table.getHeaderGroups()[0]?.headers ?? []).map(h => h.id),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [columnOrder, columnVisibility],
+  );
+
+  const commitEdit = useCallback(
+    (rowIdx: number, colId: string, value: string) => {
+      const row = activityRows[rowIdx];
+      if (!row) return;
+      const a = row.activity;
+
+      const patch: Partial<ApiActivity> & { notes?: string | null } = {};
+      if (colId === 'title' && value.trim() !== '') patch.title = value.trim();
+      else if (colId === 'startAt') patch.startAt = value ? `${value}T00:00:00Z` : undefined;
+      else if (colId === 'endAt') patch.endAt = value ? `${value}T00:00:00Z` : undefined;
+      else if (colId === 'description') patch.description = value || undefined;
+      else if (colId === 'location') patch.location = value || undefined;
+      else if (colId === 'url') patch.url = value || undefined;
+      else if (colId === 'notes') patch.notes = value || undefined;
+      else if (colId === 'progress') {
+        const n = parseInt(value, 10);
+        if (!isNaN(n) && n >= 0 && n <= 100) patch.percentComplete = n;
+      }
+
+      if (Object.keys(patch).length > 0) {
+        update.mutate({ activityId: a.id, patch });
+      }
+    },
+    [activityRows, update],
+  );
+
+  const enterEdit = useCallback((rowIdx: number, colIdx: number) => {
+    const row = activityRows[rowIdx];
+    if (!row) return;
+    const colId = visibleColIds[colIdx];
+    const meta = COL_CATALOG.find(c => c.id === colId);
+    if (!meta?.editable || meta.editType === 'status') return;
+    const a = row.activity;
+    let val = '';
+    if (colId === 'title') val = a.title;
+    else if (colId === 'startAt') val = toDateInput(a.startAt);
+    else if (colId === 'endAt') val = toDateInput(a.endAt);
+    else if (colId === 'description') val = a.description ?? '';
+    else if (colId === 'location') val = a.location ?? '';
+    else if (colId === 'url') val = a.url ?? '';
+    else if (colId === 'notes') val = (a as ApiActivity & { notes?: string | null }).notes ?? '';
+    else if (colId === 'progress') val = String(a.percentComplete ?? 0);
+    setEditingCell({ rowIdx, colIdx, value: val });
+  }, [activityRows, visibleColIds]);
+
+  const cancelEdit = useCallback(() => setEditingCell(null), []);
+
+  const commitAndMove = useCallback(
+    (dir: 'down' | 'right' | 'left') => {
+      if (!editingCell) return;
+      commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
+      setEditingCell(null);
+
+      if (dir === 'down') {
+        const nextRow = Math.min(editingCell.rowIdx + 1, activityRows.length - 1);
+        setSelectedRowIdx(nextRow);
+      } else if (dir === 'right') {
+        let nextColIdx = editingCell.colIdx + 1;
+        let nextRowIdx = editingCell.rowIdx;
+        if (nextColIdx >= visibleColIds.length) {
+          if (editingCell.rowIdx < activityRows.length - 1) {
+            nextColIdx = 0;
+            nextRowIdx = editingCell.rowIdx + 1;
+          } else {
+            nextColIdx = visibleColIds.length - 1; // clamp at last cell of last row
+          }
+        }
+        setSelectedColIdx(nextColIdx);
+        setSelectedRowIdx(nextRowIdx);
+        const colId = visibleColIds[nextColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
+          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
+          meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isText) enterEdit(nextRowIdx, nextColIdx);
+      } else if (dir === 'left') {
+        let prevColIdx = editingCell.colIdx - 1;
+        let prevRowIdx = editingCell.rowIdx;
+        if (prevColIdx < 0) {
+          if (editingCell.rowIdx > 0) {
+            prevColIdx = visibleColIds.length - 1;
+            prevRowIdx = editingCell.rowIdx - 1;
+          } else {
+            prevColIdx = 0; // clamp at first cell of first row
+          }
+        }
+        setSelectedColIdx(prevColIdx);
+        setSelectedRowIdx(prevRowIdx);
+        const colId = visibleColIds[prevColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
+          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
+          meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isText) enterEdit(prevRowIdx, prevColIdx);
+      }
+    },
+    [editingCell, commitEdit, visibleColIds, activityRows.length, enterEdit],
+  );
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLDivElement>) => {
+      if (editingCell) {
+        // Edit mode key handling is in the input's own onKeyDown
+        return;
+      }
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        if (activityRows.length === 0) return;
+        if (selectedRowIdx === null) {
+          setSelectedRowIdx(0);
+          setSelectedColIdx(0);
+          return;
+        }
+        if (e.shiftKey) {
+          let prevCol = selectedColIdx - 1;
+          let prevRow = selectedRowIdx;
+          if (prevCol < 0) {
+            if (selectedRowIdx > 0) {
+              prevCol = visibleColIds.length - 1;
+              prevRow = selectedRowIdx - 1;
+            } else {
+              prevCol = 0; // clamp at first cell of first row
+            }
+          }
+          setSelectedColIdx(prevCol);
+          setSelectedRowIdx(prevRow);
+        } else {
+          let nextCol = selectedColIdx + 1;
+          let nextRow = selectedRowIdx;
+          if (nextCol >= visibleColIds.length) {
+            if (selectedRowIdx < activityRows.length - 1) {
+              nextCol = 0;
+              nextRow = selectedRowIdx + 1;
+            } else {
+              nextCol = visibleColIds.length - 1; // clamp at last cell of last row
+            }
+          }
+          setSelectedColIdx(nextCol);
+          setSelectedRowIdx(nextRow);
+        }
+        return;
+      }
+
+      if (selectedRowIdx === null) {
+        if (e.key === 'ArrowDown') { setSelectedRowIdx(0); e.preventDefault(); }
+        return;
+      }
+
+      if (e.key === 'ArrowDown') {
+        setSelectedRowIdx(r => Math.min((r ?? 0) + 1, activityRows.length - 1));
+        e.preventDefault();
+      } else if (e.key === 'ArrowUp') {
+        setSelectedRowIdx(r => Math.max((r ?? 0) - 1, 0));
+        e.preventDefault();
+      } else if (e.key === 'ArrowRight') {
+        setSelectedColIdx(c => Math.min(c + 1, visibleColIds.length - 1));
+        e.preventDefault();
+      } else if (e.key === 'ArrowLeft') {
+        setSelectedColIdx(c => Math.max(c - 1, 0));
+        e.preventDefault();
+      } else if (e.key === 'Enter' || e.key === 'F2') {
+        const colId = visibleColIds[selectedColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
+          meta.editType !== 'status' && meta.editType !== 'identity' &&
+          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isTextEditable) enterEdit(selectedRowIdx, selectedColIdx);
+        e.preventDefault();
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+        const colId = visibleColIds[selectedColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
+          meta.editType !== 'status' && meta.editType !== 'identity' &&
+          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isTextEditable) setEditingCell({ rowIdx: selectedRowIdx, colIdx: selectedColIdx, value: e.key });
+      }
+    },
+    [editingCell, selectedRowIdx, selectedColIdx, activityRows, visibleColIds, enterEdit],
+  );
+
+  // When triggerNewRow increments, create a new "New Activity" row and queue title edit
+  useEffect(() => {
+    if (!triggerNewRow || triggerNewRow === prevTriggerNewRow.current) return;
+    prevTriggerNewRow.current = triggerNewRow;
+    const today = new Date().toISOString().slice(0, 10);
+    create.mutate(
+      { title: 'New Activity', startAt: `${today}T00:00:00Z`, endAt: `${today}T00:00:00Z` },
+      { onSuccess: (created) => { pendingEditActivityId.current = created.id; } },
+    );
+  }, [triggerNewRow]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // After a new activity appears in activityRows, enter title-edit mode on it
+  useEffect(() => {
+    if (!pendingEditActivityId.current) return;
+    const rowIdx = activityRows.findIndex(r => r.activity.id === pendingEditActivityId.current);
+    if (rowIdx < 0) return;
+    pendingEditActivityId.current = null;
+    setSelectedRowIdx(rowIdx);
+    const titleColIdx = visibleColIds.indexOf('title');
+    if (titleColIdx >= 0) {
+      setEditingCell({ rowIdx, colIdx: titleColIdx, value: 'New Activity' });
+    }
+  }, [activityRows, visibleColIds]);
+
+  // ── Color-by resolution ────────────────────────────────────────────────────
+
+  const getRowAccentColor = useCallback(
+    (activity: ApiActivity): string | null => {
+      if (colorBy === 'activity') return resolveColorHex(activity.color ?? null);
+      if (colorBy === 'member') {
+        const firstId = (activity.assignedMemberIds ?? [])[0];
+        if (!firstId) return null;
+        const m = memberById.get(firstId);
+        return resolveColorHex(m?.color ?? null);
+      }
+      if (colorBy === 'status') {
+        if (!activity.statusId) return null;
+        const s = statusById.get(activity.statusId);
+        return resolveColorHex(s?.color ?? null);
+      }
+      return null;
+    },
+    [colorBy, memberById, statusById],
+  );
+
+  // ── Picker state — all rendered as portals to escape table overflow ──────
+
+  const [statusPickerFor, setStatusPickerFor] = useState<string | null>(null);
+  const [statusPickerPos, setStatusPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeStatusPicker = useCallback(() => {
+    setStatusPickerFor(null);
+    setStatusPickerPos(null);
+  }, []);
+
+  const [assigneePickerFor, setAssigneePickerFor] = useState<string | null>(null);
+  const [assigneePickerPos, setAssigneePickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeAssigneePicker = useCallback(() => {
+    setAssigneePickerFor(null);
+    setAssigneePickerPos(null);
+  }, []);
+
+  const [tagPickerFor, setTagPickerFor] = useState<string | null>(null);
+  const [tagPickerPos, setTagPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeTagPicker = useCallback(() => {
+    setTagPickerFor(null);
+    setTagPickerPos(null);
+  }, []);
+
+  const [parentPickerFor, setParentPickerFor] = useState<string | null>(null);
+  const [parentPickerPos, setParentPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeParentPicker = useCallback(() => {
+    setParentPickerFor(null);
+    setParentPickerPos(null);
+  }, []);
+
+  const [identityPickerFor, setIdentityPickerFor] = useState<string | null>(null);
+  const [identityPickerPos, setIdentityPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const identityPickerRef = useRef<HTMLDivElement>(null);
+  const closeIdentityPicker = useCallback(() => {
+    setIdentityPickerFor(null);
+    setIdentityPickerPos(null);
+  }, []);
+
+  // Click-outside closes the identity picker
+  useEffect(() => {
+    if (!identityPickerFor) return;
+    function handler(e: MouseEvent) {
+      if (identityPickerRef.current && !identityPickerRef.current.contains(e.target as Node)) {
+        closeIdentityPicker();
+      }
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [identityPickerFor, closeIdentityPicker]);
+
+  // Multi-select state for row checkboxes
+  const [selectedActivityIds, setSelectedActivityIds] = useState<Set<string>>(new Set());
+  const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
+
+  // Holds the ID of a newly created activity that should enter title-edit mode
+  const pendingEditActivityId = useRef<string | null>(null);
+  // Guards against re-firing triggerNewRow on re-renders
+  const prevTriggerNewRow = useRef<number>(0);
+
+  // ── Multi-select delete ────────────────────────────────────────────────────
+
+  const handleDeleteSelected = useCallback(() => {
+    for (const id of Array.from(selectedActivityIds)) {
+      deleteAct.mutate(id);
+    }
+    setSelectedActivityIds(new Set());
+  }, [selectedActivityIds, deleteAct]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── DnD column reorder ─────────────────────────────────────────────────────
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setColumnOrder(prev => {
+      const oldIdx = prev.indexOf(String(active.id));
+      const newIdx = prev.indexOf(String(over.id));
+      if (oldIdx === -1 || newIdx === -1) return prev;
+      // Pinned columns can't be reordered past each other
+      const pinnedIds = ['colorBar', 'identity', 'title'];
+      if (pinnedIds.includes(String(active.id)) || pinnedIds.includes(String(over.id))) return prev;
+      const next = arrayMove(prev, oldIdx, newIdx);
+      if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
+      return next;
+    });
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
+  const rowH = 40; // always comfortable
+
+  const visibleHeaders = table.getHeaderGroups()[0]?.headers ?? [];
+
+  // Build a map from colId → left offset for sticky pinning
+  const pinnedLeft = useMemo(() => {
+    let left = 0;
+    const offsets: Record<string, number> = {};
+    for (const h of visibleHeaders) {
+      if (h.column.getIsPinned() === 'left') {
+        offsets[h.id] = left;
+        left += h.getSize();
+      }
+    }
+    return offsets;
+  }, [visibleHeaders]);
+
+  const tableWidth = visibleHeaders.reduce((acc, h) => acc + h.getSize(), 0);
+
+  // Status picker activity (for the portal)
+  const statusPickerActivity = statusPickerFor ? activityById.get(statusPickerFor) : null;
+
+  return (
+    <div
+      ref={containerRef}
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      style={{
+        flex: 1,
+        overflow: 'auto',
+        outline: 'none',
+        background: 'var(--background)',
+        position: 'relative',
+      }}
+      onClick={e => {
+        if ((e.target as HTMLElement) === containerRef.current) {
+          setSelectedRowIdx(null);
+          setEditingCell(null);
+          onSelectActivity?.(null);
+        }
+      }}
+    >
+      {/* Selection action bar — appears above the table when rows are checked */}
+      {selectedActivityIds.size > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '0 12px',
+            height: 36,
+            background: 'var(--card)',
+            borderBottom: '1px solid var(--border)',
+            flexShrink: 0,
+          }}
+        >
+          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
+            {selectedActivityIds.size} selected
+          </span>
+          <button
+            onClick={handleDeleteSelected}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
+              background: 'var(--destructive)', color: 'var(--destructive-foreground)',
+              border: 'none', borderRadius: 4, fontFamily: 'var(--font-sans)',
+            }}
+          >
+            <Trash2 size={12} />
+            Delete
+          </button>
+          <button
+            onClick={() => setSelectedActivityIds(new Set())}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
+              background: 'none', color: 'var(--foreground)',
+              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* DndContext must be outside <table> — its accessibility <div> is invalid inside <thead>. */}
+      <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+      <table
+        style={{
+          width: tableWidth,
+          minWidth: '100%',
+          borderCollapse: 'separate',
+          borderSpacing: 0,
+          tableLayout: 'fixed',
+        }}
+      >
+        {/* Column sizing */}
+        <colgroup>
+          {visibleHeaders.map(h => (
+            <col key={h.id} style={{ width: h.getSize() }} />
+          ))}
+        </colgroup>
+
+        {/* Header */}
+        <thead>
+          <SortableContext
+            items={visibleHeaders.map(h => h.id)}
+            strategy={horizontalListSortingStrategy}
+          >
+            <tr style={{ height: 36 }}>
+              {visibleHeaders.map(header => {
+                  const colId = header.id;
+                  const isPinned = header.column.getIsPinned() === 'left';
+                  const sortState = sorting[0];
+                  const sortDir = sortState?.id === colId ? (sortState.desc ? 'desc' : 'asc') : false;
+                  const meta = COL_CATALOG.find(c => c.id === colId);
+
+                  if (colId === 'colorBar') {
+                    const allChecked = activityRows.length > 0 &&
+                      activityRows.every(r => selectedActivityIds.has(r.activity.id));
+                    const someChecked = !allChecked &&
+                      activityRows.some(r => selectedActivityIds.has(r.activity.id));
+                    return (
+                      <th
+                        key={colId}
+                        style={{
+                          width: 24,
+                          position: 'sticky',
+                          left: pinnedLeft[colId] ?? 0,
+                          top: 0,
+                          zIndex: 20,
+                          background: 'var(--card)',
+                          borderBottom: '2px solid var(--border)',
+                          padding: 0,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'stretch', height: '100%' }}>
+                          <div style={{ width: 4, flexShrink: 0 }} />
+                          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <input
+                              type="checkbox"
+                              checked={allChecked}
+                              ref={el => { if (el) el.indeterminate = someChecked; }}
+                              onChange={() => {
+                                if (allChecked || someChecked) {
+                                  setSelectedActivityIds(new Set());
+                                } else {
+                                  setSelectedActivityIds(new Set(activityRows.map(r => r.activity.id)));
+                                }
+                              }}
+                              style={{ cursor: 'pointer', width: 13, height: 13 }}
+                              title="Select all"
+                            />
+                          </div>
+                        </div>
+                      </th>
+                    );
+                  }
+
+                  return (
+                    <SortableColHeader
+                      key={colId}
+                      colId={colId}
+                      style={{
+                        width: header.getSize(),
+                        left: isPinned ? pinnedLeft[colId] : undefined,
+                        position: 'sticky',
+                        zIndex: isPinned ? 20 : 10,
+                        boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
+                      }}
+                      sortDir={meta?.editType !== 'none' ? sortDir : false}
+                      onSort={meta?.editType !== 'none' ? () => {
+                        setSorting(prev => {
+                          if (prev[0]?.id !== colId) return [{ id: colId, desc: false }];
+                          if (!prev[0].desc) return [{ id: colId, desc: true }];
+                          return [];
+                        });
+                      } : undefined}
+                      resizeHandler={header.getResizeHandler() as unknown as (e: React.MouseEvent | React.TouchEvent) => void}
+                      isResizing={header.column.getIsResizing()}
+                    >
+                      {header.column.columnDef.header as string}
+                    </SortableColHeader>
+                  );
+                })}
+              </tr>
+            </SortableContext>
+        </thead>
+
+        {/* Body */}
+        <tbody>
+          {displayRows.length === 0 && (
+            <tr>
+              <td
+                colSpan={visibleHeaders.length}
+                style={{
+                  textAlign: 'center',
+                  padding: '48px 0',
+                  color: 'var(--muted-foreground)',
+                  fontSize: 13,
+                }}
+              >
+                No activities to show.
+              </td>
+            </tr>
+          )}
+
+          {displayRows.map((row, displayIdx) => {
+            // ── Group header row ─────────────────────────────────────────────
+            if (row.kind === 'group') {
+              const collapsed = collapsedGroups.has(row.key);
+              return (
+                <tr key={`group-${row.key}`}>
+                  <td
+                    colSpan={visibleHeaders.length}
+                    style={{
+                      padding: '4px 8px',
+                      background: 'var(--muted)',
+                      borderBottom: '1px solid var(--border)',
+                      borderTop: displayIdx > 0 ? '1px solid var(--border)' : undefined,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: 'var(--muted-foreground)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.05em',
+                      cursor: 'pointer',
+                      userSelect: 'none',
+                    }}
+                    onClick={() => toggleGroup(row.key)}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      {row.label}
+                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            }
+
+            // ── Activity row ─────────────────────────────────────────────────
+            const { activity, depth, hasChildren, groupKey } = row;
+            const actRowIdx = activityRows.indexOf(row);
+            const isSelected = actRowIdx === selectedRowIdx;
+            const isDetailOpen = activity.id === selectedActivityId;
+            const accentColor = getRowAccentColor(activity);
+
+            const isMatch = debouncedQuery && matchedIds.includes(activity.id);
+            const isActiveMatch = activity.id === activeMatchId;
+            const isDimmed = debouncedQuery && matchedIds.length > 0 && !isMatch;
+
+            const rowStyle: React.CSSProperties = {
+              height: rowH,
+              opacity: isDimmed ? 0.3 : 1,
+              background: isDetailOpen
+                ? 'var(--muted)'
+                : isSelected
+                ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
+                : 'transparent',
+              cursor: 'default',
+              outline: isActiveMatch
+                ? '2px solid #f59e0b'
+                : isMatch
+                ? '1px solid rgba(245,158,11,0.6)'
+                : undefined,
+              transition: 'background 0.1s ease, opacity 0.15s ease',
+            };
+
+            return (
+              <tr
+                key={activity.id}
+                ref={isActiveMatch ? el => { (activeRowRef as React.MutableRefObject<HTMLTableRowElement | null>).current = el } : undefined}
+                style={rowStyle}
+                onMouseEnter={() => setHoveredRowId(activity.id)}
+                onMouseLeave={() => setHoveredRowId(null)}
+                onClick={e => {
+                  e.stopPropagation();
+                  setSelectedRowIdx(actRowIdx);
+                  onSelectActivity?.(activity.id);
+                  // intentionally no onSelectApiActivity — edits happen inline
+                }}
+              >
+                {visibleHeaders.map((header, colIdx) => {
+                  const colId = header.id;
+                  const isPinned = header.column.getIsPinned() === 'left';
+                  const isCellSelected = isSelected && colIdx === selectedColIdx;
+                  const isEditing = editingCell?.rowIdx === actRowIdx && editingCell.colIdx === colIdx;
+                  const meta = COL_CATALOG.find(c => c.id === colId)!;
+
+                  const cellStyle: React.CSSProperties = {
+                    width: header.getSize(),
+                    maxWidth: header.getSize(),
+                    padding: '0 8px',
+                    borderBottom: '1px solid var(--border)',
+                    fontSize: 12,
+                    color: 'var(--foreground)',
+                    overflow: 'hidden',
+                    whiteSpace: 'nowrap',
+                    textOverflow: 'ellipsis',
+                    position: isPinned ? 'sticky' : undefined,
+                    left: isPinned ? pinnedLeft[colId] : undefined,
+                    zIndex: isPinned ? 5 : undefined,
+                    background: isPinned
+                      ? (isDetailOpen ? 'var(--muted)' : isSelected ? 'color-mix(in srgb, var(--primary) 8%, var(--background))' : 'var(--background)')
+                      : undefined,
+                    boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
+                    outline: isCellSelected && !isEditing ? '2px solid var(--primary)' : undefined,
+                    outlineOffset: '-2px',
+                    verticalAlign: 'middle',
+                    cursor: (meta.editType === 'text' || meta.editType === 'date' || meta.editType === 'number')
+                      ? 'text'
+                      : (meta.editType !== 'none' ? 'pointer' : 'default'),
+                  };
+
+                  // ── Cell content ──────────────────────────────────────────
+
+                  // Editing mode — inline input
+                  if (isEditing && meta.editType !== 'none' && meta.editType !== 'status') {
+                    return (
+                      <td key={colId} style={{ ...cellStyle, padding: 0, overflow: 'visible' }}>
+                        <input
+                          ref={editInputRef}
+                          type={meta.editType === 'date' ? 'date' : meta.editType === 'number' ? 'number' : 'text'}
+                          min={meta.editType === 'number' ? 0 : undefined}
+                          max={meta.editType === 'number' ? 100 : undefined}
+                          value={editingCell.value}
+                          onChange={e => setEditingCell(prev => prev ? { ...prev, value: e.target.value } : prev)}
+                          onKeyDown={e => {
+                            e.stopPropagation();
+                            if (e.key === 'Escape') { cancelEdit(); e.preventDefault(); }
+                            else if (e.key === 'Enter') { commitAndMove('down'); e.preventDefault(); }
+                            else if (e.key === 'Tab') { commitAndMove(e.shiftKey ? 'left' : 'right'); e.preventDefault(); }
+                          }}
+                          onBlur={() => {
+                            commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
+                            setEditingCell(null);
+                          }}
+                          style={{
+                            width: '100%',
+                            height: rowH,
+                            padding: '0 8px',
+                            background: 'var(--background)',
+                            border: 'none',
+                            outline: '2px solid var(--primary)',
+                            outlineOffset: '-2px',
+                            fontSize: 12,
+                            color: 'var(--foreground)',
+                            fontFamily: 'var(--font-sans)',
+                          }}
+                          onClick={e => e.stopPropagation()}
+                        />
+                      </td>
+                    );
+                  }
+
+                  // Color bar + row checkbox — 32px pinned cell
+                  if (colId === 'colorBar') {
+                    const isRowChecked = selectedActivityIds.has(activity.id);
+                    const showCb = isRowChecked || selectedActivityIds.size > 0 || hoveredRowId === activity.id;
+                    return (
+                      <td
+                        key={colId}
+                        style={{
+                          width: 24,
+                          maxWidth: 24,
+                          padding: 0,
+                          borderBottom: '1px solid var(--border)',
+                          position: 'sticky',
+                          left: pinnedLeft[colId] ?? 0,
+                          zIndex: 5,
+                          background: accentColor
+                            ?? (isDetailOpen
+                              ? 'var(--muted)'
+                              : isSelected
+                              ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
+                              : 'var(--background)'),
+                          cursor: 'default',
+                        }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedActivityIds(prev => {
+                            const next = new Set(prev);
+                            if (next.has(activity.id)) next.delete(activity.id);
+                            else next.add(activity.id);
+                            return next;
+                          });
+                        }}
+                      >
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          height: rowH,
+                          opacity: showCb ? 1 : 0,
+                          transition: 'opacity 0.1s',
+                        }}>
+                          <input
+                            type="checkbox"
+                            checked={isRowChecked}
+                            onChange={() => {}}
+                            onClick={e => e.stopPropagation()}
+                            style={{ cursor: 'pointer', width: 13, height: 13, pointerEvents: 'none' }}
+                          />
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Identity cell — shows badge; click opens identity picker portal
+                  if (colId === 'identity') {
+                    return (
+                      <td
+                        key={colId}
+                        style={{ ...cellStyle, cursor: 'pointer' }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          if (identityPickerFor === activity.id) {
+                            closeIdentityPicker();
+                          } else {
+                            closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeParentPicker();
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setIdentityPickerFor(activity.id);
+                            setIdentityPickerPos(popoverPos(rect, 240, 320));
+                          }
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          <Badge
+                            identity={{
+                              color: resolveColorHex(activity.color ?? null) ?? '#288C9B',
+                              icon: activity.icon ?? '__name_2__',
+                            }}
+                            name={activity.title}
+                            shape="square"
+                            size={28}
+                          />
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Status cell — click to open picker (portal, escapes scroll overflow)
+                  if (colId === 'status') {
+                    const status = activity.statusId ? statusById.get(activity.statusId) : null;
+                    return (
+                      <td
+                        key={colId}
+                        style={{ ...cellStyle, cursor: 'pointer' }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          if (statusPickerFor === activity.id) {
+                            closeStatusPicker();
+                          } else {
+                            closeAssigneePicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setStatusPickerFor(activity.id);
+                            setStatusPickerPos(popoverPos(rect, 160, 220));
+                          }
+                        }}
+                      >
+                        {status ? (
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 5,
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              fontSize: 11,
+                              fontWeight: 500,
+                              background: `color-mix(in srgb, ${resolveColorHex(status.color ?? null) ?? '#888'} 15%, transparent)`,
+                              color: resolveColorHex(status.color ?? null) ?? 'var(--foreground)',
+                              border: `1px solid ${resolveColorHex(status.color ?? null) ?? '#888'}40`,
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: 7,
+                                height: 7,
+                                borderRadius: '50%',
+                                background: resolveColorHex(status.color ?? null) ?? '#888',
+                                flexShrink: 0,
+                              }}
+                            />
+                            {status.name}
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                        )}
+                      </td>
+                    );
+                  }
+
+                  // Assignees cell — overlapping badges; click opens picker
+                  if (colId === 'assignees') {
+                    const ids = activity.assignedMemberIds ?? [];
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (assigneePickerFor === activity.id) {
+                          closeAssigneePicker();
+                        } else {
+                          closeStatusPicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setAssigneePickerFor(activity.id);
+                          setAssigneePickerPos(popoverPos(rect, 180, 240));
+                        }
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
+                          {ids.slice(0, 4).map((mid, i) => {
+                            const m = memberById.get(mid);
+                            if (!m) return null;
+                            return (
+                              <div key={mid} style={{ marginLeft: i === 0 ? 0 : -6 }} title={m.displayName}>
+                                <Badge
+                                  identity={{ color: resolveColorHex(m.color ?? null) ?? '#288C9B', icon: m.icon ?? '__name_2__' }}
+                                  name={m.displayName}
+                                  shape="circle"
+                                  size={22}
+                                />
+                              </div>
+                            );
+                          })}
+                          {ids.length > 4 && (
+                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>+{ids.length - 4}</span>
+                          )}
+                          {ids.length === 0 && (
+                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                          )}
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Tags cell — click opens tag picker
+                  if (colId === 'tags') {
+                    const tagList = (activity.tagIds ?? [])
+                      .map(tid => tags.find(t => t.id === tid))
+                      .filter(Boolean) as Tag[];
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (tagPickerFor === activity.id) {
+                          closeTagPicker();
+                        } else {
+                          closeStatusPicker(); closeAssigneePicker(); closeParentPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setTagPickerFor(activity.id);
+                          setTagPickerPos(popoverPos(rect, 220, 300));
+                        }
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden', flexWrap: 'nowrap' }}>
+                          {tagList.slice(0, 3).map(t => (
+                            <span
+                              key={t.id}
+                              style={{
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                fontSize: 10,
+                                background: resolveColorHex(t.color ?? null)
+                                  ? `color-mix(in srgb, ${resolveColorHex(t.color ?? null)} 18%, transparent)`
+                                  : 'var(--muted)',
+                                color: resolveColorHex(t.color ?? null) ?? 'var(--foreground)',
+                                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}40`,
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {t.name}
+                            </span>
+                          ))}
+                          {tagList.length > 3 && (
+                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tagList.length - 3}</span>
+                          )}
+                          {tagList.length === 0 && (
+                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                          )}
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Progress cell
+                  if (colId === 'progress') {
+                    const pct = activity.percentComplete ?? 0;
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          enterEdit(actRowIdx, colIdx);
+                        }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <div
+                            style={{
+                              flex: 1,
+                              height: 4,
+                              background: 'var(--border)',
+                              borderRadius: 2,
+                              overflow: 'hidden',
+                            }}
+                          >
+                            <div
+                              style={{
+                                height: '100%',
+                                width: `${pct}%`,
+                                background: 'var(--primary)',
+                                borderRadius: 2,
+                                transition: 'width 0.2s',
+                              }}
+                            />
+                          </div>
+                          <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flexShrink: 0 }}>
+                            {pct}%
+                          </span>
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Parent cell — click opens parent picker
+                  if (colId === 'parent') {
+                    const parent = activity.parentActivityId ? activityById.get(activity.parentActivityId) : null;
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (parentPickerFor === activity.id) {
+                          closeParentPicker();
+                        } else {
+                          closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setParentPickerFor(activity.id);
+                          setParentPickerPos(popoverPos(rect, 220, 280));
+                        }
+                      }}>
+                        <span style={{ color: parent ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
+                          {parent ? parent.title : '—'}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Duration cell
+                  if (colId === 'duration') {
+                    return (
+                      <td key={colId} style={cellStyle}>
+                        <span style={{ color: 'var(--muted-foreground)' }}>
+                          {formatDuration(activity.startAt, activity.endAt)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Date cells — single click to edit
+                  if (colId === 'startAt' || colId === 'endAt') {
+                    const iso = colId === 'startAt' ? activity.startAt : activity.endAt;
+                    return (
+                      <td
+                        key={colId}
+                        style={cellStyle}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          enterEdit(actRowIdx, colIdx);
+                        }}
+                      >
+                        <span style={{ color: iso ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
+                          {formatDate(iso)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Created/Updated cells
+                  if (colId === 'createdAt' || colId === 'updatedAt') {
+                    const iso = colId === 'createdAt' ? activity.createdAt : activity.updatedAt;
+                    return (
+                      <td key={colId} style={cellStyle}>
+                        <span style={{ color: 'var(--muted-foreground)' }}>
+                          {formatDate(iso)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Text cells (title, description, location, url, notes)
+                  let textVal = '';
+                  if (colId === 'title') textVal = activity.title;
+                  else if (colId === 'description') textVal = activity.description ?? '';
+                  else if (colId === 'location') textVal = activity.location ?? '';
+                  else if (colId === 'url') textVal = activity.url ?? '';
+                  else if (colId === 'notes') textVal = (activity as ApiActivity & { notes?: string | null }).notes ?? '';
+
+                  return (
+                    <td
+                      key={colId}
+                      style={{ ...cellStyle, fontWeight: colId === 'title' ? 500 : 400 }}
+                      onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (meta.editable && meta.editType === 'text') enterEdit(actRowIdx, colIdx);
+                      }}
+                    >
+                      {colId === 'title' && groupBy === 'parent' ? (
+                        // Parent-group mode: show indent + collapse toggle
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 4, paddingLeft: depth * 16 }}>
+                          {hasChildren ? (
+                            <span
+                              onClick={e => { e.stopPropagation(); toggleGroup(groupKey); }}
+                              style={{ cursor: 'pointer', flexShrink: 0, color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center' }}
+                            >
+                              {collapsedGroups.has(groupKey) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                            </span>
+                          ) : depth > 0 ? (
+                            <span style={{ width: 13, flexShrink: 0 }} />
+                          ) : null}
+                          <span title={textVal} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                            {textVal || '—'}
+                          </span>
+                        </span>
+                      ) : (
+                        <span
+                          title={textVal}
+                          style={{
+                            display: 'block',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            color: textVal ? 'var(--foreground)' : 'var(--muted-foreground)',
+                          }}
+                        >
+                          {textVal || '—'}
+                        </span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      </DndContext>
+
+      {/* Status picker portal */}
+      {statusPickerFor && statusPickerPos && statusPickerActivity &&
+        createPortal(
+          <StatusPicker
+            value={statusPickerActivity.statusId}
+            statuses={timelineStatuses}
+            onChange={statusId => {
+              update.mutate({ activityId: statusPickerFor, patch: { statusId } });
+              closeStatusPicker();
+            }}
+            onClose={closeStatusPicker}
+            positionStyle={{ position: 'fixed', top: statusPickerPos.top, left: statusPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Assignee picker portal */}
+      {assigneePickerFor && assigneePickerPos &&
+        createPortal(
+          <AssigneePicker
+            members={members}
+            selectedIds={activityById.get(assigneePickerFor)?.assignedMemberIds ?? []}
+            onToggle={memberId => {
+              const activity = activityById.get(assigneePickerFor);
+              if (!activity) return;
+              const current = activity.assignedMemberIds ?? [];
+              const next = current.includes(memberId)
+                ? current.filter(id => id !== memberId)
+                : [...current, memberId];
+              update.mutate({ activityId: assigneePickerFor, patch: { assignedMemberIds: next } });
+            }}
+            onClose={closeAssigneePicker}
+            positionStyle={{ position: 'fixed', top: assigneePickerPos.top, left: assigneePickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Tag picker portal */}
+      {tagPickerFor && tagPickerPos &&
+        createPortal(
+          <TagPicker
+            teamId={teamId}
+            tags={tags}
+            selectedTagIds={(activityById.get(tagPickerFor)?.tagIds as string[] | undefined) ?? []}
+            onChange={ids => {
+              update.mutate({ activityId: tagPickerFor, patch: { tagIds: ids } as Partial<ApiActivity> });
+            }}
+            onClose={closeTagPicker}
+            positionStyle={{ position: 'fixed', top: tagPickerPos.top, left: tagPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Parent picker portal */}
+      {parentPickerFor && parentPickerPos &&
+        createPortal(
+          <ParentPicker
+            activities={rawActivities.filter(a => a.id !== parentPickerFor)}
+            value={activityById.get(parentPickerFor)?.parentActivityId}
+            onChange={id => {
+              update.mutate({ activityId: parentPickerFor, patch: { parentActivityId: id } as Partial<ApiActivity> });
+              closeParentPicker();
+            }}
+            onClose={closeParentPicker}
+            positionStyle={{ position: 'fixed', top: parentPickerPos.top, left: parentPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Identity picker portal */}
+      {identityPickerFor && identityPickerPos && (() => {
+        const identityActivity = activityById.get(identityPickerFor);
+        if (!identityActivity) return null;
+        return createPortal(
+          <div
+            ref={identityPickerRef}
+            style={{
+              position: 'fixed',
+              top: identityPickerPos.top,
+              left: identityPickerPos.left,
+              zIndex: 9999,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+              borderRadius: 10,
+              border: '1px solid var(--border)',
+              overflow: 'hidden',
+            }}
+          >
+            <IdentityPicker
+              identity={{
+                color: resolveColorHex(identityActivity.color ?? null) ?? '#288C9B',
+                icon: identityActivity.icon ?? '__name_2__',
+              }}
+              name={identityActivity.title}
+              shape="square"
+              onChange={(next: Identity) => {
+                update.mutate({ activityId: identityPickerFor, patch: { color: next.color, icon: next.icon } });
+              }}
+            />
+          </div>,
+          document.body,
+        );
+      })()}
+    </div>
+  );
 }
 ````
 
@@ -25273,234 +26684,6 @@ export function useDeleteSavedFilter(teamId: string) {
     mutationFn: (id: string) =>
       authFetch<void>(`/saved_filters/${id}`, { method: 'DELETE' }),
     onSuccess: () => qc.invalidateQueries({ queryKey: savedFiltersKey(teamId) }),
-  })
-}
-````
-
-## File: packages/web/src/hooks/useSettings.ts
-````typescript
-/**
- * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
- * profile, password change, forgot/reset password, SMTP config, instance
- * settings, and the admin user list.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { apiFetch, createAuthFetch } from '@/lib/api'
-import type { components } from '@draba/shared'
-
-type User = components['schemas']['User']
-type SMTPConfig = components['schemas']['SMTPConfig']
-type APIToken = components['schemas']['APIToken']
-
-// ── Profile ──────────────────────────────────────────────────────────────────
-
-export function useUpdateProfile() {
-  const { getAccessToken, patchUser } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
-      authFetch<User>('/users/me', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: (updated) => {
-      qc.setQueryData(['me'], updated)
-      patchUser(updated)
-      // Invalidate all team member lists so the sidebar reflects the new color/icon.
-      void qc.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-// ── My stats ──────────────────────────────────────────────────────────────────
-
-interface MemberStats {
-  activeTimelines: number
-  archivedTimelines: number
-  pastDue: number
-  running: number
-  upcoming: number
-  unscheduled: number
-  archivedActivities: number
-}
-
-export function useMyStats() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: ['me', 'stats'],
-    queryFn: () => authFetch<MemberStats>('/users/me/stats'),
-  })
-}
-
-// ── Password ──────────────────────────────────────────────────────────────────
-
-export function useChangePassword() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
-      authFetch<{ status: string }>('/users/me/password', {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Forgot / reset password (public, no auth required) ───────────────────────
-
-export function useForgotPassword() {
-  return useMutation({
-    mutationFn: (email: string) =>
-      apiFetch<{ status: string }>('/auth/forgot-password', {
-        method: 'POST',
-        body: JSON.stringify({ email }),
-      }),
-  })
-}
-
-export function useResetPassword() {
-  return useMutation({
-    mutationFn: (data: { token: string; newPassword: string }) =>
-      apiFetch<{ status: string }>('/auth/reset-password', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Admin: SMTP ──────────────────────────────────────────────────────────────
-
-export function useAdminSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'smtp'],
-    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
-  })
-}
-
-export function useSaveSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
-        method: 'PUT',
-        body: JSON.stringify(cfg),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-export function useTestSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
-        method: 'POST',
-        body: JSON.stringify(cfg),
-      }),
-  })
-}
-
-export function useDeleteSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: () =>
-      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-// ── Admin: Instance settings ──────────────────────────────────────────────────
-
-export function useAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'settings'],
-    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
-  })
-}
-
-export function usePatchAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: Record<string, string>) =>
-      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
-  })
-}
-
-// ── API Tokens ────────────────────────────────────────────────────────────────
-
-export function useTokens() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: ['tokens'],
-    queryFn: () => authFetch<APIToken[]>('/tokens'),
-  })
-}
-
-export function useCreateToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (data: { name: string; scope: string }) =>
-      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
-
-export function useRevokeToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) =>
-      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
-
-// ── Admin: Users ──────────────────────────────────────────────────────────────
-
-export type AdminUserRow = User & { teamCount: number }
-
-export function useAdminUsers(orphanedOnly = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'users', { orphanedOnly }],
-    queryFn: () =>
-      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
   })
 }
 ````
@@ -25970,577 +27153,394 @@ export function applyActiveFilter(
 }
 ````
 
-## File: packages/web/src/pages/settings/ProfilePage.tsx
+## File: packages/web/src/pages/settings/OrganizationPage.tsx
 ````typescript
 /**
- * /settings/profile — Identity, display name, and stats for the current user.
+ * /settings/organization — Superadmin: organization name, registration policy,
+ * and system-wide defaults (language placeholder, timezone, week start).
+ * Language support is deferred to Phase 10.7 — Localization & Language Support.
  */
 
 import { useState, useEffect } from 'react'
-import { Calendar, Activity } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useUpdateProfile, useMyStats } from '@/hooks/useSettings'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { ApiError } from '@/lib/api'
+import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
 
-// ── Stat chip ──────────────────────────────────────────────────────────────
+export default function OrganizationPage() {
+  const { data } = useAdminSettings()
+  const patch = usePatchAdminSettings()
 
-function StatChip({ value, label, color }: { value: number; label: string; color: string }) {
-  return (
-    <div style={{
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-      padding: '10px 14px', borderRadius: 8, flex: 1, minWidth: 0,
-      border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
-      background: `${color}0a`, textAlign: 'center',
-    }}>
-      <span style={{ fontSize: 20, fontWeight: 700, color }}>{value}</span>
-      <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{label}</span>
-    </div>
-  )
-}
-
-// ── Main ───────────────────────────────────────────────────────────────────
-
-export default function ProfilePage() {
-  const { user } = useAuth()
-  const updateProfile = useUpdateProfile()
-  const { data: stats } = useMyStats()
-
-  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: user?.color ?? '#288C9B',
-    icon: user?.icon ?? '__none__',
-  })
+  const settings = data?.settings ?? {}
+  const [orgName, setOrgName] = useState('')
+  const [accentColor, setAccentColor] = useState('')
+  // Validated hex to submit — only a well-formed #RRGGBB is sent to the API.
+  const accentColorValid = accentColor === '' || /^#[0-9a-fA-F]{6}$/.test(accentColor)
+  const [regPolicy, setRegPolicy] = useState('invite_only')
+  const [timezone, setTimezone] = useState('UTC')
+  const [weekStart, setWeekStart] = useState('monday')
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
   useEffect(() => {
-    if (user) {
-      setDisplayName(user.displayName)
-      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
-    }
-  }, [user])
+    setOrgName(settings.instance_name || '')
+    setAccentColor(settings.accent_color || '')
+    setRegPolicy(settings.registration_policy || 'invite_only')
+    setTimezone(settings.default_timezone || 'UTC')
+    setWeekStart(settings.default_week_start || 'monday')
+  }, [JSON.stringify(settings)])
 
   async function handleSave() {
     setFeedback(null)
     try {
-      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
-      setFeedback({ type: 'success', msg: 'Profile updated.' })
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
-      setFeedback({ type: 'error', msg })
+      await patch.mutateAsync({
+        instance_name: orgName,
+        // Only submit a valid hex value; empty string clears the override.
+        accent_color: accentColorValid ? accentColor : '',
+        registration_policy: regPolicy,
+        default_timezone: timezone,
+        default_week_start: weekStart,
+      })
+      setFeedback({ type: 'success', msg: 'Settings saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
     }
   }
 
-  const accentColor = identity.color
-
   return (
     <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Profile</h2>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
       <p className="text-sm text-muted-foreground mb-6">
-        Changes to your name and identity propagate across all your team memberships.
+        System-wide identity and defaults for this draba installation.
       </p>
 
-      <div className="bg-card border border-border rounded-[10px] overflow-hidden mb-5">
-        {/* Header banner — identity + name (mirrors MemberModal / TeamModal pattern) */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '20px 24px', borderBottom: '1px solid var(--border)' }}>
-          <div style={{ flexShrink: 0 }}>
-            <IdentityWidget
-              identity={identity}
-              name={displayName}
-              shape="circle"
-              onChange={next => setIdentity(next)}
-            />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-1">
-              Your profile
-              {user?.isSuperadmin && (
-                <span className="ml-2 text-[11px] px-2 py-0.5 rounded bg-primary/15 text-primary font-semibold tracking-wide normal-case">
-                  Superadmin
-                </span>
-              )}
-            </div>
-            <input
-              value={displayName}
-              onChange={e => setDisplayName(e.target.value)}
-              placeholder="Your name"
-              style={{
-                fontSize: 18, fontWeight: 600, color: 'var(--foreground)',
-                background: 'transparent', border: 'none', outline: 'none',
-                padding: '1px 4px', margin: '-1px -4px',
-                borderRadius: 4, fontFamily: 'inherit', width: '100%',
-              }}
-              onFocus={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.outline = `2px solid ${accentColor}44` }}
-              onBlur={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.outline = 'none' }}
-            />
-            <div className="text-xs text-muted-foreground mt-0.5">{user?.email ?? ''}</div>
-          </div>
-          {/* Live badge preview */}
-          <div style={{ flexShrink: 0 }}>
-            <Badge identity={identity} name={displayName} size={44} shape="circle" />
-          </div>
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Identity
+        </h3>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Organization name</Label>
+          <Input
+            value={orgName}
+            onChange={e => setOrgName(e.target.value)}
+            placeholder="My Company"
+            className="max-w-xs"
+          />
+          <p className="text-xs text-muted-foreground m-0">
+            Shown in the browser tab title and login page.
+          </p>
         </div>
 
-        {/* Stats */}
-        {stats && (
-          <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border)' }}>
-            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
-              <Calendar size={11} /> Timelines
-            </div>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-              <StatChip value={stats.activeTimelines} label="Active" color="#1A97A2" />
-              <StatChip value={stats.archivedTimelines} label="Archived" color="#484f58" />
-            </div>
-
-            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
-              <Activity size={11} /> Activities
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <StatChip value={stats.pastDue} label="Past due" color={stats.pastDue > 0 ? '#EF4444' : '#484f58'} />
-              <StatChip value={stats.running} label="Running" color="#1A97A2" />
-              <StatChip value={stats.upcoming} label="Upcoming" color="#3B82F6" />
-              <StatChip value={stats.archivedActivities} label="Archived" color="#484f58" />
-            </div>
-          </div>
-        )}
-
-        {/* Fields */}
-        <div style={{ padding: '20px 24px' }}>
-          {/* Email (read-only) */}
-          <div className="flex flex-col gap-1.5 mb-5">
-            <Label>Email</Label>
-            <Input
-              value={user?.email ?? ''}
-              disabled
-              className="max-w-[360px] opacity-60"
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Accent color</Label>
+          <div className="flex items-center gap-3">
+            <input
+              type="color"
+              value={accentColor || '#288C9B'}
+              onChange={e => setAccentColor(e.target.value)}
+              className="h-9 w-14 rounded border border-border cursor-pointer bg-transparent"
             />
-            <p className="text-xs text-muted-foreground m-0">Email changes are not yet supported.</p>
+            <Input
+              value={accentColor}
+              onChange={e => setAccentColor(e.target.value)}
+              placeholder="#288C9B"
+              className={`max-w-[140px] font-mono text-[13px] ${!accentColorValid ? 'border-destructive' : ''}`}
+            />
+            {accentColor && (
+              <button
+                type="button"
+                onClick={() => setAccentColor('')}
+                className="text-xs text-muted-foreground hover:text-foreground cursor-pointer bg-transparent border-none"
+              >
+                Reset
+              </button>
+            )}
           </div>
-
-          {feedback && (
-            <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-              {feedback.msg}
-            </p>
+          {!accentColorValid && (
+            <p className="text-xs text-destructive m-0">Must be a 6-digit hex color (e.g. #288C9B).</p>
           )}
+          <p className="text-xs text-muted-foreground m-0">
+            Overrides the primary color globally. Leave blank to use the default teal.
+          </p>
+        </div>
 
-          <button
-            onClick={handleSave}
-            disabled={updateProfile.isPending || !displayName.trim()}
-            style={{
-              background: accentColor,
-              color: '#fff',
-              fontWeight: 600,
-              fontSize: 13,
-              padding: '8px 20px',
-              borderRadius: 7,
-              border: 'none',
-              cursor: updateProfile.isPending || !displayName.trim() ? 'not-allowed' : 'pointer',
-              opacity: updateProfile.isPending || !displayName.trim() ? 0.5 : 1,
-              fontFamily: 'inherit',
-              transition: 'opacity 0.15s',
-            }}
-          >
-            {updateProfile.isPending ? 'Saving…' : 'Save profile'}
-          </button>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Registration policy</Label>
+          <div className="flex gap-2">
+            {[
+              { v: 'invite_only', label: 'Invite only' },
+              { v: 'open', label: 'Open registration' },
+            ].map(({ v, label }) => (
+              <button
+                key={v}
+                onClick={() => setRegPolicy(v)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
+                  regPolicy === v
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
+          System defaults
+        </h3>
+        <p className="text-xs text-muted-foreground mb-4">
+          Applied to new accounts when the user hasn't set their own preference.
+        </p>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default language</Label>
+          <select
+            disabled
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
+          >
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default timezone</Label>
+          <select
+            value={timezone}
+            onChange={e => setTimezone(e.target.value)}
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
+          >
+            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+      <Button onClick={handleSave} disabled={patch.isPending}>
+        {patch.isPending ? 'Saving…' : 'Save settings'}
+      </Button>
     </div>
   )
 }
 ````
 
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
+ */
 
-import (
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
 
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
 
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
 
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
+const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
 
-	setupLogger()
-	fmt.Print(banner)
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+  const { theme: currentTheme, applyTheme } = useDarkMode()
 
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
+  useEffect(() => {
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+    const savedTheme = prefMap['theme'] as string | undefined
+    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
+  }, [JSON.stringify(prefMap)])
 
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
+  function handleThemeChange(t: 'light' | 'dark') {
+    setTheme(t)
+    applyTheme(t)
+  }
 
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
+        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
+        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
+        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
+  }
 
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	tagRepo := db.NewTagRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Personal appearance and regional settings.
+      </p>
 
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
+      {/* Regional */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Regional
+        </h3>
 
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Language</Label>
+          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
 
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, m, tokens, t, bus, hub)
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
 
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Date format</Label>
+          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
 
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
 
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
+      {/* Appearance */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Appearance
+        </h3>
+        <div className="flex flex-col gap-1.5 mb-2">
+          <Label>Theme</Label>
+          <div className="flex gap-2">
+            {(['light', 'dark'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  theme === t
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground m-0">
+            Applies immediately. Persisted server-side so it syncs across devices.
+          </p>
+        </div>
+      </div>
 
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-````
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
 
-## File: packages/api/internal/api/admin_handler.go
-````go
-package api
-
-import (
-	"encoding/json"
-	"log/slog"
-	"net/http"
-
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-)
-
-// requireSuperadmin is a shared guard for admin endpoints. Returns false
-// and writes a 403 if the caller is not a superadmin.
-func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
-		return false
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return false
-	}
-	return true
-}
-
-// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
-// with the password masked. Superadmin-only.
-func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	cfg, err := s.mailer.LoadConfig()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
-		return
-	}
-	if cfg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
-		return
-	}
-
-	// Mask the password in the response.
-	masked := *cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
-// validates it by sending a test email to the caller's address. Superadmin-only.
-func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
-		return
-	}
-
-	// Fetch caller email for the validation test.
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
-		return
-	}
-
-	// Validate by sending a test email before persisting.
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		slog.Warn("smtp validation failed", "err", err)
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
-		return
-	}
-
-	if err := s.mailer.SaveConfig(&cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
-		return
-	}
-
-	masked := cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
-// provided config without persisting it. Superadmin-only.
-func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
-		return
-	}
-
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		slog.Warn("smtp test failed", "err", err)
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
-}
-
-// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
-// Superadmin-only.
-func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-	if err := s.mailer.DeleteConfig(); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
-// defaults. Superadmin-only.
-func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name", "accent_color"}
-	settings := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := s.instanceSets.Get(k)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
-			return
-		}
-		settings[k] = v
-	}
-
-	// Apply defaults for missing keys.
-	if settings["registration_policy"] == "" {
-		settings["registration_policy"] = "invite_only"
-	}
-	if settings["default_timezone"] == "" {
-		settings["default_timezone"] = "UTC"
-	}
-	if settings["default_date_format"] == "" {
-		settings["default_date_format"] = "MMM D, YYYY"
-	}
-	if settings["default_week_start"] == "" {
-		settings["default_week_start"] = "monday"
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
-}
-
-// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
-// instance-level settings. Superadmin-only.
-func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var body map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Validate known keys and values.
-	allowed := map[string]bool{
-		"registration_policy": true,
-		"default_timezone":    true,
-		"default_date_format": true,
-		"default_week_start":  true,
-		"instance_name":       true,
-		"accent_color":        true,
-	}
-	for k := range body {
-		if !allowed[k] {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
-			return
-		}
-	}
-	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
-		return
-	}
-	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
-		return
-	}
-
-	for k, v := range body {
-		if err := s.instanceSets.Set(k, v); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
-}
-
-// handleGetPublicBranding handles GET /settings/branding. Returns the
-// instance name and accent color without requiring authentication, so the
-// login page and shared timeline views can display branding before sign-in.
-//
-// Only cosmetic settings are exposed here. Never add sensitive keys (SMTP
-// credentials, JWT secrets, registration policy, etc.) to this handler.
-func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
-	name, _ := s.instanceSets.Get("instance_name")
-	accent, _ := s.instanceSets.Get("accent_color")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"instanceName": name,
-		"accentColor":  accent,
-	})
-}
-
-func smtpTestBody() string {
-	return `<html><body>
-<p>This is a test email from <strong>draba</strong>.</p>
-<p>If you received this, your SMTP configuration is working correctly.</p>
-</body></html>`
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
+    </div>
+  )
 }
 ````
 
@@ -28440,6 +29440,223 @@ func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
 }
 ````
 
+## File: packages/web/src/components/gantt/GanttToolbar.tsx
+````typescript
+/**
+ * GanttToolbar — the thin sub-toolbar that sits between the top bar and
+ * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
+ * export stub.
+ */
+
+import { Download, Share2, Plus, Minus } from 'lucide-react';
+import type { TimeGranularity } from './granularity';
+import { cn } from '@/lib/utils';
+
+export type { TimeGranularity } from './granularity';
+export type GroupBy = 'none' | 'member' | 'parent' | 'status';
+export type SortBy = 'startDate' | 'endDate' | 'title';
+export type ColorBy = 'activity' | 'member' | 'status';
+
+interface Props {
+  groupBy: GroupBy;
+  onGroupByChange: (g: GroupBy) => void;
+  sortBy: SortBy;
+  onSortByChange: (s: SortBy) => void;
+  granularity: TimeGranularity | 'auto';
+  onGranularityChange: (g: TimeGranularity | 'auto') => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  onExport: () => void;
+  onShare?: () => void;
+}
+
+const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label   = 'text-[11px] text-muted-foreground shrink-0';
+const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+export default function GanttToolbar({
+  groupBy,
+  onGroupByChange,
+  sortBy,
+  onSortByChange,
+  granularity,
+  onGranularityChange,
+  colorBy,
+  onColorByChange,
+  onExport,
+  onShare,
+}: Props) {
+  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
+  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
+  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
+    ? granularityMap.indexOf(granularity as never)
+    : 0;
+  const currentLabel = granularityLabels[currentIndex];
+
+  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseInt(e.target.value, 10);
+    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
+  };
+
+  return (
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
+      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
+      <style>{`
+        .gantt-zoom-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          background: transparent;
+        }
+        .gantt-zoom-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          margin-top: -4px;
+        }
+        .gantt-zoom-slider::-moz-range-thumb {
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          border: none;
+        }
+        .gantt-zoom-slider::-webkit-slider-runnable-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+        .gantt-zoom-slider::-moz-range-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+      `}</style>
+
+      {/* Zoom (granularity) */}
+      <div className="flex items-center gap-1.5 h-[26px]">
+        <button
+          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 0}
+          title="Zoom out"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Minus size={14} />
+        </button>
+
+        <div className="relative w-20 h-[26px] flex items-center">
+          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
+            {[0, 1, 2, 3, 4, 5].map(i => (
+              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
+            ))}
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="5"
+            step="1"
+            value={currentIndex}
+            onChange={handleSliderChange}
+            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
+            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          />
+        </div>
+
+        <button
+          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 5}
+          title="Zoom in"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Plus size={14} />
+        </button>
+
+        <div
+          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          className={cn(
+            'flex items-center justify-center w-[22px] h-[22px]',
+            'bg-card border border-border rounded-sm text-xs font-mono select-none',
+            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
+          )}
+        >
+          {currentLabel}
+        </div>
+      </div>
+
+      <div className={divider} />
+
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as GroupBy)}
+      >
+        <option value="none">None</option>
+        <option value="member">Member</option>
+        <option value="parent">Parent activity</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Sort by */}
+      <span className={label}>Sort by</span>
+      <select
+        className={select}
+        value={sortBy}
+        onChange={e => onSortByChange(e.target.value as SortBy)}
+      >
+        <option value="startDate">Start date</option>
+        <option value="endDate">End date</option>
+        <option value="title">Title A–Z</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className="flex-1" />
+
+      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
+        <Download size={13} strokeWidth={1.8} />
+        Export
+      </button>
+
+      <button className={ctrlBtn} onClick={onShare} title="Share">
+        <Share2 size={13} strokeWidth={1.8} />
+        Share
+      </button>
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/components/layout/TopBar.tsx
 ````typescript
 /**
@@ -28830,397 +30047,6 @@ describe("filter kind 'saved'", () => {
     expect(result).toHaveLength(2)
   })
 })
-````
-
-## File: packages/web/src/pages/settings/OrganizationPage.tsx
-````typescript
-/**
- * /settings/organization — Superadmin: organization name, registration policy,
- * and system-wide defaults (language placeholder, timezone, week start).
- * Language support is deferred to Phase 10.7 — Localization & Language Support.
- */
-
-import { useState, useEffect } from 'react'
-import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-export default function OrganizationPage() {
-  const { data } = useAdminSettings()
-  const patch = usePatchAdminSettings()
-
-  const settings = data?.settings ?? {}
-  const [orgName, setOrgName] = useState('')
-  const [accentColor, setAccentColor] = useState('')
-  // Validated hex to submit — only a well-formed #RRGGBB is sent to the API.
-  const accentColorValid = accentColor === '' || /^#[0-9a-fA-F]{6}$/.test(accentColor)
-  const [regPolicy, setRegPolicy] = useState('invite_only')
-  const [timezone, setTimezone] = useState('UTC')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setOrgName(settings.instance_name || '')
-    setAccentColor(settings.accent_color || '')
-    setRegPolicy(settings.registration_policy || 'invite_only')
-    setTimezone(settings.default_timezone || 'UTC')
-    setWeekStart(settings.default_week_start || 'monday')
-  }, [JSON.stringify(settings)])
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await patch.mutateAsync({
-        instance_name: orgName,
-        // Only submit a valid hex value; empty string clears the override.
-        accent_color: accentColorValid ? accentColor : '',
-        registration_policy: regPolicy,
-        default_timezone: timezone,
-        default_week_start: weekStart,
-      })
-      setFeedback({ type: 'success', msg: 'Settings saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        System-wide identity and defaults for this draba installation.
-      </p>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Identity
-        </h3>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Organization name</Label>
-          <Input
-            value={orgName}
-            onChange={e => setOrgName(e.target.value)}
-            placeholder="My Company"
-            className="max-w-xs"
-          />
-          <p className="text-xs text-muted-foreground m-0">
-            Shown in the browser tab title and login page.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Accent color</Label>
-          <div className="flex items-center gap-3">
-            <input
-              type="color"
-              value={accentColor || '#288C9B'}
-              onChange={e => setAccentColor(e.target.value)}
-              className="h-9 w-14 rounded border border-border cursor-pointer bg-transparent"
-            />
-            <Input
-              value={accentColor}
-              onChange={e => setAccentColor(e.target.value)}
-              placeholder="#288C9B"
-              className={`max-w-[140px] font-mono text-[13px] ${!accentColorValid ? 'border-destructive' : ''}`}
-            />
-            {accentColor && (
-              <button
-                type="button"
-                onClick={() => setAccentColor('')}
-                className="text-xs text-muted-foreground hover:text-foreground cursor-pointer bg-transparent border-none"
-              >
-                Reset
-              </button>
-            )}
-          </div>
-          {!accentColorValid && (
-            <p className="text-xs text-destructive m-0">Must be a 6-digit hex color (e.g. #288C9B).</p>
-          )}
-          <p className="text-xs text-muted-foreground m-0">
-            Overrides the primary color globally. Leave blank to use the default teal.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Registration policy</Label>
-          <div className="flex gap-2">
-            {[
-              { v: 'invite_only', label: 'Invite only' },
-              { v: 'open', label: 'Open registration' },
-            ].map(({ v, label }) => (
-              <button
-                key={v}
-                onClick={() => setRegPolicy(v)}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
-                  regPolicy === v
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
-          System defaults
-        </h3>
-        <p className="text-xs text-muted-foreground mb-4">
-          Applied to new accounts when the user hasn't set their own preference.
-        </p>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default language</Label>
-          <select
-            disabled
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
-          >
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default timezone</Label>
-          <select
-            value={timezone}
-            onChange={e => setTimezone(e.target.value)}
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
-          >
-            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-      <Button onClick={handleSave} disabled={patch.isPending}>
-        {patch.isPending ? 'Saving…' : 'Save settings'}
-      </Button>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
- */
-
-import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
-
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
-
-const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
-
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-  const { theme: currentTheme, applyTheme } = useDarkMode()
-
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-    const savedTheme = prefMap['theme'] as string | undefined
-    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
-  }, [JSON.stringify(prefMap)])
-
-  function handleThemeChange(t: 'light' | 'dark') {
-    setTheme(t)
-    applyTheme(t)
-  }
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await Promise.all([
-        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
-        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
-        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
-        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
-      ])
-      setFeedback({ type: 'success', msg: 'Preferences saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Personal appearance and regional settings.
-      </p>
-
-      {/* Regional */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Regional
-        </h3>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Language</Label>
-          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Timezone</Label>
-          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Date format</Label>
-          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Appearance */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Appearance
-        </h3>
-        <div className="flex flex-col gap-1.5 mb-2">
-          <Label>Theme</Label>
-          <div className="flex gap-2">
-            {(['light', 'dark'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  theme === t
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground m-0">
-            Applies immediately. Persisted server-side so it syncs across devices.
-          </p>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <Button onClick={handleSave} disabled={upsert.isPending}>
-        {upsert.isPending ? 'Saving…' : 'Save preferences'}
-      </Button>
-    </div>
-  )
-}
 ````
 
 ## File: packages/api/internal/api/saved_filter_handler.go
@@ -44734,593 +45560,6 @@ export interface operations {
 }
 ````
 
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { usePreferenceMap } from '@/hooks/usePreferences';
-import { applyActiveFilter } from '@/lib/presetFilters';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-
-interface Props {
-  teamId: string;
-  /** Active timeline ID — activities are fetched scoped to this timeline. */
-  timelineId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  /**
-   * Timeline statuses — used to derive closedStatusIds and resolve status names
-   * in the filter engine. Replaces the old closedStatusIds prop.
-   */
-  timelineStatuses?: Status[];
-  /** Saved filters for the active team — evaluated by the filter engine. */
-  savedFilters?: SavedFilter[];
-  /** Team tags — used to resolve tag names in the filter engine. */
-  tags?: Tag[];
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called during a bar drag with live snapped dates — for sidebar preview. */
-  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
-  /** Called when a bar drag completes (before the PATCH fires). */
-  onBarDragEnd?: () => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
-  labelColW?: number;
-  /** Called when the user drags the label column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-}
-
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate type that carries original API fields alongside view-state. */
-export interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-  statusColorById: Map<string, string>,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-/**
- * Builds the flat GanttRow list from positioned activities, applying grouping,
- * sorting, parent→child nesting (arbitrary depth), and collapse state.
- * Exported for unit testing of the tree/collapse logic.
- */
-export function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-  collapsedParents: Set<string>,
-  collapsedGroups: Set<string>,
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    // Flat list — no parent nesting, so children are not indented.
-    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
-  }
-
-  if (groupBy === 'member') {
-    const buckets: Record<string, RichActivity[]> = {};
-    for (const ev of sorted) {
-      const key = ev.primaryMemberId ?? '__none__';
-      (buckets[key] ??= []).push(ev);
-    }
-
-    const rows: GanttRow[] = [];
-    const pushBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
-      const collapsed = collapsedGroups.has(id);
-      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
-      if (collapsed) return;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    };
-
-    for (const m of members) {
-      const evs = buckets[m.id];
-      if (!evs?.length) continue;
-      pushBucket(m.id, m.name, m.color, evs);
-    }
-    const unassigned = buckets['__none__'];
-    if (unassigned?.length) {
-      pushBucket('__none__', 'Unassigned', 'var(--muted-foreground)', unassigned);
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    // Build a parent→children index, then emit rows via depth-first traversal so
-    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
-    // has no parent or its parent fell outside the current view.
-    const byId = new Map(sorted.map(a => [a.id, a]));
-    const childrenByParent = new Map<string, RichActivity[]>();
-    const roots: RichActivity[] = [];
-    for (const ev of sorted) {
-      const pid = ev.parentActivityId;
-      if (pid && byId.has(pid)) {
-        const list = childrenByParent.get(pid) ?? [];
-        list.push(ev);
-        childrenByParent.set(pid, list);
-      } else {
-        roots.push(ev);
-      }
-    }
-
-    const rows: GanttRow[] = [];
-    const seen = new Set<string>();   // emitted into rows (also guards cycles)
-    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
-
-    // Recursively mark a collapsed node's descendants as hidden so the leftover
-    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
-    const markHidden = (ev: RichActivity) => {
-      if (hidden.has(ev.id)) return;
-      hidden.add(ev.id);
-      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
-    };
-
-    const visit = (ev: RichActivity, depth: number) => {
-      if (seen.has(ev.id)) return;
-      seen.add(ev.id);
-      const kids = childrenByParent.get(ev.id) ?? [];
-      const hasChildren = kids.length > 0;
-      const collapsed = collapsedParents.has(ev.id);
-      rows.push({
-        kind: 'activity',
-        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
-      });
-      if (!hasChildren) return;
-      if (collapsed) for (const k of kids) markHidden(k);
-      else for (const k of kids) visit(k, depth + 1);
-    };
-
-    for (const r of roots) visit(r, 0);
-    // Safety net: emit any activity unreachable from a root (e.g. a parent-
-    // pointer cycle where no node qualifies as a root) at depth 0, but never
-    // resurrect a node intentionally hidden under a collapsed ancestor.
-    for (const ev of sorted) {
-      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
-    }
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-/**
- * Returns only the activities whose status is not in closedStatusIds.
- * Extracted as a named export so the 'open' filter preset logic can be
- * unit-tested without mounting the full component.
- */
-export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
-  activities: T[],
-  closedStatusIds: Set<string>,
-): T[] {
-  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-}
-
-export default function GanttView({
-  teamId,
-  timelineId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  timelineStatuses,
-  savedFilters,
-  tags,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onBarDragProgress,
-  onBarDragEnd,
-  onMembersLoaded,
-  onSelectApiActivity,
-  labelColW,
-  onLabelColWChange,
-}: Props) {
-  const queryClient = useQueryClient();
-  const updateActivity = useUpdateActivity(timelineId);
-  const today = todayMidnight();
-
-  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
-  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
-  // activities (member grouping). Both persist across re-renders and view tweaks.
-  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-
-  const toggleParent = useCallback((id: string) => {
-    setCollapsedParents(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const toggleGroup = useCallback((id: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  const globalPrefs = usePreferenceMap();
-  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
-  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
-  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
-  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
-  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
-  const closedStatusIds = useMemo(
-    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-
-  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
-  const memberIdsByUserId = useMemo(() => {
-    const m = new Map<string, string[]>();
-    apiMembers.forEach(member => {
-      if (member.userId) {
-        const existing = m.get(member.userId) ?? [];
-        m.set(member.userId, [...existing, member.id]);
-      }
-    });
-    return m;
-  }, [apiMembers]);
-
-  const visibleActivities = useMemo(() => applyActiveFilter(
-    apiActivities,
-    activeFilter,
-    memberIdsByUserId,
-    {
-      closedStatusIds,
-      savedFilters: savedFilters ?? [],
-      statuses: statusesByTimeline,
-      tags: tags ?? [],
-    },
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
-
-  const statusColorById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
-    [timelineStatuses],
-  );
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    const patch = {
-      startAt: newStartDate.toISOString(),
-      endAt: newEndDate.toISOString(),
-    };
-
-    // Synchronously update the cache so the bar doesn't flash back to old
-    // position when GanttGrid clears its drag state in the same render cycle.
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-    );
-
-    // Push updated activity to the sidebar so it shows new dates immediately
-    // instead of the stale snapshot from when the activity was selected.
-    if (onSelectApiActivity) {
-      const updated = apiActivities.find(a => a.id === activityId);
-      if (updated) onSelectApiActivity({ ...updated, ...patch });
-    }
-
-    onBarDragEnd?.();
-    updateActivity.mutate({ activityId, patch });
-  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={onLaneDrag}
-        onBarDrag={handleBarDrag}
-        onBarDragProgress={onBarDragProgress}
-        resolvedGranularity={resolvedGranularity}
-        onClearFilters={filtersActive ? () => {} : undefined}
-        labelColW={labelColW}
-        onLabelColWChange={onLabelColWChange}
-        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
-        onToggleGroup={groupBy === 'member' ? toggleGroup : undefined}
-      />
-    </div>
-  );
-}
-````
-
 ## File: packages/shared/openapi.yaml
 ````yaml
 openapi: "3.0.3"
@@ -48718,6 +48957,627 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
+import { applyActiveFilter } from '@/lib/presetFilters';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+
+interface Props {
+  teamId: string;
+  /** Active timeline ID — activities are fetched scoped to this timeline. */
+  timelineId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  /**
+   * Timeline statuses — used to derive closedStatusIds and resolve status names
+   * in the filter engine. Replaces the old closedStatusIds prop.
+   */
+  timelineStatuses?: Status[];
+  /** Saved filters for the active team — evaluated by the filter engine. */
+  savedFilters?: SavedFilter[];
+  /** Team tags — used to resolve tag names in the filter engine. */
+  tags?: Tag[];
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag completes (before the PATCH fires). */
+  onBarDragEnd?: () => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
+  labelColW?: number;
+  /** Called when the user drags the label column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+}
+
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate type that carries original API fields alongside view-state. */
+export interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+  statusId: string | null;
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+  statusColorById: Map<string, string>,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+/**
+ * Builds the flat GanttRow list from positioned activities, applying grouping,
+ * sorting, parent→child nesting (arbitrary depth), and collapse state.
+ * Exported for unit testing of the tree/collapse logic.
+ */
+export function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+  collapsedParents: Set<string>,
+  collapsedGroups: Set<string>,
+  statuses?: Status[],
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    // Flat list — no parent nesting, so children are not indented.
+    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
+  }
+
+  if (groupBy === 'member') {
+    const buckets: Record<string, RichActivity[]> = {};
+    for (const ev of sorted) {
+      const key = ev.primaryMemberId ?? '__none__';
+      (buckets[key] ??= []).push(ev);
+    }
+
+    const rows: GanttRow[] = [];
+    const pushBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
+      const collapsed = collapsedGroups.has(id);
+      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
+      if (collapsed) return;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    };
+
+    for (const m of members) {
+      const evs = buckets[m.id];
+      if (!evs?.length) continue;
+      pushBucket(m.id, m.name, m.color, evs);
+    }
+    const unassigned = buckets['__none__'];
+    if (unassigned?.length) {
+      pushBucket('__none__', 'Unassigned', 'var(--muted-foreground)', unassigned);
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    // Build a parent→children index, then emit rows via depth-first traversal so
+    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
+    // has no parent or its parent fell outside the current view.
+    const byId = new Map(sorted.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, RichActivity[]>();
+    const roots: RichActivity[] = [];
+    for (const ev of sorted) {
+      const pid = ev.parentActivityId;
+      if (pid && byId.has(pid)) {
+        const list = childrenByParent.get(pid) ?? [];
+        list.push(ev);
+        childrenByParent.set(pid, list);
+      } else {
+        roots.push(ev);
+      }
+    }
+
+    const rows: GanttRow[] = [];
+    const seen = new Set<string>();   // emitted into rows (also guards cycles)
+    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
+
+    // Recursively mark a collapsed node's descendants as hidden so the leftover
+    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
+    const markHidden = (ev: RichActivity) => {
+      if (hidden.has(ev.id)) return;
+      hidden.add(ev.id);
+      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
+    };
+
+    const visit = (ev: RichActivity, depth: number) => {
+      if (seen.has(ev.id)) return;
+      seen.add(ev.id);
+      const kids = childrenByParent.get(ev.id) ?? [];
+      const hasChildren = kids.length > 0;
+      const collapsed = collapsedParents.has(ev.id);
+      rows.push({
+        kind: 'activity',
+        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
+      });
+      if (!hasChildren) return;
+      if (collapsed) for (const k of kids) markHidden(k);
+      else for (const k of kids) visit(k, depth + 1);
+    };
+
+    for (const r of roots) visit(r, 0);
+    // Safety net: emit any activity unreachable from a root (e.g. a parent-
+    // pointer cycle where no node qualifies as a root) at depth 0, but never
+    // resurrect a node intentionally hidden under a collapsed ancestor.
+    for (const ev of sorted) {
+      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
+    }
+    return rows;
+  }
+
+  if (groupBy === 'status') {
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = ev.statusId ?? '__no_status__';
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const rows: GanttRow[] = [];
+    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
+      const collapsed = collapsedGroups.has(id);
+      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
+      if (collapsed) return;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    };
+
+    if (statuses) {
+      for (const s of statuses) {
+        const evs = buckets.get(s.id);
+        if (!evs?.length) continue;
+        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
+      }
+    }
+    const noStatus = buckets.get('__no_status__');
+    if (noStatus?.length) {
+      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
+    }
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+/**
+ * Returns only the activities whose status is not in closedStatusIds.
+ * Extracted as a named export so the 'open' filter preset logic can be
+ * unit-tested without mounting the full component.
+ */
+export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
+  activities: T[],
+  closedStatusIds: Set<string>,
+): T[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
+export default function GanttView({
+  teamId,
+  timelineId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  timelineStatuses,
+  savedFilters,
+  tags,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onBarDragProgress,
+  onBarDragEnd,
+  onMembersLoaded,
+  onSelectApiActivity,
+  labelColW,
+  onLabelColWChange,
+}: Props) {
+  const queryClient = useQueryClient();
+  const updateActivity = useUpdateActivity(timelineId);
+  const today = todayMidnight();
+
+  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
+  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
+  // activities (member grouping). Both persist across re-renders and view tweaks.
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  const toggleParent = useCallback((id: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleGroup = useCallback((id: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(member => {
+      if (member.userId) {
+        const existing = m.get(member.userId) ?? [];
+        m.set(member.userId, [...existing, member.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const visibleActivities = useMemo(() => applyActiveFilter(
+    apiActivities,
+    activeFilter,
+    memberIdsByUserId,
+    {
+      closedStatusIds,
+      savedFilters: savedFilters ?? [],
+      statuses: statusesByTimeline,
+      tags: tags ?? [],
+    },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
+
+  const statusColorById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
+    [timelineStatuses],
+  );
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = visibleActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    const patch = {
+      startAt: newStartDate.toISOString(),
+      endAt: newEndDate.toISOString(),
+    };
+
+    // Synchronously update the cache so the bar doesn't flash back to old
+    // position when GanttGrid clears its drag state in the same render cycle.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+    );
+
+    // Push updated activity to the sidebar so it shows new dates immediately
+    // instead of the stale snapshot from when the activity was selected.
+    if (onSelectApiActivity) {
+      const updated = apiActivities.find(a => a.id === activityId);
+      if (updated) onSelectApiActivity({ ...updated, ...patch });
+    }
+
+    onBarDragEnd?.();
+    updateActivity.mutate({ activityId, patch });
+  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={onLaneDrag}
+        onBarDrag={handleBarDrag}
+        onBarDragProgress={onBarDragProgress}
+        resolvedGranularity={resolvedGranularity}
+        onClearFilters={filtersActive ? () => {} : undefined}
+        labelColW={labelColW}
+        onLabelColWChange={onLabelColWChange}
+        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
+        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
+      />
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/pages/DashboardPage.tsx
 ````typescript
 /**
@@ -48788,6 +49648,8 @@ function DashboardShell() {
   // Gantt label-column width — held here so it survives switching to another
   // view and back (GanttView unmounts on view change, which would reset it).
   const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
+  // Close the detail sidebar when switching to list view (edits are inline there)
+  const prevView = useRef<ViewMode>('gantt')
   const [profileOpen, setProfileOpen] = useState(false)
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
   const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
@@ -48809,6 +49671,8 @@ function DashboardShell() {
   // Incremented seq lets ListView know a new toggle has arrived
   const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
   const listColToggleSeq = useRef(0)
+  // Incremented to trigger inline row creation in list view
+  const [listNewRowSeq, setListNewRowSeq] = useState(0)
   const profileRef = useRef<HTMLDivElement>(null)
   // Preference persistence
   const upsert = useUpsertPreference()
@@ -48828,6 +49692,16 @@ function DashboardShell() {
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
+
+  // Close the detail sidebar when switching to list view (list edits are inline).
+  useEffect(() => {
+    if (view === 'list' && prevView.current !== 'list') {
+      setSelectedActivityId(null)
+      setSelectedApiActivity(null)
+      setCreateDefaults(null)
+    }
+    prevView.current = view
+  }, [view])
 
   // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
   useEffect(() => {
@@ -49065,7 +49939,11 @@ function DashboardShell() {
           const today = new Date().toISOString().slice(0, 10)
           setSelectedActivityId(null)
           setSelectedApiActivity(null)
-          setCreateDefaults({ start: today, end: today, memberId: null })
+          if (view === 'list') {
+            setListNewRowSeq(s => s + 1)
+          } else {
+            setCreateDefaults({ start: today, end: today, memberId: null })
+          }
         }}
         activeTeam={activeTeam}
         activeTeams={activeTeams}
@@ -49088,7 +49966,7 @@ function DashboardShell() {
           onViewChange={setView}
           onOpenFilterManager={() => setFilterModalOpen(true)}
           rightSlot={
-            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
+            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
               <button
                 onClick={() => setProfileOpen(o => !o)}
                 style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
@@ -49253,6 +50131,7 @@ function DashboardShell() {
               }}
               onMembersLoaded={setGanttMembers}
               onColumnsChange={setListColumns}
+              triggerNewRow={listNewRowSeq}
             />
           ) : view === 'list' && (!teamId || !activeTimelineId) ? (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -51221,6 +52100,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
 | 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | 🔄 In Progress |
+| 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ⬜ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
@@ -52509,6 +53389,34 @@ Deliberately **not** a power-user database grid: no virtualization (our timeline
 - Sorting by a column header reorders rows without losing selection
 - Group-by and Color-by controls work and persist per-timeline
 - Find bar highlights matching rows the same way it highlights bars in Gantt
+
+---
+
+### Phase 11.1.1 — Timezone-Safe Activity Dates
+**Status:** ⬜ | **Effort:** S–M (0.5–1 day)
+
+Activity start/end dates render one calendar day early for any user in a timezone behind UTC (e.g. `America/Denver`, −6): a date stored as `2026-05-31T00:00:00Z` shows as "May 30" in the List Start/End cells and Gantt labels, while the date *picker* correctly shows `2026-05-31`. The List/Gantt date pickers were unusable for a separate reason (a column-index bug, fixed during 11.1); this phase fixes the underlying timezone skew that remains.
+
+**Root cause:**
+`startAt`/`endAt` are `format: date-time` (RFC3339 instants) in the schema, but the app uses them as **calendar dates** — every write sends `${date}T00:00:00Z` and every edit reads `iso.slice(0,10)`, so the *storage and edit* paths are UTC-consistent. The defect is on the **display and positioning** paths, which do `new Date(iso)` and then read **local** components (`toLocaleDateString`, `getFullYear/Month/Date`, `setHours`). Midnight-UTC collapses to the previous local day for negative-offset zones.
+
+**Approach — Option A (treat all activity dates as all-day / calendar dates):**
+Format and position all activity `startAt`/`endAt` in **UTC** (no local conversion). This matches today's UI, which has no time-of-day editor — every activity is effectively all-day. The schema's `allDay` flag is **not** branched on yet; leave a `// TODO: branch on allDay when timed events ship (Phase 15 calendar sync)` marker where the formatter is chosen. Genuine timestamps (createdAt/updatedAt, member joinedAt, invite dates) stay in local time.
+
+**Scope:**
+- *Shared date module* (new, e.g. `packages/web/src/lib/activityDates.ts`): single source of truth — `formatActivityDate(iso, fmt)` using UTC components, `parseActivityDateUTC(iso): Date` for positioning math. Keep existing `toDateInput` (slice) / `toISODate` (`T00:00:00Z`) — already correct. Note: `hooks/useFormatDate.ts`'s `formatDate` uses local getters (`getFullYear/getMonth/getDate`) — that's the core defect for activity dates; route activity dates through the UTC formatter rather than changing the timestamp-oriented hook.
+- *List view:* `ListView.tsx` `formatDate` → UTC formatter for **Start/End cells only**. The same helper is reused by the **Created/Updated** cells, which are real timestamps and must stay local — keep those on the local path.
+- *Gantt labels:* `GanttGrid.tsx:184` and `granularity.ts:105–116` (`toLocaleDateString`).
+- *Gantt positioning (highest-risk piece):* events are parsed as UTC midnight (`GanttView.tsx:135–136` `new Date(toDateOnly(...))`) but the column axis is built in **local** time (`granularity.ts` `setHours(0,0,0,0)`, `new Date(y,m,1)`, `getDate()`, `setDate`) and the today marker (`GanttView.tsx:87` `todayMidnight()`) is local — so events map onto a local axis with UTC dates, shifting bars ~a day at boundaries. Pick **one basis (UTC)** for the axis, today marker, and event parsing together.
+- *Not this phase:* `allDay`-branching for timed events (deferred to Phase 15); backend emitting CalDAV `DATE` vs `DATE-TIME` (Phase 15 concern — backend stores/echoes RFC3339 verbatim and needs no change for the display bug).
+
+**Exit criteria — safe to pause when:**
+- A `TZ=America/Denver` test run (Vitest honors `process.env.TZ`) asserts a midnight-UTC date renders on the **same** calendar day — guards against silent regression
+- List Start/End cells show the same calendar day as their date picker, in a negative-offset timezone
+- Created/Updated cells still render in local time (unchanged)
+- Gantt day/week/month labels match the List dates for the same activity
+- Gantt bars sit on the correct day in a negative-offset timezone (axis, today marker, and event positions all on a UTC basis)
+- Round-trip holds: open a date picker, save unchanged, and the displayed date does not shift
 
 ---
 
