@@ -13,6 +13,7 @@ import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
 import { useTeamMembers } from '@/hooks/useTeamActivities'
 import { useSavedFilters } from '@/hooks/useSavedFilters'
 import { useAuth } from '@/contexts/AuthContext'
+import { filterColor } from '@/lib/filterColors'
 
 interface Props {
   teamId?: string
@@ -57,12 +58,17 @@ function activeLabel(
   return saved.find(s => s.id === active.id)?.name ?? 'Saved filter'
 }
 
-function activeMemberColor(
+function activeDotColor(
   active: ActiveFilter,
   members: { userId: string; color?: string | null }[],
+  saved: { id: string }[],
 ): string | null {
-  if (active.kind !== 'member') return null
-  return members.find(m => m.userId === active.userId)?.color ?? null
+  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.color ?? null
+  if (active.kind === 'saved') {
+    const s = saved.find(f => f.id === active.id)
+    return s ? filterColor(s.id) : null
+  }
+  return null
 }
 
 // ── Sub-components ───────────────────────────────────────────────────────────
@@ -213,7 +219,7 @@ export default function FilterDropdown({ teamId = '', onOpenManager }: Props) {
 
   const membersWithUser = members.filter(hasUserId)
   const label = activeLabel(activeFilter, membersWithUser, saved)
-  const memberDotColor = activeMemberColor(activeFilter, membersWithUser)
+  const triggerDotColor = activeDotColor(activeFilter, membersWithUser, saved)
   const currentUserId = (user as { id?: string } | null)?.id ?? ''
 
   // Partition saved filters: team-promoted vs. user's own personal
@@ -265,9 +271,9 @@ export default function FilterDropdown({ teamId = '', onOpenManager }: Props) {
           transition: 'all 0.12s',
         }}
       >
-        {/* Icon: colored dot when a member filter is active, otherwise Filter icon */}
-        {memberDotColor && !isDefaultFilter ? (
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: memberDotColor, flexShrink: 0 }} />
+        {/* Icon: colored dot when a non-preset filter is active, otherwise Filter icon */}
+        {triggerDotColor && !isDefaultFilter ? (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: triggerDotColor, flexShrink: 0 }} />
         ) : (
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: 'var(--muted-foreground)' }}>
             <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
@@ -343,6 +349,7 @@ export default function FilterDropdown({ teamId = '', onOpenManager }: Props) {
                 return (
                   <ItemRow
                     key={s.id}
+                    dotColor={filterColor(s.id)}
                     label={s.name}
                     active={isSelected(f)}
                     onClick={() => select(f)}
@@ -362,6 +369,7 @@ export default function FilterDropdown({ teamId = '', onOpenManager }: Props) {
                 return (
                   <ItemRow
                     key={s.id}
+                    dotColor={filterColor(s.id)}
                     label={s.name}
                     active={isSelected(f)}
                     onClick={() => select(f)}

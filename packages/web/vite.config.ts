@@ -40,6 +40,7 @@ export default defineConfig(({ mode }) => {
         '/statuses': { target: apiTarget, changeOrigin: true },
         '/activities': { target: apiTarget, changeOrigin: true },
         '/tags': { target: apiTarget, changeOrigin: true },
+        '/saved_filters': { target: apiTarget, changeOrigin: true },
         '/events': { target: apiTarget, changeOrigin: true },
         '/health': { target: apiTarget, changeOrigin: true },
         '/ws': {

@@ -24,6 +24,7 @@ import {
   Filter, X, Plus, ArrowLeft, Eye, Pencil, Trash2, Copy,
   Globe, Lock, Users, AlertCircle, ArrowUp, Search, Check,
 } from 'lucide-react'
+import { filterColor } from '@/lib/filterColors'
 
 type SavedFilter = components['schemas']['SavedFilter']
 
@@ -44,16 +45,6 @@ function makeBlank(): FilterCondition {
   return { field: 'title', op: 'contains', value: '' }
 }
 
-function summarize(filter: SavedFilter): string {
-  try {
-    const def = JSON.parse(filter.definition) as FilterDefinition
-    if (!def.conditions?.length) return ''
-    const sep = def.logic === 'or' ? ' or ' : ' and '
-    return def.conditions
-      .map(c => `${c.field} ${String(c.op).replace(/_/g, ' ')}`)
-      .join(sep)
-  } catch { return '' }
-}
 
 function parseDraft(filter: SavedFilter): { logic: 'and' | 'or'; conditions: FilterCondition[] } {
   try {
@@ -168,7 +159,7 @@ function FilterRow({
 }: FilterRowProps) {
   const [hovered, setHovered] = useState(false)
   const [confirmDel, setConfirmDel] = useState(false)
-  const summary = summarize(filter)
+  const color = filterColor(filter.id)
   // member-admin always shows actions; others reveal on hover
   const showActions = context === 'member-admin' || hovered
 
@@ -178,7 +169,7 @@ function FilterRow({
       onMouseLeave={() => { setHovered(false); setConfirmDel(false) }}
       style={{
         display: 'flex',
-        alignItems: 'flex-start',
+        alignItems: 'center',
         gap: 10,
         padding: '10px 12px',
         borderRadius: 8,
@@ -187,7 +178,7 @@ function FilterRow({
         transition: 'background 0.08s, border-color 0.08s',
       }}
     >
-      {/* Icon tile */}
+      {/* Icon tile — color derived from filter ID */}
       <div style={{
         width: 28,
         height: 28,
@@ -196,15 +187,14 @@ function FilterRow({
         alignItems: 'center',
         justifyContent: 'center',
         flexShrink: 0,
-        background: filter.isTeamFilter ? 'rgba(40,140,155,.1)' : 'var(--muted)',
-        border: `1px solid ${filter.isTeamFilter ? 'rgba(40,140,155,.25)' : 'var(--border)'}`,
-        color: filter.isTeamFilter ? 'var(--primary)' : 'var(--muted-foreground)',
-        marginTop: 1,
+        background: `${color}20`,
+        border: `1px solid ${color}50`,
+        color,
       }}>
         <Filter size={12} strokeWidth={1.8} />
       </div>
 
-      {/* Content */}
+      {/* Name + pill */}
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
           <span style={{
@@ -224,77 +214,48 @@ function FilterRow({
             </span>
           )}
         </div>
-        {summary && (
-          <div style={{
-            fontSize: 11,
-            color: 'var(--muted-foreground)',
-            marginTop: 2,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}>
-            {summary}
-          </div>
-        )}
+      </div>
 
-        {/* Actions */}
-        {!confirmDel && (
-          <div style={{
-            display: 'flex',
-            gap: 5,
-            marginTop: 6,
-            flexWrap: 'wrap',
-            opacity: showActions ? 1 : 0,
-            transition: 'opacity 0.1s',
-          }}>
-            {context === 'member-admin' && (
+      {/* Right-side actions — revealed on hover */}
+      {confirmDel ? (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+          <button onClick={() => setConfirmDel(false)} style={BTN}>Cancel</button>
+          <button
+            onClick={() => { setConfirmDel(false); onDelete?.() }}
+            style={{ ...BTN, background: 'var(--destructive)', color: 'white', border: 'none' }}
+          >
+            Delete
+          </button>
+        </div>
+      ) : (
+        <div style={{
+          display: 'flex',
+          gap: 5,
+          flexShrink: 0,
+          alignItems: 'center',
+          opacity: showActions ? 1 : 0,
+          transition: 'opacity 0.1s',
+        }}>
+          {context === 'member-admin' && (
+            <>
+              <button onClick={onView} style={ICON_BTN} title="View filter">
+                <Eye size={12} strokeWidth={1.8} />
+              </button>
+              <button onClick={onPromote} style={BTN_PROMOTE}>
+                <ArrowUp size={11} strokeWidth={2} />
+                Promote to team
+              </button>
+            </>
+          )}
+          {context === 'team' && (
+            isAdmin ? (
               <>
-                <button onClick={onView} style={ICON_BTN} title="View filter">
-                  <Eye size={12} strokeWidth={1.8} />
-                </button>
-                <button onClick={onPromote} style={BTN_PROMOTE}>
-                  <ArrowUp size={11} strokeWidth={2} />
-                  Promote to team
-                </button>
-              </>
-            )}
-            {context === 'team' && (
-              isAdmin ? (
-                <>
-                  <button onClick={onEdit} style={ICON_BTN} title="Edit">
-                    <Pencil size={12} strokeWidth={1.8} />
-                  </button>
-                  <button onClick={onDemote} style={ICON_BTN} title="Remove from team">
-                    <Lock size={12} strokeWidth={1.8} />
-                  </button>
-                  <button
-                    onClick={() => setConfirmDel(true)}
-                    style={{ ...ICON_BTN, color: 'var(--destructive)' }}
-                    title="Delete"
-                  >
-                    <Trash2 size={12} strokeWidth={1.8} />
-                  </button>
-                </>
-              ) : (
-                <button onClick={onView} style={ICON_BTN} title="View filter">
-                  <Eye size={12} strokeWidth={1.8} />
-                </button>
-              )
-            )}
-            {context === 'mine' && (
-              <>
-                <button onClick={onDuplicate} style={ICON_BTN} title="Duplicate">
-                  <Copy size={12} strokeWidth={1.8} />
-                </button>
                 <button onClick={onEdit} style={ICON_BTN} title="Edit">
                   <Pencil size={12} strokeWidth={1.8} />
                 </button>
-                {isAdmin && (
-                  <button onClick={onPromote} style={BTN_PROMOTE}>
-                    <ArrowUp size={11} strokeWidth={2} />
-                    Promote
-                  </button>
-                )}
+                <button onClick={onDemote} style={ICON_BTN} title="Remove from team">
+                  <Lock size={12} strokeWidth={1.8} />
+                </button>
                 <button
                   onClick={() => setConfirmDel(true)}
                   style={{ ...ICON_BTN, color: 'var(--destructive)' }}
@@ -303,25 +264,37 @@ function FilterRow({
                   <Trash2 size={12} strokeWidth={1.8} />
                 </button>
               </>
-            )}
-          </div>
-        )}
-
-        {confirmDel && (
-          <div style={{ display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' }}>
-            <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flex: 1 }}>
-              Delete "{filter.name}"?
-            </span>
-            <button onClick={() => setConfirmDel(false)} style={BTN}>Cancel</button>
-            <button
-              onClick={() => { setConfirmDel(false); onDelete?.() }}
-              style={{ ...BTN, background: 'var(--destructive)', color: 'white', border: 'none' }}
-            >
-              Delete
-            </button>
-          </div>
-        )}
-      </div>
+            ) : (
+              <button onClick={onView} style={ICON_BTN} title="View filter">
+                <Eye size={12} strokeWidth={1.8} />
+              </button>
+            )
+          )}
+          {context === 'mine' && (
+            <>
+              <button onClick={onDuplicate} style={ICON_BTN} title="Duplicate">
+                <Copy size={12} strokeWidth={1.8} />
+              </button>
+              <button onClick={onEdit} style={ICON_BTN} title="Edit">
+                <Pencil size={12} strokeWidth={1.8} />
+              </button>
+              {isAdmin && (
+                <button onClick={onPromote} style={BTN_PROMOTE}>
+                  <ArrowUp size={11} strokeWidth={2} />
+                  Promote
+                </button>
+              )}
+              <button
+                onClick={() => setConfirmDel(true)}
+                style={{ ...ICON_BTN, color: 'var(--destructive)' }}
+                title="Delete"
+              >
+                <Trash2 size={12} strokeWidth={1.8} />
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -563,7 +536,6 @@ export default function FilterManageModal({
         zIndex: 1000,
         padding: 24,
       }}
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
       <div
         style={{
