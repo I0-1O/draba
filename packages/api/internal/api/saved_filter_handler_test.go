@@ -361,6 +361,55 @@ func TestDeleteSavedFilter_AdminCanDeleteTeamFilter(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, wDel.Code)
 }
 
+// TestCreateSavedFilter_NonAdminCannotCreateAsTeamFilter checks that a
+// non-admin member cannot create a filter with isTeamFilter=true.
+func TestCreateSavedFilter_NonAdminCannotCreateAsTeamFilter(t *testing.T) {
+	srv, aliceToken, teamID := savedFilterTestSetup(t)
+	bobToken := addTeamMember(t, srv, aliceToken, teamID, "bob7@savedfilter.com", "Bob7")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/saved_filters", teamID),
+		map[string]any{"name": "Sneaky", "definition": "{}", "isTeamFilter": true}, bobToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// TestListAllTeamSavedFilters_AdminSuccess checks that an admin can list all
+// filters in the team (including other members' private filters).
+func TestListAllTeamSavedFilters_AdminSuccess(t *testing.T) {
+	srv, aliceToken, teamID := savedFilterTestSetup(t)
+	bobToken := addTeamMember(t, srv, aliceToken, teamID, "bob8@savedfilter.com", "Bob8")
+
+	// Alice (admin) creates one filter; Bob creates a private one.
+	for _, pair := range []struct{ tok, name string }{
+		{aliceToken, "alice-private"},
+		{bobToken, "bob-private"},
+	} {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/saved_filters", teamID),
+			map[string]any{"name": pair.name, "definition": "{}"}, pair.tok))
+		require.Equal(t, http.StatusCreated, w.Code)
+	}
+
+	// Admin list-all should return both.
+	wList := httptest.NewRecorder()
+	srv.ServeHTTP(wList, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/saved_filters/all", teamID), nil, aliceToken))
+	require.Equal(t, http.StatusOK, wList.Code, "body: %s", wList.Body)
+	var list []map[string]any
+	require.NoError(t, json.NewDecoder(wList.Body).Decode(&list))
+	assert.Len(t, list, 2)
+}
+
+// TestListAllTeamSavedFilters_NonAdminForbidden checks that a non-admin member
+// cannot access the list-all endpoint.
+func TestListAllTeamSavedFilters_NonAdminForbidden(t *testing.T) {
+	srv, aliceToken, teamID := savedFilterTestSetup(t)
+	bobToken := addTeamMember(t, srv, aliceToken, teamID, "bob9@savedfilter.com", "Bob9")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/saved_filters/all", teamID), nil, bobToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
 // TestDeleteSavedFilter_NonAdminCannotDeleteOthersTeamFilter checks that a
 // regular member cannot delete a team filter they don't own.
 func TestDeleteSavedFilter_NonAdminCannotDeleteOthersTeamFilter(t *testing.T) {

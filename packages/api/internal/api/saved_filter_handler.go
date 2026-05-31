@@ -137,10 +137,10 @@ func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request)
 
 	isOwner := filter.UserID == claims.UserID
 
-	// Name and definition can be updated by:
-	//   • The filter owner (any role)
-	//   • A team admin, but only when the filter is already a team filter
-	//     (admins promote first, then edit).
+	// Name and definition can be updated by the owner or by a team admin, but
+	// only after the filter has been promoted. This prevents admins from silently
+	// editing a member's private filter before they decide to share it — promotion
+	// is the explicit consent step.
 	wantsNameOrDef := req.Name != nil || req.Definition != nil
 	if wantsNameOrDef && !isOwner {
 		if !isAdmin || !filter.IsTeamFilter {
@@ -163,8 +163,9 @@ func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request)
 		}
 		filter.Definition = *req.Definition
 	}
-	// Only admins may promote/demote isTeamFilter (on any filter in the team,
-	// regardless of ownership — this is how personal filters get promoted).
+	// Only admins may promote or demote isTeamFilter — setting it back to false
+	// is just as impactful as promoting, since it silently removes the filter
+	// from all members' views.
 	if req.IsTeamFilter != nil {
 		if !isAdmin {
 			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can change team filter status")

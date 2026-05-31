@@ -2647,7 +2647,7 @@ paths:
                   type: string
                 isTeamFilter:
                   type: boolean
-                  description: When true, visible to all team members (admin-only to set true).
+                  description: Promotes or demotes team visibility. Admin-only — both setting true and reverting to false require admin role.
       responses:
         "200":
           description: Updated saved filter.

@@ -1279,6 +1279,17 @@ Makes the filter system fully operational. Today only the "Open only" preset act
 - "Manage filters" link at bottom of dropdown opens `FilterManagePanel.tsx` in the right sidebar
 - Management panel: lists user's filters + team filters; edit/delete buttons; admins see "Promote to team" on user filters
 
+*API — admin list-all:*
+- `GET /teams/{id}/saved_filters/all` — admin-only endpoint that returns all filters for a team (both private and team-scoped). Enables the admin "Members" tab in the management modal.
+
+*Web — additional filter fields:*
+- `FilterConditionRow.tsx` includes `progress` and `hasParent` fields (not in the original spec but prerequisite for a complete filter builder given that these fields were shipped in 10.4.5). `filterEngine.ts` already evaluates both.
+
+*Web — UX polish included in scope:*
+- Selecting an activity is auto-cleared when the active filter changes (avoids showing a detail panel for a now-hidden row).
+- Active filter resets to "all" when the user switches timelines (prevents stale filter state).
+- `FilterManageModal.tsx` replaces the planned `FilterManagePanel.tsx` sidebar with a single dialog that consolidates create/edit/duplicate/promote/demote flows and an admin "Members" tab for browsing all team members' filters.
+
 *Forward compatibility:*
 - Shared views (Phase 13) will reference saved filters by ID — the `saved_filters` table and team-scoping design support this
 - Exports (Phase 14) will accept a filter ID to scope exported data

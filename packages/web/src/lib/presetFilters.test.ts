@@ -210,4 +210,22 @@ describe("filter kind 'saved'", () => {
     const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
     expect(result).toHaveLength(2)
   })
+
+  it('returns all activities when saved filter definition is invalid JSON', () => {
+    const badFilter: SavedFilter = {
+      id: 'sf-bad',
+      teamId: 'team-1',
+      userId: 'user-1',
+      name: 'Broken',
+      isTeamFilter: false,
+      definition: 'NOT VALID JSON }{',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }
+    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
+    const ctx = { ...baseCtx, savedFilters: [badFilter] }
+    const filter: ActiveFilter = { kind: 'saved', id: 'sf-bad' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
+    expect(result).toHaveLength(2)
+  })
 })
