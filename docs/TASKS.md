@@ -1004,20 +1004,71 @@ Full filter system: filter definition language, client-side engine, all 6 preset
 Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
 
 **Infrastructure:**
-- [ ] Extend `ViewMode` to `'gantt' | 'list' | 'calendar' | 'kanban'`
-- [ ] View switcher control in the timeline sub-toolbar; per-timeline persisted via existing preferences (8.4)
-- [ ] View-specific toolbar slots so each view contributes its own controls
+- [x] `ViewMode` already defined as `'gantt' | 'list' | 'calendar' | 'kanban'` in TopBar.tsx — 2026-05-31
+- [x] View switcher control in TopBar; per-timeline view mode persisted via preferences (key: `view_mode`) — 2026-05-31
+- [x] View-specific toolbar slots — GanttToolbar shown for gantt, ListToolbar shown for list — 2026-05-31
 
-**List view:**
-- [ ] Virtualized table (TanStack Virtual or react-virtual) — must handle 1000+ rows smoothly
-- [ ] Default columns: Title, Start, End, Duration, Status, Assignees, Tags, Parent
-- [ ] Column show/hide menu; column reorder via drag; resizable widths — persisted via preferences (new prefs keys)
-- [ ] Sort by clicking a column header (single-column sort for v1)
-- [ ] Density toggle (Comfortable / Compact)
-- [ ] Inline edit for title, dates, status; Tab / Shift+Tab / Enter cell navigation
-- [ ] Row click (off editable cell) opens existing `EventDetailPanel`
-- [ ] Bulk selection via checkbox column; contextual bulk-action bar (archive / delete / status-change)
-- [ ] Find bar (8.5) highlights matching rows in List view
+**Dependencies installed:**
+- [x] `@tanstack/react-table@^8.21.3` — headless table (column visibility/order/sizing/pinning/sorting) — 2026-05-31
+- [x] `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` — column drag-reorder — 2026-05-31
+
+**ListToolbar (`components/list/ListToolbar.tsx`):**
+- [x] Columns menu (hide/show all columns via checkbox list) — 2026-05-31
+- [x] Density toggle (Comfortable / Compact) — 2026-05-31
+- [x] Group by (None / Member / Parent activity / Status) — 2026-05-31
+- [x] Sort by (Start date / End date / Title / Status / Progress) — 2026-05-31
+- [x] Color by (Activity / Member / Status) — 2026-05-31
+- [x] Export + Share stubs — 2026-05-31
+
+**ListView (`components/list/ListView.tsx`):**
+- [x] TanStack Table v8 with column visibility, order, sizing, pinning (Title always pinned left) — 2026-05-31
+- [x] Default columns: Title, Start, End, Duration, Status, Assignees, Tags (hidden: Progress, Parent, Description, Location, URL, Created, Updated) — 2026-05-31
+- [x] Column hide/show via toolbar Columns menu (pendingColumnToggle prop) — 2026-05-31
+- [x] Column drag-reorder via @dnd-kit (drag handles on column headers) — 2026-05-31
+- [x] Column resizing via TanStack's `columnResizeMode: 'onChange'` — 2026-05-31
+- [x] Column config (order/hidden/widths) persisted per-timeline via `list_columns` preference key — 2026-05-31
+- [x] Single-column sort by clicking column header (sort indicator arrow) — 2026-05-31
+- [x] Density toggle changes row height (comfortable: 40px, compact: 32px) and persists — 2026-05-31
+- [x] Keyboard navigation: Arrow keys move selection, Enter/F2 enters edit mode, Esc cancels, Tab/Shift+Tab commit+move horizontal, Enter in edit commits+moves down — 2026-05-31
+- [x] Inline editing: Title (text), Start (date), End (date), Description/Location/URL (text), Progress (number) — 2026-05-31
+- [x] Status cell: click to open StatusPicker popover with color pills — 2026-05-31
+- [x] Assignees cell: read-only display with member Badges (up to 4 + overflow count) — 2026-05-31
+- [x] Tags cell: read-only display with colored tag pills (up to 3 + overflow count) — 2026-05-31
+- [x] Progress cell: read-only mini progress bar + percentage — 2026-05-31
+- [x] Duration cell: computed from start/end dates (read-only) — 2026-05-31
+- [x] PATCH mutations via useUpdateActivity with optimistic updates — 2026-05-31
+- [x] Group-by: None / Member / Parent / Status with collapsible group header rows — 2026-05-31
+- [x] Color-by: left border stripe per row (activity color / primary member color / status color) — 2026-05-31
+- [x] Group-by/Color-by/Sort-by/Density persisted per-timeline in DashboardPage (keys: `list_group_by`, `list_color_by`, `list_sort_by`, `list_density`) — 2026-05-31
+- [x] Find bar highlights: matching rows amber outline, non-matching rows dimmed 30%, active match stronger outline — 2026-05-31
+- [x] Active filter applied (applyActiveFilter) — all 6 presets + member + saved filter kinds — 2026-05-31
+- [x] Row click opens ActivityDetailPanel; Space in selection mode opens detail panel — 2026-05-31
+- [x] Title column sticky left with box-shadow separator — 2026-05-31
+
+**DashboardPage wiring:**
+- [x] List toolbar state (listGroupBy, listSortBy, listColorBy, listDensity) in DashboardPage — 2026-05-31
+- [x] List toolbar state restored from per-timeline preferences on timeline switch — 2026-05-31
+- [x] List toolbar state saved to per-timeline preferences on change — 2026-05-31
+- [x] ListView rendered when view === 'list' with correct props — 2026-05-31
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-31
+- [x] `go test ./...` passes (135 tests) — 2026-05-31
+- [x] `pnpm --filter web lint` clean — 2026-05-31
+- [x] `pnpm --filter web build` clean — 2026-05-31
+- [ ] Manual: view switcher toggles Gantt ↔ List; choice persists per timeline
+- [ ] Manual: List shows activities with default columns, respects active filter
+- [ ] Manual: hide/show columns from Columns menu; persists across reload
+- [ ] Manual: drag column headers to reorder; persists across reload
+- [ ] Manual: resize column by dragging header right edge; persists
+- [ ] Manual: density toggle changes row height; persists
+- [ ] Manual: keyboard navigation (arrows, Enter/F2, Esc, Tab)
+- [ ] Manual: inline edit Title, Start, End → switches to Gantt → change reflected
+- [ ] Manual: click Status cell → picker opens → select → pill updates
+- [ ] Manual: Title column stays visible when scrolled horizontally
+- [ ] Manual: sort by column header (click once asc, twice desc, three times off)
+- [ ] Manual: group-by and color-by controls work
+- [ ] Manual: Find bar highlights matching rows in List view
 
 ---
 

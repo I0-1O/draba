@@ -46,7 +46,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.4 | [Gantt Interaction & Activity Edit Polish](#phase-1044--gantt-interaction--activity-edit-polish) | M — 2–3 days | 🔄 |
 | 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
-| 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | ⬜ |
+| 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | 🔄 In Progress |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
@@ -1311,7 +1311,7 @@ Makes the filter system fully operational. Today only the "Open only" preset act
 ---
 
 ### Phase 11.1 — Web — List View
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** 🔄 In Progress — 2026-05-31, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
 
 A curated, inline-editable **List** view of the active timeline's activities — the surface a team lead reaches for when they'd otherwise plan in Excel or a Google Doc. Two goals: (1) edit activities like a spreadsheet (keyboard-first, quick single-cell edits, no modal round-trips), and (2) curate a *digestible* column set — hide/show/reorder columns so the whole list reads in one sitting. Ships first so the view-switcher infrastructure lands here and the later views (11.2 Calendar, 11.3 Kanban) slot in.
 

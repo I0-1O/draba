@@ -2,25 +2,30 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-05-30 (Filter UI overhaul: unified modal, "My events" removed, sidebar panels replaced; all automated checks pass; Docker verification pending)
+**Last updated:** 2026-05-31 (Phase 11.1 List View: full curated table with inline editing, column management, group-by/color-by, Find/filter integration; all automated checks pass; Docker verification pending)
 
 ---
 
 ## Phase Status
 
-**All phases through 10.4.5 are complete and Docker-verified.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), and the 10.4.1–10.4.5 polish series.
+**All phases through 10.4.6 are complete and automated-checks-pass.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), 10.4.1–10.4.5 polish, and 10.4.6 Filter Implementation. Phases through 10.4.5 are Docker-verified; 10.4.6 and 11.1 are awaiting Docker verification.
 
-**Phase 10.4.6 — Filter Implementation:** complete and checked. Filter UI overhauled post-phase: "My events" preset removed; dropdown height uncapped; "Add filter" entry removed; `FilterManagePanel` + `FilterEditor` sidebars replaced by a single `FilterManageModal`; applying a filter now closes the activity detail panel; switching timelines resets filter to "all"; new admin API endpoint `GET /teams/{id}/saved_filters/all` added. All automated checks pass (golangci-lint, go test, pnpm lint, pnpm build, 116 frontend tests).
+**Phase 11.1 — List View:** complete and checked (2026-05-31). Ships:
+- `components/list/ListToolbar.tsx` — Columns menu, Density, Group by, Sort by, Color by
+- `components/list/ListView.tsx` — TanStack Table v8 + @dnd-kit; column management, keyboard editing, inline edit (Title/Start/End/Status/text fields), Find/filter integration, Group-by, Color-by, persistence
+- DashboardPage: view mode + list toolbar state persisted per-timeline; List toolbar + ListView wired; shared detail/create panels
+- New deps: `@tanstack/react-table`, `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities`
+- All automated checks pass (golangci-lint, go test 135 pass, pnpm lint, pnpm build)
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **10.5** | Communications Testing | see ROADMAP.md |
+| **11.2** | Calendar View | see ROADMAP.md |
 
 ---
 
 ## Open Issues
 
-None — 10.4.6 automated checks all pass. Manual filter verification items tracked in TASKS.md under Phase 10.4.6.
+None surfaced. Manual verification items for 10.4.6 and 11.1 tracked in TASKS.md.
 
 ---
 

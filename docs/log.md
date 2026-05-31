@@ -2,6 +2,56 @@
 
 ---
 
+## 2026-05-31 — Phase 11.1: List View
+
+**Goal:** Ship a curated, inline-editable List view as a peer to the Gantt view, plus the view-switcher persistence infrastructure reused by 11.2/11.3.
+
+**New dependencies:**
+- `@tanstack/react-table@^8.21.3` — headless table (column visibility/order/sizing/pinning/sorting state management)
+- `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` — drag-to-reorder column headers
+
+**Frontend — `components/list/ListToolbar.tsx`:**
+- Thin sub-toolbar (same height/style as GanttToolbar) shown when `view === 'list'`
+- Columns menu: dropdown checklist of all 14 columns; toggling fires `onColumnVisibilityChange`
+- Density toggle: Comfortable (40px rows) / Compact (32px rows)
+- Group by: None / Member / Parent activity / Status
+- Sort by: Start date / End date / Title / Status / Progress
+- Color by: Activity / Member / Status
+- Export + Share stubs
+
+**Frontend — `components/list/ListView.tsx`:**
+- TanStack Table v8 used for column management (visibility, order, sizing, pinning); `Title` column pinned to left with sticky positioning + box-shadow separator
+- Column drag-reorder via `@dnd-kit` `SortableContext` on `<thead>`; drag handle grip icons on each `<th>`
+- Column resize via TanStack `columnResizeMode: 'onChange'`
+- Column config (order, hidden columns, widths) persisted per-timeline under preference key `list_columns` as `{ order, hidden, widths }` JSON blob
+- Filter integration: `applyActiveFilter` applied before rendering (all 6 presets + member + saved filter kinds)
+- Sort: default by `sortBy` prop; column header click overrides with TanStack sorting state (click once → asc, again → desc, again → none)
+- Group-by: pre-processes sorted activities into flat `DisplayRow[]` with interleaved `{kind:'group'}` header rows; collapsible via chevron toggle
+- Color-by: left 3px border stripe per row resolved to activity/member/status hex color
+- Keyboard navigation: two-mode system — selection mode (arrows navigate cells, Enter/F2 enters edit) and edit mode (Esc cancels, Tab/Shift+Tab commit+move horizontal, Enter commit+move down, typing on editable cell immediately enters edit)
+- Inline editors: `<input type="text">` for title/description/location/url, `<input type="date">` for startAt/endAt, `<input type="number">` for progress (0–100)
+- Status cell: click to open `StatusPicker` popover with color-coded status pills; selection fires `useUpdateActivity` PATCH
+- Assignees cell: read-only `<Badge>` display (up to 4, + overflow count); clicking row opens detail panel
+- Tags cell: read-only colored tag pills (up to 3, + overflow count)
+- Progress cell: mini progress bar + percentage label
+- Duration cell: computed from startAt/endAt
+- All edits go through `useUpdateActivity(timelineId)` with optimistic cache update
+- Find integration: `matchEvents` run against filtered activities, `registerMatches` called when debounced query changes; amber outline on matches, 30% opacity on non-matches, stronger outline on active match; auto-scroll to active match via `activeRowRef`
+- Empty state: single-cell spanning message when no activities
+- Column visibility external toggle via `pendingColumnToggle` prop (seq-guarded to avoid double-application)
+
+**DashboardPage updates:**
+- Imports `ListToolbar`, `ListView`, `ListGroupBy`, `ListSortBy`, `ListColorBy`, `ListDensity`, `ColumnConfig`
+- New state: `listGroupBy`, `listSortBy`, `listColorBy`, `listDensity`, `listColumns`, `listColToggle`
+- Preference restore effect extended: reads `list_group_by`, `list_sort_by`, `list_color_by`, `list_density`, `view_mode` from per-timeline prefs
+- New save effects: persist `view_mode`, `list_group_by`, `list_sort_by`, `list_color_by`, `list_density` on change
+- `ListToolbar` shown when `view === 'list'` (same pattern as `GanttToolbar` for `view === 'gantt'`)
+- `ListView` rendered in content area when `view === 'list' && teamId && activeTimelineId`; same detail/create panel shared with Gantt (selectedApiActivity, createDefaults)
+
+**Checks:** golangci-lint clean, `go test ./...` 135 tests pass, `pnpm --filter web lint` clean, `pnpm --filter web build` clean
+
+---
+
 ## 2026-05-31 — /test-phase 10.4.6
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
