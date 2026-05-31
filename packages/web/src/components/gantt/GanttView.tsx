@@ -77,17 +77,6 @@ interface Props {
   onLabelColWChange?: (w: number) => void;
 }
 
-/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
-function statusColorFromId(statusId: string | null | undefined): string {
-  if (!statusId) return '#6b7280';
-  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
-  let h = 0;
-  for (let i = 0; i < statusId.length; i++) {
-    h = statusId.charCodeAt(i) + ((h << 5) - h);
-    h |= 0;
-  }
-  return palette[Math.abs(h) % palette.length];
-}
 
 // ── Date helpers ────────────────────────────────────────────────────────────
 
@@ -140,6 +129,7 @@ function toRichActivity(
   viewEnd: Date,
   columns: ColumnDef[],
   colorBy: ColorBy,
+  statusColorById: Map<string, string>,
 ): RichActivity | null {
   const evStart = new Date(toDateOnly(ev.startAt));
   const evEnd = new Date(toDateOnly(ev.endAt));
@@ -155,7 +145,7 @@ function toRichActivity(
 
   const color =
     colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
+    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
     /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
 
   return {
@@ -471,13 +461,18 @@ export default function GanttView({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
 
+  const statusColorById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
+    [timelineStatuses],
+  );
+
   const rows: GanttRow[] = useMemo(() => {
     const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
       .filter((a): a is RichActivity => a !== null);
     return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns, collapsedParents, collapsedGroups]);
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups]);
 
   // ── Find: compute matches and register with context ───────────────────────
 

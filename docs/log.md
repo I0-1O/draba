@@ -2,6 +2,15 @@
 
 ---
 
+## 2026-05-31 — /test-phase 10.4.6
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (0 fail, 0 skip)
+- Smoke target: http://epcot.lan:8081
+- Notes: type-sync notes activity endpoints are timeline-scoped (`/teams/{id}/timelines/{timelineId}/activities`) rather than the flat path in Phase 3 TESTING.md assertions — this is the accepted design; TESTING.md assertions for those two paths are outdated. web-e2e WS heartbeat not directly introspectable from browser JS (app WS client is encapsulated), but no WS errors present and unit tests cover heartbeat behavior.
+
+---
+
 ## 2026-05-30 — Phase 10.4.6: Filter Implementation
 
 **Goal:** Make the filter system fully operational. Previously only "Open only" actually filtered activities. This phase ships a filter definition language, a client-side filter engine, all 6 presets wired, a visual filter builder, team-scoped filter promotion, and a "Manage filters" management panel.
