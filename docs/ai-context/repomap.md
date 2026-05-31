@@ -86,6 +86,7 @@ docs/
   plans/
     phase-10.4.5.md
     phase-10.4.6.md
+    phase-11.1-list-view.md
   ARCHITECTURE.md
   CONVENTIONS.md
   GreatEventToActivity.md
@@ -13863,6 +13864,262 @@ These items are NOT in scope for 10.4.6 but inform the design:
 12. Tests
 ````
 
+## File: docs/plans/phase-11.1-list-view.md
+````markdown
+# Phase 11.1 (ALT) — List View
+
+**UI name:** "List" (the user-facing view label). Internally this doc sometimes says "spreadsheet" to signal the *editing ambition* — but the toolbar button and view switcher say **List**.
+
+**Status:** 🟢 Reviewed — scope settled. All first-round decisions resolved (see [Decisions](#decisions-resolved-first-review) at the bottom): paste-fill/fill handle cut, light multi-select deferred, group/color-by mirror Gantt. Ready to promote into ROADMAP.md when we choose to schedule the phase. This is an *alternate* proposal for Phase 11.1, replacing the current ROADMAP.md plan ("List / Spreadsheet View").
+
+**Why this rewrite exists:** the original 11.1 plan reads like a generic data-grid spec ("scroll 1000+ rows smoothly," "virtualized table," bulk-edit-everything). That's the wrong center of gravity. We are not building a database admin tool. We're building the surface a team lead reaches for when they'd otherwise open Excel or a Google Doc to plan the team's work. Two goals drive everything below:
+
+1. **Edit activities like a spreadsheet** — click a cell, type, Tab to the next, Enter to commit and move down. Keyboard-first, no modal round-trips. (Quick single-cell edits — *not* Excel-grade range fills; that's what import is for.)
+2. **Curate a digestible view** — hide/show/reorder columns so a human can take in the whole list *in one sitting*. The win is a calm, readable table, not a 40-column firehose.
+
+The original "edit 1000+ records" framing is explicitly **out**. Real draba timelines are tens of activities, maybe low hundreds. We optimize for *legibility and fast single-cell edits*, not bulk mutation throughput.
+
+---
+
+## How other tools do this (research notes)
+
+Quick survey of the spreadsheet-style editing surfaces in the tools people actually use for team planning, and what's worth borrowing.
+
+### Airtable — the gold standard for "spreadsheet that's secretly a database"
+- **Keyboard model** (the part worth copying almost verbatim):
+  - Arrow keys move the *selection* between cells without entering edit mode.
+  - `Enter` or `F2` enters edit mode on the active cell; `Esc` cancels back to selection.
+  - `Tab` / `Shift+Tab` commit + move horizontally; `Enter` commits + moves down.
+  - `Cmd/Ctrl+C` / `V` copy-paste — pasting one value into a multi-cell selection fills them all.
+  - `Space` expands the active *record* (their version of our detail panel).
+  - `Shift+Enter` inserts a row below.
+- **Field (column) management:** show/hide via a "Hide fields" menu, drag to reorder, drag edge to resize. State is per-*view*, so the same data can have a "Planning" view and a "Status report" view with different columns. This per-view persistence is the key idea behind making a list "digestible."
+- Takeaway: **the selection-vs-edit-mode distinction is the whole game.** A grid that drops you straight into a text input on every click feels nothing like a spreadsheet. A grid where arrows move a highlight and Enter opens the cell *does*.
+
+### Smartsheet — "every row is a grid row, like Excel"
+- Treats data as a literal grid (vs. Airtable's record/relation model). Closer to how a non-technical planner thinks.
+- `Shift+Space` selects a whole row, `Ctrl+Space` a whole column. Drag the bottom-right corner of a cell to **fill** down/right (the Excel fill handle).
+- Takeaway: the **fill handle** and column/row selection are familiar muscle memory for Excel refugees — our exact target user. Worth having on the roadmap even if not in v1.
+
+### monday.com
+- Same data shown as grid / Gantt / Kanban / calendar / timeline — view switching over one dataset. Validates our view-switcher direction.
+- Their grid leans on colored status "pills" and inline dropdowns rather than raw text cells — editing a status is picking a swatch, not typing. We already have per-timeline statuses with colors; this maps directly.
+
+### Notion databases
+- Strength is *not* dense editing — it's the calm, low-chrome table and trivially easy hide/reorder of properties. Editing is click-to-open-cell, lighter-weight keyboard story than Airtable.
+- Takeaway: Notion proves the "digestible curated view" half of our goal can be the headline feature on its own. A clean table with great column controls is valuable even before the keyboard grid is fully Excel-grade.
+
+### Linear
+- Not a spreadsheet, but its list view nails *inline property editing without a modal*: click an assignee/status/label cell → small command-menu popover → pick → done, all keyboard-drivable. For our set-valued fields (status, assignees, tags) this popover-per-cell pattern is a better fit than a raw text input.
+
+### React implementation landscape
+- **TanStack Table v8** is the obvious headless choice: built-in state for `columnVisibility`, `columnOrder`, `columnSizing`, `columnPinning`, sorting, row selection. Headless = we render with our own shadcn/Tailwind markup and own the styling. It does *not* ship virtualization or DnD — you bolt those on only if needed.
+- **@dnd-kit/core** is the current standard for column-reorder drag (both official TanStack DnD examples use it).
+- **Virtualization** (TanStack Virtual / react-window) is available but **we likely don't need it** at our row counts — see the "no virtualization in v1" decision below.
+- A from-scratch grid (no TanStack) is viable too given our modest feature set; trade-off discussed under Open Questions.
+
+**Net synthesis for draba:** Build a *legible, curated* table (Notion's calm + per-view column config) with an *Airtable-grade keyboard editing model* (selection vs. edit mode, Tab/Enter flow, paste-fill) and *Linear-style popovers* for our set-valued fields (status/assignees/tags). Skip the "big data" machinery (virtualization, mass mutation) entirely for v1.
+
+Sources: [Airtable keyboard shortcuts](https://support.airtable.com/docs/airtable-keyboard-shortcuts), [Airtable Interface Designer](https://support.airtable.com/docs/getting-started-with-airtable-interface-designer), [Smartsheet keyboard shortcuts](https://help.smartsheet.com/articles/522200-keyboard-shortcuts), [Smartsheet vs Airtable (monday.com)](https://monday.com/blog/project-management/smartsheet-vs-airtable/), [TanStack Table column ordering](https://tanstack.com/table/v8/docs/guide/column-ordering), [TanStack Table column visibility](https://tanstack.com/table/v8/docs/guide/column-visibility), [TanStack Table column sizing](https://tanstack.com/table/v8/docs/guide/column-sizing), [DataSheetGrid (Show HN)](https://news.ycombinator.com/item?id=38228788).
+
+---
+
+## What we're actually building
+
+A **List View** — a third peer to Gantt (and the later Calendar/Kanban), reachable from the view switcher. It shows the active timeline's activities as a table where:
+
+- The user **curates the columns**: hide the ones they don't care about, reorder the rest, resize them, and that arrangement *sticks* (per-timeline, per-user, via existing preferences).
+- The user **edits inline like a spreadsheet**: keyboard-driven cell selection and edit, with field-appropriate editors (text input for title, date picker for dates, color-pill popover for status, avatar-multiselect for assignees).
+- The list stays **digestible**: sensible default columns, comfortable density, no horizontal-scroll firehose unless the user opts into more columns.
+
+It is the same activity data as Gantt, respecting the same active filter — just rendered as rows instead of bars.
+
+### Explicitly out of scope (the things I'm cutting from the old plan)
+- ❌ "Scroll 1000+ rows smoothly" / virtualization as a v1 requirement. Our timelines aren't that big; chasing it adds a dependency and complexity for a problem we don't have.
+- ❌ Heavy bulk-mutation toolbar (bulk archive/delete/status-change across a large selection). The old plan made bulk-edit a co-equal pillar; it shouldn't be.
+- ❌ **Paste-fill and fill handle.** Deliberately *not* doing the Excel power-grid gestures. If a user wants spreadsheet-grade bulk manipulation, the right answer is "do it in Excel and import it" (a later phase), not to reimplement Excel inside draba. List editing is for quick single-cell tweaks, not data-entry marathons.
+- ❌ Treating this as a "power user database editor." The user is a team lead doing weekly planning, not a data entry operator.
+- 🔜 **Light multi-select** (checkbox gutter + Archive / Set-status bar) — *maybe later*, not now. Not in this phase's scope; revisit once the core List view is in use.
+
+---
+
+## The data: columns
+
+Activities already carry everything we need ([`Activity`](../../packages/api/internal/...) — see repomap). Proposed column catalog, with which are shown by default:
+
+| Column | Field | Editable inline | Default visible | Editor type |
+|--------|-------|:---:|:---:|-------------|
+| Title | `title` | ✅ | ✅ | text input |
+| Start | `startAt` | ✅ | ✅ | date (+ time if not all-day) |
+| End | `endAt` | ✅ | ✅ | date (+ time if not all-day) |
+| Duration | derived (end − start) | ❌ (read-only) | ✅ | computed text |
+| Status | `statusId` | ✅ | ✅ | color-pill popover (timeline statuses) |
+| Assignees | `assignedMemberIds` | ✅ | ✅ | avatar multi-select popover |
+| Tags | `tagIds` | ✅ | ✅ | tag multi-select popover |
+| Progress | `percentComplete` | ✅ | ⬜ | number / mini slider |
+| Parent | `parentActivityId` | ✅ | ⬜ | activity picker popover |
+| All-day | `allDay` | ✅ | ⬜ | checkbox |
+| Location | `location` | ✅ | ⬜ | text input |
+| URL | `url` | ✅ | ⬜ | text input |
+| Description | `description` | ✅ | ⬜ | text input (truncated, expand on edit) |
+| Created | `createdAt` | ❌ | ⬜ | computed text |
+| Updated | `updatedAt` | ❌ | ⬜ | computed text |
+
+Notes:
+- **Default set is deliberately small** (Title, Start, End, Duration, Status, Assignees, Tags). That's the "digestible in one sitting" baseline. Everything else is opt-in via the columns menu.
+- `Title` should probably be a **pinned/frozen left column** so it stays visible when the user has scrolled right or resized aggressively. (Linear/Airtable both freeze the primary column.)
+- Color/icon could become a thin leading affordance on the Title cell rather than its own columns.
+
+---
+
+## Column curation (the "digestible view" half)
+
+This is the feature that makes the view worth having. Three controls, all persisted per-timeline-per-user:
+
+1. **Hide/show** — a "Columns" menu (checklist) in the view toolbar slot. Toggling re-renders immediately.
+2. **Reorder** — drag column headers left/right (@dnd-kit). Pinned Title stays leftmost.
+3. **Resize** — drag the header's right edge; double-click edge to auto-fit.
+
+**Persistence:** store a single preference blob, e.g. key `spreadsheet_columns`, scoped to the timeline, shaped like:
+
+```jsonc
+{
+  "order":   ["title", "startAt", "endAt", "status", "assignees"],
+  "hidden":  ["progress", "parent", "location", "url", "description"],
+  "widths":  { "title": 280, "startAt": 120, "endAt": 120 }
+}
+```
+
+This reuses the existing `usePreferences` / `useUpsertPreference` hooks ([usePreferences.ts](../../packages/web/src/hooks/usePreferences.ts)) — same mechanism Gantt's `group_by` / `sort_by` already use. No new persistence machinery.
+
+**Density toggle** (Comfortable / Compact) — a second small control; also persisted. Compact lets more rows fit "in one sitting," directly serving the legibility goal.
+
+**Future (not v1): saved column presets.** Airtable's per-*view* column sets are powerful — "Planning view" vs. "Status report view" over the same data. We get a taste of this for free once Phase 16 (Shares) lands, since a share freezes a view config including visible columns. Worth noting but not building here.
+
+---
+
+## Inline editing (the "spreadsheet" half)
+
+The interaction model, lifted from Airtable because it's correct:
+
+### Two modes: selection vs. edit
+- **Selection mode** (default): a single cell is highlighted. Arrow keys move the highlight. Nothing is editable yet — this is what makes it feel like a grid, not a forest of input boxes.
+- **Edit mode**: `Enter`, `F2`, or starting to type opens the active cell's editor. `Esc` cancels (revert), `Enter`/`Tab` commits.
+
+### Navigation
+| Key | Action |
+|-----|--------|
+| Arrows | Move selection between cells |
+| `Tab` / `Shift+Tab` | Commit edit, move right / left |
+| `Enter` | Commit edit, move down (in selection mode: enter edit) |
+| `Esc` | Cancel edit, return to selection |
+| `Cmd/Ctrl+C` / `V` | Copy / paste cell value(s) |
+| `Space` | Open the full [EventDetailPanel] for the active row |
+| click off-cell (row gutter) | Open EventDetailPanel |
+
+### Field-appropriate editors (not everything is a text box)
+- **Text** (title, location, url, description): inline `<input>`.
+- **Dates** (start, end): date popover; respects all-day (hide time component when `allDay`).
+- **Status**: color-pill popover listing the timeline's statuses — pick a swatch, à la monday.com.
+- **Assignees / Tags**: multi-select popover with avatars/chips, à la Linear. Keyboard: type to filter, Enter to toggle.
+- **Progress**: numeric input or tiny slider.
+- **Parent**: searchable activity picker.
+
+### Saving
+- Each committed cell edit fires a `PATCH /activities/:id` with just the changed field — the same endpoint the EventDetailPanel already uses, so no new API surface.
+- **Optimistic update** via TanStack Query so the cell reflects instantly; rollback + toast on failure.
+- When the user switches back to Gantt, edits are already reflected (shared query cache).
+
+### Not doing: paste-fill / fill handle
+- We intentionally skip Excel's range-paste and drag-corner-fill gestures. Cell copy/paste of a *single* cell is fine, but filling a range is out — that's Excel's job. Bulk spreadsheet manipulation will be served by an **import** path in a later phase, not by rebuilding Excel inside the List view.
+
+### Not doing (this phase): light multi-select
+- A checkbox gutter + minimal Archive / Set-status bar is a plausible *future* addition once the view is in real use, but it's **not in this phase**. Core value is the curated, legible table with quick single-cell edits.
+
+---
+
+## View-switcher infrastructure (lands here, reused by 11.2/11.3)
+
+Unchanged from the original plan's intent — this is the one piece worth keeping wholesale:
+- Extend `ViewMode` to `'gantt' | 'list' | 'calendar' | 'kanban'`.
+- View switcher control in the timeline sub-toolbar; choice persisted per-timeline via preferences.
+- **View-specific toolbar slots** so List can contribute its "Columns" and "Density" controls without crowding the shared bar. Gantt keeps its granularity control; List ignores granularity (it doesn't apply to a flat table).
+
+### Group-by / Color-by — mirror Gantt (planned, likely a fast-follow not first cut)
+
+Gantt already exposes these controls ([GanttToolbar.tsx](../../packages/web/src/components/gantt/GanttToolbar.tsx)), and the user wants List to feel consistent with them:
+
+- **Group by** — Gantt offers `none | member | parent`. For List, mirror those and **add `status`** (grouping a table by status column is very natural). Rendered as collapsible group header rows with a count, rows nested beneath.
+- **Color by** — Gantt offers `activity | member | status`. In a table this becomes a **colored accent** — a left border stripe on the row or a dot on the Title cell — rather than Gantt's filled bar.
+
+Both persist per-timeline via preferences, reusing the same keys/pattern Gantt uses, so a user's grouping/coloring intent is shared mental model across views. These are drawn as a **planned addition** — the static table + column curation + inline editing are the core; group/color slot in cleanly afterward.
+
+---
+
+## Library decision (to confirm before building)
+
+**Recommendation: TanStack Table v8 (headless) + @dnd-kit for column drag.** No virtualization library in v1.
+
+Rationale:
+- TanStack gives us `columnVisibility`, `columnOrder`, `columnSizing`, `columnPinning`, sorting, and row-selection *state management* for free, while we keep full control of markup (shadcn `<Table>` primitives + Tailwind). That's a lot of the column-curation feature handed to us.
+- Headless means no fight with its styling — it owns logic, we own pixels.
+- It's a new dependency (we currently have zero table libs), but a well-maintained, tree-shakeable, widely-used one. The alternative — hand-rolling column order/visibility/resize state — is genuinely fiddly and TanStack has solved exactly these.
+
+**Counter-option:** roll it by hand. Our feature set is modest and a bespoke grid avoids the dep. But the keyboard grid + column DnD + resize state is the hard 20% TanStack already ships; I'd lean toward the library. *Flag for your call.*
+
+**Virtualization: deferred.** At tens-to-low-hundreds of rows, plain DOM rendering is fine and far simpler. We add TanStack Virtual *only if* a real timeline ever proves janky. This is a direct reversal of the old plan's "must scroll 1000+ rows" requirement and the main thing keeping this phase small.
+
+---
+
+## Rough build order
+
+1. **View-switcher infra** — `ViewMode` extension, switcher control, per-view toolbar slots, preference persistence. (Foundational; 11.2/11.3 depend on it.)
+2. **Static table** — TanStack Table wired to the active timeline's activities, default columns, density toggle, respects active filter. Read-only first. This alone is shippable value (the "digestible view").
+3. **Column curation** — hide/show menu, drag reorder, resize, persistence blob. Pin Title.
+4. **Inline editing — text & dates** — selection/edit modes, Tab/Enter navigation, PATCH + optimistic update.
+5. **Inline editing — popover fields** — status pill, assignees, tags, parent.
+6. **Group-by / Color-by** — mirror Gantt (group: none/member/parent/status; color: activity/member/status as a row accent), persisted.
+
+*Not in this phase:* light multi-select (maybe later), paste-fill / fill handle (out — Excel's job, served by future import), saved column presets (rides along with Phase 16 Shares).
+
+Each step is independently shippable, which makes this easy to pause — far more so than the old monolithic plan.
+
+---
+
+## Draft exit criteria
+
+Safe to pause when:
+- View switcher toggles Gantt ↔ Spreadsheet, choice persists per timeline.
+- Spreadsheet shows the active timeline's activities with the default columns, respecting the active filter.
+- Hiding, reordering, and resizing columns works and **survives a reload** (persisted per-timeline-per-user).
+- Density toggle changes row height and persists.
+- Arrow keys move cell selection; Enter/F2 enters edit; Esc cancels; Tab/Enter commit-and-move.
+- Editing Title, Start, End, and Status inline saves via PATCH and is reflected in Gantt when switched back.
+- Title column stays pinned/visible when scrolled horizontally.
+- Sorting by a column header reorders rows without losing selection.
+- Group-by and Color-by controls work and persist per-timeline (mirroring Gantt).
+
+---
+
+## Decisions (resolved, first review)
+
+1. **Library — TanStack Table v8 (headless) + @dnd-kit.** ✅ Confirmed. Virtualization stays deferred.
+2. **Naming — "List".** ✅ The UI label is **List**; this doc keeps "spreadsheet" only as shorthand for the editing feel.
+3. **Sorting — single-column for v1.** ✅
+4. **Group-by / Color-by — yes, mirror Gantt.** ✅ Planned addition (see the view-switcher section). Group: `none | member | parent | status`; Color: `activity | member | status` rendered as a row accent.
+5. **Paste-fill — cut.** ❌ Excel's job. Bulk spreadsheet manipulation will be served by a future **import** path, not by rebuilding Excel inside List.
+6. **Fill handle (drag-corner-to-fill) — cut.** ❌ Same rationale as paste-fill.
+7. **Light multi-select — deferred, not this phase.** 🔜 May add a checkbox gutter + Archive / Set-status bar later, once the core view is in real use. Out of scope for now.
+
+### Still open / to decide later
+- Exact persistence key names and whether group/color reuse Gantt's literal preference keys or get List-scoped ones (leaning: List-scoped, so a user can group Gantt by member but List by status independently).
+- Whether group-by collapsed-state persists.
+
+---
+
+*Once you've reviewed and tweaked, the agreed version replaces the "Phase 11.1 — Web — List / Spreadsheet View" section in [ROADMAP.md](../ROADMAP.md).*
+````
+
 ## File: packages/api/internal/api/auth_handler.go
 ````go
 package api
@@ -16313,6 +16570,194 @@ export default function ThemeSync() {
 }
 ````
 
+## File: packages/web/src/contexts/AuthContext.tsx
+````typescript
+/**
+ * Auth context: current user + access token in memory, refresh token in localStorage.
+ *
+ * Provides login, logout, and register actions so any component can
+ * authenticate without knowing about token storage details.
+ */
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import type { components } from '@draba/shared'
+import {
+  API_BASE,
+  ApiError,
+  clearStoredRefreshToken,
+  configureSilentRefresh,
+  getStoredRefreshToken,
+  storeRefreshToken,
+} from '@/lib/api'
+
+type User = components['schemas']['User']
+type AuthResponse = components['schemas']['AuthResponse']
+type RefreshResponse = components['schemas']['RefreshResponse']
+
+interface AuthState {
+  user: User | null
+  accessToken: string | null
+  /** True while checking the stored refresh token on initial mount. */
+  initializing: boolean
+}
+
+interface AuthContextValue extends AuthState {
+  getAccessToken: () => string | null
+  login: (email: string, password: string) => Promise<void>
+  /** Registers a new account and returns the fresh access token directly,
+   *  avoiding a race against the async setState that follows. */
+  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
+  logout: () => void
+  /** Merges fields into the current user object — used after profile updates. */
+  patchUser: (patch: Partial<User>) => void
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null)
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    const err = data as { error: { code: string; message: string } }
+    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
+  }
+  return data as T
+}
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [state, setState] = useState<AuthState>({
+    user: null,
+    accessToken: null,
+    initializing: true,
+  })
+
+  // Stable ref so callbacks never capture a stale token.
+  const tokenRef = useRef<string | null>(null)
+  tokenRef.current = state.accessToken
+
+  const getAccessToken = useCallback(() => tokenRef.current, [])
+
+  // On mount, attempt to restore session via the stored refresh token.
+  // After exchanging the refresh token we also fetch /auth/me so that `user`
+  // is populated — without it, admin checks (canEditTeam etc.) always fail
+  // because userId is '' and no member's userId matches an empty string.
+  useEffect(() => {
+    const refresh = getStoredRefreshToken()
+    if (!refresh) {
+      setState(s => ({ ...s, initializing: false }))
+      return
+    }
+    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
+      .then(async ({ accessToken }) => {
+        try {
+          const res = await fetch(`${API_BASE}/auth/me`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          })
+          const user: User | null = res.ok ? (await res.json() as User) : null
+          setState({ user, accessToken, initializing: false })
+        } catch {
+          // /auth/me failed but the token is still valid — set what we have.
+          setState(s => ({ ...s, accessToken, initializing: false }))
+        }
+      })
+      .catch(() => {
+        clearStoredRefreshToken()
+        setState(s => ({ ...s, initializing: false }))
+      })
+  }, [])
+
+  const login = useCallback(async (email: string, password: string) => {
+    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
+      email,
+      password,
+    })
+    storeRefreshToken(refreshToken)
+    setState({ user, accessToken, initializing: false })
+  }, [])
+
+  const register = useCallback(
+    async (
+      email: string,
+      password: string,
+      displayName: string,
+      inviteToken?: string,
+    ): Promise<string> => {
+      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
+        '/auth/register',
+        { email, password, displayName, inviteToken },
+      )
+      storeRefreshToken(refreshToken)
+      setState({ user, accessToken, initializing: false })
+      // Return the token directly so callers don't race against the async
+      // setState — tokenRef won't update until the next render cycle.
+      return accessToken
+    },
+    [],
+  )
+
+  const logout = useCallback(() => {
+    clearStoredRefreshToken()
+    setState({ user: null, accessToken: null, initializing: false })
+  }, [])
+
+  // Register a silent-refresh callback with the API layer so that any 401
+  // anywhere in the app triggers a token refresh rather than a hard failure.
+  // On refresh failure, clear the session and redirect to /login.
+  useEffect(() => {
+    const silentRefresh = async (): Promise<string | null> => {
+      const refresh = getStoredRefreshToken()
+      if (!refresh) {
+        logout()
+        window.location.replace('/login')
+        return null
+      }
+      try {
+        const { accessToken: newToken } = await postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
+        setState(s => ({ ...s, accessToken: newToken }))
+        return newToken
+      } catch {
+        clearStoredRefreshToken()
+        setState({ user: null, accessToken: null, initializing: false })
+        window.location.replace('/login')
+        return null
+      }
+    }
+    configureSilentRefresh(silentRefresh)
+    return () => configureSilentRefresh(null)
+  }, [logout])
+
+  const patchUser = useCallback((patch: Partial<User>) => {
+    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
+  }, [])
+
+  const value = useMemo<AuthContextValue>(
+    () => ({ ...state, getAccessToken, login, register, logout, patchUser }),
+    [state, getAccessToken, login, register, logout, patchUser],
+  )
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+/** Returns the auth context. Throws if used outside of AuthProvider. */
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext)
+  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
+  return ctx
+}
+````
+
 ## File: packages/web/src/hooks/useDarkMode.ts
 ````typescript
 /**
@@ -17891,6 +18336,371 @@ describe('matchActivities', () => {
 })
 ````
 
+## File: packages/web/src/pages/settings/AdminUsersPage.tsx
+````typescript
+/**
+ * /settings/users — Superadmin: view and search all users; orphaned-user alert.
+ */
+
+import { useState } from 'react'
+import { useAdminUsers } from '@/hooks/useSettings'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { Input } from '@/components/ui/input'
+import { AlertTriangle } from 'lucide-react'
+
+export default function AdminUsersPage() {
+  const [orphanedOnly, setOrphanedOnly] = useState(false)
+  const [search, setSearch] = useState('')
+  const { data: allData, error: allError } = useAdminUsers(false)
+  const { data: orphanData } = useAdminUsers(true)
+
+  const allUsers = allData?.users ?? []
+  const orphanedCount = orphanData?.users?.length ?? 0
+  const displayed = (orphanedOnly ? orphanData?.users ?? [] : allUsers)
+    .filter(u => {
+      if (!search) return true
+      const q = search.toLowerCase()
+      return u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
+    })
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Users</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        All accounts in this organization. Use team management to assign or remove memberships.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        {orphanedCount > 0 && !orphanedOnly && (
+          <div className="flex items-center gap-2.5 px-3.5 py-2.5 mb-4 bg-warning/10 border border-warning/30 rounded-lg">
+            <AlertTriangle size={16} className="text-warning shrink-0" />
+            <span className="text-[13px] text-warning">
+              {orphanedCount} user{orphanedCount > 1 ? 's' : ''} with no team memberships.
+            </span>
+            <button
+              onClick={() => setOrphanedOnly(true)}
+              className="ml-auto text-xs text-warning bg-transparent border-none cursor-pointer underline"
+            >
+              View
+            </button>
+          </div>
+        )}
+
+        {allError && (
+          <div className="px-4 py-3 mb-4 bg-destructive/10 border border-destructive/30 rounded-lg text-[13px] text-destructive">
+            Failed to load users. This endpoint requires the Phase 10.1.3 backend — rebuild and redeploy the Docker container.
+          </div>
+        )}
+
+        <div className="flex gap-2 mb-4 items-center">
+          <Input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search by name or email…"
+            className="max-w-[300px]"
+          />
+          <div className="flex gap-1">
+            {[
+              { label: `All (${allUsers.length})`, v: false },
+              { label: `Orphaned (${orphanedCount})`, v: true },
+            ].map(({ label, v }) => (
+              <button
+                key={String(v)}
+                onClick={() => setOrphanedOnly(v)}
+                className={`px-3 py-1.5 rounded-md text-xs border cursor-pointer ${
+                  orphanedOnly === v
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {displayed.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No users found.</p>
+        ) : (
+          <table className="w-full border-collapse">
+            <thead>
+              <tr>
+                {['User', 'Email', 'Teams', 'Status'].map(h => (
+                  <th key={h} className="text-left text-[11px] text-muted-foreground font-semibold pb-2.5 px-2 tracking-[0.4px]">
+                    {h.toUpperCase()}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {displayed.map(u => (
+                <tr key={u.id} className="border-t border-card">
+                  <td className="py-2.5 px-2 flex items-center gap-2.5">
+                    <Badge identity={{ color: u.color ?? '#288C9B', icon: u.icon ?? '__none__' } satisfies Identity} name={u.displayName} size={28} shape="circle" />
+                    <span className="text-[13px] text-foreground">{u.displayName}</span>
+                    {u.isSuperadmin && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-primary/15 text-primary">
+                        superadmin
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-2.5 px-2 text-[13px] text-muted-foreground">{u.email}</td>
+                  <td className="py-2.5 px-2 text-[13px] text-muted-foreground">{u.teamCount}</td>
+                  <td className="py-2.5 px-2">
+                    {u.archivedAt ? (
+                      <span className="text-xs px-2 py-0.5 rounded bg-destructive/15 text-destructive">
+                        Inactive
+                      </span>
+                    ) : (
+                      <span className="text-xs px-2 py-0.5 rounded bg-success/15 text-success">
+                        Active
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/AiKeysPage.tsx
+````typescript
+/**
+ * /settings/ai — Superadmin: AI / LLM API key configuration.
+ * Stub for Phase 10.6 — AI Key Management. Key storage, model routing, and
+ * usage tracking are deferred to that phase.
+ */
+
+import { Sparkles } from 'lucide-react'
+
+export default function AiKeysPage() {
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">AI / LLM Keys</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Connect AI providers to enable AI-assisted features in draba.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-10 h-10 rounded-[10px] bg-primary/10 border border-primary/20 flex items-center justify-center">
+            <Sparkles size={18} className="text-primary" />
+          </div>
+          <div>
+            <div className="text-sm font-semibold text-foreground">AI features coming in Phase 10.6</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Configure an API key when AI functionality is available.</div>
+          </div>
+        </div>
+
+        <p className="text-[13px] text-muted-foreground mb-4">
+          When AI features are enabled, you'll be able to add API keys for providers such as Anthropic, OpenAI, and others. Keys are stored encrypted and used only for organization-wide AI requests.
+        </p>
+
+        <div className="flex flex-col gap-2">
+          {['Anthropic (Claude)', 'OpenAI (GPT)', 'Google (Gemini)', 'Custom / self-hosted'].map(provider => (
+            <div
+              key={provider}
+              className="flex items-center justify-between px-4 py-3 rounded-lg border border-border bg-background opacity-50"
+            >
+              <span className="text-[13px] text-foreground">{provider}</span>
+              <span className="text-[11px] text-muted-foreground px-2 py-0.5 rounded border border-border">
+                Not configured
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/CommunicationPage.tsx
+````typescript
+/**
+ * /settings/communication — Superadmin: email / SMTP configuration.
+ */
+
+import { useState, useEffect } from 'react'
+import { useAdminSMTP, useSaveSMTP, useTestSMTP, useDeleteSMTP } from '@/hooks/useSettings'
+import type { components } from '@draba/shared'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+import { Eye, EyeOff } from 'lucide-react'
+
+type SMTPConfig = components['schemas']['SMTPConfig']
+
+export default function CommunicationPage() {
+  const { data } = useAdminSMTP()
+  const saveSMTP = useSaveSMTP()
+  const testSMTP = useTestSMTP()
+  const deleteSMTP = useDeleteSMTP()
+
+  const [host, setHost] = useState('')
+  const [port, setPort] = useState('587')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [fromName, setFromName] = useState('')
+  const [fromEmail, setFromEmail] = useState('')
+  const [encryption, setEncryption] = useState<'none' | 'tls' | 'starttls'>('starttls')
+  const [showPw, setShowPw] = useState(false)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [testState, setTestState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
+
+  useEffect(() => {
+    const cfg = data?.smtp
+    if (cfg) {
+      setHost(cfg.host ?? '')
+      setPort(String(cfg.port ?? 587))
+      setUsername(cfg.username ?? '')
+      setFromName(cfg.fromName ?? '')
+      setFromEmail(cfg.fromEmail ?? '')
+      setEncryption((cfg.encryption as 'none' | 'tls' | 'starttls') ?? 'starttls')
+    }
+  }, [data])
+
+  function buildConfig(): SMTPConfig {
+    return { host, port: parseInt(port, 10), username, password, fromName, fromEmail, encryption }
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await saveSMTP.mutateAsync(buildConfig())
+      setFeedback({ type: 'success', msg: 'SMTP settings saved and validated.' })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to save SMTP settings.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  async function handleTest() {
+    setTestState('sending')
+    try {
+      const res = await testSMTP.mutateAsync(buildConfig())
+      setTestState('sent')
+      setFeedback({ type: 'success', msg: `Test email sent to ${res.to}` })
+    } catch (err) {
+      setTestState('failed')
+      const msg = err instanceof ApiError ? err.message : 'SMTP test failed.'
+      setFeedback({ type: 'error', msg })
+    }
+    setTimeout(() => setTestState('idle'), 3000)
+  }
+
+  async function handleDelete() {
+    await deleteSMTP.mutateAsync()
+    setHost(''); setPort('587'); setUsername(''); setPassword('')
+    setFromName(''); setFromEmail(''); setEncryption('starttls')
+    setFeedback({ type: 'success', msg: 'SMTP configuration cleared.' })
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Communication</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Configure outbound email for password resets and invitations.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          SMTP / Email
+        </h3>
+
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="flex flex-col gap-1.5">
+            <Label>SMTP host</Label>
+            <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>Port</Label>
+            <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Username</Label>
+          <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" className="max-w-[360px]" />
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Password</Label>
+          <div className="relative max-w-[360px]">
+            <Input
+              type={showPw ? 'text' : 'password'}
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
+            />
+            <button
+              onClick={() => setShowPw(v => !v)}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 bg-transparent border-none text-muted-foreground cursor-pointer"
+            >
+              {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="flex flex-col gap-1.5">
+            <Label>From name</Label>
+            <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>From email</Label>
+            <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Encryption</Label>
+          <select
+            value={encryption}
+            onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[200px]"
+          >
+            <option value="none">None</option>
+            <option value="tls">TLS</option>
+            <option value="starttls">STARTTLS</option>
+          </select>
+        </div>
+
+        {feedback && (
+          <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+            {feedback.msg}
+          </p>
+        )}
+
+        <div className="flex gap-2 flex-wrap">
+          <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
+            {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
+          </Button>
+          <Button variant="outline" onClick={handleTest} disabled={testSMTP.isPending || !host}>
+            {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
+          </Button>
+          {data?.smtp && (
+            <Button variant="ghost" className="text-destructive" onClick={handleDelete}>
+              Clear config
+            </Button>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground mt-3">
+          When SMTP is not configured, password resets and email invitations are unavailable.
+        </p>
+      </div>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/pages/settings/SecurityPage.tsx
 ````typescript
 /**
@@ -18229,6 +19039,127 @@ export default function TokensPage() {
             </Button>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/SettingsPage.tsx
+````typescript
+/**
+ * SettingsPage — shell with left-nav and nested sub-routes.
+ *
+ * Phase 10.1.1: initial shell + Teams link.
+ * Phase 10.1.3: full settings — Profile, Security, Preferences, API Tokens,
+ * and Organization section (superadmin only): Organization, Communication,
+ * Users, AI Keys (Phase 10.6 stub).
+ */
+
+import { Link, useLocation, Navigate, Routes, Route } from 'react-router-dom'
+import { ArrowLeft, User, Settings, Key, Lock, MessageSquare, Users, Sparkles, Building2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useNavigate } from 'react-router-dom'
+import ProfilePage from '@/pages/settings/ProfilePage'
+import SecurityPage from '@/pages/settings/SecurityPage'
+import PreferencesPage from '@/pages/settings/PreferencesPage'
+import TokensPage from '@/pages/settings/TokensPage'
+import OrganizationPage from '@/pages/settings/OrganizationPage'
+import CommunicationPage from '@/pages/settings/CommunicationPage'
+import AdminUsersPage from '@/pages/settings/AdminUsersPage'
+import AiKeysPage from '@/pages/settings/AiKeysPage'
+
+function NavLink({ to, active, children }: { to: string; active: boolean; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] no-underline cursor-pointer ${
+        active
+          ? 'bg-muted text-foreground font-medium'
+          : 'text-muted-foreground font-normal hover:text-foreground'
+      }`}
+    >
+      {children}
+    </Link>
+  )
+}
+
+export default function SettingsPage() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const path = location.pathname
+
+  function isActive(prefix: string) {
+    return path === prefix || path.startsWith(prefix + '/')
+  }
+
+  return (
+    <div className="flex min-h-screen bg-background text-foreground font-sans">
+      {/* Left nav */}
+      <div className="w-[220px] border-r border-border px-3 py-4 flex flex-col gap-0.5 shrink-0">
+        <button
+          onClick={() => navigate('/')}
+          className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] text-muted-foreground mb-3 bg-transparent border-none cursor-pointer w-full font-inherit hover:text-foreground"
+        >
+          <ArrowLeft size={14} />
+          Back to app
+        </button>
+
+        <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
+          Account
+        </div>
+
+        <NavLink to="/settings/profile" active={isActive('/settings/profile')}>
+          <User size={14} /> Profile
+        </NavLink>
+        <NavLink to="/settings/security" active={isActive('/settings/security')}>
+          <Lock size={14} /> Security
+        </NavLink>
+        <NavLink to="/settings/preferences" active={isActive('/settings/preferences')}>
+          <Settings size={14} /> Preferences
+        </NavLink>
+        <NavLink to="/settings/tokens" active={isActive('/settings/tokens')}>
+          <Key size={14} /> API Tokens
+        </NavLink>
+
+        {user?.isSuperadmin && (
+          <>
+            <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
+              Organization
+            </div>
+            <NavLink to="/settings/organization" active={isActive('/settings/organization')}>
+              <Building2 size={14} /> Organization
+            </NavLink>
+            <NavLink to="/settings/communication" active={isActive('/settings/communication')}>
+              <MessageSquare size={14} /> Communication
+            </NavLink>
+            <NavLink to="/settings/users" active={isActive('/settings/users')}>
+              <Users size={14} /> Users
+            </NavLink>
+            <NavLink to="/settings/ai" active={isActive('/settings/ai')}>
+              <Sparkles size={14} /> AI Keys
+            </NavLink>
+          </>
+        )}
+      </div>
+
+      {/* Content area */}
+      <div className="flex-1 px-10 py-8 max-w-[800px] min-w-0">
+        <Routes>
+          <Route path="profile" element={<ProfilePage />} />
+          <Route path="security" element={<SecurityPage />} />
+          <Route path="preferences" element={<PreferencesPage />} />
+          <Route path="tokens" element={<TokensPage />} />
+          <Route path="organization" element={user?.isSuperadmin ? <OrganizationPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="communication" element={user?.isSuperadmin ? <CommunicationPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="users" element={user?.isSuperadmin ? <AdminUsersPage /> : <Navigate to="/settings/profile" replace />} />
+          <Route path="ai" element={user?.isSuperadmin ? <AiKeysPage /> : <Navigate to="/settings/profile" replace />} />
+          {/* Legacy redirect: old /settings/admin deep links fall to organization */}
+          <Route path="admin/*" element={user?.isSuperadmin ? <Navigate to="/settings/organization" replace /> : <Navigate to="/settings/profile" replace />} />
+          <Route index element={<Navigate to="/settings/profile" replace />} />
+          <Route path="*" element={<Navigate to="/settings/profile" replace />} />
+        </Routes>
       </div>
     </div>
   )
@@ -18736,6 +19667,65 @@ export default function SetupPage() {
         </div>
       </Card>
     </div>
+  )
+}
+````
+
+## File: packages/web/src/App.tsx
+````typescript
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AuthProvider } from '@/contexts/AuthContext'
+import ProtectedRoute from '@/components/ProtectedRoute'
+import ThemeSync from '@/components/ThemeSync'
+import BrandingSync from '@/components/BrandingSync'
+import LoginPage from '@/pages/LoginPage'
+import RegisterPage from '@/pages/RegisterPage'
+import DashboardPage from '@/pages/DashboardPage'
+import SetupPage from '@/pages/SetupPage'
+import SettingsPage from '@/pages/SettingsPage'
+import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
+import ResetPasswordPage from '@/pages/ResetPasswordPage'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
+    },
+  },
+})
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          {/* Side-effect components — render nothing but apply global state. */}
+          <ThemeSync />
+          <BrandingSync />
+          <Routes>
+            {/* First-run setup — public, shown before any users exist */}
+            <Route path="/setup" element={<SetupPage />} />
+
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/settings/*" element={<SettingsPage />} />
+            </Route>
+
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
   )
 }
 ````
@@ -22528,194 +23518,6 @@ export default function TagInput({ teamId, tags, selectedTagIds, onChange }: Pro
 }
 ````
 
-## File: packages/web/src/contexts/AuthContext.tsx
-````typescript
-/**
- * Auth context: current user + access token in memory, refresh token in localStorage.
- *
- * Provides login, logout, and register actions so any component can
- * authenticate without knowing about token storage details.
- */
-
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
-import type { components } from '@draba/shared'
-import {
-  API_BASE,
-  ApiError,
-  clearStoredRefreshToken,
-  configureSilentRefresh,
-  getStoredRefreshToken,
-  storeRefreshToken,
-} from '@/lib/api'
-
-type User = components['schemas']['User']
-type AuthResponse = components['schemas']['AuthResponse']
-type RefreshResponse = components['schemas']['RefreshResponse']
-
-interface AuthState {
-  user: User | null
-  accessToken: string | null
-  /** True while checking the stored refresh token on initial mount. */
-  initializing: boolean
-}
-
-interface AuthContextValue extends AuthState {
-  getAccessToken: () => string | null
-  login: (email: string, password: string) => Promise<void>
-  /** Registers a new account and returns the fresh access token directly,
-   *  avoiding a race against the async setState that follows. */
-  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
-  logout: () => void
-  /** Merges fields into the current user object — used after profile updates. */
-  patchUser: (patch: Partial<User>) => void
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null)
-
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const data = await res.json()
-  if (!res.ok) {
-    const err = data as { error: { code: string; message: string } }
-    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
-  }
-  return data as T
-}
-
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<AuthState>({
-    user: null,
-    accessToken: null,
-    initializing: true,
-  })
-
-  // Stable ref so callbacks never capture a stale token.
-  const tokenRef = useRef<string | null>(null)
-  tokenRef.current = state.accessToken
-
-  const getAccessToken = useCallback(() => tokenRef.current, [])
-
-  // On mount, attempt to restore session via the stored refresh token.
-  // After exchanging the refresh token we also fetch /auth/me so that `user`
-  // is populated — without it, admin checks (canEditTeam etc.) always fail
-  // because userId is '' and no member's userId matches an empty string.
-  useEffect(() => {
-    const refresh = getStoredRefreshToken()
-    if (!refresh) {
-      setState(s => ({ ...s, initializing: false }))
-      return
-    }
-    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
-      .then(async ({ accessToken }) => {
-        try {
-          const res = await fetch(`${API_BASE}/auth/me`, {
-            headers: { Authorization: `Bearer ${accessToken}` },
-          })
-          const user: User | null = res.ok ? (await res.json() as User) : null
-          setState({ user, accessToken, initializing: false })
-        } catch {
-          // /auth/me failed but the token is still valid — set what we have.
-          setState(s => ({ ...s, accessToken, initializing: false }))
-        }
-      })
-      .catch(() => {
-        clearStoredRefreshToken()
-        setState(s => ({ ...s, initializing: false }))
-      })
-  }, [])
-
-  const login = useCallback(async (email: string, password: string) => {
-    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
-      email,
-      password,
-    })
-    storeRefreshToken(refreshToken)
-    setState({ user, accessToken, initializing: false })
-  }, [])
-
-  const register = useCallback(
-    async (
-      email: string,
-      password: string,
-      displayName: string,
-      inviteToken?: string,
-    ): Promise<string> => {
-      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
-        '/auth/register',
-        { email, password, displayName, inviteToken },
-      )
-      storeRefreshToken(refreshToken)
-      setState({ user, accessToken, initializing: false })
-      // Return the token directly so callers don't race against the async
-      // setState — tokenRef won't update until the next render cycle.
-      return accessToken
-    },
-    [],
-  )
-
-  const logout = useCallback(() => {
-    clearStoredRefreshToken()
-    setState({ user: null, accessToken: null, initializing: false })
-  }, [])
-
-  // Register a silent-refresh callback with the API layer so that any 401
-  // anywhere in the app triggers a token refresh rather than a hard failure.
-  // On refresh failure, clear the session and redirect to /login.
-  useEffect(() => {
-    const silentRefresh = async (): Promise<string | null> => {
-      const refresh = getStoredRefreshToken()
-      if (!refresh) {
-        logout()
-        window.location.replace('/login')
-        return null
-      }
-      try {
-        const { accessToken: newToken } = await postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
-        setState(s => ({ ...s, accessToken: newToken }))
-        return newToken
-      } catch {
-        clearStoredRefreshToken()
-        setState({ user: null, accessToken: null, initializing: false })
-        window.location.replace('/login')
-        return null
-      }
-    }
-    configureSilentRefresh(silentRefresh)
-    return () => configureSilentRefresh(null)
-  }, [logout])
-
-  const patchUser = useCallback((patch: Partial<User>) => {
-    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
-  }, [])
-
-  const value = useMemo<AuthContextValue>(
-    () => ({ ...state, getAccessToken, login, register, logout, patchUser }),
-    [state, getAccessToken, login, register, logout, patchUser],
-  )
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
-}
-
-/** Returns the auth context. Throws if used outside of AuthProvider. */
-export function useAuth(): AuthContextValue {
-  const ctx = useContext(AuthContext)
-  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
-  return ctx
-}
-````
-
 ## File: packages/web/src/hooks/useFormatDate.ts
 ````typescript
 /**
@@ -22856,6 +23658,234 @@ export function useDeleteSavedFilter(teamId: string) {
     mutationFn: (id: string) =>
       authFetch<void>(`/saved_filters/${id}`, { method: 'DELETE' }),
     onSuccess: () => qc.invalidateQueries({ queryKey: savedFiltersKey(teamId) }),
+  })
+}
+````
+
+## File: packages/web/src/hooks/useSettings.ts
+````typescript
+/**
+ * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
+ * profile, password change, forgot/reset password, SMTP config, instance
+ * settings, and the admin user list.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { apiFetch, createAuthFetch } from '@/lib/api'
+import type { components } from '@draba/shared'
+
+type User = components['schemas']['User']
+type SMTPConfig = components['schemas']['SMTPConfig']
+type APIToken = components['schemas']['APIToken']
+
+// ── Profile ──────────────────────────────────────────────────────────────────
+
+export function useUpdateProfile() {
+  const { getAccessToken, patchUser } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
+      authFetch<User>('/users/me', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: (updated) => {
+      qc.setQueryData(['me'], updated)
+      patchUser(updated)
+      // Invalidate all team member lists so the sidebar reflects the new color/icon.
+      void qc.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+// ── My stats ──────────────────────────────────────────────────────────────────
+
+interface MemberStats {
+  activeTimelines: number
+  archivedTimelines: number
+  pastDue: number
+  running: number
+  upcoming: number
+  unscheduled: number
+  archivedActivities: number
+}
+
+export function useMyStats() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: ['me', 'stats'],
+    queryFn: () => authFetch<MemberStats>('/users/me/stats'),
+  })
+}
+
+// ── Password ──────────────────────────────────────────────────────────────────
+
+export function useChangePassword() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
+      authFetch<{ status: string }>('/users/me/password', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Forgot / reset password (public, no auth required) ───────────────────────
+
+export function useForgotPassword() {
+  return useMutation({
+    mutationFn: (email: string) =>
+      apiFetch<{ status: string }>('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }),
+  })
+}
+
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: (data: { token: string; newPassword: string }) =>
+      apiFetch<{ status: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Admin: SMTP ──────────────────────────────────────────────────────────────
+
+export function useAdminSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'smtp'],
+    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
+  })
+}
+
+export function useSaveSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
+        method: 'PUT',
+        body: JSON.stringify(cfg),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+export function useTestSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
+        method: 'POST',
+        body: JSON.stringify(cfg),
+      }),
+  })
+}
+
+export function useDeleteSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: () =>
+      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+// ── Admin: Instance settings ──────────────────────────────────────────────────
+
+export function useAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'settings'],
+    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
+  })
+}
+
+export function usePatchAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: Record<string, string>) =>
+      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
+  })
+}
+
+// ── API Tokens ────────────────────────────────────────────────────────────────
+
+export function useTokens() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: ['tokens'],
+    queryFn: () => authFetch<APIToken[]>('/tokens'),
+  })
+}
+
+export function useCreateToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { name: string; scope: string }) =>
+      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+export function useRevokeToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+// ── Admin: Users ──────────────────────────────────────────────────────────────
+
+export type AdminUserRow = User & { teamCount: number }
+
+export function useAdminUsers(orphanedOnly = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'users', { orphanedOnly }],
+    queryFn: () =>
+      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
   })
 }
 ````
@@ -23325,547 +24355,185 @@ export function applyActiveFilter(
 }
 ````
 
-## File: packages/web/src/pages/settings/AdminUsersPage.tsx
+## File: packages/web/src/pages/settings/ProfilePage.tsx
 ````typescript
 /**
- * /settings/users — Superadmin: view and search all users; orphaned-user alert.
- */
-
-import { useState } from 'react'
-import { useAdminUsers } from '@/hooks/useSettings'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { Input } from '@/components/ui/input'
-import { AlertTriangle } from 'lucide-react'
-
-export default function AdminUsersPage() {
-  const [orphanedOnly, setOrphanedOnly] = useState(false)
-  const [search, setSearch] = useState('')
-  const { data: allData, error: allError } = useAdminUsers(false)
-  const { data: orphanData } = useAdminUsers(true)
-
-  const allUsers = allData?.users ?? []
-  const orphanedCount = orphanData?.users?.length ?? 0
-  const displayed = (orphanedOnly ? orphanData?.users ?? [] : allUsers)
-    .filter(u => {
-      if (!search) return true
-      const q = search.toLowerCase()
-      return u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
-    })
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Users</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        All accounts in this organization. Use team management to assign or remove memberships.
-      </p>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        {orphanedCount > 0 && !orphanedOnly && (
-          <div className="flex items-center gap-2.5 px-3.5 py-2.5 mb-4 bg-warning/10 border border-warning/30 rounded-lg">
-            <AlertTriangle size={16} className="text-warning shrink-0" />
-            <span className="text-[13px] text-warning">
-              {orphanedCount} user{orphanedCount > 1 ? 's' : ''} with no team memberships.
-            </span>
-            <button
-              onClick={() => setOrphanedOnly(true)}
-              className="ml-auto text-xs text-warning bg-transparent border-none cursor-pointer underline"
-            >
-              View
-            </button>
-          </div>
-        )}
-
-        {allError && (
-          <div className="px-4 py-3 mb-4 bg-destructive/10 border border-destructive/30 rounded-lg text-[13px] text-destructive">
-            Failed to load users. This endpoint requires the Phase 10.1.3 backend — rebuild and redeploy the Docker container.
-          </div>
-        )}
-
-        <div className="flex gap-2 mb-4 items-center">
-          <Input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search by name or email…"
-            className="max-w-[300px]"
-          />
-          <div className="flex gap-1">
-            {[
-              { label: `All (${allUsers.length})`, v: false },
-              { label: `Orphaned (${orphanedCount})`, v: true },
-            ].map(({ label, v }) => (
-              <button
-                key={String(v)}
-                onClick={() => setOrphanedOnly(v)}
-                className={`px-3 py-1.5 rounded-md text-xs border cursor-pointer ${
-                  orphanedOnly === v
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {displayed.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No users found.</p>
-        ) : (
-          <table className="w-full border-collapse">
-            <thead>
-              <tr>
-                {['User', 'Email', 'Teams', 'Status'].map(h => (
-                  <th key={h} className="text-left text-[11px] text-muted-foreground font-semibold pb-2.5 px-2 tracking-[0.4px]">
-                    {h.toUpperCase()}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {displayed.map(u => (
-                <tr key={u.id} className="border-t border-card">
-                  <td className="py-2.5 px-2 flex items-center gap-2.5">
-                    <Badge identity={{ color: u.color ?? '#288C9B', icon: u.icon ?? '__none__' } satisfies Identity} name={u.displayName} size={28} shape="circle" />
-                    <span className="text-[13px] text-foreground">{u.displayName}</span>
-                    {u.isSuperadmin && (
-                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-primary/15 text-primary">
-                        superadmin
-                      </span>
-                    )}
-                  </td>
-                  <td className="py-2.5 px-2 text-[13px] text-muted-foreground">{u.email}</td>
-                  <td className="py-2.5 px-2 text-[13px] text-muted-foreground">{u.teamCount}</td>
-                  <td className="py-2.5 px-2">
-                    {u.archivedAt ? (
-                      <span className="text-xs px-2 py-0.5 rounded bg-destructive/15 text-destructive">
-                        Inactive
-                      </span>
-                    ) : (
-                      <span className="text-xs px-2 py-0.5 rounded bg-success/15 text-success">
-                        Active
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/AiKeysPage.tsx
-````typescript
-/**
- * /settings/ai — Superadmin: AI / LLM API key configuration.
- * Stub for Phase 10.6 — AI Key Management. Key storage, model routing, and
- * usage tracking are deferred to that phase.
- */
-
-import { Sparkles } from 'lucide-react'
-
-export default function AiKeysPage() {
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">AI / LLM Keys</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Connect AI providers to enable AI-assisted features in draba.
-      </p>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <div className="flex items-center gap-3 mb-5">
-          <div className="w-10 h-10 rounded-[10px] bg-primary/10 border border-primary/20 flex items-center justify-center">
-            <Sparkles size={18} className="text-primary" />
-          </div>
-          <div>
-            <div className="text-sm font-semibold text-foreground">AI features coming in Phase 10.6</div>
-            <div className="text-xs text-muted-foreground mt-0.5">Configure an API key when AI functionality is available.</div>
-          </div>
-        </div>
-
-        <p className="text-[13px] text-muted-foreground mb-4">
-          When AI features are enabled, you'll be able to add API keys for providers such as Anthropic, OpenAI, and others. Keys are stored encrypted and used only for organization-wide AI requests.
-        </p>
-
-        <div className="flex flex-col gap-2">
-          {['Anthropic (Claude)', 'OpenAI (GPT)', 'Google (Gemini)', 'Custom / self-hosted'].map(provider => (
-            <div
-              key={provider}
-              className="flex items-center justify-between px-4 py-3 rounded-lg border border-border bg-background opacity-50"
-            >
-              <span className="text-[13px] text-foreground">{provider}</span>
-              <span className="text-[11px] text-muted-foreground px-2 py-0.5 rounded border border-border">
-                Not configured
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/CommunicationPage.tsx
-````typescript
-/**
- * /settings/communication — Superadmin: email / SMTP configuration.
+ * /settings/profile — Identity, display name, and stats for the current user.
  */
 
 import { useState, useEffect } from 'react'
-import { useAdminSMTP, useSaveSMTP, useTestSMTP, useDeleteSMTP } from '@/hooks/useSettings'
-import type { components } from '@draba/shared'
+import { Calendar, Activity } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useUpdateProfile, useMyStats } from '@/hooks/useSettings'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
 import { ApiError } from '@/lib/api'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-import { Eye, EyeOff } from 'lucide-react'
 
-type SMTPConfig = components['schemas']['SMTPConfig']
+// ── Stat chip ──────────────────────────────────────────────────────────────
 
-export default function CommunicationPage() {
-  const { data } = useAdminSMTP()
-  const saveSMTP = useSaveSMTP()
-  const testSMTP = useTestSMTP()
-  const deleteSMTP = useDeleteSMTP()
+function StatChip({ value, label, color }: { value: number; label: string; color: string }) {
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      padding: '10px 14px', borderRadius: 8, flex: 1, minWidth: 0,
+      border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
+      background: `${color}0a`, textAlign: 'center',
+    }}>
+      <span style={{ fontSize: 20, fontWeight: 700, color }}>{value}</span>
+      <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{label}</span>
+    </div>
+  )
+}
 
-  const [host, setHost] = useState('')
-  const [port, setPort] = useState('587')
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [fromName, setFromName] = useState('')
-  const [fromEmail, setFromEmail] = useState('')
-  const [encryption, setEncryption] = useState<'none' | 'tls' | 'starttls'>('starttls')
-  const [showPw, setShowPw] = useState(false)
+// ── Main ───────────────────────────────────────────────────────────────────
+
+export default function ProfilePage() {
+  const { user } = useAuth()
+  const updateProfile = useUpdateProfile()
+  const { data: stats } = useMyStats()
+
+  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: user?.color ?? '#288C9B',
+    icon: user?.icon ?? '__none__',
+  })
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-  const [testState, setTestState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
 
   useEffect(() => {
-    const cfg = data?.smtp
-    if (cfg) {
-      setHost(cfg.host ?? '')
-      setPort(String(cfg.port ?? 587))
-      setUsername(cfg.username ?? '')
-      setFromName(cfg.fromName ?? '')
-      setFromEmail(cfg.fromEmail ?? '')
-      setEncryption((cfg.encryption as 'none' | 'tls' | 'starttls') ?? 'starttls')
+    if (user) {
+      setDisplayName(user.displayName)
+      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
     }
-  }, [data])
-
-  function buildConfig(): SMTPConfig {
-    return { host, port: parseInt(port, 10), username, password, fromName, fromEmail, encryption }
-  }
+  }, [user])
 
   async function handleSave() {
     setFeedback(null)
     try {
-      await saveSMTP.mutateAsync(buildConfig())
-      setFeedback({ type: 'success', msg: 'SMTP settings saved and validated.' })
+      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
+      setFeedback({ type: 'success', msg: 'Profile updated.' })
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to save SMTP settings.'
+      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
       setFeedback({ type: 'error', msg })
     }
   }
 
-  async function handleTest() {
-    setTestState('sending')
-    try {
-      const res = await testSMTP.mutateAsync(buildConfig())
-      setTestState('sent')
-      setFeedback({ type: 'success', msg: `Test email sent to ${res.to}` })
-    } catch (err) {
-      setTestState('failed')
-      const msg = err instanceof ApiError ? err.message : 'SMTP test failed.'
-      setFeedback({ type: 'error', msg })
-    }
-    setTimeout(() => setTestState('idle'), 3000)
-  }
-
-  async function handleDelete() {
-    await deleteSMTP.mutateAsync()
-    setHost(''); setPort('587'); setUsername(''); setPassword('')
-    setFromName(''); setFromEmail(''); setEncryption('starttls')
-    setFeedback({ type: 'success', msg: 'SMTP configuration cleared.' })
-  }
+  const accentColor = identity.color
 
   return (
     <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Communication</h2>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Profile</h2>
       <p className="text-sm text-muted-foreground mb-6">
-        Configure outbound email for password resets and invitations.
+        Changes to your name and identity propagate across all your team memberships.
       </p>
 
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          SMTP / Email
-        </h3>
-
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="flex flex-col gap-1.5">
-            <Label>SMTP host</Label>
-            <Input value={host} onChange={e => setHost(e.target.value)} placeholder="smtp.example.com" />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label>Port</Label>
-            <Input value={port} onChange={e => setPort(e.target.value)} placeholder="587" />
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Username</Label>
-          <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="user@smtp.example.com" className="max-w-[360px]" />
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Password</Label>
-          <div className="relative max-w-[360px]">
-            <Input
-              type={showPw ? 'text' : 'password'}
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              placeholder="••••••••"
+      <div className="bg-card border border-border rounded-[10px] overflow-hidden mb-5">
+        {/* Header banner — identity + name (mirrors MemberModal / TeamModal pattern) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '20px 24px', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ flexShrink: 0 }}>
+            <IdentityWidget
+              identity={identity}
+              name={displayName}
+              shape="circle"
+              onChange={next => setIdentity(next)}
             />
-            <button
-              onClick={() => setShowPw(v => !v)}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 bg-transparent border-none text-muted-foreground cursor-pointer"
-            >
-              {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
-            </button>
           </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="flex flex-col gap-1.5">
-            <Label>From name</Label>
-            <Input value={fromName} onChange={e => setFromName(e.target.value)} placeholder="draba" />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label>From email</Label>
-            <Input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="noreply@example.com" />
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Encryption</Label>
-          <select
-            value={encryption}
-            onChange={e => setEncryption(e.target.value as 'none' | 'tls' | 'starttls')}
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[200px]"
-          >
-            <option value="none">None</option>
-            <option value="tls">TLS</option>
-            <option value="starttls">STARTTLS</option>
-          </select>
-        </div>
-
-        {feedback && (
-          <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-            {feedback.msg}
-          </p>
-        )}
-
-        <div className="flex gap-2 flex-wrap">
-          <Button onClick={handleSave} disabled={saveSMTP.isPending || !host}>
-            {saveSMTP.isPending ? 'Saving…' : 'Save SMTP settings'}
-          </Button>
-          <Button variant="outline" onClick={handleTest} disabled={testSMTP.isPending || !host}>
-            {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent!' : 'Send test email'}
-          </Button>
-          {data?.smtp && (
-            <Button variant="ghost" className="text-destructive" onClick={handleDelete}>
-              Clear config
-            </Button>
-          )}
-        </div>
-        <p className="text-xs text-muted-foreground mt-3">
-          When SMTP is not configured, password resets and email invitations are unavailable.
-        </p>
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/SettingsPage.tsx
-````typescript
-/**
- * SettingsPage — shell with left-nav and nested sub-routes.
- *
- * Phase 10.1.1: initial shell + Teams link.
- * Phase 10.1.3: full settings — Profile, Security, Preferences, API Tokens,
- * and Organization section (superadmin only): Organization, Communication,
- * Users, AI Keys (Phase 10.6 stub).
- */
-
-import { Link, useLocation, Navigate, Routes, Route } from 'react-router-dom'
-import { ArrowLeft, User, Settings, Key, Lock, MessageSquare, Users, Sparkles, Building2 } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useNavigate } from 'react-router-dom'
-import ProfilePage from '@/pages/settings/ProfilePage'
-import SecurityPage from '@/pages/settings/SecurityPage'
-import PreferencesPage from '@/pages/settings/PreferencesPage'
-import TokensPage from '@/pages/settings/TokensPage'
-import OrganizationPage from '@/pages/settings/OrganizationPage'
-import CommunicationPage from '@/pages/settings/CommunicationPage'
-import AdminUsersPage from '@/pages/settings/AdminUsersPage'
-import AiKeysPage from '@/pages/settings/AiKeysPage'
-
-function NavLink({ to, active, children }: { to: string; active: boolean; children: React.ReactNode }) {
-  return (
-    <Link
-      to={to}
-      className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] no-underline cursor-pointer ${
-        active
-          ? 'bg-muted text-foreground font-medium'
-          : 'text-muted-foreground font-normal hover:text-foreground'
-      }`}
-    >
-      {children}
-    </Link>
-  )
-}
-
-export default function SettingsPage() {
-  const { user } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const path = location.pathname
-
-  function isActive(prefix: string) {
-    return path === prefix || path.startsWith(prefix + '/')
-  }
-
-  return (
-    <div className="flex min-h-screen bg-background text-foreground font-sans">
-      {/* Left nav */}
-      <div className="w-[220px] border-r border-border px-3 py-4 flex flex-col gap-0.5 shrink-0">
-        <button
-          onClick={() => navigate('/')}
-          className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] text-muted-foreground mb-3 bg-transparent border-none cursor-pointer w-full font-inherit hover:text-foreground"
-        >
-          <ArrowLeft size={14} />
-          Back to app
-        </button>
-
-        <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
-          Account
-        </div>
-
-        <NavLink to="/settings/profile" active={isActive('/settings/profile')}>
-          <User size={14} /> Profile
-        </NavLink>
-        <NavLink to="/settings/security" active={isActive('/settings/security')}>
-          <Lock size={14} /> Security
-        </NavLink>
-        <NavLink to="/settings/preferences" active={isActive('/settings/preferences')}>
-          <Settings size={14} /> Preferences
-        </NavLink>
-        <NavLink to="/settings/tokens" active={isActive('/settings/tokens')}>
-          <Key size={14} /> API Tokens
-        </NavLink>
-
-        {user?.isSuperadmin && (
-          <>
-            <div className="text-[11px] font-semibold text-muted-foreground/60 uppercase tracking-[0.5px] px-3 py-1 mt-3">
-              Organization
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-1">
+              Your profile
+              {user?.isSuperadmin && (
+                <span className="ml-2 text-[11px] px-2 py-0.5 rounded bg-primary/15 text-primary font-semibold tracking-wide normal-case">
+                  Superadmin
+                </span>
+              )}
             </div>
-            <NavLink to="/settings/organization" active={isActive('/settings/organization')}>
-              <Building2 size={14} /> Organization
-            </NavLink>
-            <NavLink to="/settings/communication" active={isActive('/settings/communication')}>
-              <MessageSquare size={14} /> Communication
-            </NavLink>
-            <NavLink to="/settings/users" active={isActive('/settings/users')}>
-              <Users size={14} /> Users
-            </NavLink>
-            <NavLink to="/settings/ai" active={isActive('/settings/ai')}>
-              <Sparkles size={14} /> AI Keys
-            </NavLink>
-          </>
-        )}
-      </div>
+            <input
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+              placeholder="Your name"
+              style={{
+                fontSize: 18, fontWeight: 600, color: 'var(--foreground)',
+                background: 'transparent', border: 'none', outline: 'none',
+                padding: '1px 4px', margin: '-1px -4px',
+                borderRadius: 4, fontFamily: 'inherit', width: '100%',
+              }}
+              onFocus={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.outline = `2px solid ${accentColor}44` }}
+              onBlur={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.outline = 'none' }}
+            />
+            <div className="text-xs text-muted-foreground mt-0.5">{user?.email ?? ''}</div>
+          </div>
+          {/* Live badge preview */}
+          <div style={{ flexShrink: 0 }}>
+            <Badge identity={identity} name={displayName} size={44} shape="circle" />
+          </div>
+        </div>
 
-      {/* Content area */}
-      <div className="flex-1 px-10 py-8 max-w-[800px] min-w-0">
-        <Routes>
-          <Route path="profile" element={<ProfilePage />} />
-          <Route path="security" element={<SecurityPage />} />
-          <Route path="preferences" element={<PreferencesPage />} />
-          <Route path="tokens" element={<TokensPage />} />
-          <Route path="organization" element={user?.isSuperadmin ? <OrganizationPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="communication" element={user?.isSuperadmin ? <CommunicationPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="users" element={user?.isSuperadmin ? <AdminUsersPage /> : <Navigate to="/settings/profile" replace />} />
-          <Route path="ai" element={user?.isSuperadmin ? <AiKeysPage /> : <Navigate to="/settings/profile" replace />} />
-          {/* Legacy redirect: old /settings/admin deep links fall to organization */}
-          <Route path="admin/*" element={user?.isSuperadmin ? <Navigate to="/settings/organization" replace /> : <Navigate to="/settings/profile" replace />} />
-          <Route index element={<Navigate to="/settings/profile" replace />} />
-          <Route path="*" element={<Navigate to="/settings/profile" replace />} />
-        </Routes>
+        {/* Stats */}
+        {stats && (
+          <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border)' }}>
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
+              <Calendar size={11} /> Timelines
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              <StatChip value={stats.activeTimelines} label="Active" color="#1A97A2" />
+              <StatChip value={stats.archivedTimelines} label="Archived" color="#484f58" />
+            </div>
+
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
+              <Activity size={11} /> Activities
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <StatChip value={stats.pastDue} label="Past due" color={stats.pastDue > 0 ? '#EF4444' : '#484f58'} />
+              <StatChip value={stats.running} label="Running" color="#1A97A2" />
+              <StatChip value={stats.upcoming} label="Upcoming" color="#3B82F6" />
+              <StatChip value={stats.archivedActivities} label="Archived" color="#484f58" />
+            </div>
+          </div>
+        )}
+
+        {/* Fields */}
+        <div style={{ padding: '20px 24px' }}>
+          {/* Email (read-only) */}
+          <div className="flex flex-col gap-1.5 mb-5">
+            <Label>Email</Label>
+            <Input
+              value={user?.email ?? ''}
+              disabled
+              className="max-w-[360px] opacity-60"
+            />
+            <p className="text-xs text-muted-foreground m-0">Email changes are not yet supported.</p>
+          </div>
+
+          {feedback && (
+            <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+              {feedback.msg}
+            </p>
+          )}
+
+          <button
+            onClick={handleSave}
+            disabled={updateProfile.isPending || !displayName.trim()}
+            style={{
+              background: accentColor,
+              color: '#fff',
+              fontWeight: 600,
+              fontSize: 13,
+              padding: '8px 20px',
+              borderRadius: 7,
+              border: 'none',
+              cursor: updateProfile.isPending || !displayName.trim() ? 'not-allowed' : 'pointer',
+              opacity: updateProfile.isPending || !displayName.trim() ? 0.5 : 1,
+              fontFamily: 'inherit',
+              transition: 'opacity 0.15s',
+            }}
+          >
+            {updateProfile.isPending ? 'Saving…' : 'Save profile'}
+          </button>
+        </div>
       </div>
     </div>
-  )
-}
-````
-
-## File: packages/web/src/App.tsx
-````typescript
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AuthProvider } from '@/contexts/AuthContext'
-import ProtectedRoute from '@/components/ProtectedRoute'
-import ThemeSync from '@/components/ThemeSync'
-import BrandingSync from '@/components/BrandingSync'
-import LoginPage from '@/pages/LoginPage'
-import RegisterPage from '@/pages/RegisterPage'
-import DashboardPage from '@/pages/DashboardPage'
-import SetupPage from '@/pages/SetupPage'
-import SettingsPage from '@/pages/SettingsPage'
-import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
-import ResetPasswordPage from '@/pages/ResetPasswordPage'
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
-})
-
-export default function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          {/* Side-effect components — render nothing but apply global state. */}
-          <ThemeSync />
-          <BrandingSync />
-          <Routes>
-            {/* First-run setup — public, shown before any users exist */}
-            <Route path="/setup" element={<SetupPage />} />
-
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/reset-password" element={<ResetPasswordPage />} />
-
-            {/* Protected routes */}
-            <Route element={<ProtectedRoute />}>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/settings/*" element={<SettingsPage />} />
-            </Route>
-
-            {/* Fallback */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
   )
 }
 ````
@@ -26314,234 +26982,6 @@ export function useFilter(): FilterContextValue {
 }
 ````
 
-## File: packages/web/src/hooks/useSettings.ts
-````typescript
-/**
- * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
- * profile, password change, forgot/reset password, SMTP config, instance
- * settings, and the admin user list.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { apiFetch, createAuthFetch } from '@/lib/api'
-import type { components } from '@draba/shared'
-
-type User = components['schemas']['User']
-type SMTPConfig = components['schemas']['SMTPConfig']
-type APIToken = components['schemas']['APIToken']
-
-// ── Profile ──────────────────────────────────────────────────────────────────
-
-export function useUpdateProfile() {
-  const { getAccessToken, patchUser } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
-      authFetch<User>('/users/me', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: (updated) => {
-      qc.setQueryData(['me'], updated)
-      patchUser(updated)
-      // Invalidate all team member lists so the sidebar reflects the new color/icon.
-      void qc.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-// ── My stats ──────────────────────────────────────────────────────────────────
-
-interface MemberStats {
-  activeTimelines: number
-  archivedTimelines: number
-  pastDue: number
-  running: number
-  upcoming: number
-  unscheduled: number
-  archivedActivities: number
-}
-
-export function useMyStats() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: ['me', 'stats'],
-    queryFn: () => authFetch<MemberStats>('/users/me/stats'),
-  })
-}
-
-// ── Password ──────────────────────────────────────────────────────────────────
-
-export function useChangePassword() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
-      authFetch<{ status: string }>('/users/me/password', {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Forgot / reset password (public, no auth required) ───────────────────────
-
-export function useForgotPassword() {
-  return useMutation({
-    mutationFn: (email: string) =>
-      apiFetch<{ status: string }>('/auth/forgot-password', {
-        method: 'POST',
-        body: JSON.stringify({ email }),
-      }),
-  })
-}
-
-export function useResetPassword() {
-  return useMutation({
-    mutationFn: (data: { token: string; newPassword: string }) =>
-      apiFetch<{ status: string }>('/auth/reset-password', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Admin: SMTP ──────────────────────────────────────────────────────────────
-
-export function useAdminSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'smtp'],
-    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
-  })
-}
-
-export function useSaveSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
-        method: 'PUT',
-        body: JSON.stringify(cfg),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-export function useTestSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
-        method: 'POST',
-        body: JSON.stringify(cfg),
-      }),
-  })
-}
-
-export function useDeleteSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: () =>
-      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-// ── Admin: Instance settings ──────────────────────────────────────────────────
-
-export function useAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'settings'],
-    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
-  })
-}
-
-export function usePatchAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: Record<string, string>) =>
-      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
-  })
-}
-
-// ── API Tokens ────────────────────────────────────────────────────────────────
-
-export function useTokens() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: ['tokens'],
-    queryFn: () => authFetch<APIToken[]>('/tokens'),
-  })
-}
-
-export function useCreateToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (data: { name: string; scope: string }) =>
-      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
-
-export function useRevokeToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) =>
-      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
-
-// ── Admin: Users ──────────────────────────────────────────────────────────────
-
-export type AdminUserRow = User & { teamCount: number }
-
-export function useAdminUsers(orphanedOnly = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'users', { orphanedOnly }],
-    queryFn: () =>
-      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
-  })
-}
-````
-
 ## File: packages/web/src/lib/presetFilters.test.ts
 ````typescript
 /**
@@ -26777,184 +27217,392 @@ describe("filter kind 'saved'", () => {
 })
 ````
 
-## File: packages/web/src/pages/settings/ProfilePage.tsx
+## File: packages/web/src/pages/settings/OrganizationPage.tsx
 ````typescript
 /**
- * /settings/profile — Identity, display name, and stats for the current user.
+ * /settings/organization — Superadmin: organization name, registration policy,
+ * and system-wide defaults (language placeholder, timezone, week start).
+ * Language support is deferred to Phase 10.7 — Localization & Language Support.
  */
 
 import { useState, useEffect } from 'react'
-import { Calendar, Activity } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useUpdateProfile, useMyStats } from '@/hooks/useSettings'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { ApiError } from '@/lib/api'
+import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
 
-// ── Stat chip ──────────────────────────────────────────────────────────────
+export default function OrganizationPage() {
+  const { data } = useAdminSettings()
+  const patch = usePatchAdminSettings()
 
-function StatChip({ value, label, color }: { value: number; label: string; color: string }) {
-  return (
-    <div style={{
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-      padding: '10px 14px', borderRadius: 8, flex: 1, minWidth: 0,
-      border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
-      background: `${color}0a`, textAlign: 'center',
-    }}>
-      <span style={{ fontSize: 20, fontWeight: 700, color }}>{value}</span>
-      <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{label}</span>
-    </div>
-  )
-}
-
-// ── Main ───────────────────────────────────────────────────────────────────
-
-export default function ProfilePage() {
-  const { user } = useAuth()
-  const updateProfile = useUpdateProfile()
-  const { data: stats } = useMyStats()
-
-  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: user?.color ?? '#288C9B',
-    icon: user?.icon ?? '__none__',
-  })
+  const settings = data?.settings ?? {}
+  const [orgName, setOrgName] = useState('')
+  const [accentColor, setAccentColor] = useState('')
+  // Validated hex to submit — only a well-formed #RRGGBB is sent to the API.
+  const accentColorValid = accentColor === '' || /^#[0-9a-fA-F]{6}$/.test(accentColor)
+  const [regPolicy, setRegPolicy] = useState('invite_only')
+  const [timezone, setTimezone] = useState('UTC')
+  const [weekStart, setWeekStart] = useState('monday')
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
   useEffect(() => {
-    if (user) {
-      setDisplayName(user.displayName)
-      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
-    }
-  }, [user])
+    setOrgName(settings.instance_name || '')
+    setAccentColor(settings.accent_color || '')
+    setRegPolicy(settings.registration_policy || 'invite_only')
+    setTimezone(settings.default_timezone || 'UTC')
+    setWeekStart(settings.default_week_start || 'monday')
+  }, [JSON.stringify(settings)])
 
   async function handleSave() {
     setFeedback(null)
     try {
-      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
-      setFeedback({ type: 'success', msg: 'Profile updated.' })
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
-      setFeedback({ type: 'error', msg })
+      await patch.mutateAsync({
+        instance_name: orgName,
+        // Only submit a valid hex value; empty string clears the override.
+        accent_color: accentColorValid ? accentColor : '',
+        registration_policy: regPolicy,
+        default_timezone: timezone,
+        default_week_start: weekStart,
+      })
+      setFeedback({ type: 'success', msg: 'Settings saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
     }
   }
 
-  const accentColor = identity.color
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        System-wide identity and defaults for this draba installation.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Identity
+        </h3>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Organization name</Label>
+          <Input
+            value={orgName}
+            onChange={e => setOrgName(e.target.value)}
+            placeholder="My Company"
+            className="max-w-xs"
+          />
+          <p className="text-xs text-muted-foreground m-0">
+            Shown in the browser tab title and login page.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Accent color</Label>
+          <div className="flex items-center gap-3">
+            <input
+              type="color"
+              value={accentColor || '#288C9B'}
+              onChange={e => setAccentColor(e.target.value)}
+              className="h-9 w-14 rounded border border-border cursor-pointer bg-transparent"
+            />
+            <Input
+              value={accentColor}
+              onChange={e => setAccentColor(e.target.value)}
+              placeholder="#288C9B"
+              className={`max-w-[140px] font-mono text-[13px] ${!accentColorValid ? 'border-destructive' : ''}`}
+            />
+            {accentColor && (
+              <button
+                type="button"
+                onClick={() => setAccentColor('')}
+                className="text-xs text-muted-foreground hover:text-foreground cursor-pointer bg-transparent border-none"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          {!accentColorValid && (
+            <p className="text-xs text-destructive m-0">Must be a 6-digit hex color (e.g. #288C9B).</p>
+          )}
+          <p className="text-xs text-muted-foreground m-0">
+            Overrides the primary color globally. Leave blank to use the default teal.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Registration policy</Label>
+          <div className="flex gap-2">
+            {[
+              { v: 'invite_only', label: 'Invite only' },
+              { v: 'open', label: 'Open registration' },
+            ].map(({ v, label }) => (
+              <button
+                key={v}
+                onClick={() => setRegPolicy(v)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
+                  regPolicy === v
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
+          System defaults
+        </h3>
+        <p className="text-xs text-muted-foreground mb-4">
+          Applied to new accounts when the user hasn't set their own preference.
+        </p>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default language</Label>
+          <select
+            disabled
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
+          >
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default timezone</Label>
+          <select
+            value={timezone}
+            onChange={e => setTimezone(e.target.value)}
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
+          >
+            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+      <Button onClick={handleSave} disabled={patch.isPending}>
+        {patch.isPending ? 'Saving…' : 'Save settings'}
+      </Button>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
+ */
+
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
+
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
+
+const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
+
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+  const { theme: currentTheme, applyTheme } = useDarkMode()
+
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+    const savedTheme = prefMap['theme'] as string | undefined
+    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
+  }, [JSON.stringify(prefMap)])
+
+  function handleThemeChange(t: 'light' | 'dark') {
+    setTheme(t)
+    applyTheme(t)
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
+        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
+        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
+        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
+  }
 
   return (
     <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Profile</h2>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
       <p className="text-sm text-muted-foreground mb-6">
-        Changes to your name and identity propagate across all your team memberships.
+        Personal appearance and regional settings.
       </p>
 
-      <div className="bg-card border border-border rounded-[10px] overflow-hidden mb-5">
-        {/* Header banner — identity + name (mirrors MemberModal / TeamModal pattern) */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '20px 24px', borderBottom: '1px solid var(--border)' }}>
-          <div style={{ flexShrink: 0 }}>
-            <IdentityWidget
-              identity={identity}
-              name={displayName}
-              shape="circle"
-              onChange={next => setIdentity(next)}
-            />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-1">
-              Your profile
-              {user?.isSuperadmin && (
-                <span className="ml-2 text-[11px] px-2 py-0.5 rounded bg-primary/15 text-primary font-semibold tracking-wide normal-case">
-                  Superadmin
-                </span>
-              )}
-            </div>
-            <input
-              value={displayName}
-              onChange={e => setDisplayName(e.target.value)}
-              placeholder="Your name"
-              style={{
-                fontSize: 18, fontWeight: 600, color: 'var(--foreground)',
-                background: 'transparent', border: 'none', outline: 'none',
-                padding: '1px 4px', margin: '-1px -4px',
-                borderRadius: 4, fontFamily: 'inherit', width: '100%',
-              }}
-              onFocus={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.outline = `2px solid ${accentColor}44` }}
-              onBlur={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.outline = 'none' }}
-            />
-            <div className="text-xs text-muted-foreground mt-0.5">{user?.email ?? ''}</div>
-          </div>
-          {/* Live badge preview */}
-          <div style={{ flexShrink: 0 }}>
-            <Badge identity={identity} name={displayName} size={44} shape="circle" />
-          </div>
+      {/* Regional */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Regional
+        </h3>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Language</Label>
+          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
         </div>
 
-        {/* Stats */}
-        {stats && (
-          <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border)' }}>
-            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
-              <Calendar size={11} /> Timelines
-            </div>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-              <StatChip value={stats.activeTimelines} label="Active" color="#1A97A2" />
-              <StatChip value={stats.archivedTimelines} label="Archived" color="#484f58" />
-            </div>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
 
-            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
-              <Activity size={11} /> Activities
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <StatChip value={stats.pastDue} label="Past due" color={stats.pastDue > 0 ? '#EF4444' : '#484f58'} />
-              <StatChip value={stats.running} label="Running" color="#1A97A2" />
-              <StatChip value={stats.upcoming} label="Upcoming" color="#3B82F6" />
-              <StatChip value={stats.archivedActivities} label="Archived" color="#484f58" />
-            </div>
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Date format</Label>
+          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
           </div>
-        )}
-
-        {/* Fields */}
-        <div style={{ padding: '20px 24px' }}>
-          {/* Email (read-only) */}
-          <div className="flex flex-col gap-1.5 mb-5">
-            <Label>Email</Label>
-            <Input
-              value={user?.email ?? ''}
-              disabled
-              className="max-w-[360px] opacity-60"
-            />
-            <p className="text-xs text-muted-foreground m-0">Email changes are not yet supported.</p>
-          </div>
-
-          {feedback && (
-            <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-              {feedback.msg}
-            </p>
-          )}
-
-          <button
-            onClick={handleSave}
-            disabled={updateProfile.isPending || !displayName.trim()}
-            style={{
-              background: accentColor,
-              color: '#fff',
-              fontWeight: 600,
-              fontSize: 13,
-              padding: '8px 20px',
-              borderRadius: 7,
-              border: 'none',
-              cursor: updateProfile.isPending || !displayName.trim() ? 'not-allowed' : 'pointer',
-              opacity: updateProfile.isPending || !displayName.trim() ? 0.5 : 1,
-              fontFamily: 'inherit',
-              transition: 'opacity 0.15s',
-            }}
-          >
-            {updateProfile.isPending ? 'Saving…' : 'Save profile'}
-          </button>
         </div>
       </div>
+
+      {/* Appearance */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Appearance
+        </h3>
+        <div className="flex flex-col gap-1.5 mb-2">
+          <Label>Theme</Label>
+          <div className="flex gap-2">
+            {(['light', 'dark'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  theme === t
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground m-0">
+            Applies immediately. Persisted server-side so it syncs across devices.
+          </p>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
     </div>
   )
 }
@@ -29463,397 +30111,6 @@ export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props
           </button>
         )
       )}
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/OrganizationPage.tsx
-````typescript
-/**
- * /settings/organization — Superadmin: organization name, registration policy,
- * and system-wide defaults (language placeholder, timezone, week start).
- * Language support is deferred to Phase 10.7 — Localization & Language Support.
- */
-
-import { useState, useEffect } from 'react'
-import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-export default function OrganizationPage() {
-  const { data } = useAdminSettings()
-  const patch = usePatchAdminSettings()
-
-  const settings = data?.settings ?? {}
-  const [orgName, setOrgName] = useState('')
-  const [accentColor, setAccentColor] = useState('')
-  // Validated hex to submit — only a well-formed #RRGGBB is sent to the API.
-  const accentColorValid = accentColor === '' || /^#[0-9a-fA-F]{6}$/.test(accentColor)
-  const [regPolicy, setRegPolicy] = useState('invite_only')
-  const [timezone, setTimezone] = useState('UTC')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setOrgName(settings.instance_name || '')
-    setAccentColor(settings.accent_color || '')
-    setRegPolicy(settings.registration_policy || 'invite_only')
-    setTimezone(settings.default_timezone || 'UTC')
-    setWeekStart(settings.default_week_start || 'monday')
-  }, [JSON.stringify(settings)])
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await patch.mutateAsync({
-        instance_name: orgName,
-        // Only submit a valid hex value; empty string clears the override.
-        accent_color: accentColorValid ? accentColor : '',
-        registration_policy: regPolicy,
-        default_timezone: timezone,
-        default_week_start: weekStart,
-      })
-      setFeedback({ type: 'success', msg: 'Settings saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        System-wide identity and defaults for this draba installation.
-      </p>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Identity
-        </h3>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Organization name</Label>
-          <Input
-            value={orgName}
-            onChange={e => setOrgName(e.target.value)}
-            placeholder="My Company"
-            className="max-w-xs"
-          />
-          <p className="text-xs text-muted-foreground m-0">
-            Shown in the browser tab title and login page.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Accent color</Label>
-          <div className="flex items-center gap-3">
-            <input
-              type="color"
-              value={accentColor || '#288C9B'}
-              onChange={e => setAccentColor(e.target.value)}
-              className="h-9 w-14 rounded border border-border cursor-pointer bg-transparent"
-            />
-            <Input
-              value={accentColor}
-              onChange={e => setAccentColor(e.target.value)}
-              placeholder="#288C9B"
-              className={`max-w-[140px] font-mono text-[13px] ${!accentColorValid ? 'border-destructive' : ''}`}
-            />
-            {accentColor && (
-              <button
-                type="button"
-                onClick={() => setAccentColor('')}
-                className="text-xs text-muted-foreground hover:text-foreground cursor-pointer bg-transparent border-none"
-              >
-                Reset
-              </button>
-            )}
-          </div>
-          {!accentColorValid && (
-            <p className="text-xs text-destructive m-0">Must be a 6-digit hex color (e.g. #288C9B).</p>
-          )}
-          <p className="text-xs text-muted-foreground m-0">
-            Overrides the primary color globally. Leave blank to use the default teal.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Registration policy</Label>
-          <div className="flex gap-2">
-            {[
-              { v: 'invite_only', label: 'Invite only' },
-              { v: 'open', label: 'Open registration' },
-            ].map(({ v, label }) => (
-              <button
-                key={v}
-                onClick={() => setRegPolicy(v)}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
-                  regPolicy === v
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
-          System defaults
-        </h3>
-        <p className="text-xs text-muted-foreground mb-4">
-          Applied to new accounts when the user hasn't set their own preference.
-        </p>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default language</Label>
-          <select
-            disabled
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
-          >
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default timezone</Label>
-          <select
-            value={timezone}
-            onChange={e => setTimezone(e.target.value)}
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
-          >
-            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-      <Button onClick={handleSave} disabled={patch.isPending}>
-        {patch.isPending ? 'Saving…' : 'Save settings'}
-      </Button>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
- */
-
-import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
-
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
-
-const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
-
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-  const { theme: currentTheme, applyTheme } = useDarkMode()
-
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-    const savedTheme = prefMap['theme'] as string | undefined
-    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
-  }, [JSON.stringify(prefMap)])
-
-  function handleThemeChange(t: 'light' | 'dark') {
-    setTheme(t)
-    applyTheme(t)
-  }
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await Promise.all([
-        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
-        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
-        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
-        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
-      ])
-      setFeedback({ type: 'success', msg: 'Preferences saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Personal appearance and regional settings.
-      </p>
-
-      {/* Regional */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Regional
-        </h3>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Language</Label>
-          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Timezone</Label>
-          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Date format</Label>
-          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Appearance */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Appearance
-        </h3>
-        <div className="flex flex-col gap-1.5 mb-2">
-          <Label>Theme</Label>
-          <div className="flex gap-2">
-            {(['light', 'dark'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  theme === t
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground m-0">
-            Applies immediately. Persisted server-side so it syncs across devices.
-          </p>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <Button onClick={handleSave} disabled={upsert.isPending}>
-        {upsert.isPending ? 'Saving…' : 'Save preferences'}
-      </Button>
     </div>
   )
 }
@@ -35339,893 +35596,6 @@ func spaHandler(uiFS fs.FS) http.Handler {
 }
 ````
 
-## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
-````typescript
-/**
- * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
- *
- * Field order (top to bottom):
- *   1. Header — Identity widget + Title
- *   2. When — Date pickers (start → end)
- *   3. Description — single-line input
- *   4. Assigned to — bordered card style (matches create panel)
- *   5. Classify — Status (rich dropdown with color dot + icon + name), Tags (stub)
- *   6. Advanced — Parent (stub), Progress (stub), Location, URL
- *   7. Notes — multi-line textarea
- *   8. Footer — Delete button
- *
- * All functional fields save on change/blur via PATCH /activities/:id.
- * liveDragStart / liveDragEnd display live dates during bar drag without triggering saves.
- */
-
-import { useState, useEffect, useRef } from 'react'
-import { X, Trash2, ArrowRight, Loader2, ChevronDown, Search } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useUpdateActivity, useDeleteActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useTags } from '@/hooks/useTags'
-import TagInput from '@/components/TagInput'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-
-const PANEL_WIDTH = 300
-
-interface Props {
-  event: ApiActivity | null
-  open: boolean
-  members: Member[]
-  teamId: string
-  timelineId: string
-  onClose: () => void
-  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragStart?: string
-  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragEnd?: string
-}
-
-// ── Small helpers ─────────────────────────────────────────────────────────────
-
-function toDateInput(iso: string): string { return iso.slice(0, 10) }
-function toISODate(d: string): string { return `${d}T00:00:00Z` }
-
-const SEC_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 700,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  marginBottom: 6,
-}
-
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 3,
-  width: 68,
-  flexShrink: 0,
-}
-
-const STUB_VALUE: React.CSSProperties = {
-  fontSize: 12,
-  color: 'var(--muted-foreground)',
-  opacity: 0.5,
-  flex: 1,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 4,
-  cursor: 'default',
-  userSelect: 'none',
-}
-
-const DIVIDER: React.CSSProperties = {
-  borderTop: '1px solid var(--border)',
-  margin: '10px 0',
-}
-
-const INPUT: React.CSSProperties = {
-  width: '100%',
-  boxSizing: 'border-box' as const,
-  fontSize: 12,
-  color: 'var(--foreground)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-  padding: '5px 8px',
-  outline: 'none',
-  background: 'var(--background)',
-  fontFamily: 'var(--font-sans)',
-}
-
-// ── Rich status dropdown ──────────────────────────────────────────────────────
-
-interface StatusDropdownProps {
-  statuses: Status[]
-  value: string | null | undefined
-  onChange: (id: string | null) => void
-}
-
-function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
-
-  const selected = statuses.find(s => s.id === value) ?? null
-
-  return (
-    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '4px 8px',
-          border: '1px solid var(--border)',
-          borderRadius: 6,
-          background: 'var(--background)',
-          color: 'var(--foreground)',
-          cursor: 'pointer',
-          fontSize: 12,
-          fontFamily: 'var(--font-sans)',
-          textAlign: 'left',
-        }}
-      >
-        {selected ? (
-          <>
-            <div
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: '50%',
-                background: resolveColorHex(selected.color) ?? selected.color,
-                flexShrink: 0,
-              }}
-            />
-            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selected.name}
-            </span>
-          </>
-        ) : (
-          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
-        )}
-        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {open && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 4px)',
-            left: 0,
-            right: 0,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
-            zIndex: 100,
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            onClick={() => { onChange(null); setOpen(false) }}
-            style={{
-              padding: '6px 10px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              fontStyle: 'italic',
-              cursor: 'pointer',
-              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-          >
-            — No status —
-          </div>
-          {statuses.map(s => (
-            <div
-              key={s.id}
-              onClick={() => { onChange(s.id); setOpen(false) }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '6px 10px',
-                fontSize: 12,
-                cursor: 'pointer',
-                background: s.id === value ? 'var(--muted)' : 'transparent',
-                fontWeight: s.id === value ? 600 : 400,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
-            >
-              <div
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: resolveColorHex(s.color) ?? s.color,
-                  flexShrink: 0,
-                }}
-              />
-              <span style={{ flex: 1 }}>{s.name}</span>
-              {s.isClosed && (
-                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
-                  CLOSED
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Searchable parent activity picker ─────────────────────────────────────────
-
-interface ParentPickerProps {
-  activities: ApiActivity[]
-  value: string | null | undefined
-  onChange: (id: string | null) => void
-}
-
-/**
- * Searchable combobox for choosing a parent activity. Scales past a plain
- * <select> by filtering as you type, shows each activity's identity badge,
- * and ellipsis-truncates long titles so the panel never overflows.
- */
-function ParentActivityPicker({ activities, value, onChange }: ParentPickerProps) {
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const ref = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQuery('') }
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
-
-  // Focus the search field whenever the dropdown opens.
-  useEffect(() => { if (open) inputRef.current?.focus() }, [open])
-
-  const selected = activities.find(a => a.id === value) ?? null
-  const filtered = activities.filter(a => a.title.toLowerCase().includes(query.trim().toLowerCase()))
-
-  function choose(id: string | null) {
-    onChange(id)
-    setOpen(false)
-    setQuery('')
-  }
-
-  return (
-    <div ref={ref} style={{ flex: 1, position: 'relative', minWidth: 0 }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%', display: 'flex', alignItems: 'center', gap: 6,
-          padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 6,
-          background: 'var(--background)', color: 'var(--foreground)', cursor: 'pointer',
-          fontSize: 12, fontFamily: 'var(--font-sans)', textAlign: 'left',
-        }}
-      >
-        {selected ? (
-          <>
-            <Badge identity={{ color: selected.color ?? '#288C9B', icon: selected.icon ?? '__none__' }} name={selected.title} size={16} />
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selected.title}
-            </span>
-          </>
-        ) : (
-          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— None —</span>
-        )}
-        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {open && (
-        <div
-          style={{
-            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
-            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)', zIndex: 100, overflow: 'hidden',
-          }}
-        >
-          {/* Search field */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
-            <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-            <input
-              ref={inputRef}
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              placeholder="Search activities…"
-              style={{
-                flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'none',
-                fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
-              }}
-            />
-          </div>
-
-          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-            <div
-              onClick={() => choose(null)}
-              style={{
-                padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
-                fontStyle: 'italic', cursor: 'pointer',
-                borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              — None —
-            </div>
-            {filtered.map(a => (
-              <div
-                key={a.id}
-                onClick={() => choose(a.id)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
-                  fontSize: 12, cursor: 'pointer',
-                  background: a.id === value ? 'var(--muted)' : 'transparent',
-                  fontWeight: a.id === value ? 600 : 400,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
-              >
-                <Badge identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }} name={a.title} size={16} />
-                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {a.title}
-                </span>
-              </div>
-            ))}
-            {filtered.length === 0 && (
-              <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-                No matching activities
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-export default function ActivityDetailPanel({
-  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
-}: Props) {
-  const updateMutation = useUpdateActivity(timelineId)
-  const deleteMutation = useDeleteActivity(timelineId)
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
-  const { data: teamTags = [] } = useTags(teamId)
-  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
-
-  const [title, setTitle] = useState(event?.title ?? '')
-  const [description, setDescription] = useState(event?.description ?? '')
-  const [notes, setNotes] = useState(event?.notes ?? '')
-  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
-  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: event?.color ?? '#288C9B',
-    icon: event?.icon ?? '__none__',
-  })
-  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
-  const [tagIds, setTagIds] = useState<string[]>((event?.tagIds as string[] | undefined) ?? [])
-  const [location, setLocation] = useState(event?.location ?? '')
-  const [url, setUrl] = useState(event?.url ?? '')
-  const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
-  // Parent and status are mirrored locally so the picker reflects a change
-  // immediately — the `event` prop is a snapshot taken at selection time and
-  // doesn't refresh until the activity is reselected.
-  const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
-  const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
-  // Progress percent renders as a label until clicked; `progressDraft` holds the
-  // in-flight text while editing.
-  const [editingProgress, setEditingProgress] = useState(false)
-  const [progressDraft, setProgressDraft] = useState('')
-  const [confirmDelete, setConfirmDelete] = useState(false)
-
-  // Re-sync when the selected activity changes.
-  useEffect(() => {
-    if (!event) return
-    setTitle(event.title)
-    setDescription(event.description ?? '')
-    setNotes(event.notes ?? '')
-    setStartDate(toDateInput(event.startAt))
-    setEndDate(toDateInput(event.endAt))
-    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
-    setAssignedIds(event.assignedMemberIds ?? [])
-    setTagIds((event.tagIds as string[] | undefined) ?? [])
-    setLocation(event.location ?? '')
-    setUrl(event.url ?? '')
-    setProgressValue(event.percentComplete ?? 0)
-    setParentId(event.parentActivityId ?? null)
-    setStatusId(event.statusId ?? null)
-    setEditingProgress(false)
-    setConfirmDelete(false)
-  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Sync local date state when the event's dates change (e.g. after a drag commit).
-  const eventStartAt = event?.startAt
-  const eventEndAt = event?.endAt
-  useEffect(() => {
-    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
-    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
-  }, [eventStartAt, eventEndAt])
-
-  const saving = updateMutation.isPending
-  const deleting = deleteMutation.isPending
-
-  // Display dates: live drag overrides take precedence while dragging.
-  const displayStart = liveDragStart ?? startDate
-  const displayEnd = liveDragEnd ?? endDate
-
-  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
-    if (!event) return
-    updateMutation.mutate({ activityId: event.id, patch })
-  }
-
-  function handleTitleBlur() {
-    if (title.trim() && title !== event?.title) save({ title: title.trim() })
-  }
-
-  function handleDescriptionBlur() {
-    if (description !== (event?.description ?? '')) save({ description: description || null })
-  }
-
-  function handleNotesBlur() {
-    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
-  }
-
-  function handleLocationBlur() {
-    if (location !== (event?.location ?? '')) save({ location: location || null })
-  }
-
-  function handleUrlBlur() {
-    if (url !== (event?.url ?? '')) save({ url: url || null })
-  }
-
-  function handleStartDateChange(val: string) {
-    setStartDate(val)
-    if (val && val <= endDate) save({ startAt: toISODate(val) })
-  }
-
-  function handleEndDateChange(val: string) {
-    setEndDate(val)
-    if (val && val >= startDate) save({ endAt: toISODate(val) })
-  }
-
-  function handleIdentityChange(next: Identity) {
-    setIdentity(next)
-    save({ color: next.color, icon: next.icon })
-  }
-
-  function toggleAssignee(memberId: string) {
-    const next = assignedIds.includes(memberId)
-      ? assignedIds.filter(id => id !== memberId)
-      : [...assignedIds, memberId]
-    setAssignedIds(next)
-    save({ assignedMemberIds: next })
-  }
-
-  function handleTagsChange(ids: string[]) {
-    setTagIds(ids)
-    save({ tagIds: ids } as Parameters<typeof save>[0])
-  }
-
-  function handleProgressChange(e: React.ChangeEvent<HTMLInputElement>) {
-    setProgressValue(Number(e.target.value))
-  }
-
-  // Clamps to 0–100, rounds to an integer, and saves only on a real change.
-  function commitProgress(val: number) {
-    const clamped = Math.max(0, Math.min(100, Math.round(Number.isFinite(val) ? val : 0)))
-    setProgressValue(clamped)
-    if (clamped !== (event?.percentComplete ?? 0)) {
-      save({ percentComplete: clamped } as Parameters<typeof save>[0])
-    }
-  }
-
-  function handleProgressCommit(e: React.ChangeEvent<HTMLInputElement>) {
-    commitProgress(Number(e.target.value))
-  }
-
-  function startEditProgress() {
-    setProgressDraft(String(progressValue))
-    setEditingProgress(true)
-  }
-
-  function commitProgressEdit() {
-    commitProgress(progressDraft === '' ? 0 : Number(progressDraft))
-    setEditingProgress(false)
-  }
-
-  function handleDelete() {
-    if (!event) return
-    deleteMutation.mutate(event.id, { onSuccess: onClose })
-  }
-
-  return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-        {!event ? null : (<>
-
-        {/* ── Header bar ── */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '0 12px', height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)', flexShrink: 0,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
-            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', color: 'var(--muted-foreground)',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
-        </div>
-
-        {/* ── Scrollable body ── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
-
-          {/* 1. Identity widget + Title */}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
-            <div style={{ marginTop: 2, flexShrink: 0 }}>
-              <IdentityWidget
-                identity={identity}
-                name={title || event?.title || ''}
-                shape="square"
-                onChange={handleIdentityChange}
-              />
-            </div>
-            <input
-              value={title}
-              onChange={e => setTitle(e.target.value)}
-              onBlur={handleTitleBlur}
-              style={{
-                flex: 1, fontSize: 13, fontWeight: 600,
-                color: 'var(--foreground)', border: '1px solid transparent',
-                borderRadius: 'var(--radius-md)', padding: '5px 6px',
-                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-              }}
-              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 2. When — date pickers only (no allDay checkbox, no date summary) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>When</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input
-                type="date" value={displayStart}
-                onChange={e => handleStartDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-              <input
-                type="date" value={displayEnd} min={startDate}
-                onChange={e => handleEndDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 3. Description — below dates, matching create panel */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Description</div>
-            <input
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Optional description…"
-              style={{ ...INPUT, padding: '6px 8px' }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 4. Assigned to — bordered card style matching create panel */}
-          {members.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={SEC_LABEL}>Assigned to</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {members.map(m => {
-                  const assigned = assignedIds.includes(m.id)
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => toggleAssignee(m.id)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '5px 8px',
-                        border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
-                        borderRadius: 'var(--radius-md)',
-                        background: assigned ? `${m.color}18` : 'var(--background)',
-                        cursor: 'pointer', textAlign: 'left',
-                        transition: 'background 0.1s, border-color 0.1s',
-                      }}
-                    >
-                      <MemberAvatar member={m} size={18} />
-                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                      {assigned && (
-                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          <div style={DIVIDER} />
-
-          {/* 5. Classify — Status (rich dropdown), Tags (stub) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Classify</div>
-
-            {/* Status picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Status</span>
-              {statuses.length > 0 ? (
-                <StatusDropdown
-                  statuses={statuses}
-                  value={statusId}
-                  onChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
-                />
-              ) : (
-                <div style={{ ...STUB_VALUE }}>
-                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
-                </div>
-              )}
-            </div>
-
-            {/* Tags */}
-            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-              <span style={{ ...FIELD_LABEL, paddingTop: 5 }}>Tags</span>
-              <TagInput
-                teamId={teamId}
-                tags={teamTags}
-                selectedTagIds={tagIds}
-                onChange={handleTagsChange}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 6. Advanced (was "Details") — Parent, Progress, Location, URL */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Advanced</div>
-
-            {/* Parent activity picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Parent</span>
-              <ParentActivityPicker
-                activities={allActivities.filter(a => a.id !== event.id)}
-                value={parentId}
-                onChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
-              />
-            </div>
-
-            {/* % Complete slider */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Progress</span>
-              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={progressValue}
-                  onChange={handleProgressChange}
-                  onMouseUp={handleProgressCommit as unknown as React.MouseEventHandler}
-                  onTouchEnd={handleProgressCommit as unknown as React.TouchEventHandler}
-                  style={{ flex: 1, cursor: 'pointer', accentColor: 'var(--primary)' }}
-                />
-                {editingProgress ? (
-                  <input
-                    autoFocus
-                    type="text"
-                    inputMode="numeric"
-                    value={progressDraft}
-                    onChange={e => setProgressDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
-                    onBlur={commitProgressEdit}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') commitProgressEdit()
-                      else if (e.key === 'Escape') setEditingProgress(false)
-                    }}
-                    aria-label="Percent complete"
-                    style={{
-                      width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
-                      marginLeft: 'auto',
-                      color: 'var(--foreground)', border: '1px solid var(--primary)',
-                      borderRadius: 4, padding: '2px 4px', outline: 'none',
-                      background: 'var(--background)', fontFamily: 'var(--font-sans)',
-                    }}
-                  />
-                ) : (
-                  <span
-                    onClick={startEditProgress}
-                    title="Click to edit"
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEditProgress() } }}
-                    style={{
-                      fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
-                      textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
-                      marginLeft: 'auto',
-                      padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    {progressValue}%
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {/* Location (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Location</span>
-              <input
-                value={location}
-                onChange={e => setLocation(e.target.value)}
-                onBlur={handleLocationBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-
-            {/* URL (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>URL</span>
-              <input
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-                onBlur={handleUrlBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 7. Notes — multi-line textarea */}
-          <div style={{ marginBottom: 8 }}>
-            <div style={SEC_LABEL}>Notes</div>
-            <textarea
-              value={notes}
-              onChange={e => setNotes(e.target.value)}
-              onBlur={e => { handleNotesBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Add notes…"
-              rows={4}
-              style={{
-                ...INPUT,
-                padding: '6px 8px',
-                resize: 'vertical',
-                minHeight: 72,
-                lineHeight: 1.5,
-              }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
-
-        </div>
-
-        {/* ── Footer — Delete button ── */}
-        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-          {confirmDelete ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
-                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
-              </p>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  onClick={() => setConfirmDelete(false)}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                    background: 'var(--card)', color: 'var(--foreground)',
-                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                  }}
-                >Cancel</button>
-                <button
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: 'none',
-                    background: 'var(--destructive)', color: 'white',
-                    cursor: deleting ? 'not-allowed' : 'pointer',
-                    fontFamily: 'var(--font-sans)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  }}
-                >
-                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                  Delete
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setConfirmDelete(true)}
-              style={{
-                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                fontSize: 12, fontWeight: 600, padding: 7,
-                borderRadius: 'var(--radius-md)', border: 'none',
-                background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
-                cursor: 'pointer', fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <Trash2 size={12} strokeWidth={2} />
-              Delete activity
-            </button>
-          )}
-        </div>
-
-        </>)}
-      </div>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/components/layout/Sidebar.tsx
 ````typescript
 import { useState, useRef, useEffect } from 'react';
@@ -37275,6 +36645,893 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
       )}
     </div>
   );
+}
+````
+
+## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
+````typescript
+/**
+ * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
+ *
+ * Field order (top to bottom):
+ *   1. Header — Identity widget + Title
+ *   2. When — Date pickers (start → end)
+ *   3. Description — single-line input
+ *   4. Assigned to — bordered card style (matches create panel)
+ *   5. Classify — Status (rich dropdown with color dot + icon + name), Tags (stub)
+ *   6. Advanced — Parent (stub), Progress (stub), Location, URL
+ *   7. Notes — multi-line textarea
+ *   8. Footer — Delete button
+ *
+ * All functional fields save on change/blur via PATCH /activities/:id.
+ * liveDragStart / liveDragEnd display live dates during bar drag without triggering saves.
+ */
+
+import { useState, useEffect, useRef } from 'react'
+import { X, Trash2, ArrowRight, Loader2, ChevronDown, Search } from 'lucide-react'
+import MemberAvatar from '@/components/MemberAvatar'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useUpdateActivity, useDeleteActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useTags } from '@/hooks/useTags'
+import TagInput from '@/components/TagInput'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
+
+const PANEL_WIDTH = 300
+
+interface Props {
+  event: ApiActivity | null
+  open: boolean
+  members: Member[]
+  teamId: string
+  timelineId: string
+  onClose: () => void
+  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragStart?: string
+  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragEnd?: string
+}
+
+// ── Small helpers ─────────────────────────────────────────────────────────────
+
+function toDateInput(iso: string): string { return iso.slice(0, 10) }
+function toISODate(d: string): string { return `${d}T00:00:00Z` }
+
+const SEC_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.08em',
+  marginBottom: 6,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.07em',
+  marginBottom: 3,
+  width: 68,
+  flexShrink: 0,
+}
+
+const STUB_VALUE: React.CSSProperties = {
+  fontSize: 12,
+  color: 'var(--muted-foreground)',
+  opacity: 0.5,
+  flex: 1,
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  cursor: 'default',
+  userSelect: 'none',
+}
+
+const DIVIDER: React.CSSProperties = {
+  borderTop: '1px solid var(--border)',
+  margin: '10px 0',
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box' as const,
+  fontSize: 12,
+  color: 'var(--foreground)',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-md)',
+  padding: '5px 8px',
+  outline: 'none',
+  background: 'var(--background)',
+  fontFamily: 'var(--font-sans)',
+}
+
+// ── Rich status dropdown ──────────────────────────────────────────────────────
+
+interface StatusDropdownProps {
+  statuses: Status[]
+  value: string | null | undefined
+  onChange: (id: string | null) => void
+}
+
+function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  const selected = statuses.find(s => s.id === value) ?? null
+
+  return (
+    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 8px',
+          border: '1px solid var(--border)',
+          borderRadius: 6,
+          background: 'var(--background)',
+          color: 'var(--foreground)',
+          cursor: 'pointer',
+          fontSize: 12,
+          fontFamily: 'var(--font-sans)',
+          textAlign: 'left',
+        }}
+      >
+        {selected ? (
+          <>
+            <div
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: resolveColorHex(selected.color) ?? selected.color,
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected.name}
+            </span>
+          </>
+        ) : (
+          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
+        )}
+        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            right: 0,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
+            zIndex: 100,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            onClick={() => { onChange(null); setOpen(false) }}
+            style={{
+              padding: '6px 10px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              fontStyle: 'italic',
+              cursor: 'pointer',
+              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            — No status —
+          </div>
+          {statuses.map(s => (
+            <div
+              key={s.id}
+              onClick={() => { onChange(s.id); setOpen(false) }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 10px',
+                fontSize: 12,
+                cursor: 'pointer',
+                background: s.id === value ? 'var(--muted)' : 'transparent',
+                fontWeight: s.id === value ? 600 : 400,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
+            >
+              <div
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: resolveColorHex(s.color) ?? s.color,
+                  flexShrink: 0,
+                }}
+              />
+              <span style={{ flex: 1 }}>{s.name}</span>
+              {s.isClosed && (
+                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
+                  CLOSED
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Searchable parent activity picker ─────────────────────────────────────────
+
+interface ParentPickerProps {
+  activities: ApiActivity[]
+  value: string | null | undefined
+  onChange: (id: string | null) => void
+}
+
+/**
+ * Searchable combobox for choosing a parent activity. Scales past a plain
+ * <select> by filtering as you type, shows each activity's identity badge,
+ * and ellipsis-truncates long titles so the panel never overflows.
+ */
+function ParentActivityPicker({ activities, value, onChange }: ParentPickerProps) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQuery('') }
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  // Focus the search field whenever the dropdown opens.
+  useEffect(() => { if (open) inputRef.current?.focus() }, [open])
+
+  const selected = activities.find(a => a.id === value) ?? null
+  const filtered = activities.filter(a => a.title.toLowerCase().includes(query.trim().toLowerCase()))
+
+  function choose(id: string | null) {
+    onChange(id)
+    setOpen(false)
+    setQuery('')
+  }
+
+  return (
+    <div ref={ref} style={{ flex: 1, position: 'relative', minWidth: 0 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', gap: 6,
+          padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 6,
+          background: 'var(--background)', color: 'var(--foreground)', cursor: 'pointer',
+          fontSize: 12, fontFamily: 'var(--font-sans)', textAlign: 'left',
+        }}
+      >
+        {selected ? (
+          <>
+            <Badge identity={{ color: selected.color ?? '#288C9B', icon: selected.icon ?? '__none__' }} name={selected.title} size={16} />
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected.title}
+            </span>
+          </>
+        ) : (
+          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— None —</span>
+        )}
+        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)', zIndex: 100, overflow: 'hidden',
+          }}
+        >
+          {/* Search field */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
+            <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search activities…"
+              style={{
+                flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'none',
+                fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
+              }}
+            />
+          </div>
+
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            <div
+              onClick={() => choose(null)}
+              style={{
+                padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
+                fontStyle: 'italic', cursor: 'pointer',
+                borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              — None —
+            </div>
+            {filtered.map(a => (
+              <div
+                key={a.id}
+                onClick={() => choose(a.id)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
+                  fontSize: 12, cursor: 'pointer',
+                  background: a.id === value ? 'var(--muted)' : 'transparent',
+                  fontWeight: a.id === value ? 600 : 400,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
+              >
+                <Badge identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }} name={a.title} size={16} />
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {a.title}
+                </span>
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+                No matching activities
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export default function ActivityDetailPanel({
+  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
+}: Props) {
+  const updateMutation = useUpdateActivity(timelineId)
+  const deleteMutation = useDeleteActivity(timelineId)
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
+  const { data: teamTags = [] } = useTags(teamId)
+  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
+
+  const [title, setTitle] = useState(event?.title ?? '')
+  const [description, setDescription] = useState(event?.description ?? '')
+  const [notes, setNotes] = useState(event?.notes ?? '')
+  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
+  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: event?.color ?? '#288C9B',
+    icon: event?.icon ?? '__none__',
+  })
+  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
+  const [tagIds, setTagIds] = useState<string[]>((event?.tagIds as string[] | undefined) ?? [])
+  const [location, setLocation] = useState(event?.location ?? '')
+  const [url, setUrl] = useState(event?.url ?? '')
+  const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
+  // Parent and status are mirrored locally so the picker reflects a change
+  // immediately — the `event` prop is a snapshot taken at selection time and
+  // doesn't refresh until the activity is reselected.
+  const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
+  const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
+  // Progress percent renders as a label until clicked; `progressDraft` holds the
+  // in-flight text while editing.
+  const [editingProgress, setEditingProgress] = useState(false)
+  const [progressDraft, setProgressDraft] = useState('')
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // Re-sync when the selected activity changes.
+  useEffect(() => {
+    if (!event) return
+    setTitle(event.title)
+    setDescription(event.description ?? '')
+    setNotes(event.notes ?? '')
+    setStartDate(toDateInput(event.startAt))
+    setEndDate(toDateInput(event.endAt))
+    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
+    setAssignedIds(event.assignedMemberIds ?? [])
+    setTagIds((event.tagIds as string[] | undefined) ?? [])
+    setLocation(event.location ?? '')
+    setUrl(event.url ?? '')
+    setProgressValue(event.percentComplete ?? 0)
+    setParentId(event.parentActivityId ?? null)
+    setStatusId(event.statusId ?? null)
+    setEditingProgress(false)
+    setConfirmDelete(false)
+  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync local date state when the event's dates change (e.g. after a drag commit).
+  const eventStartAt = event?.startAt
+  const eventEndAt = event?.endAt
+  useEffect(() => {
+    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
+    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
+  }, [eventStartAt, eventEndAt])
+
+  const saving = updateMutation.isPending
+  const deleting = deleteMutation.isPending
+
+  // Display dates: live drag overrides take precedence while dragging.
+  const displayStart = liveDragStart ?? startDate
+  const displayEnd = liveDragEnd ?? endDate
+
+  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
+    if (!event) return
+    updateMutation.mutate({ activityId: event.id, patch })
+  }
+
+  function handleTitleBlur() {
+    if (title.trim() && title !== event?.title) save({ title: title.trim() })
+  }
+
+  function handleDescriptionBlur() {
+    if (description !== (event?.description ?? '')) save({ description: description || null })
+  }
+
+  function handleNotesBlur() {
+    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
+  }
+
+  function handleLocationBlur() {
+    if (location !== (event?.location ?? '')) save({ location: location || null })
+  }
+
+  function handleUrlBlur() {
+    if (url !== (event?.url ?? '')) save({ url: url || null })
+  }
+
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val && val <= endDate) save({ startAt: toISODate(val) })
+  }
+
+  function handleEndDateChange(val: string) {
+    setEndDate(val)
+    if (val && val >= startDate) save({ endAt: toISODate(val) })
+  }
+
+  function handleIdentityChange(next: Identity) {
+    setIdentity(next)
+    save({ color: next.color, icon: next.icon })
+  }
+
+  function toggleAssignee(memberId: string) {
+    const next = assignedIds.includes(memberId)
+      ? assignedIds.filter(id => id !== memberId)
+      : [...assignedIds, memberId]
+    setAssignedIds(next)
+    save({ assignedMemberIds: next })
+  }
+
+  function handleTagsChange(ids: string[]) {
+    setTagIds(ids)
+    save({ tagIds: ids } as Parameters<typeof save>[0])
+  }
+
+  function handleProgressChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setProgressValue(Number(e.target.value))
+  }
+
+  // Clamps to 0–100, rounds to an integer, and saves only on a real change.
+  function commitProgress(val: number) {
+    const clamped = Math.max(0, Math.min(100, Math.round(Number.isFinite(val) ? val : 0)))
+    setProgressValue(clamped)
+    if (clamped !== (event?.percentComplete ?? 0)) {
+      save({ percentComplete: clamped } as Parameters<typeof save>[0])
+    }
+  }
+
+  function handleProgressCommit(e: React.ChangeEvent<HTMLInputElement>) {
+    commitProgress(Number(e.target.value))
+  }
+
+  function startEditProgress() {
+    setProgressDraft(String(progressValue))
+    setEditingProgress(true)
+  }
+
+  function commitProgressEdit() {
+    commitProgress(progressDraft === '' ? 0 : Number(progressDraft))
+    setEditingProgress(false)
+  }
+
+  function handleDelete() {
+    if (!event) return
+    deleteMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {!event ? null : (<>
+
+        {/* ── Header bar ── */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0 12px', height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)', flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
+            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', color: 'var(--muted-foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <X size={14} strokeWidth={2} />
+          </button>
+        </div>
+
+        {/* ── Scrollable body ── */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
+
+          {/* 1. Identity widget + Title */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
+            <div style={{ marginTop: 2, flexShrink: 0 }}>
+              <IdentityWidget
+                identity={identity}
+                name={title || event?.title || ''}
+                shape="square"
+                onChange={handleIdentityChange}
+              />
+            </div>
+            <input
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              onBlur={handleTitleBlur}
+              style={{
+                flex: 1, fontSize: 13, fontWeight: 600,
+                color: 'var(--foreground)', border: '1px solid transparent',
+                borderRadius: 'var(--radius-md)', padding: '5px 6px',
+                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
+              }}
+              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
+              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
+            />
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 2. When — date pickers only (no allDay checkbox, no date summary) */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>When</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                type="date" value={displayStart}
+                onChange={e => handleStartDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
+              <input
+                type="date" value={displayEnd} min={startDate}
+                onChange={e => handleEndDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 3. Description — below dates, matching create panel */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Description</div>
+            <input
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
+              placeholder="Optional description…"
+              style={{ ...INPUT, padding: '6px 8px' }}
+              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            />
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 4. Assigned to — bordered card style matching create panel */}
+          {members.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={SEC_LABEL}>Assigned to</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {members.map(m => {
+                  const assigned = assignedIds.includes(m.id)
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => toggleAssignee(m.id)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '5px 8px',
+                        border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
+                        borderRadius: 'var(--radius-md)',
+                        background: assigned ? `${m.color}18` : 'var(--background)',
+                        cursor: 'pointer', textAlign: 'left',
+                        transition: 'background 0.1s, border-color 0.1s',
+                      }}
+                    >
+                      <MemberAvatar member={m} size={18} />
+                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
+                      {assigned && (
+                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          <div style={DIVIDER} />
+
+          {/* 5. Classify — Status (rich dropdown), Tags (stub) */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Classify</div>
+
+            {/* Status picker */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Status</span>
+              {statuses.length > 0 ? (
+                <StatusDropdown
+                  statuses={statuses}
+                  value={statusId}
+                  onChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
+                />
+              ) : (
+                <div style={{ ...STUB_VALUE }}>
+                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
+                </div>
+              )}
+            </div>
+
+            {/* Tags */}
+            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+              <span style={{ ...FIELD_LABEL, paddingTop: 5 }}>Tags</span>
+              <TagInput
+                teamId={teamId}
+                tags={teamTags}
+                selectedTagIds={tagIds}
+                onChange={handleTagsChange}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 6. Advanced (was "Details") — Parent, Progress, Location, URL */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Advanced</div>
+
+            {/* Parent activity picker */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Parent</span>
+              <ParentActivityPicker
+                activities={allActivities.filter(a => a.id !== event.id)}
+                value={parentId}
+                onChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
+              />
+            </div>
+
+            {/* % Complete slider */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Progress</span>
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={progressValue}
+                  onChange={handleProgressChange}
+                  onMouseUp={handleProgressCommit as unknown as React.MouseEventHandler}
+                  onTouchEnd={handleProgressCommit as unknown as React.TouchEventHandler}
+                  style={{ flex: 1, cursor: 'pointer', accentColor: 'var(--primary)' }}
+                />
+                {editingProgress ? (
+                  <input
+                    autoFocus
+                    type="text"
+                    inputMode="numeric"
+                    value={progressDraft}
+                    onChange={e => setProgressDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
+                    onBlur={commitProgressEdit}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') commitProgressEdit()
+                      else if (e.key === 'Escape') setEditingProgress(false)
+                    }}
+                    aria-label="Percent complete"
+                    style={{
+                      width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
+                      marginLeft: 'auto',
+                      color: 'var(--foreground)', border: '1px solid var(--primary)',
+                      borderRadius: 4, padding: '2px 4px', outline: 'none',
+                      background: 'var(--background)', fontFamily: 'var(--font-sans)',
+                    }}
+                  />
+                ) : (
+                  <span
+                    onClick={startEditProgress}
+                    title="Click to edit"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEditProgress() } }}
+                    style={{
+                      fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
+                      textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
+                      marginLeft: 'auto',
+                      padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    {progressValue}%
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Location (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Location</span>
+              <input
+                value={location}
+                onChange={e => setLocation(e.target.value)}
+                onBlur={handleLocationBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+
+            {/* URL (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <span style={FIELD_LABEL}>URL</span>
+              <input
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                onBlur={handleUrlBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 7. Notes — multi-line textarea */}
+          <div style={{ marginBottom: 8 }}>
+            <div style={SEC_LABEL}>Notes</div>
+            <textarea
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+              onBlur={e => { handleNotesBlur(); e.target.style.borderColor = 'var(--border)' }}
+              placeholder="Add notes…"
+              rows={4}
+              style={{
+                ...INPUT,
+                padding: '6px 8px',
+                resize: 'vertical',
+                minHeight: 72,
+                lineHeight: 1.5,
+              }}
+              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            />
+          </div>
+
+        </div>
+
+        {/* ── Footer — Delete button ── */}
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+          {confirmDelete ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
+                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
+              </p>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                    background: 'var(--card)', color: 'var(--foreground)',
+                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                  }}
+                >Cancel</button>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: 'none',
+                    background: 'var(--destructive)', color: 'white',
+                    cursor: deleting ? 'not-allowed' : 'pointer',
+                    fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  }}
+                >
+                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmDelete(true)}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                fontSize: 12, fontWeight: 600, padding: 7,
+                borderRadius: 'var(--radius-md)', border: 'none',
+                background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
+                cursor: 'pointer', fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <Trash2 size={12} strokeWidth={2} />
+              Delete activity
+            </button>
+          )}
+        </div>
+
+        </>)}
+      </div>
+    </div>
+  )
 }
 ````
 
@@ -47335,1726 +47592,6 @@ export default function DashboardPage() {
 }
 ````
 
-## File: docs/ROADMAP.md
-````markdown
-# Roadmap
-
-This document organizes development into discrete phases with effort estimates and exit criteria — clear goalposts for testing and evaluation between sessions. For the granular task checklist, see [TASKS.md](TASKS.md).
-
-## Status Key
-
-| Symbol | Meaning |
-|--------|---------|
-| ✅ | Done |
-| 🔄 | In Progress |
-| ⬜ | Not Started |
-
-## Phase Summary
-
-| # | Phase | Effort | Status |
-|---|-------|--------|--------|
-| 0 | [Scaffold & Docs](#phase-0-scaffold--docs) | XS | ✅ |
-| 1 | [Project Infrastructure](#phase-1-project-infrastructure) | S — 2–4 hrs | ✅ |
-| 2 | [API Foundation — DB & Auth](#phase-2-api-foundation--db--auth) | L — 3–5 days | ✅ |
-| 3 | [Core API — Events & Teams](#phase-3-core-api--events--teams) | M — 2–3 days | ✅ |
-| 4 | [OpenAPI Spec & Type Generation](#phase-4-openapi-spec--type-generation) | S — 1 day | ✅ |
-| 5 | [API — Real-Time (WebSocket)](#phase-5-api--real-time-websocket) | M — 2–3 days | ✅ |
-| 6 | [API — Timelines](#phase-6-api--timelines) | S — ½–1 day | ✅ |
-| 7 | [Web — Scaffold](#phase-7-web--scaffold) | M — 2–3 days | ✅ |
-| 8.0 | [RBAC Refactor + First-Run Setup](#phase-80-rbac-refactor--first-run-setup) | M — 1–2 days | ✅ |
-| 8.1 | [Web — Gantt Shell & Event Rendering](#phase-81-web--gantt-shell--event-rendering) | L — 3–5 days | ✅ |
-| 8.1.1 | [Rename Timeline View → Gantt](#phase-811-rename-timeline-view--gantt) | XS — 1 hr | ✅ |
-| 8.1.2 | [Gantt View Polish](#phase-812-gantt-view-polish) | M — 1–2 days | ✅ |
-| 8.2 | [Web — Gantt Interactions](#phase-82-web--gantt-interactions) | L — 3–5 days | ✅ |
-| 8.2.1 | [Gantt Bar Drag — Resize & Move](#phase-821-gantt-bar-drag--resize--move) | M — 1–2 days | ✅ |
-| 8.3 | [Web — Real-Time WebSocket Sync](#phase-83-web--real-time-websocket-sync) | M — 1–2 days | ✅ |
-| 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ✅ |
-| 8.5 | [Find (In-View)](#phase-85-find-in-view) | M — 1–2 days | ✅ |
-| 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ✅ |
-| 9.5 | [Rename Event → Activity (The Great Rename)](#phase-95--rename-event--activity-the-great-rename) | M — 1–2 days | ✅ |
-| 9.6 | [Identity System (Color + Icon)](#phase-96--identity-system-color--icon) | M — 2–3 days | 🔄 |
-| 10.1.1 | [Teams — CRUD & Management](#phase-1011--teams--crud--management) | M — 2 days | 🔄 |
-| 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
-| 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | 🔄 |
-| 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | 🔄 |
-| 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | ✅ |
-| 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | 🔄 |
-| 10.4.1 | [Preference Consumption & Session Handling](#phase-1041--preference-consumption--session-handling) | S–M — 1–2 days | 🔄 |
-| 10.4.2 | [Activity Schema Normalization — Drop team_id](#phase-1042--activity-schema-normalization--drop-team_id) | S — ½–1 day | ✅ |
-| 10.4.3 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1043--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ✅ |
-| 10.4.4 | [Gantt Interaction & Activity Edit Polish](#phase-1044--gantt-interaction--activity-edit-polish) | M — 2–3 days | 🔄 |
-| 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
-| 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
-| 11.1 | [Web — List / Spreadsheet View](#phase-111--web--list--spreadsheet-view) | M — 2–3 days | ⬜ |
-| 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
-| 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
-| 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
-| 13 | [AI Key Management](#phase-13--ai-key-management) | M — 2–3 days | ⬜ |
-| 14 | [Localization & Language Support](#phase-14--localization--language-support) | L — 3–5 days | ⬜ |
-| 15 | [Calendar Sync — Google & CalDAV](#phase-15-calendar-sync--google--caldav) | XL — 1–2 wks | ⬜ |
-| 16 | [Shares — Multi-Share Views with Passwords](#phase-16-shares--multi-share-views-with-passwords) | M — 3–5 days | ⬜ |
-| 17 | [Data Portability & Exports](#phase-17-data-portability--exports) | L — 1 wk | ⬜ |
-| 18 | [External Connectors (Webhooks)](#phase-18-external-connectors-webhooks) | M — 3–5 days | ⬜ |
-| 19 | [Global Search](#phase-19-global-search) | M — 2–3 days | ⬜ |
-| 20 | [Backup & Restore](#phase-20--backup--restore) | M — 2–3 days | ⬜ |
-
-**Parking Lot (v2):** MySQL/Postgres adapters, CLI, MCP server, mobile apps, Microsoft/Outlook sync, multi-tenant hosting, SSO, notifications.
-
----
-
-## Phase Detail
-
-### Phase 0 — Scaffold & Docs
-**Status:** ✅ Done — 2026-04-27
-
-Repo created. Requirements, architecture, conventions, and design docs written.
-
----
-
-### Phase 1 — Project Infrastructure
-**Status:** ✅ Done — 2026-04-29 | **Effort:** S (2–4 hrs)
-
-**Scope:**
-- Go module initialized at `packages/api/`
-- React + TypeScript + Vite initialized at `packages/web/`
-- `pnpm-workspace.yaml` wiring both packages
-- `golangci-lint` config (`.golangci.yml`)
-- GitHub Actions CI: lint + test on PR
-- `docker-compose.yml` for local development
-
-**Exit criteria — safe to pause when:**
-- `go build ./...` completes without errors
-- `pnpm build` (web) completes without errors
-- CI pipeline is green on a test push
-- `docker compose up` starts both services without errors
-
----
-
-### Phase 2 — API Foundation — DB & Auth
-**Status:** ✅ Done — 2026-04-30 | **Effort:** L (3–5 days)
-
-**Scope:**
-- DB abstraction layer with SQLite adapter (sqlc or sqlx)
-- Migration runner (auto-runs on startup, idempotent)
-- Initial schema: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
-- JWT issue/validate, password hash/verify, invite token generate/validate
-- Endpoints: `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`
-
-**Exit criteria — safe to pause when:**
-- `POST /auth/register` (invite token required), `POST /auth/login`, and `POST /auth/refresh` all return correct responses
-- JWT validates on a subsequent authenticated request
-- All schema tables exist in the SQLite file
-- Migration runner re-run produces no changes (idempotent)
-
----
-
-### Phase 3 — Core API — Activities & Teams (originally Events; renamed in Phase 9.5)
-**Status:** ✅ Done — 2026-05-03 | **Effort:** M (2–3 days)
-
-**Scope:**
-- `POST /teams` — create team
-- `POST /teams/:id/invites` — send invite
-- `GET /teams/:id/members`
-- `POST /teams/:id/activities` — create activity (shipped as `/events`; renamed in Phase 9.5)
-- `GET /teams/:id/activities` — list activities (date range filter)
-- `PATCH /activities/:id` — update activity
-- `DELETE /activities/:id` — delete activity
-
-**Exit criteria — safe to pause when:**
-- Full invite flow works: create team → send invite → register via token → list members
-- Activities can be created, listed (filtered by date range), updated, and deleted via HTTP with a valid JWT
-- All responses match the expected shape (verified manually or with a test script)
-
----
-
-### Phase 4 — OpenAPI Spec & Type Generation
-**Status:** ✅ Done — 2026-05-04 | **Effort:** S (1 day)
-
-**Scope:**
-- `packages/shared/openapi.yaml` covering all Phase 2–3 endpoints
-- `openapi-typescript` codegen configured in `packages/shared/`
-- Generated types importable from `packages/web/`
-
-**Exit criteria — safe to pause when:**
-- `pnpm generate` (or equivalent) completes with no errors
-- All Phase 2–3 endpoints are represented in the spec
-- A generated type (e.g., `Event`) can be imported in a web file without TypeScript errors
-
----
-
-### Phase 5 — API — Real-Time (WebSocket)
-**Status:** ✅ Done — 2026-05-14 | **Effort:** M (2–3 days)
-
-**Scope:**
-- WebSocket hub (`internal/ws/`)
-- Team-scoped subscription model
-- Broadcast on `events.*` internal bus events (create, update, delete)
-
-**Exit criteria — safe to pause when:**
-- Two browser clients subscribed to the same team both receive a broadcast delta within 500ms of an event mutation
-- A client subscribed to team A does not receive events from team B
-- 30-second heartbeat keeps idle connections alive without dropping
-
----
-
-### Phase 6 — API — Timelines
-**Status:** ✅ Done — 2026-05-15 | **Effort:** S (½–1 day)
-
-**Scope:**
-- `POST /teams/:id/timelines` — create timeline
-- `GET /timelines/:id` — fetch timeline (auth-gated)
-- `GET /timelines/share/:token` — public share link handler
-- Timeline access list enforcement
-
-**Exit criteria — safe to pause when:**
-- Can create a timeline and retrieve it with a valid JWT
-- Public share token returns the timeline without auth
-- A user not on the access list is rejected with 403
-
----
-
-### Phase 7 — Web — Scaffold
-**Status:** ✅ Done — 2026-05-17 | **Effort:** M (2–3 days)
-
-**Scope:**
-- shadcn/ui initialized (`pnpm dlx shadcn@latest init`)
-- Color tokens set in `src/index.css`
-- Dark mode toggle (localStorage + `prefers-color-scheme`)
-- Routing (React Router)
-- Auth flow: login page, register-via-invite page, token storage
-- API client: TanStack Query + fetch wrapper using generated types
-- WebSocket client hook (`useWebSocket`)
-- oapi-codegen wired for Go handler types (no drift between OpenAPI spec and Go)
-- React build embedded in Go binary via `//go:embed`; single container, single port
-
-**Exit criteria — safe to pause when:**
-- `/login` renders and authenticates against the live API (served from the Go binary)
-- Protected routes redirect unauthenticated users to `/login`
-- A TanStack Query hook successfully fetches and displays team events
-- WebSocket connects and emits events visible in browser DevTools Network tab
-- `docker build --target prod` produces a single image; the login page loads at port 8080 with no second container
-
----
-
-### Phase 8.0 — RBAC Refactor + First-Run Setup
-**Status:** ✅ Done — 2026-05-18 | **Effort:** M (1–2 days)
-
-Prerequisite work before the web timeline phases: tightened the auth model and added a first-run experience.
-
-**Scope:**
-- Migration 003: `team_members` PK, nullable `user_id` (login-less Participants), `team_member_id` FKs on `event_assignments` and `timeline_access`, `role` on `timeline_access`, `visibility` dropped from `timelines`
-- First registered user auto-granted `is_superadmin`; team admins bypass timeline access checks; members require explicit grant
-- `GET /setup/status` public endpoint; 3-step first-run setup wizard (Account → Team → Timeline)
-- Production container runs as non-root user (uid 1000)
-
-**Exit criteria:**
-- Migration runs cleanly on a fresh DB; existing data preserved on upgrade
-- First user through the wizard lands in the app as superadmin with a team and timeline
-- Navigating to `/setup` after setup is complete redirects to `/login`
-- `go test ./...` all pass; `golangci-lint run` clean
-
----
-
-### Phase 8.1 — Web — Gantt Shell & Event Rendering
-**Status:** ✅ Done — 2026-05-18 | **Effort:** L (3–5 days)
-
-Static, data-driven Gantt chart. No drag interactions — layout, rendering, grouping, sorting, and zoom only.
-
-**Design pivot (2026-05-18):** Switched from person-lane resource view to event-row Gantt layout based on first live preview. Person grouping is now one of several "Group by" options rather than the fixed row axis.
-
-**Scope:**
-- `GanttGrid` component: Gantt layout — one row per event, sticky label column (title + member avatars), horizontal time grid, horizontal scroll
-- `GanttToolbar` component: zoom (granularity), group-by selector (None / Member / Parent event), sort-by selector (Start date / End date / Title), Export stub
-- `GanttView` component: data container — fetches events + members, applies grouping + sorting, builds `GanttRow[]`, passes to `GanttGrid`
-- Pixel ↔ date math (map date range to X offset/width); variable column width for zoom
-- Wire to `GET /teams/:id/events?start=&end=` via TanStack Query
-- Wire to `GET /teams/:id/members` for group labels and member avatars
-- API additions: `GET /teams` (list user's teams), `GET /teams/:id/timelines` (list timelines for date bounds), `assignedMemberIds[]` on Event responses
-
-**Exit criteria — safe to pause when:**
-- Events render as bars in the correct date columns, with correct width
-- Group by Member shows one section per assignee with correct events beneath
-- Group by Parent shows children indented under their parent event
-- Sort by Start date / End date / Title reorders rows within groups
-- Zoom steps change column width and the grid scrolls correctly
-- Gantt toolbar renders and all controls are functional
-
----
-
-### Phase 8.1.1 — Rename Timeline View → Gantt
-**Status:** ✅ Done — 2026-05-19 | **Effort:** XS (1 hr)
-
-Renamed the Gantt view components to eliminate confusion between the "Timeline" data entity (date-bounded event container) and the view layer.
-
-**Scope:**
-- Renamed directory `components/timeline/` → `components/gantt/`
-- Renamed `TimelineView` → `GanttView`, `TimelineGrid` → `GanttGrid`, `TimelineToolbar` → `GanttToolbar`
-- Updated `ViewMode` type: `'timeline'` → `'gantt'`
-- All data entity code (Sidebar, API, hooks) untouched
-
----
-
-### Phase 8.1.2 — Gantt View Polish
-**Status:** ✅ Done — 2026-05-19 | **Effort:** M (1–2 days)
-
-Three polish items bundled together.
-
-**Scope:**
-- Reusable `EmptyState` component (`components/shared/EmptyState.tsx`) — draba icon, message, optional description; dark-mode aware via `currentColor`
-- Fixed empty state centering — renders outside the scroll container so it stays centered on screen
-- Zoom rethink — replaced pixel-width slider with time granularity dropdown (Auto / Day / Week / Month / Quarter / Year). Auto-fit picks the finest granularity that fills the viewport. New `granularity.ts` utility for column generation and fractional event positioning.
-
-**Exit criteria — safe to pause when:**
-- Empty state shows centered draba icon + "No viewable events" when no events exist
-- Zoom dropdown changes time granularity; Auto picks an appropriate level based on timeline duration
-- Event bars position correctly with fractional column math at all granularity levels
-
----
-
-### Phase 8.2 — Web — Gantt Interactions
-**Status:** ✅ Done — 2026-05-19 | **Effort:** L (3–5 days)
-
-Builds on 8.1. Full CRUD interactions on the timeline.
-
-**Scope:**
-- Click activity block → open `ActivityDetailPanel` (view mode) *(shipped as `EventDetailPanel`; renamed in Phase 9.5)*
-- Edit button → inline editing form (title, description, date range, status, assignees)
-- Save → `PATCH /activities/:id`, optimistic update, close panel *(shipped as `PATCH /events/:id`; renamed in Phase 9.5)*
-- Delete → `DELETE /activities/:id`, confirm dialog, remove from timeline *(shipped as `DELETE /events/:id`; renamed in Phase 9.5)*
-- Drag on empty lane cell → capture start/end date range → open `ActivityCreatePanel` pre-filled with lane member + dates *(shipped as `EventCreateForm`; renamed in Phase 9.5)*
-- Submit form → `POST /teams/:id/activities`, add block to timeline *(shipped as `POST /teams/:id/events`; renamed in Phase 9.5)*
-
-**Exit criteria — safe to pause when:**
-- Clicking an activity block opens an edit panel; changes save and reflect immediately in the UI
-- Dragging on an empty lane cell opens a creation form pre-filled with the selected range
-- Created and edited events appear correctly in the timeline without page reload
-
----
-
-### Phase 8.2.1 — Gantt Bar Drag — Resize & Move
-**Status:** ✅ Done — 2026-05-19 | **Effort:** M (1–2 days)
-
-Builds on 8.2. Direct manipulation of event bars on the Gantt chart.
-
-**Scope:**
-- **Edge drag (resize):** mousedown on the left or right 8px edge of an event bar → drag to change start or end date; show date tooltip during drag; PATCH on mouseup
-- **Body drag (move):** mousedown on the bar body → drag horizontally to shift both start and end dates by the same delta; show date tooltip during drag; PATCH on mouseup
-- Visual feedback: bar moves/resizes live during drag (optimistic); ghost/overlay at original position optional
-- Snap to column boundaries (e.g. day, week) matching the active granularity
-- `is_external` events (Phase 18) are non-draggable (read-only)
-
-**Exit criteria — safe to pause when:**
-- Dragging a bar edge changes the event's start or end date and saves on mouseup without a page reload
-- Dragging a bar body shifts both dates by the same amount and saves on mouseup
-- A date tooltip shows the new date(s) during drag
-- Snap-to-column works at all granularity levels
-
----
-
-### Phase 8.3 — Web — Real-Time WebSocket Sync
-**Status:** ✅ Done — 2026-05-19 | **Effort:** M (1–2 days)
-
-Builds on 8.2. Wire live WebSocket deltas into the timeline's state.
-
-**Scope:**
-- Connect `useWebSocket` hook (Phase 7) to subscribe to `events.*` messages for the active team
-- On `activity.created` delta: insert new event block into TanStack Query cache
-- On `activity.updated` delta: update existing block in cache (position + content)
-- On `activity.deleted` delta: remove block from cache
-- Handle optimistic update conflicts (local edit in-flight when WS delta arrives for same event)
-
-**Exit criteria — safe to pause when:**
-- A second browser tab's Gantt view updates within 500ms when an activity is mutated in the first tab
-- No duplicate or ghost blocks after rapid create/edit/delete sequences
-
----
-
-### Phase 8.4 — Persistent View Settings
-**Status:** ✅ Done — 2026-05-20 | **Effort:** M (2–3 days)
-
-Server-side user preferences so view settings survive login/logout and sync across devices.
-
-**Scope:**
-- New `user_preferences` table: `id`, `user_id`, `timeline_id` (nullable), `key`, `value` (JSON), `updated_at`; unique on `(user_id, timeline_id, key)`
-- Global preferences (timeline_id NULL): theme, selected_team, selected_timeline
-- Per-timeline preferences: filter preset, group_by, sort_by, zoom_granularity
-- API: `GET /users/me/preferences?timeline_id=`, `PUT /users/me/preferences`
-- Frontend: `usePreferences(timelineId?)` hook — reads/writes, caches via TanStack Query
-- On timeline switch: fetch per-timeline prefs, apply to toolbar state
-- On login: fetch global prefs, restore theme/team/timeline selection
-
-**Exit criteria — safe to pause when:**
-- Changing zoom/group/sort on a timeline, switching to another timeline, and switching back restores the original settings
-- Dark mode and selected team persist across logout/login
-- Settings sync between two browser tabs via API (not just localStorage)
-
----
-
-### Phase 8.5 — Find (In-View)
-**Status:** ✅ Done — 2026-05-20 | **Effort:** M (1–2 days)
-
-Browser-style "find in page" for the active view. Scoped to events the current view has already loaded; respects active filters. **Global cross-team search is deferred to [Phase 19](#phase-19-global-search).**
-
-**Design rationale:**
-Two distinct tools, not one box. **Find** answers *"highlight what I'm looking at"* — fast, keyboard-driven, walks matches. Global **Search** (Phase 19) answers *"find an event when I don't know where it lives"* — palette-style, navigates across teams/timelines. Mixing them in one input is where these UIs get muddy. With Find + the upcoming List view (Phase 11), we expect ~95% of real-world lookup needs to be covered.
-
-**Scope:**
-
-*Trigger & layout:*
-- Find bar opens on `Ctrl/Cmd+F` (and via a search icon in the TopBar between FilterDropdown and ProfileMenu)
-- `Esc` closes; clear button (×) resets the query
-- Bar shows: query input · match counter (`3 / 12`) · prev/next chevrons · close
-
-*Match scope (client-side, against already-fetched events):*
-- Event title, description, tag names, assignee display names, parent event title
-- Case-insensitive, debounced (~150ms)
-- Search respects active filters by default — the visible view defines the search world
-
-*Visual treatment:*
-- Matching events: amber outline / glow (uses existing design tokens)
-- Non-matching events: dimmed to ~0.3 opacity
-- **Active** match (the one prev/next is parked on): stronger outline + subtle pulse, so users can tell it apart from the other matches
-- For non-title matches, a small badge or tooltip on hover surfaces *why it matched* (e.g. `matched tag #urgent`, `matched assignee Jane`) so highlights on otherwise-blank-looking cards aren't mysterious
-
-*Navigation:*
-- `Enter` / `Shift+Enter` (and the ◀ ▶ chevrons) walk forward/backward through matches
-- On step, the Gantt auto-scrolls **both axes** to center the active match (horizontal pan to the event's date range, vertical scroll to its row)
-- If the active match lives inside a collapsed group, the group expands automatically
-
-*Empty-state behavior:*
-- Zero matches, no filters active → bar shows `No matches`
-- Zero matches **in view**, but filters are active → soft inline callout: *"No matches in current view. [Clear filters]"*. (We do **not** silently search outside the filters — that's Phase 19's job.)
-
-*Persistence:*
-- The query itself is **not** persisted across navigation or reloads — Find is ephemeral by design (matches browser Cmd+F muscle memory)
-- Open/closed state of the bar is also ephemeral
-
-**Out of scope (explicitly):**
-- Cross-team or cross-timeline search → Phase 19
-- Server-side full-text search → Phase 19
-- Saved searches / recent queries → Phase 19
-- Highlighting matches that aren't in the currently-loaded event set (no dynamic loading exists yet; revisit when/if windowed loading lands)
-
-**Exit criteria — safe to pause when:**
-- `Ctrl/Cmd+F` opens the Find bar; `Esc` closes it
-- Typing dims non-matches and highlights matches across title, description, tags, assignees, and parent title
-- Match counter shows `N / M` and updates as the query changes
-- Prev/next (and `Enter` / `Shift+Enter`) cycle through matches, auto-scrolling the Gantt to center each one
-- Active match is visually distinguishable from other matches
-- Non-title matches surface a "why matched" hint on hover
-- With filters active and zero in-view matches, the "Clear filters" callout appears
-- Find works correctly at all granularity levels and with all group-by modes
-
----
-
-### Phase 9 — API Token Auth & Archive
-**Status:** ✅ Done — 2026-05-20 | **Effort:** M (1–2 days)
-
-**Scope:**
-- `POST /tokens`, `GET /tokens`, `DELETE /tokens/:id`
-- Auth middleware accepts Bearer (JWT or API token) on all authenticated routes
-- Read-only token scope enforcement (blocked from mutations)
-- `POST /events/:id/archive`, `POST /events/:id/unarchive`
-- `POST /timelines/:id/archive`, `POST /timelines/:id/unarchive`
-- List endpoints exclude archived records by default; `?archived=true` to include
-
-> **Note:** Phase 9 ships the API surface only. The token management **UI** (create / list / revoke from a settings page) lands in [Phase 10.1.3 — Settings](#phase-1013--settings--profile-tokens--admin). Until 10.1.3 ships, tokens are created via direct API calls or a temporary admin script.
-
-**Exit criteria — safe to pause when:**
-- Can create an API token and use its value as a Bearer token on a GET request
-- A read-only token is rejected (403) on a POST/PATCH/DELETE request
-- Archiving an event removes it from the default event list; `?archived=true` restores it
-
----
-
-### Phase 9.5 — Rename Event → Activity (The Great Rename)
-**Status:** ✅ Done — 2026-05-21 | **Effort:** M (1–2 days)
-
-Rename the domain entity `Event` → `Activity` end-to-end (DB, Go API, OpenAPI, generated TS, web hooks/components, user-facing copy, docs). The pub/sub bus keeps its `internal/events` package name (correct event-driven-architecture term), but its message-type constants and wire strings move to `activity.*`. Calendar fields (`google_event_id`, `caldav_uid`) are preserved — they map to external VEVENT identifiers.
-
-**Why now:** the name collides with internal pub/sub events and with calendar VEVENTs. Cost of disambiguation grows fast in Phase 15 (Calendar Sync) and Phase 18 (Webhooks). Cheapest to fix while pre-1.0, single LAN test instance, no external API consumers.
-
-**Approach:** hard cutover. No `/events` aliases, no dual message types. Single migration via `ALTER TABLE RENAME`. See **[GreatEventToActivity.md](GreatEventToActivity.md)** for the full runbook (token map, per-layer checklist, verification, rollback).
-
-**Scope (summary — see runbook for the full list):**
-- DB: `events` → `activities`, `event_tags` → `activity_tags`, `event_assignments` → `activity_assignments`, `parent_event_id` → `parent_activity_id`. New migration `005_rename_events_to_activities.sql`. **Keep** `google_event_id` and `caldav_uid`.
-- Go: `models.Event` → `Activity`; `EventRepo` → `ActivityRepo`; `event_handler.go` → `activity_handler.go`; all routes `/events*` → `/activities*`; bus constants `EventCreated/Updated/Deleted` → `ActivityCreated/Updated/Deleted` and wire strings `event.*` → `activity.*`. **Keep** `internal/events` package name and `TimelineCreated/Updated`.
-- OpenAPI: `Event` schema → `Activity`; all operationIds, tags, paths. **Keep** `googleEventId`/`caldavUid` fields. Regenerate TS types.
-- Web: `useTeamEvents` → `useTeamActivities`; `EventDetailPanel`/`EventCreatePanel`/`EventPanel` → `Activity*`; `DrabaEvent`/`EventStatus`/`EVENT_COLORS` → `Activity*`/`ACTIVITY_COLORS`; UI strings ("Add Event" → "Add Activity", sidebar "Events" → "Activities", etc.); WebSocket message switch updated.
-- Tests, seed (`seed-find-test-events.sql` → `…-activities.sql`), and docs (ROADMAP/REQUIREMENTS/ARCHITECTURE/CONVENTIONS/TESTING/UX_PATTERNS) swept.
-
-**Exit criteria — safe to pause when:**
-- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-- Migration applies cleanly against a copy of the production DB; row counts unchanged; `PRAGMA foreign_key_check` returns no rows
-- Smoke test on test docker passes: create / edit / archive / unarchive / delete an Activity; WebSocket frames arrive as `activity.created` (not `event.created`)
-- `googleEventId` / `caldavUid` still present in OpenAPI `Activity` schema and in the `activities` table
-- Final-sweep grep returns only the expected remaining matches (bus package, calendar fields, historical log)
-- `docs/log.md` Phase 9.5 entry written
-
----
-
-### Phase 9.6 — Identity System (Color + Icon)
-**Status:** 🔄 In Progress — 2026-05-24, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
-
-Builds a reusable Identity component system — a color + icon pair that gives every major entity (activities, timelines, teams, members) a consistent visual fingerprint. Ships the component library, expands the color palette from 8 to 16, adds schema fields where missing, and swaps the new components into every existing UI surface that edits color or icon.
-
-**Why now:** Phase 10.x builds full CRUD for teams, timelines, and members. Each will need an identity editor. Building the component system now means 10.x simply drops `<IdentityWidget>` into each form instead of inventing bespoke color/icon pickers per entity. The existing `ActivityDetailPanel` already has a color picker (8 squares) and an icon stub ("coming soon") — this phase replaces both with the real thing.
-
-**Design reference:** [docs/design/IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md) — full spec, palette, component API. Prototype: `docs/design/assets/identity-widget-prototype.html`.
-
-**Scope:**
-
-*Schema (migration 006):*
-- Add `icon TEXT` column to `team_members` (nullable)
-- Add `color TEXT`, `icon TEXT` columns to `teams` (nullable)
-- Add `color TEXT`, `icon TEXT` columns to `timelines` (nullable)
-- Convert existing `activities.color` hex values → color IDs (e.g. `#288C9B` → `teal`)
-- Convert existing `team_members.color` hex values → color IDs
-- Activities already have both `icon` and `color` columns — no structural change needed
-
-*API:*
-- Update `models.go`: add `Icon` and `Color` fields to `Team` and `Timeline`; add `Icon` field to `TeamMember`
-- Update OpenAPI spec: add `icon`/`color` to `Team` and `Timeline` schemas; add `icon` to `TeamMember` schema
-- Existing PATCH endpoints already handle `color` and `icon` for activities — no new endpoints needed; Team/Timeline PATCH lands in Phase 10.x
-- Regenerate TypeScript types
-
-*Web — component library (`src/components/identity/`):*
-- `identity-constants.ts` — 16-color palette, 64-icon list, name-text helpers, legacy hex→colorId mapping
-- `Badge.tsx` — read-only identity display (replaces and supersedes `MemberAvatar`)
-- `IdentityTrigger.tsx` — clickable badge with chevron pip
-- `IdentityPicker.tsx` — popover panel: color grid + name options + icon grid
-- `IdentityWidget.tsx` — composed trigger + popover with portal positioning
-
-*Web — integration into existing surfaces:*
-- `ActivityDetailPanel`: replace the 8-color swatch grid and icon stub with `<IdentityWidget>`; color changes now persist as color IDs
-- `ActivityCreatePanel`: add optional `<IdentityWidget>` for setting identity at creation time
-- Gantt bar label column: replace inline color dot with `<Badge>` (square, 20px)
-- Sidebar timeline rows: replace inline colored squares with `<Badge>` (square, 22px)
-- Sidebar member rows: replace inline colored circles with `<Badge>` (circle, 22px)
-- `MemberAvatar`: refactor to delegate to `<Badge>` internally (preserves existing API, avoids a sweeping import change)
-- Update `ACTIVITY_COLORS` and `MEMBER_COLORS` arrays → import from `identity-constants.ts`
-- Update CSS custom properties `--member-N-*` → identity palette hex values
-
-*Design system docs:*
-- Update `DESIGN_SYSTEM.md`: replace 8-color member palette section with 16-color identity palette
-- Add `IDENTITY_SYSTEM.md` as the canonical reference for the identity data model and component specs
-
-**Exit criteria — safe to pause when:**
-- `<Badge>` renders correctly in all four modes: Lucide icon, 1-letter, 2-letter, none — at sizes 20–40px, both shapes
-- `<IdentityWidget>` opens a popover with 16 colors, 4 name options, and 64 icons; selecting any fires `onChange` immediately
-- The `ActivityDetailPanel` uses `<IdentityWidget>` instead of the old color grid + icon stub; color persists as a color ID (e.g. `"violet"`, not `"#8B5CF6"`)
-- Existing activities with legacy hex colors display correctly (hex→colorId mapping works)
-- Sidebar member and timeline rows use `<Badge>` instead of inline styled divs
-- Migration 006 applies cleanly: new columns added, existing hex values converted to color IDs
-- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-- `docs/log.md` Phase 9.6 entry written
-
----
-
-### Phase 10 — Entity Management (data-cornerstone CRUD)
-
-**Framing:** Phase 10 closes the gaps in CRUD for the three core data entities — Teams, Timelines, Activities (renamed from Events in Phase 9.5) — plus the cross-cutting settings shell. Today the first-run wizard creates one of each and there is no path to manage them afterward. We tackle them entity-by-entity, top-down, so that by the time Phase 11 (views) ships, the data layer underneath is fully manageable. Activities are already CRUD-complete from Phases 3 / 8.2 / 8.2.1 (archive lands in Phase 9), so Phase 10 only needs to address Teams and Timelines.
-
-Sub-phase dependency: 9.6 (Identity) → 10.1.1 (Teams) → 10.1.2 (Members) → 10.2 (Statuses) → 10.3 (Timelines) → 10.4 (Profile/Tokens/Admin). All entity forms use the `<IdentityWidget>` from 9.6 for color/icon editing. 10.1.2 depends on 10.1.1 because the Members tab lives inside the Team Modal and member API endpoints are team-scoped. 10.2 depends on 10.1.2 because the statuses tab sits alongside the Members tab in team settings. 10.3 doesn't strictly depend on 10.2 but is sequenced after for clean delivery.
-
-**Design references:**
-- Team Modal handoff: `docs/design/handoffs/team-modal/` — create + edit flows, Settings tab, Members tab, archive confirmation
-- Member Edit Modal handoff: `docs/design/handoffs/member-modal/` — member profile editing, stats, admin actions
-
----
-
-### Phase 10.1.1 — Teams — CRUD & Management
-**Status:** 🔄 In Progress — 2026-05-25, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2 days)
-
-Closes the Teams data entity. Today a user can create one team via the first-run wizard and never manage it again. After this phase, teams are a fully manageable entity from both API and UI. Ships the Team Modal component with the Settings tab functional; the Members tab UI is scaffolded but locked until 10.1.2.
-
-**Design rationale:**
-Teams are the outermost data scope — everything else (timelines, activities, members, statuses, tokens, shares) hangs off a team. Without a way to rename, reconfigure, or add additional teams, the rest of the app is essentially read-only at the structural level. This phase focuses on the team entity itself; member management is split to [Phase 10.1.2](#phase-1012--members--management--editing) to keep each phase focused.
-
-**Scope:**
-
-*Schema (migration 008):*
-- Add `description TEXT` column to `teams` (nullable)
-- Add `notes TEXT` column to `teams` (nullable)
-- Add `archived_at DATETIME` column to `teams` (nullable)
-
-*API — team-level:*
-- `GET /teams/:id` — full team detail (name, description, notes, icon, color, timezone, week start, member count, timeline count, archived_at)
-- `PATCH /teams/:id` — update name, description, notes, icon, color (admin only)
-- `POST /teams/:id/archive` and `POST /teams/:id/unarchive` (depends on Phase 9 archive pattern)
-- Update `POST /teams` to accept `description`, `notes`, `icon`, `color` on creation
-- `GET /teams` already exists — add `?archived=true` to include archived teams
-
-*Web — Team Modal component (`<TeamModal>`):*
-- Modal shell: header (identity badge + team name), tab bar (Settings / Members), scrollable content, footer
-- Two modes: `new` (create) and `edit` (existing team)
-- **Settings tab**: identity picker (square shape), name (required), description, notes fields
-- **Members tab**: scaffolded as locked/disabled in this phase — tooltip "Save the team first" in new mode; placeholder content in edit mode until 10.1.2 ships
-- Footer: Cancel, Save changes / Create team (primary button uses team color); Archive team button (edit mode only)
-- "Saved" banner: shown briefly after new team creation, auto-dismisses after 3 seconds
-- New-team flow: Settings tab only → Create team → banner → Members tab unlocks (but content is 10.1.2)
-- Archive confirmation dialog: replaces modal content, amber styling, preserves all data
-
-*Web — team picker + settings shell:*
-- "New team" affordance in the team picker dropdown → opens Team Modal in `new` mode
-- Existing team gear/edit icon → opens Team Modal in `edit` mode
-- `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2)
-- Archived teams surfaced in team picker under a collapsed "Archived" section with unarchive affordance
-
-*OpenAPI + types:*
-- Update `Team` schema: add `description`, `notes`, `archivedAt` fields
-- Update `CreateTeamInput` and `PatchTeamInput` bodies
-- Regenerate TypeScript types
-
-**Exit criteria — safe to pause when:**
-- A user can create a second team from the team picker without going through the first-run wizard
-- The Team Modal opens in both `new` and `edit` modes with correct behavior
-- A team admin can edit name, description, notes, icon, and color via the Settings tab
-- The Members tab is visible but locked/placeholder (ready for 10.1.2 to fill in)
-- Archiving a team removes it from the active picker; unarchive restores it
-- The "Saved" banner appears after creating a new team and auto-dismisses
-- A non-admin member cannot access team edit actions (modal opens in read-only or is hidden)
-- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-
----
-
-### Phase 10.1.2 — Members — Management & Editing
-**Status:** 🔄 In Progress — 2026-05-25, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
-
-Fills in the Members tab of the Team Modal and adds the standalone Member Edit Modal. Covers the full member lifecycle: add, edit, role changes, inactivation, removal, participant management, and both email invites and reusable invite links.
-
-**Design rationale:**
-Member management is the most interaction-dense part of team administration. Splitting it from the team entity work (10.1.1) keeps each phase focused — 10.1.1 closes the "team as a data entity" gap, while 10.1.2 closes the "people within a team" gap. The Member Edit Modal introduces member-level stats and admin actions that require new API endpoints and computation.
-
-**Terminology mapping:**
-- **Participant** = login-less team member (team_members with `user_id = NULL`). The design handoffs use "stub" but we use "Participant" — it's the established codebase term (Phase 8.0) and more user-friendly. The UI displays "Participant" in role dropdowns and "No login" pills; the backend model is unchanged.
-- "Inactivate" in the UI maps to the existing `archived_at` pattern on `team_members`. Archiving a member disables their access but preserves their data and activity assignments.
-- "Super Admin" in the UI maps to the existing `users.is_superadmin` field.
-
-**Scope:**
-
-*Schema (migration 009):*
-- Add `archived_at DATETIME` column to `team_members` (nullable) — supports member inactivation
-- Add `archived_at DATETIME` column to `users` (nullable) — supports account-level inactivation by superadmin
-- Add `invite_link_token TEXT` column to `teams` (nullable, unique) — reusable team invite link
-
-*API — member CRUD:*
-- `GET /teams/:id/members/:memberId` — full member detail including stats (timeline counts, activity counts by date status)
-- `GET /teams/:id/members/:memberId/stats` — lightweight stat-only endpoint (same data as the stats object in the detail response)
-- `POST /teams/:id/members` — add existing registered user by `userId` (admin only)
-- `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; member can set own display name/color/icon)
-- `DELETE /teams/:id/members/:memberId` — remove member from team; reject if last admin
-- `POST /teams/:id/members/:memberId/archive` — inactivate member (sets `archived_at`)
-- `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clears `archived_at`)
-
-*API — participant CRUD:*
-- `POST /teams/:id/participants` — create login-less participant (admin only); accepts name, icon, color, optional email (reference only)
-- Participants are managed via the same `PATCH` and `DELETE` member endpoints (role is always `member`, `user_id` stays NULL)
-
-*API — invites:*
-- `GET /teams/:id/invites` — list pending invites (email, sent date, status)
-- `DELETE /teams/:id/invites/:inviteId` — revoke/cancel a pending invite
-- `POST /teams/:id/invites` already exists (Phase 3) — verified working
-- `POST /teams/:id/invite-link` — generate or regenerate a reusable team invite link token
-- `POST /teams/:id/invite-link/reset` — alias for regenerate (invalidates old token); stub for now, wired to email-sending sub-phase
-- `GET /teams/:id/invite-link` — get the current invite link (or null if none)
-- `DELETE /teams/:id/invite-link` — revoke the current invite link
-- `POST /auth/register` — update to accept reusable invite link tokens (in addition to existing one-time invite tokens)
-
-*API — member stats (computed, not stored):*
-- Timeline counts: active timelines the member has access to, archived timelines
-- Activity counts (date-relative, not status-relative):
-  - **Past due**: end date passed, on an active timeline
-  - **Running**: start date passed + end date in future, on an active timeline
-  - **Upcoming**: start date not yet reached, on an active timeline
-  - **Unscheduled**: no start or end date set, on an active timeline
-  - **Archived**: on archived timelines (historical count)
-
-*API — superadmin actions:*
-- `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only; not applicable to participants)
-- `POST /users/:id/archive` — inactivate user account (superadmin only; sets `users.archived_at`)
-- `POST /users/:id/unarchive` — reactivate user account (superadmin only)
-- `DELETE /users/:id` — hard delete user (superadmin only; only when deletable — no active activities, single team)
-- Auth middleware: reject login attempts from archived users with a clear error message
-
-*Web — Team Modal Members tab:*
-- Search/add input: search registered users by name/email, or type an email to send an invite
-- Search results dropdown: user matches with "Add" button, email-only results with "Invite" button; already-added users shown muted
-- Participant creation: inline expandable form with identity picker, name (required), optional email
-- Member list: each row shows avatar (dashed border if participant), name, "No login" pill (participants), email, role dropdown, remove (×) button
-- Role dropdown (`<RoleDropdown>`): three options — Admin (teal), Member (muted), Participant (amber) — with descriptions; role changes save immediately via PATCH
-- Pending invitations section: invite rows with email, sent date, "Revoke" button (red)
-- Invite link section: generated URL with copy button (transitions to "Copied!" for 2s), explanatory note; admins can regenerate or revoke
-
-*Web — Member Edit Modal (`<MemberModal>`):*
-- Opened from member list rows (in Team Modal or sidebar gear icon)
-- Header: identity picker (40px circle, editable), subline (participant/team member + viewer role), name with role badges
-- Scrollable content:
-  - Name + email fields (email read-only for stubs)
-  - Timeline stats chips (active, archived) with color-coded top borders
-  - Activity stats chips (past due, running, upcoming, unscheduled, archived) — date-relative
-  - Joined date + last active date (read-only)
-  - Teams list showing all teams the member belongs to with role pills
-  - Account section (non-participant only): password reset button — UI present but shows "SMTP not configured" until SMTP is configured (Phase 10.1.3)
-  - Super Admin actions section (superadmin viewer only): promote to super admin, inactivate/delete with confirmation dialogs
-- Footer: Cancel + Save changes (in member's identity color)
-- Role permission matrix: team admins can edit name/email/identity; superadmins additionally see promote/inactivate/delete
-- Confirmation dialogs: promote (indigo), inactivate (amber), delete (red) — each with icon, title, body copy, cancel/confirm buttons
-- Deletable rule: member can be deleted only when they have zero active activities and belong to a single team
-
-*Web — sidebar integration:*
-- Member rows in sidebar: gear icon on hover → opens Member Edit Modal
-- Inactivated members: shown with reduced opacity and "Inactive" indicator; filterable
-
-**Exit criteria — safe to pause when:**
-- The Team Modal Members tab is fully functional: search/add users, send email invites, create participants, manage roles, revoke invites
-- A team admin can add a registered user, invite a new email, create a participant, change a member's role, and remove a member
-- The reusable invite link can be generated, copied, and used to register a new account
-- The Member Edit Modal opens from member list rows and shows correct stats and fields
-- A superadmin can promote a member to super admin, inactivate an account, and delete a deletable member — all with confirmation dialogs
-- Inactivated members cannot log in; reactivation restores access
-- A non-admin member sees member list in read-only form (no role changes, no add/remove)
-- Removing the last admin from a team returns a validation error
-- Password reset button is present but shows "SMTP not configured" state
-- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-
----
-
-### Phase 10.1.3 — Settings — Profile, Tokens & Admin
-**Status:** 🔄 In Progress — 2026-05-26, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
-
-Builds out the `/settings` page shell (already scaffolded in 10.1.1) into a working settings experience. Every user gets a profile page, identity management, preferences, and API token management; superadmins get SMTP configuration, instance defaults, and an orphaned-users view. Also ships the forgot-password flow, which depends on SMTP.
-
-**Why now (before 10.1.4):** Users currently cannot change their own display name, password, or identity without API calls. Self-service profile editing and password management are table-stakes for any multi-user deployment. SMTP configuration unlocks email-based invite delivery and password reset — both of which become increasingly painful to lack as more users join. Shipping this before the data-lifecycle hardening in 10.1.4 means admins have full visibility into users and accounts before we tighten deletion semantics.
-
-**What exists today:**
-- Settings page shell with left-nav (`SettingsPage.tsx`) — links to Profile, Tokens, Teams, Admin; only Teams has content
-- `GET /auth/me` returns the current user's profile
-- No `PATCH /users/me` endpoint — display name and password cannot be changed from the UI
-- `reset_password.go` CLI subcommand exists (hashes + updates by email) but no HTTP endpoint
-- API token CRUD is fully implemented in the backend (`POST /tokens`, `GET /tokens`, `DELETE /tokens/:id`)
-- No SMTP infrastructure — invites work via manual token copy, no emails sent
-- `users` table has no color/icon fields; identity lives at the `team_members` level only
-- `user_preferences` table and `GET/PUT /users/me/preferences` endpoints exist (shipped in Phase 8.4) — used for per-timeline view settings but no UI for account-level preferences
-
-**Scope:**
-
-*Schema (migration 010):*
-- Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity, same value space as `team_members.color/icon`
-- Add `instance_settings` table (`key` TEXT PK, `value` TEXT, `updated_at`) — stores SMTP config and instance-level defaults
-- Add `password_reset_tokens` table (`id`, `user_id`, `token_hash`, `expires_at`, `used_at`, `created_at`)
-
-*API — profile management:*
-- `PATCH /users/me` — update `display_name`, `color`, `icon`; validates non-empty name, trims whitespace; when color or icon changes, propagates to all `team_members` rows for the user where the member's color/icon has not been explicitly overridden by a team admin (i.e. where `team_members.color/icon` currently matches the user's old value, or is NULL)
-- `PUT /users/me/password` — change password; requires `currentPassword` + `newPassword`; verifies current hash before updating; returns 401 `WRONG_PASSWORD` on mismatch
-- Email remains read-only for v1 (changing email would require verification flow)
-
-*API — forgot password:*
-- `POST /auth/forgot-password` — accepts `{ email }`; generates a time-limited reset token (1 hour), stores hash in `password_reset_tokens` table; sends reset link via SMTP if configured; always returns 200 (no email enumeration)
-- `POST /auth/reset-password` — accepts `{ token, newPassword }`; validates token not expired, hashes new password, updates user, invalidates token; returns 200 or 400 `TOKEN_INVALID`/`TOKEN_EXPIRED`
-
-*API — SMTP configuration (superadmin only):*
-- `GET /admin/smtp` — returns current SMTP config (password masked); superadmin only
-- `PUT /admin/smtp` — upsert SMTP config; validates by sending a test email to the calling user's address; returns success/failure with error details; superadmin only
-- `POST /admin/smtp/test` — sends a test email without saving config; superadmin only
-- `DELETE /admin/smtp` — clears SMTP config; superadmin only
-- Internal `mailer` package: wraps `net/smtp`; reads config from `instance_settings` at send time (no restart needed); exposes `Send(to, subject, htmlBody)` and `IsConfigured() bool`
-- When SMTP is not configured: `forgot-password` returns 200 but logs a warning; invite endpoints continue to return the token for manual copy
-
-*API — orphaned users (superadmin only):*
-- `GET /admin/users` — returns all users with their team membership counts and account status (active/archived); supports `?orphaned=true` filter (users with zero active team memberships); superadmin only
-- This reuses the existing user model; no new tables needed
-
-*API — instance settings (superadmin only):*
-- `GET /admin/settings` — returns all instance-level settings (registration policy, default timezone, default date format, default week start); superadmin only
-- `PATCH /admin/settings` — update one or more instance-level settings; superadmin only
-- Settings stored in `instance_settings` table alongside SMTP config
-- Instance defaults provide fallbacks for users who haven't set personal preferences
-
-*Web — Profile (`/settings/profile`):*
-- Display name field with save button; calls `PATCH /users/me`
-- **Identity picker:** color + icon selector (reuses the existing `IdentityWidget` component from 9.6); changing identity here propagates to all team memberships
-- Email shown read-only with explanatory note
-- Success/error feedback inline (no toast system needed — keep it simple)
-
-*Web — Security (`/settings/security`):*
-- Change password form: current password + new password + confirm; calls `PUT /users/me/password`
-- Validation: new + confirm must match; new ≥ 8 chars; save disabled until valid
-- Success/error feedback inline
-
-*Web — Preferences (`/settings/preferences`):*
-- **Defaults:** default team (dropdown of user's teams), default timeline (filtered by selected team) — stored via existing `PUT /users/me/preferences`
-- **Regional:** timezone (IANA selector), date format (`MMM D, YYYY` / `MM/DD/YYYY` / `DD/MM/YYYY` / `YYYY-MM-DD`), week starts on (Monday / Sunday)
-- **Appearance:** theme toggle (Light / Dark / System) — already partially wired via localStorage; this phase persists it server-side
-- All preferences use the existing `user_preferences` API; this phase adds the UI and stores the values but does **not** require the Gantt or other views to consume them yet (that lands in 10.4.1)
-
-*Web — API Tokens (`/settings/tokens`):*
-- Table: name, scope badge, last used (relative time), created date, revoke button
-- Create dialog: name input + scope picker (read-only / add / edit-own / edit-all) with brief descriptions of each scope
-- On creation: one-time secret reveal with copy-to-clipboard; warning that it won't be shown again
-- Revoke: confirmation dialog, then `DELETE /tokens/:id`
-
-*Web — Admin (`/settings/admin`, superadmin only):*
-- **Instance defaults section:** default timezone, default date format, default week start — these serve as fallbacks for users who haven't set personal preferences; calls `PATCH /admin/settings`
-- **Registration policy:** toggle between invite-only and open registration (stored in `instance_settings`)
-- **SMTP section:** form with host, port, username, password, from address, from name, encryption dropdown (none/TLS/STARTTLS); "Test connection" button sends test email; "Save" validates then stores; info note: "When SMTP is not configured, password resets and email invitations are unavailable"
-- **Users section:** table of all users (name, email, team count, status badge); orphaned alert banner with count + filter toggle; search by name/email; click row opens existing MemberModal; "Assign team" action on orphaned users
-
-*Web — Forgot password flow:*
-- `/forgot-password` public page: email input → calls `POST /auth/forgot-password` → shows "check your email" message (regardless of whether email exists)
-- `/reset-password?token=...` public page: new password + confirm → calls `POST /auth/reset-password` → success redirects to login
-- Login page: "Forgot password?" link
-- When SMTP is not configured: forgot-password page shows "Password reset is not available — contact your administrator"
-
-**Error-reduction notes:** Recent phases (10.1.1, 10.1.2) had significant bug fix rounds. To reduce errors in this phase:
-- Each API endpoint gets at least one happy-path and one error-path test before moving to the next endpoint
-- Frontend forms are tested against the real API (via dev proxy to Docker) before marking the section complete, not just type-checked
-- SMTP send is tested with a real mail server (or a local test tool like MailHog) before marking SMTP complete
-- The forgot-password flow is tested end-to-end (request → email received → click link → new password works) before exit
-
-**Exit criteria — safe to pause when:**
-- A user can change their display name and identity (color/icon) from `/settings/profile`; identity change propagates to all team memberships; visible in sidebar and member lists
-- A user can change their password from `/settings/security`; the old password stops working and the new one works
-- A user can set preferences (default team/timeline, timezone, date format, week start, theme) from `/settings/preferences`; values persist across logout (views don't need to consume them yet)
-- Forgot-password: requesting a reset sends an email (when SMTP configured); clicking the link allows setting a new password; the token expires after 1 hour and after use
-- Forgot-password without SMTP: the page shows a clear "contact admin" message instead of a broken form
-- A user can create an API token, see the secret once, copy it, and use it to authenticate an API call; can revoke it and it stops working
-- A superadmin can configure SMTP from the admin page; test email arrives; saving persists without restart
-- A superadmin can set instance defaults (timezone, date format, week start); these are stored and retrievable
-- A superadmin can view all users and filter to orphaned users; clicking a user opens their detail; "Assign team" works on orphaned users
-- A superadmin can toggle registration policy; the setting takes effect immediately
-- A non-superadmin does not see the Admin section
-- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-
----
-
-### Phase 10.1.4 — Member Access & Data Lifecycle
-**Status:** 🔄 In Progress — 2026-05-27, all automated checks pass; manual Docker verification still needed | **Effort:** S–M (1–2 days)
-
-Closes the data-integrity and access-revocation gaps left open by 10.1.2. Defines explicit semantics for every lifecycle state a member can be in and ensures that activity data is never silently orphaned or destroyed.
-
-**The problem 10.1.2 leaves open:**
-- `DELETE /teams/:id/members/:memberId` attempts to hard-delete the `team_members` row. If the member has `activity_assignments`, SQLite FK behavior (RESTRICT, CASCADE, or no-op depending on pragma state) is undefined and may leave orphaned assignment rows or silently destroy assignment history.
-- There is no UI affordance to distinguish *"this member can be fully removed"* from *"this member has history — inactivate instead."*
-- The three access states (active → inactivated membership → deactivated account) are implemented but not clearly surfaced or documented in the UI.
-- There is no single "revoke all access" operation for superadmins — today they would need to inactivate the user account and individually inactivate each team membership in separate steps across potentially many modals.
-
-**Lifecycle states defined:**
-
-| State | `users.archived_at` | `team_members.archived_at` | Can log in? | Data preserved? |
-|-------|---------------------|-----------------------------|-------------|-----------------|
-| Active member | NULL | NULL | ✅ | ✅ |
-| Inactivated membership | NULL | set | ✅ (other teams) | ✅ |
-| Deactivated account | set | any | ❌ | ✅ |
-| Removed from team | — | row deleted | ✅ (other teams) | ✅ only if zero assignments |
-
-Hard-delete of a `team_members` row is only ever permitted when the member has zero `activity_assignments`. All other cases must use inactivation (soft delete). This invariant protects historical activity data unconditionally.
-
-**Scope:**
-
-*Schema (migration 011):*
-- Verify `activity_assignments.team_member_id` FK is declared with `ON DELETE RESTRICT`; add an explicit constraint migration if not
-- Same for `timeline_access.team_member_id`
-- Enable `PRAGMA foreign_keys = ON` in the DB initialization path (currently SQLite defaults to off) to enforce the constraint at runtime
-
-*API — removal guard:*
-- `DELETE /teams/:id/members/:memberId` — before deleting, count `activity_assignments` for the member; if count > 0, respond 409 `MEMBER_HAS_ASSIGNMENTS` with `{ assignmentCount: N }` in the error body; direct the caller to use archive/inactivate instead
-- Hard-delete proceeds only when assignment count is 0 — no behavior change for clean removals
-
-*API — full revoke (superadmin only):*
-- `POST /users/:id/revoke` — new endpoint; atomically: (1) sets `users.archived_at` (blocks login everywhere), (2) sets `archived_at` on every `team_members` row for the user (inactivates all memberships), (3) hard-deletes any `team_members` rows where assignment count is 0 (cleans up zero-history memberships); returns `{ accountDeactivated: true, membershipsInactivated: N, membershipsRemoved: N }`
-- Superadmin only; 403 if caller is not superadmin; 400 `CANNOT_SELF_REVOKE` if caller targets their own account
-- Note: the original spec listed a 409 for participant targets. This is unreachable — participants have no `users` row so `/users/:id/revoke` returns 404 naturally; no separate guard is needed.
-
-*Web — TeamModal Members tab:*
-- Remove (×) button: on 409 `MEMBER_HAS_ASSIGNMENTS`, show an inline error beneath the member row: *"N assignment(s) found — [Inactivate instead]"* where the bracketed text is a direct action button that calls the archive endpoint
-- On success, replace the error with confirmation and re-fetch the member list
-
-*Web — MemberModal:*
-- Add **"Revoke all access"** button to the Super Admin Actions section (red, below Inactivate); opens a confirmation dialog that lists the three effects (account deactivated, all memberships inactivated, zero-history memberships removed), shows the return summary once complete
-- After confirmation, calls `POST /users/:id/revoke`, then closes the modal and invalidates relevant query cache
-- Button is hidden if the user is already fully inactivated (`users.archived_at` set AND all `team_members.archived_at` set)
-
-*Web — activity display:*
-- Inactivated members: already shown at 50% opacity in sidebar and member list; no change needed
-- Gantt bars and detail panels: assignee badge continues to render using the preserved `team_members` row data (name + color/icon); no display change — historical data reads accurately
-- Removed members (zero-assignment clean removals): those `activity_assignments` rows don't exist, so no badge to render; this is already correct behavior
-
-**Exit criteria — safe to pause when:**
-- Attempting to remove a member with existing assignments returns 409 with assignment count; the TeamModal shows *"N assignment(s) — Inactivate instead"* with a one-click inactivate action
-- Removing a member with zero assignments succeeds as before
-- `POST /users/:id/revoke` atomically deactivates account + inactivates all memberships + cleans zero-assignment memberships; returns the summary breakdown
-- MemberModal "Revoke all access" confirmation dialog shows the three effects and calls the endpoint on confirm
-- `PRAGMA foreign_keys = ON` is in effect at startup; attempting a raw FK violation in a test is rejected
-- Inactivated members' avatars still render correctly on existing Gantt bars (data preserved, no orphaned rows)
-- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-
----
-
-### Phase 10.2 — Status Templates & Timeline Statuses
-**Status:** ✅ Done — 2026-05-27 | **Effort:** M (2–3 days)
-
-Statuses represent phases for an activity (e.g., Planned → In Progress → Done). They are **timeline-scoped** — each timeline has its own set. To reduce setup friction, teams maintain **status templates** (reusable presets). When a timeline is created, a template's items are copied into timeline-specific status rows; from that point the timeline's statuses are independent of the template. Activities default to null status (no auto-assignment). Required before Phase 11.3 (Kanban) so admins can configure columns.
-
-**Data model:**
-
-*`status_templates` (team-level reusable presets):*
-- `id`, `team_id` (FK teams), `name`, `description`, `position`, `created_by` (FK users), `created_at`, `updated_at`
-
-*`status_template_items` (statuses within a template):*
-- `id`, `template_id` (FK status_templates CASCADE), `name`, `color`, `icon`, `is_closed` (boolean — closure flag for filtering), `position`
-
-*`statuses` (live statuses on a timeline, copied from template):*
-- `id`, `timeline_id` (FK timelines CASCADE), `name`, `color`, `icon`, `is_closed`, `position`, `created_at`, `updated_at`
-
-*Migration:* `activities.status_id` FK moves from `team_statuses` → `statuses`; drop `team_statuses`.
-
-**Scope:**
-
-*API — templates (team-level):*
-- Seed one default template ("Simple": Planned / In Progress / Done; Done is `is_closed`) on team creation
-- `GET /teams/:id/status-templates` — list templates with items
-- `POST /teams/:id/status-templates` — create template
-- `PATCH /status-templates/:id` — rename, reorder
-- `DELETE /status-templates/:id` — blocked if last template on team
-- `POST /status-templates/:id/items` — add item
-- `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder
-- `DELETE /status-template-items/:id` — blocked if last item in template
-
-*API — timeline statuses:*
-- On timeline creation, copy items from chosen template (or team's first template) into `statuses`
-- `GET /timelines/:id/statuses` — list statuses for a timeline
-
-*Web — Team Modal → "Status Templates" tab:*
-- List templates with expand/collapse to show items
-- Create template, rename, delete (with guard)
-- Within a template: add/remove/reorder items, inline edit name + identity (color/icon) + is_closed toggle
-- Drag-to-reorder items
-
-**Exit criteria — safe to pause when:**
-- New team gets one "Simple" template with 3 statuses (last marked closed)
-- Templates can be created, edited, reordered, deleted from team modal
-- Creating a timeline copies the selected template's statuses into `statuses` table
-- `GET /timelines/:id/statuses` returns the copied statuses
-- `is_closed` flag stored and returned in API responses
-
----
-
-### Phase 10.3 — Timelines — Full CRUD (API + UI)
-**Status:** 🔄 In Progress — 2026-05-27, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
-
-Closes the Timelines cornerstone. Same problem space as 10.1: today timelines can be created in the wizard and never managed afterward, and access lists exist in the schema (Phase 8.0) with no CRUD endpoints. Also wires the status system from 10.2 into the timeline and activity UIs.
-
-**Scope:**
-
-*API — timeline-level:*
-- `PATCH /timelines/:id` — rename, change start/end date, change description (admin only)
-- `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (depends on Phase 9)
-- `DELETE /timelines/:id` — hard delete; admin only; confirms via second action
-
-*API — timeline statuses (editing):*
-- `POST /timelines/:id/statuses` — add a status
-- `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder
-- `DELETE /statuses/:id` — requires `replacementStatusId` if activities reference it; blocked if last status
-
-*API — access-list:*
-- `GET /timelines/:id/access` — list current grants (team member + role)
-- `PUT /timelines/:id/access/:memberId` — grant or update role (admin / member)
-- `DELETE /timelines/:id/access/:memberId` — revoke grant
-
-*Web — timeline CRUD:*
-- "New timeline" affordance in the sidebar → create-timeline modal (name, date range, **template picker** with status preview)
-- Edit-timeline modal reachable from each timeline in the sidebar: rename, change date range, archive, delete
-- Access-list management UI: search-pick team members, role toggle, remove
-- Sidebar shows archived timelines under a collapsed "Archived" group; unarchive from there
-
-*Web — status uplifts (wiring 10.2 into the UI):*
-- **Timeline status management:** within edit-timeline modal, a "Statuses" tab where admins can add, rename, reorder, delete statuses; delete-with-replacement dialog shows affected activity count; identity (color/icon) and is_closed toggle inline
-- **Activity detail status picker:** `ActivityDetailPanel` gets a status dropdown populated from `GET /timelines/:id/statuses`; shows identity (color dot + icon) next to each option; null = "No status"
-- **"Hide closed" filter toggle:** in the Gantt toolbar filter area, hides activities whose status has `is_closed = true`
-
-*Deferred:*
-- "Re-apply template" (replace timeline statuses from a template with merge semantics) — future effort
-- Gantt bar status indicator (small color dot/icon on bars) — polish pass
-
-**Exit criteria — safe to pause when:**
-- A user can create a second timeline without going through the first-run wizard
-- Timeline creation modal shows template picker; selected template's statuses are previewed and copied
-- A timeline admin can rename a timeline and change its date range; activities outside the new range are not deleted, just hidden from default views
-- Timeline status management: add, rename, reorder, delete (with replacement) all work from the UI
-- Activity detail panel shows status dropdown; selected status persists across reload
-- "Hide closed" toggle hides activities with a closed status; removing the filter restores them
-- Archiving a timeline removes it from the active sidebar; unarchive restores it
-- The access-list UI lets an admin grant / revoke access for any team member; a non-admin attempting these actions is rejected
-- A team member without an access grant cannot open the timeline (existing 8.0 enforcement) — verified end-to-end through the new UI
-
----
-
-### Phase 10.4.1 — Preference Consumption & Session Handling
-**Status:** 🔄 In Progress — 2026-05-28, all automated checks pass; manual Docker verification still needed | **Effort:** S–M (1–2 days)
-
-Wires the user and instance preferences stored in 10.1.3 into the rest of the system, fixes the broken session lifecycle, and adds cosmetic branding for admins.
-
-**Why now:** User preferences for date format, week start, and theme are stored (Phase 10.1.3) but not consumed by any view. The Gantt hardcodes Monday week-start and `en-US` date formatting. Additionally, access tokens expire after 15 minutes with no refresh interceptor — after 15 minutes of use, every API call silently fails.
-
-**Scope:**
-
-*Session lifecycle (token refresh):*
-- Add a 401 interceptor to `apiFetch` in `packages/web/src/lib/api.ts`: on 401, attempt silent refresh using stored refresh token, retry the original request with the new access token; if refresh also fails (expired/revoked), clear tokens and redirect to `/login`
-- Use a mutex/queue so concurrent 401s don't fire multiple refresh calls
-- Completely invisible to the user — no toast, no banner (standard SPA pattern)
-- Best practice: short-lived access token (15 min — already correct) + silent refresh on 401 + hard redirect when refresh fails
-
-*Preference consumption (system-wide):*
-- **Date format:** Create a `useFormatDate()` hook that reads user's `date_format` preference and returns a formatter; wire into `granularity.ts` `formatLabel()` (currently hardcoded to `en-US`), `ActivityDetailPanel` date displays, and any other date-displaying surface
-- **Week start:** Pass user's `week_start` preference into `granularity.ts` `startOfWeek()` (currently hardcodes Monday); Gantt column alignment shifts to match the user's chosen start day
-- **Timezone:** Stored and displayed; actual date math conversion deferred (complex, low urgency for self-hosted single-timezone teams)
-- **Theme sync:** On login, read server-side theme preference and apply it; `useDarkMode.ts` currently ignores the server value and only reads localStorage
-- **Instance defaults fallback:** For public/shared timeline views (no logged-in user), read instance-level defaults from `GET /admin/settings`
-
-*Admin — branding (`/settings/admin`, superadmin only — extends 10.1.3):*
-- Instance name field (stored in `instance_settings`); shown in browser tab title and login page
-- Accent color override (stored in `instance_settings`); applies globally via CSS custom property
-- Optional logo upload (stretch)
-
-**Exit criteria — safe to pause when:**
-- After 15+ minutes of use, API calls silently refresh the access token; if the refresh token is also expired, the user is redirected to `/login` cleanly
-- Gantt view renders dates using the user's chosen date format; public views use instance defaults
-- Week-start preference shifts the Gantt grid column alignment (e.g., Sunday start when configured)
-- Theme persists across devices — logging in on a new browser picks up the server-side theme
-- A superadmin can set a custom instance name; it appears in the browser tab title and on the login page
-- A superadmin can set an accent color override; the change applies globally
-- Settings persist across container restarts
-
----
-
-### Phase 10.4.2 — Activity Schema Normalization — Drop team_id
-**Status:** ✅ Done — 2026-05-28 | **Effort:** S (½–1 day)
-
-Removes `activities.team_id` now that `timeline_id` is stored and the relationship `activity → timeline → team` is sufficient. `team_id` is a transitive dependency (`activity_id → timeline_id → team_id`) — a violation of 3NF that creates two sources of truth for the same fact. If timelines are ever moved between teams, every activity row would also need updating or the data silently lies.
-
-**Why now:** Phase 10.4.1 added `timeline_id`. The redundant column is cheapest to remove before more code accumulates that reads `activity.TeamID` directly. The auth checks and WebSocket routing that currently use `activity.TeamID` are straightforward to reroute through the timeline.
-
-**Prerequisite:** `activities.timeline_id` is currently nullable (migration 014 used `ON DELETE SET NULL` for backward compatibility). This phase hardens it to `NOT NULL`.
-
-**Scope:**
-
-*Schema (migration 015 — table rebuild):*
-- Backfill: `UPDATE activities SET timeline_id = (SELECT id FROM timelines WHERE team_id = activities.team_id ORDER BY created_at LIMIT 1) WHERE timeline_id IS NULL` — assigns any orphaned activities to the team's oldest timeline; log a warning if any activities remain NULL after backfill (manual remediation required)
-- Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE`; use the SQLite table-rebuild pattern (CREATE new → INSERT → DROP old → RENAME) to enforce the NOT NULL constraint cleanly and add the cascade
-- Recreate `idx_activities_timeline_id` on the new table
-
-*API — Go:*
-- `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string`
-- `ActivityRepo.Create`: remove `team_id` from INSERT
-- `ActivityRepo.ListByTeam`: rename to `ListByTimeline(timelineID string, ...)` — query becomes `WHERE timeline_id = ?` directly; remove the `timelineID *string` optional filter added in 10.4.1 since it is now the only filter
-- `handleUpdateActivity`, `handleDeleteActivity`, `handleArchiveActivity`/`handleUnarchiveActivity`: replace `activity.TeamID` usage with a timeline lookup — call `s.timelines.GetByID(activity.TimelineID)` to retrieve `timeline.TeamID` for the membership check
-- WebSocket broadcasts: derive `TeamID` from the same timeline lookup before `s.bus.Publish`
-- Move activity routes to timeline scope: `POST /teams/{id}/activities` → `POST /timelines/{id}/activities`; `GET /teams/{id}/activities` → `GET /timelines/{id}/activities` (no `?timelineId=` param — it is now the path param); remove the old team-scoped routes
-- `handleCreateActivity`: path param is now `timelineId`; look up the timeline to get `teamID` for the membership check; `timelineId` is no longer in the request body
-- `handleListActivities`: path param is now `timelineId`; no query param needed
-- Add `/timelines` prefix to the Go mux and Vite proxy (activities already sit under `/timelines/*` for status routes — this is consistent)
-
-*Frontend:*
-- `Activity` generated type: `teamId` field removed; `timelineId` becomes `string` (non-optional)
-- Rename `useTeamActivities(teamId, from, to, timelineId)` → `useTimelineActivities(timelineId, from, to)` — URL becomes `/timelines/{id}/activities`
-- Rename `useCreateActivity(teamId)` → `useCreateActivity(timelineId)` — URL becomes `/timelines/{id}/activities`; remove `timelineId` from request body since it is in the URL
-- Update cache keys: `keys.teamActivities` → `keys.timelineActivities(timelineId, from, to)`; WS cache updates match on `['timelines', timelineId, 'activities']`
-- `GanttView`: prop changes from `teamId + timelineId` to just `timelineId` for the activities query (still receives `teamId` for the members query)
-- `ActivityCreatePanel`: `teamId` prop removed (only `timelineId` needed); `useCreateActivity` called with `timelineId`
-- `DashboardPage`: pass `activeTimelineId` to `ActivityCreatePanel` (already done); update `GanttView` activities hook call; keep `teamId` only for the members query
-- Update OpenAPI spec: move activity endpoints under `/timelines/{timelineId}/activities`; regenerate TS types
-
-*Tests:*
-- Update `TestCreateActivity_*`, `TestListActivities_*`, `TestUpdateActivity_*` handler tests: seed a timeline, use `/timelines/{timelineId}/activities` path, remove `teamId` from activity body
-- Update `TestActivityRepo_*` db tests: `makeActivity` helper no longer sets `TeamID`; all `ListByTeam` calls become `ListByTimeline`
-- Add `TestActivityRepo_ListByTimeline_Filter` to verify timeline scoping works correctly
-
-**Exit criteria — safe to pause when:**
-- `activities` table has no `team_id` column; `timeline_id` is `NOT NULL`
-- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-- Gantt view still loads activities for the active timeline
-- Creating an activity from the panel associates it with the correct timeline; creating on a different timeline does not bleed into the wrong Gantt view
-- `PRAGMA foreign_key_check` returns no rows after migration runs against a copy of the test DB
-- No remaining references to `activity.TeamID` / `activity["teamId"]` in Go or TS source (grep confirms)
-
----
-
-### Phase 10.4.3 — UI Consistency — Modals, Sidebar & Toolbar
-**Status:** ✅ Done — 2026-05-28 | **Effort:** M (1–2 days)
-
-Standardizes visual patterns across the three main modals (Team, Member, Timeline), the sidebar, and the Gantt toolbar. Today these surfaces use three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and a mix of hardcoded hex colors vs CSS variables.
-
-**Why now:** Every new modal or surface built from here forward will inherit whatever pattern exists. Standardizing now prevents compounding inconsistency as the UI grows through Phase 11 (views) and beyond.
-
-**Scope:**
-
-*Inline name editing (3 patterns → 1):*
-- Current: `MemberModal` uses always-input with focus underline; `TeamModal` toggles between div and input via a state machine; `TimelineModal` uses always-input with no visual cue
-- Standardize to: always-input with subtle bottom border on hover/focus (refined MemberModal pattern); extract to a shared `InlineEditableTitle` component used by all three modals
-
-*Archive/restore buttons (3 styles → 1):*
-- Current: `MemberModal` uses amber background + border + icon (most prominent); `TeamModal` uses neutral gray that looks disabled; `TimelineModal` uses amber border-only with no icon
-- Standardize to: consistent amber styling with Archive icon for archive, teal for restore; extract shared button style constants or a small `ArchiveButton` / `RestoreButton` component
-
-*Confirmation dialogs (3 implementations → 1):*
-- Current: `MemberModal` uses a custom `ConfirmDialog`; `TeamModal` uses `ArchiveDialog`; `TimelineModal` uses inline confirmation panels
-- Standardize to: single `ConfirmDialog` component with color variants (red = destructive, amber = archive, indigo = promote, teal = restore)
-
-*Color system (mixed → CSS variables):*
-- Current: `TeamModal` and `MemberModal` hardcode hex colors (`#21262d`, `#30363d`, etc.); `TimelineModal` uses CSS variables (`var(--card)`, `var(--border)`)
-- Standardize to: CSS variables everywhere; migrate all hardcoded hex values in modal components
-
-*Sidebar & toolbar audit:*
-- Sidebar member/timeline rows: verify Badge usage, hover states, and gear icon consistency across all row types
-- Gantt toolbar controls: verify button styling consistency with the new modal patterns
-- Fix any inconsistencies found
-
-**Exit criteria — safe to pause when:**
-- All three modals use the same `InlineEditableTitle` component for name editing — identical visual behavior
-- Archive and restore buttons look identical across all three modals (amber archive, teal restore, both with icons)
-- All confirmation dialogs use the same `ConfirmDialog` component with appropriate color variants
-- No hardcoded hex colors remain in modal components; all use CSS variables or design-token references
-- Sidebar member rows and timeline rows have consistent hover states and gear icon placement
-- Gantt toolbar buttons are visually consistent with modal footer button patterns
-
----
-
-### Phase 10.4.4 — Gantt Interaction & Activity Edit Polish
-**Status:** 🔄 In Progress — 2026-05-29, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
-
-Refines the Gantt chart's direct-manipulation UX and overhauls the Activity Edit sidebar to match the Activity Create sidebar's layout, adds missing fields, and removes unnecessary UI elements.
-
-**Why now:** The Gantt bar interactions have rough edges (accidental drags, coarse snap, no live feedback to sidebar) and the edit sidebar diverges from the create sidebar in layout and style. Polishing these before Phase 11 (new views) ensures the core interaction patterns are solid before they're replicated.
-
-**Scope:**
-
-*Gantt — resizable activity column:*
-- The label column (`LABEL_COL_W = 240`) becomes user-resizable via a drag handle on its right edge
-- Min: 140px, Max: 400px; header and all rows use the same live width
-- Optionally persist width as a per-timeline user preference
-
-*Gantt — click-to-activate before drag:*
-- First click on a bar **selects** it (existing behavior); only a **selected** bar shows grab/ew-resize cursors and allows drag/resize
-- Unselected bars show `cursor: pointer` — prevents accidental date changes when users just want to inspect an activity
-
-*Gantt — bar drag updates sidebar dates live:*
-- When dragging or resizing a bar, the `ActivityDetailPanel` start/end date inputs update in real-time to reflect the current snapped dates
-- On mouseup, the PATCH fires as today and the panel re-syncs from the API response
-
-*Gantt — finer-grained snap during drag:*
-- Snap one level finer than the active granularity (except day, which stays day):
-  - Day → day (no finer unit)
-  - Week → snap to day
-  - Month → snap to week
-  - Quarter → snap to month
-  - Year → snap to quarter
-- The drag tooltip already shows exact dates; this is primarily a math change in the mousemove handler
-
-*Gantt — "Hide closed" moves to filter preset:*
-- Remove the `hideClosed` checkbox from `GanttToolbar`
-- Add an `'open'` preset to the `FilterDropdown` presets list — "Open only" with description "Hide activities with a closed status"
-- Wire the `'open'` filter into `GanttView`'s `visibleActivities` memo where `hideClosed` currently lives
-
-*Activity Edit Sidebar — layout and field changes:*
-- **Remove** "All day" checkbox — all activities are implicitly all-day; remove state and toggle
-- **Simplify dates** — remove the human-readable date summary line; keep only the two date picker inputs
-- **Move description** — from bottom ("Notes" section) to directly below the date pickers, matching create panel order
-- **Assigned to** — restyle to match the create panel's bordered-card style (colored border + tint when selected) instead of opacity-based toggle buttons
-- **Status dropdown** — replace plain `<select>` with a custom dropdown showing each status's color dot, icon, and name, ordered by position
-- **Remove "Identity" line** — from Classify section (the identity widget in the header is self-evident)
-- **Rename "Details" → "Advanced"**
-- **Add Notes field** — multi-line `<textarea>` at the bottom (above footer/delete); requires adding `notes TEXT` column to activities table (migration 016), OpenAPI schema update, and TS type regeneration
-
-*Schema (migration 016):*
-- Add `notes TEXT` column to `activities` (nullable)
-
-*Final edit panel field order (top to bottom):*
-1. Header — Identity widget + Title
-2. When — Date pickers (start → end)
-3. Description — single-line input
-4. Assigned to — bordered card style
-5. Classify — Status (rich dropdown), Tags (stub)
-6. Advanced — Parent (stub), Progress (stub), Location, URL
-7. Notes — multi-line textarea
-8. Footer — Delete button
-
-**Exit criteria — safe to pause when:**
-- Activity column is resizable by dragging the right edge; width persists during session
-- Bar requires a selection click before drag/resize cursors appear; unselected bars show pointer cursor
-- Dragging a bar updates the sidebar date pickers in real-time
-- Drag snaps at one level finer than the zoom granularity (week→day, month→week, etc.)
-- "Hide closed" checkbox removed from toolbar; "Open only" preset appears in filter dropdown and hides closed-status activities
-- All-day checkbox removed from edit sidebar; date section shows only the pickers
-- Edit sidebar field order matches the spec (description under dates, notes at bottom)
-- Assigned-to section styled like the create panel (bordered cards with color tint)
-- Status dropdown shows color dot + icon + name per option
-- "Identity" line removed from Classify; "Details" section renamed to "Advanced"
-- Notes field (multi-line) added at bottom; backed by new `notes` column on activities
-- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-
----
-
-### Phase 10.4.5 — Activity Tags, Parent & Progress Fields
-**Status:** ✅ Done — 2026-05-30 | **Effort:** M (2–3 days)
-
-Replaces the three "coming soon" stubs in the activity edit panel with fully functional fields: **tags** (team-scoped, normalized), **parent activity** (searchable picker), and **progress** (editable slider). Tags require a new schema and full API; parent and progress already have backend support but need frontend controls.
-
-**Why now:** These fields are prerequisites for Phase 10.4.6 (Filters) — the filter builder needs tags to exist as a filterable dimension, and progress/parent filters need editable values to be meaningful. Shipping stubs into the filter UI would create dead controls.
-
-**Design decisions:**
-- **Tags are normalized.** A team-scoped `tags` table (id, team_id, name, color) + a junction table (`activity_tags` referencing tag IDs) replaces the original simple (activity_id, tag_text) design. This enables colored tag pills, rename-all-at-once, autocomplete from existing tags, and name-based filter matching across timelines.
-- **The original `activity_tags` table** (migration 001, renamed in 005) has **never been wired to any Go code or API** — no repo methods, no handlers, not in OpenAPI. It is safe to DROP and recreate with the new schema. No data migration needed.
-
-**Detailed plan:** [docs/plans/phase-10.4.5.md](plans/phase-10.4.5.md)
-
-**Scope summary:**
-
-*Schema (migration 017):*
-- New `tags` table: `id TEXT PK`, `team_id TEXT FK`, `name TEXT NOT NULL`, `color TEXT`, `created_by TEXT FK`, `created_at DATETIME`; unique on `(team_id, name)`
-- Rebuild `activity_tags`: drop old (activity_id, tag text) table, create new (activity_id FK, tag_id FK) with cascade deletes
-
-*API — tag CRUD:*
-- `GET /teams/{id}/tags` — list team tags (any member)
-- `POST /teams/{id}/tags` — create tag (any member; sets `created_by` from JWT)
-- `PATCH /tags/{id}` — update name/color (any member)
-- `DELETE /tags/{id}` — delete tag (any member; cascades from activity_tags)
-
-*API — activity tag wiring:*
-- `Activity` model gains `TagIDs []string` field (same `db:"-"` pattern as `AssignedMemberIDs`)
-- `ActivityRepo` gains `SetTags` / `GetTags` methods (same transaction pattern as `SetAssignments` / `GetAssignments`)
-- `ListByTimeline` batch-populates `TagIDs` on returned activities (same JOIN pattern as `AssignedMemberIDs`)
-- Activity create/update handlers accept `tagIds`; activity list responses include `tagIds`
-
-*Web — tags:*
-- `useTags.ts` hook — CRUD following `useSavedFilters.ts` pattern
-- `TagInput.tsx` component — combobox with colored pills, autocomplete from team tags, "Create tag" option for on-the-fly creation
-- Replaces stub in `ActivityDetailPanel` and added to `ActivityCreatePanel`
-
-*Web — parent picker:*
-- Backend already handles `parentActivityId` in create/update — no API changes needed
-- Replace stub in `ActivityDetailPanel` with searchable combobox of activities in same timeline
-- Exclude self and descendants to prevent cycles
-- Save on select; null to clear
-
-*Web — progress:*
-- Backend already handles `percentComplete` in create/update — no API changes needed
-- Replace read-only progress bar stub with range slider (0–100)
-- Save on mouse-up
-- Optional: Gantt bar partial-fill indicator (darker overlay at `percentComplete%` width)
-
-*Web — Gantt tree expand/collapse (ratified in-scope):*
-- Activities with `parentActivityId` render indented under their parent in the Gantt grid
-- Chevron toggle per row collapses/expands that parent's children
-- Group-level rows (assignee / status grouping) have their own collapse toggle
-- `collapsedParents` and `collapsedGroups` state in `GanttView`; `buildRows` rewritten for arbitrary-depth nesting
-- `GanttView.tree.test.ts` covers the `buildRows` tree and collapse logic
-
-*Sample data:*
-- `sample_data/10_tags.sql` — 5–8 tags per team + activity_tags associations
-
-**Exit criteria — safe to pause when:**
-- Tag CRUD API works end-to-end; activities carry `tagIds` in create/update/list responses
-- Tag combobox in detail + create panels; create-on-the-fly produces a new team tag and associates it
-- Parent picker: searchable dropdown within same timeline, replaces stub; cycles prevented
-- Progress slider: editable 0–100 range, saves on change, replaces stub
-- Sample data includes tags and activity-tag associations
-- Gantt tree expand/collapse renders parent-child hierarchy with per-row chevron toggles
-- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-
----
-
-### Phase 10.4.6 — Filter Implementation
-**Status:** 🔄 In Progress — 2026-05-30, all automated checks pass; manual Docker verification still needed | **Effort:** M–L (3–4 days)
-
-Makes the filter system fully operational. Today only the "Open only" preset actually filters activities — the other five presets, member filters, and saved filters exist as UI selections but are never evaluated. This phase ships: a filter definition language, a client-side filter engine, a visual filter builder, team-scoped filter promotion, and the "Manage filters" admin experience.
-
-**Depends on:** 10.4.5 (tags must exist for tag-based filtering)
-
-**Design decisions:**
-- **Filters are team-scoped, not timeline-scoped.** Status filter conditions match by **name** (case-insensitive), not by status ID. A filter for "In Progress" works across all timelines that have a status with that name. If a timeline lacks a matching status, the condition simply finds no matches — nothing breaks. Tags and assignees are already team-scoped. This makes filters intuitive and portable.
-- **Filter admin lives inline in the filter dropdown**, not in a separate Team Modal tab. A "Manage filters" link opens a management panel in the existing right sidebar. This keeps the workflow close to where users interact with filters.
-- **Client-side evaluation for v1.** Activities are already fully fetched per-timeline. The filter engine is a pure function that can later move server-side when data volumes warrant it.
-
-**Detailed plan:** [docs/plans/phase-10.4.6.md](plans/phase-10.4.6.md)
-
-**Scope summary:**
-
-*Filter definition schema (stored as JSON in `saved_filters.definition`):*
-- A filter is `{ logic: 'and' | 'or', conditions: FilterCondition[] }`
-- Each condition is `{ field, op, value }` with field-specific operator and value types
-- Supported fields: `status` (name match), `tag` (name match), `assignee` (member ID), `title` (string), `progress` (number), `hasParent` (boolean), `startDate` / `endDate` (date)
-- Operators vary by type: equals, not_equals, contains, in, not_in, gt, lt, is_empty, is_not_empty, before, after, between, is_true, is_false
-
-*Schema (migration 018):*
-- `ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0`
-
-*API — team filter support:*
-- `SavedFilter` model gains `IsTeamFilter bool`
-- `ListByTeamUser` returns user's own filters + all team filters (`WHERE team_id = ? AND (user_id = ? OR is_team_filter = 1)`)
-- `PATCH /saved_filters/{id}` accepts `isTeamFilter` (admin-only to set `true`)
-- Admins can delete team filters they don't own
-
-*Web — filter engine (`lib/filterEngine.ts`):*
-- Pure function: `matchesFilter(activity, filterDef, context) → boolean`
-- Resolves status name from `statusId` using timeline's status list (case-insensitive comparison)
-- Resolves tag names from `tagIds` using team's tag list
-- Evaluates conditions, combines with AND/OR
-
-*Web — unified filter application:*
-- `applyActiveFilter(activities, activeFilter, context)` — single function handling all filter kinds
-- Replaces the current GanttView open-only filtering (lines 358–363) with full evaluation
-- Makes all 6 presets actually work: all, open (uses isClosed flag), upcoming (7-day window), my (assigned to current user), overdue (past end + not closed), noassign (empty assignees)
-- Member filter kind: filters by selected member's assignments
-- Saved filter kind: parses definition JSON, evaluates via filter engine
-
-*Web — filter builder (`components/filters/FilterEditor.tsx`):*
-- Replaces "coming soon" in the RightSidebar
-- Filter name input, AND/OR toggle, condition rows with + / − buttons, Save / Delete footer
-- `FilterConditionRow.tsx`: field dropdown → operator dropdown → contextual value input (status: multi-select from deduped names across timelines; tag: multi-select from team tags; assignee: multi-select from members; dates: date picker; etc.)
-
-*Web — team filters & management:*
-- `FilterDropdown.tsx`: "Team filters" section shows filters where `isTeamFilter === true`; replaces current stub
-- "Manage filters" link at bottom of dropdown opens `FilterManagePanel.tsx` in the right sidebar
-- Management panel: lists user's filters + team filters; edit/delete buttons; admins see "Promote to team" on user filters
-
-*API — admin list-all:*
-- `GET /teams/{id}/saved_filters/all` — admin-only endpoint that returns all filters for a team (both private and team-scoped). Enables the admin "Members" tab in the management modal.
-
-*Web — additional filter fields:*
-- `FilterConditionRow.tsx` includes `progress` and `hasParent` fields (not in the original spec but prerequisite for a complete filter builder given that these fields were shipped in 10.4.5). `filterEngine.ts` already evaluates both.
-
-*Web — UX polish included in scope:*
-- Selecting an activity is auto-cleared when the active filter changes (avoids showing a detail panel for a now-hidden row).
-- Active filter resets to "all" when the user switches timelines (prevents stale filter state).
-- `FilterManageModal.tsx` replaces the planned `FilterManagePanel.tsx` sidebar with a single dialog that consolidates create/edit/duplicate/promote/demote flows and an admin "Members" tab for browsing all team members' filters.
-
-*Forward compatibility:*
-- Shared views (Phase 16) will reference saved filters by ID — the `saved_filters` table and team-scoping design support this
-- Exports (Phase 17) will accept a filter ID to scope exported data
-- New activity fields added in future phases should be added to the `FilterCondition` union and the filter engine
-
-**Exit criteria — safe to pause when:**
-- All 6 preset filters actually filter activities (not just "Open only")
-- Member filter kind filters by assignee
-- Filter builder UI: add/remove conditions, pick field/op/value for all supported fields, AND/OR toggle
-- Save/load/edit/delete custom filters works end-to-end
-- Status conditions match by name (case-insensitive) across timelines
-- Tag conditions match by tag name
-- Team filter flag works: admins can promote a user filter to a team filter
-- Team filters visible to all team members in the filter dropdown
-- "Manage filters" panel accessible from dropdown; shows all filters with admin actions
-- Filter engine has comprehensive unit tests (each field type, each operator, AND/OR logic, edge cases)
-- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-
----
-
-### Phase 11.1 — Web — List / Spreadsheet View
-**Status:** ⬜ | **Effort:** M (2–3 days)
-
-The "spreadsheet" surface — a dense, sortable, inline-editable table view of the same events shown in Gantt. Cheapest of the three new views to build and the highest-utility for power users who want to bulk-scan or bulk-edit. Shipped first so the view-switcher infrastructure lands here and the later views slot in.
-
-**Design rationale:**
-Gantt answers "when," List answers "what" — a flat, scannable inventory with column-level sorting, density that fits 50+ events on screen, and inline edits without opening a side panel. This is the view most users will reach for once Find (8.5) gets them close to a row.
-
-**Scope:**
-
-*View-switcher infrastructure (lands here, reused by 11.2 / 11.3):*
-- `ViewMode` extended to `'gantt' | 'list' | 'calendar' | 'kanban'`
-- View switcher control in the timeline sub-toolbar; per-timeline persisted via existing preferences (8.4)
-- View-specific toolbar slots so each view can contribute its own controls without crowding the shared bar
-
-*List view itself:*
-- Virtualized table (react-virtual or TanStack Virtual) — must scroll 1000+ rows smoothly
-- Default columns: Title, Start, End, Duration, Status, Assignees, Tags, Parent
-- Column show/hide menu; column order via drag; column widths resizable — persisted via preferences
-- Sort by clicking a column header (single-column sort for v1)
-- Density toggle (Comfortable / Compact)
-- Inline edit on click for title, dates, status — Tab/Shift+Tab/Enter navigation between cells
-- Row click (off-editable-cell) opens the existing `EventDetailPanel`
-- Bulk selection via checkbox column; bulk archive / delete / status-change actions in a contextual toolbar
-- Respects active filter, Find highlight (8.5), and granularity-independent — granularity does not apply to List
-
-**Exit criteria — safe to pause when:**
-- View switcher toggles between Gantt and List, persisting the choice per timeline
-- List shows all visible events with correct columns and respects the active filter
-- Sorting by any column reorders rows without losing scroll position
-- Inline editing title / dates / status saves via PATCH and reflects in Gantt when switched back
-- Bulk selecting 3+ events and applying "Archive" archives all selected events
-- 1000-row test fixture scrolls without jank
-- Find bar highlights matching rows in List view the same way it highlights bars in Gantt
-
----
-
-### Phase 11.2 — Web — Calendar View
-**Status:** ⬜ | **Effort:** L (3–5 days)
-
-Three calendar sub-layouts (Month / Week / Day) sharing one component skeleton. Week / Day need an overlapping-event lane algorithm; Month is the cheaper grid.
-
-**Design rationale:**
-A familiar surface for users coming from Google Calendar / Outlook. Not a Gantt replacement — it answers "what's happening this week?" rather than "how does this project unfold?". Multi-day events render as continuous bars across cells (Month) or pinned to an all-day strip above the time grid (Week / Day).
-
-**Scope:**
-
-*Shared:*
-- Sub-layout switcher (Month / Week / Day) inside the view's toolbar slot
-- Today / prev / next navigation; "jump to date" picker
-- Click empty cell → open Event create form, prefilled with that date
-- Click event → open `EventDetailPanel`
-- Drag event between cells → PATCH new start/end (preserving duration); only valid on Week / Day for v1
-
-*Month layout:*
-- 6-week grid; multi-day events render as continuous bars spanning cells; overflow handled with a "+N more" affordance per cell
-
-*Week layout:*
-- 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
-- All-day strip at the top for events without time components
-- Overlapping-event lane algorithm: side-by-side columns within a day
-
-*Day layout:*
-- Single-day variant of Week; same time grid and lane algorithm
-
-**Open question (resolve early in phase):**
-- Events without time components (date-only) — do they all live in the all-day strip, or do they get a default block at e.g. 9am? Affects sync compatibility with Phase 15 (Calendar Sync).
-
-**Exit criteria — safe to pause when:**
-- Switching to Calendar from List/Gantt renders the current month with all events in correct cells
-- Month / Week / Day sub-toggles each render correctly with no data discrepancy
-- A multi-day event renders as a continuous bar in Month and pinned to the all-day strip in Week / Day
-- Two overlapping events in Week view render side-by-side without occlusion
-- Dragging an event to a different day in Week view updates start/end via PATCH
-- Find highlights matching events in all three sub-layouts
-
----
-
-### Phase 11.3 — Web — Kanban View (Read-Only)
-**Status:** ⬜ | **Effort:** S–M (1–2 days)
-
-Read-only Kanban per [REQUIREMENTS.md](REQUIREMENTS.md). Columns are team statuses in their configured order; cards are events colored by primary assignee. Drag-to-change-status is explicitly v2.
-
-**Depends on:** Phase 10.2 (statuses API + UI), so admins can actually configure columns.
-
-**Scope:**
-- Columns from `team_statuses` in display order; column header colored from status color
-- Cards: title, date range, assignee avatars (stacked color indicators for multi-assignee), parent badge if nested
-- Empty column shows muted "No events" placeholder
-- Column scroll independently when card count exceeds viewport height
-- Card click → `EventDetailPanel`
-- Respects active filter, Find highlight, archived hiding
-
-**Exit criteria — safe to pause when:**
-- Kanban columns appear in the same order as the team's configured statuses
-- Cards show the correct member color (or stacked indicators for multi-assignee)
-- A status renamed / recolored in Settings updates the Kanban column header without refresh
-- Find highlights matching cards across columns
-- Attempting to drag a card produces no errors and no state change (read-only enforcement)
-
----
-
-### Phase 12 — Communications Testing
-**Status:** ⬜ | **Effort:** S (1 day)
-
-Comprehensive automated tests for every outbound email flow. No new features; this phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production.
-
-**Scope:**
-
-*Flows to cover (one integration test each):*
-- Invite email: `POST /teams/:id/invites` → mailer.SendInvite called with correct recipient and link
-- Password reset request: `POST /auth/forgot-password` with a known-SMTP server → email delivered; token stored hashed
-- Password reset confirm: `POST /auth/reset-password` → password updated; token marked used; second attempt rejected
-- SMTP validation: `PUT /admin/smtp` with a valid test server → test email sent before config is persisted
-- SMTP test: `POST /admin/smtp/test` → email sent to caller; no config persisted
-
-*Mailer unit tests:*
-- `SaveConfig` → password is encrypted before storage (sentinel prefix present)
-- `LoadConfig` → encrypted password is decrypted on read; plaintext fallback for legacy values
-- `Send` with no config → no-op (returns nil)
-- `encryptPassword` / `decryptPassword` round-trip
-
-*Test infrastructure:*
-- Add a `newTestSMTPServer(t)` helper using `net/smtp` or a simple TCP listener to capture outbound SMTP without a real mail server
-
-**Exit criteria — safe to pause when:**
-- All flows above have at least one passing integration test
-- `SaveConfig`/`LoadConfig` encryption round-trip has a unit test
-- `go test ./...` passes clean
-
----
-
-### Phase 13 — AI Key Management
-**Status:** ⬜ | **Effort:** M (2–3 days)
-
-Ships the AI/LLM key configuration surface stubbed in Phase 10.1.3. Adds encrypted storage, model routing, and a usage log so superadmins can connect AI providers and see which features are consuming tokens.
-
-**Scope:**
-
-*API:*
-- New table `ai_provider_keys`: id, provider (anthropic | openai | google | custom), api_key (encrypted AES-256-GCM, same pattern as SMTP password), model_override, created_at, updated_at
-- `GET /admin/ai/keys` — list configured providers (key masked); superadmin only
-- `PUT /admin/ai/keys/:provider` — upsert a provider key; validates by making a lightweight test call; superadmin only
-- `DELETE /admin/ai/keys/:provider` — remove a provider key; superadmin only
-
-*Web — `/settings/ai` (replaces current stub):*
-- Real form replacing the placeholder cards: provider selector, API key input (masked), model override field
-- "Test connection" button calls a test endpoint before saving
-- Usage log section (read-only): last 10 AI requests with timestamp, provider, model, token count
-
-*Encryption:*
-- Reuse the AES-256-GCM pattern introduced for SMTP passwords in Phase 10.1.3
-
-**Exit criteria — safe to pause when:**
-- A superadmin can configure an Anthropic key and verify via the test connection button
-- The key is stored encrypted and masked in the GET response
-- Removing a key clears it from the DB
-- `golangci-lint run` clean; `go test ./...` passes
-
----
-
-### Phase 14 — Localization & Language Support
-**Status:** ⬜ | **Effort:** L (3–5 days)
-
-Adds i18n infrastructure and ships the first non-English locale. The "Default language" fields in `/settings/preferences` and `/settings/organization` (currently disabled stubs) become functional.
-
-**Scope:**
-
-*Infrastructure:*
-- Adopt `react-i18next` (or equivalent) for the web client
-- Extract all user-facing strings from React components into locale JSON files
-- Add a `language` column to `user_preferences` (per-user) and a `default_language` key to `instance_settings`
-- `PATCH /users/me/preferences` accepts `language` key; `PATCH /admin/settings` accepts `default_language`
-
-*Locales:*
-- `en` — English (extracted from existing strings; the baseline)
-- Ship at least one additional locale to validate the pipeline (e.g. `es` — Spanish, or `fr` — French)
-
-*Web — settings surfaces:*
-- Enable the "Language" dropdown in `/settings/preferences` (user-level)
-- Enable the "Default language" dropdown in `/settings/organization` (instance-level)
-- Language change takes effect on next page load (no hard reload required)
-
-**Exit criteria — safe to pause when:**
-- Switching to the second locale changes all UI strings in the web app
-- User language preference persists across logout/login
-- Instance default language is used when the user has no preference set
-- Adding a new locale requires only a new JSON file (no code changes)
-- `pnpm --filter web lint` clean
-
----
-
-### Phase 15 — Calendar Sync — Google & CalDAV
-**Status:** ⬜ | **Effort:** XL (1–2 wks)
-
-**Scope:**
-- Google Calendar OAuth connect flow
-- Outbound sync: push draba events to Google on create/update/delete
-- Inbound sync: Google webhook handler → upsert event in draba
-- Built-in CalDAV server (`internal/caldav/`)
-- CalDAV connect flow (user provides URL + credentials)
-- Outbound sync: push draba events to CalDAV on create/update/delete
-- Team iCal feed: `GET /timelines/:ical_token/feed.ics` (public, no private notes)
-
-**Exit criteria — safe to pause when:**
-- Connecting Google Calendar and creating a draba event causes it to appear in Google Calendar within 30s
-- Editing that event in Google Calendar updates the draba event within 30s (webhook round-trip)
-- A CalDAV client (e.g., iOS Calendar) can subscribe to a user's feed and see their draba events
-- The iCal feed URL is importable into a calendar app without errors
-
----
-
-### Phase 16 — Shares — Multi-Share Views with Passwords
-**Status:** ⬜ | **Effort:** M (3–5 days)
-
-A first-class **Share** entity. One timeline can have many shares; each share is a frozen pairing of `{ view type + view config + optional password + optional expiry }`. This is the feature that lets a team publish, e.g., a public Gantt sorted by start date with the "Marketing" filter applied, alongside a password-protected List view of the same data for an external stakeholder.
-
-**Design rationale:**
-The existing single share token on `timelines` is too coarse — it shares "the timeline" with no opinion about which view, filter, sort, or grouping the viewer should land in. With four view types live (Gantt + 11.1 + 11.2 + 11.3), the surface a sharer wants to publish is the *configured view*, not the raw timeline. Multiple shares per timeline also enable stakeholder-specific snapshots (different filters, different views, different passwords) without forcing the team into a one-link compromise.
-
-**Scope:**
-
-*Schema:*
-- New `shares` table: `id`, `timeline_id`, `view_type` (gantt/list/calendar/kanban), `view_config` JSON (filter preset, group_by, sort_by, granularity, visible-columns, etc.), `password_hash` (nullable, bcrypt), `expires_at` (nullable), `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`
-- Public-token column on `shares` (unguessable, URL-safe) — the existing single token on `timelines` is migrated to the first share row
-- `timelines.share_token` deprecated and removed in a follow-up migration once UI references are migrated
-
-*API:*
-- `POST /timelines/:id/shares` — create share; body carries `view_type`, `view_config`, optional `password`, optional `expires_at`
-- `GET /timelines/:id/shares` — list shares for a timeline (creator + admins only)
-- `PATCH /shares/:id` — rename / change password / extend expiry / revoke
-- `DELETE /shares/:id` — hard delete
-- `GET /shares/:token` — public lookup; if password-protected returns 401 with a `passwordRequired: true` marker (no data leakage)
-- `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
-
-*Web — creating shares:*
-- "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
-- Click → modal that snapshots the current toolbar state (filter, sort, group, zoom, etc.) into `view_config`, offers password + expiry toggles, then returns the URL with copy button
-- View-config snapshot is **frozen** at creation time — later changes to the live view do not mutate existing shares
-
-*Web — viewing shares:*
-- Public viewer route `/s/:token` — no auth required; if password-protected, gates behind a password prompt; on success, mounts the corresponding view component in read-only mode with `view_config` applied
-- Read-only enforcement: no drag, no inline edit, no create — the same lockdown used for `is_external` events (Phase 18) applied to the whole surface
-- Branding strip at the top: team name, "Shared view," last-updated timestamp
-
-*Web — managing shares:*
-- "Manage shares" section on each timeline (also reachable from `/settings/team/:id` via a Timelines tab if scope allows): list, view counts, revoke, edit
-- Indicator chip on a timeline tile showing active share count
-
-**Open questions (resolve before starting):**
-- Do password-protected shares get a rate limit on unlock attempts? (Probably yes — N attempts per IP per hour.)
-- Should the unlock JWT be tied to the share's `view_config` snapshot, or refetch live? (Snapshot — that's the whole point.)
-- Do we expose share view counts to non-creators with admin access, or keep them creator-private?
-
-**Exit criteria — safe to pause when:**
-- A user can create a share from any of the four views, with the current toolbar state captured in `view_config`
-- Visiting the share URL renders the saved view exactly as it was configured at creation time
-- A password-protected share prompts for the password; wrong password is rejected; correct password renders the view
-- Setting an expiry causes the share to return 410 Gone after that date
-- A revoked share returns 410 Gone immediately and the URL is no longer usable
-- One timeline can host at least three independent shares with different view types and configurations
-- Public viewers cannot mutate any data through the share URL (no edits, no drags, no creates)
-
----
-
-### Phase 17 — Data Portability & Exports
-**Status:** ⬜ | **Effort:** L (1 wk)
-
-Tabular import / export plus view-aware exports (Gantt → PDF, Kanban → PDF, List → Markdown, etc.). Each visual export respects the active filter / sort / group at time of export — the deliverable is "what's on the screen right now," not the raw event list.
-
-**Implementation note (PDF engine):**
-PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency in the Docker image). This keeps the binary lean at the cost of reimplementing Gantt / Kanban / Calendar layouts in PDF primitives — accepted tradeoff because the alternative (chromedp) significantly inflates the image size and breaks the "single binary" promise. Visual fidelity for the Gantt PDF will not match the live view pixel-for-pixel; the target is "readable and recognizable," not "screenshot quality."
-
-**Scope:**
-
-*Tabular import / export (was the old Phase 13):*
-- `GET /timelines/:id/export.csv` and `.xlsx`
-- `POST /teams/:id/events/import` — CSV/Excel import with preview + validation step
-- `GET /import-template.csv` and `.xlsx` downloadable template
-- Password reset flow (requires SMTP or transactional email provider) — kept here because import errors / reset emails are the first time we need SMTP
-
-*Visual / textual exports (per view):*
-- **Gantt → PDF:** landscape, paginated by date range; columns scale to fit a printable width per page; legend strip with member colors; export current filter/sort/group state. Gantt → PNG as a single-page variant.
-- **Kanban → PDF:** columns laid out side-by-side; if more columns than fit a printable width, paginate across pages with a column-overflow indicator. Kanban → PNG single-page.
-- **List → CSV, xlsx, Markdown, PDF.** Markdown export uses a GitHub-flavored table; PDF is a styled table with the same columns shown in the UI.
-- **Calendar → PDF:** Month layout → one page per month in range; Week layout → one page per week; Day layout → one page per day.
-- All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description.
-
-*Wiring:*
-- The Gantt toolbar's existing "Export" stub (Phase 8.1) becomes a real menu: CSV / xlsx / PDF / PNG
-- Same menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to each view's relevant formats
-
-**Open questions (resolve before starting):**
-- Are exports synchronous (block and return the file) or async (job queue with a download link)? Probably sync for v1; revisit if multi-hundred-page PDFs become slow.
-- Do exports respect Find highlights or just the filter? (Filter only — Find is ephemeral.)
-
-**Exit criteria — safe to pause when:**
-- Exporting a timeline to CSV and xlsx produces files containing all visible events with the active filter applied
-- Importing the exported CSV back in shows a preview, validates rows, and creates events on confirm
-- Gantt → PDF renders a recognizable Gantt chart with bars in the correct positions and a member-color legend
-- Kanban → PDF renders the visible columns and cards in the same order shown on screen
-- List → Markdown produces a clean GitHub-flavored table that renders correctly in a Markdown previewer
-- Calendar → PDF in Month layout produces one page per month with events in correct cells
-- Password reset flow sends an email and allows setting a new password
-- All export menus are reachable from their respective view toolbars; format options match the view type
-
----
-
-### Phase 18 — External Connectors (Webhooks)
-**Status:** ⬜ | **Effort:** M (3–5 days)
-
-**Scope:**
-- Schema changes: `event_links`, `team_inbound_webhooks`, `is_external` flag on `events`
-- `POST /teams/:id/webhooks` to generate inbound webhook URLs
-- Generic JSON parsing for inbound webhook payload mapping (e.g. Asana, Aha)
-- Disabling edit UI for `is_external` blocks in the timeline (read-only)
-
-**Exit criteria — safe to pause when:**
-- Generating a webhook creates a unique URL for the team
-- Sending a dummy JSON payload to that URL creates an `is_external` event block mapped to a user
-- Trying to drag or edit that block in the UI is prevented (read-only mode)
-
----
-
-### Phase 19 — Global Search
-**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
-
-Cross-team, cross-timeline event search via a command palette. Complements (does **not** replace) the in-view Find from [Phase 8.5](#phase-85-find-in-view).
-
-**Why a separate phase:**
-By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), and likely more events per team than fit in one fetch. Global Search needs server-side full-text and a different UX surface (a palette, not an inline bar), so it earns its own phase. With Find + List already shipped, this should feel like the natural "I genuinely don't know where this event is" escape hatch — used rarely but valued when needed.
-
-**Directional scope (to be firmed up before the phase):**
-- Command palette opened via `Ctrl/Cmd+K` (separate keybinding from Find's `Ctrl/Cmd+F`)
-- Server-side search endpoint: `GET /search/events?q=` — scoped to teams/timelines the caller can access
-- Full-text index over title, description, tags, assignee names (SQLite FTS5 for the default backend; equivalent for MySQL/Postgres adapters when those land)
-- Results grouped by team → timeline, each row showing event title, date range, assignees, and a snippet of the matched field
-- Selecting a result navigates to that timeline and **hands off to Find**, pre-seeding the query so the event is highlighted on arrival (reuses 8.5's scroll-to-match logic)
-- Keyboard-first: arrow keys to move, Enter to navigate, Esc to close
-- Recent searches / pinned searches — stretch goal, evaluate during the phase
-
-**Open questions (resolve before starting):**
-- Does Search surface archived events by default, or behind a toggle?
-- Do we index event descriptions in v1, or just title/tags/assignees? (description indexing has size implications for SQLite FTS5)
-- Permission model: do we filter results post-query or push the auth predicate into the FTS query?
-
-**Exit criteria (placeholder — refine in-phase):**
-- `Ctrl/Cmd+K` opens a palette returning results across every team the user belongs to
-- Selecting a result navigates to the correct timeline and the event is visibly highlighted on arrival
-- Users with no access to a team never see that team's events in results
-- Search returns within ~200ms for a database with 10k events
-
----
-
-### Phase 20 — Backup & Restore
-**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
-
-Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container.
-
-**Directional scope (to be firmed up before the phase):**
-
-*Backup status (read-only admin surface):*
-- `/settings/admin/backup` page: current DB file path, file size, last-modified timestamp, WAL size (SQLite), connection count
-- Health indicator: green when last backup < 24h old, amber when 1–7 days, red when > 7 days or no backup exists
-- For MySQL/Postgres adapters: show connection string (masked), database size, last `pg_dump`/`mysqldump` timestamp if available
-
-*Manual backup:*
-- "Back up now" button → triggers a hot copy of the SQLite file (using `VACUUM INTO` or the backup API) to a configurable backup directory
-- For MySQL/Postgres: trigger `pg_dump`/`mysqldump` to the backup directory
-- Download backup file directly from the admin UI (optional — evaluate security implications)
-
-*Scheduled backups:*
-- Cron-style schedule configuration (daily at 2am, every 6 hours, etc.)
-- Retention policy: keep last N backups, or keep backups for N days
-- Backup location: local directory (default), or S3-compatible object storage (stretch)
-- Notification on backup failure (via SMTP if configured)
-
-*API:*
-- `GET /admin/backup/status` — current backup state (superadmin only)
-- `POST /admin/backup` — trigger immediate backup (superadmin only)
-- `GET /admin/backup/history` — list recent backups with size and status
-- `GET/PUT /admin/backup/schedule` — read/update backup schedule config
-- `DELETE /admin/backup/:id` — delete a specific backup file
-
-**Open questions (resolve before starting):**
-- Should backup files be downloadable from the admin UI, or only stored on the server filesystem? (Security tradeoff: convenience vs. risk of unauthorized download)
-- For SQLite, `VACUUM INTO` vs. the SQLite backup API — which handles concurrent writes better under WAL mode?
-- Do we need backup encryption at rest? (Probably not for v1 if the backup directory is on the same host)
-
-**Exit criteria (placeholder — refine in-phase):**
-- A superadmin can see the current DB status (path, size, last modified) on the admin backup page
-- "Back up now" creates a usable copy of the database in the configured backup directory
-- A scheduled backup runs at the configured interval and produces a valid backup file
-- Retention policy automatically cleans up old backups beyond the configured limit
-- Backup history shows the last N backups with timestamps and sizes
-
----
-
-## How to Use This Document
-
-1. Work phases in order — each phase's exit criteria assume the previous phase is complete.
-2. After finishing a phase, flip its status to ✅ and update the summary table.
-3. Use the exit criteria as your acceptance checklist before calling a phase done.
-4. For the granular task list within each phase, refer to [TASKS.md](TASKS.md).
-````
-
 ## File: docs/log.md
 ````markdown
 # Development Log
@@ -50824,4 +49361,1715 @@ Port 8080 was already in use on the host.
 - Result: all pass (web-e2e partial — code-verified, no live server; ws-smoke cross-team isolation skipped, covered by unit tests)
 - Smoke target: http://epcot.lan:8081
 - Note: type-sync initially failed (4 tag endpoints missing from openapi.yaml); fixed and committed before logging
+````
+
+## File: docs/ROADMAP.md
+````markdown
+# Roadmap
+
+This document organizes development into discrete phases with effort estimates and exit criteria — clear goalposts for testing and evaluation between sessions. For the granular task checklist, see [TASKS.md](TASKS.md).
+
+## Status Key
+
+| Symbol | Meaning |
+|--------|---------|
+| ✅ | Done |
+| 🔄 | In Progress |
+| ⬜ | Not Started |
+
+## Phase Summary
+
+| # | Phase | Effort | Status |
+|---|-------|--------|--------|
+| 0 | [Scaffold & Docs](#phase-0-scaffold--docs) | XS | ✅ |
+| 1 | [Project Infrastructure](#phase-1-project-infrastructure) | S — 2–4 hrs | ✅ |
+| 2 | [API Foundation — DB & Auth](#phase-2-api-foundation--db--auth) | L — 3–5 days | ✅ |
+| 3 | [Core API — Events & Teams](#phase-3-core-api--events--teams) | M — 2–3 days | ✅ |
+| 4 | [OpenAPI Spec & Type Generation](#phase-4-openapi-spec--type-generation) | S — 1 day | ✅ |
+| 5 | [API — Real-Time (WebSocket)](#phase-5-api--real-time-websocket) | M — 2–3 days | ✅ |
+| 6 | [API — Timelines](#phase-6-api--timelines) | S — ½–1 day | ✅ |
+| 7 | [Web — Scaffold](#phase-7-web--scaffold) | M — 2–3 days | ✅ |
+| 8.0 | [RBAC Refactor + First-Run Setup](#phase-80-rbac-refactor--first-run-setup) | M — 1–2 days | ✅ |
+| 8.1 | [Web — Gantt Shell & Event Rendering](#phase-81-web--gantt-shell--event-rendering) | L — 3–5 days | ✅ |
+| 8.1.1 | [Rename Timeline View → Gantt](#phase-811-rename-timeline-view--gantt) | XS — 1 hr | ✅ |
+| 8.1.2 | [Gantt View Polish](#phase-812-gantt-view-polish) | M — 1–2 days | ✅ |
+| 8.2 | [Web — Gantt Interactions](#phase-82-web--gantt-interactions) | L — 3–5 days | ✅ |
+| 8.2.1 | [Gantt Bar Drag — Resize & Move](#phase-821-gantt-bar-drag--resize--move) | M — 1–2 days | ✅ |
+| 8.3 | [Web — Real-Time WebSocket Sync](#phase-83-web--real-time-websocket-sync) | M — 1–2 days | ✅ |
+| 8.4 | [Persistent View Settings](#phase-84-persistent-view-settings) | M — 2–3 days | ✅ |
+| 8.5 | [Find (In-View)](#phase-85-find-in-view) | M — 1–2 days | ✅ |
+| 9 | [API Token Auth & Archive](#phase-9-api-token-auth--archive) | M — 1–2 days | ✅ |
+| 9.5 | [Rename Event → Activity (The Great Rename)](#phase-95--rename-event--activity-the-great-rename) | M — 1–2 days | ✅ |
+| 9.6 | [Identity System (Color + Icon)](#phase-96--identity-system-color--icon) | M — 2–3 days | 🔄 |
+| 10.1.1 | [Teams — CRUD & Management](#phase-1011--teams--crud--management) | M — 2 days | 🔄 |
+| 10.1.2 | [Members — Management & Editing](#phase-1012--members--management--editing) | M — 2–3 days | 🔄 |
+| 10.1.3 | [Settings — Profile, Tokens & Admin](#phase-1013--settings--profile-tokens--admin) | M — 2–3 days | 🔄 |
+| 10.1.4 | [Member Access & Data Lifecycle](#phase-1014--member-access--data-lifecycle) | S–M — 1–2 days | 🔄 |
+| 10.2 | [Status Templates & Timeline Statuses](#phase-102--status-templates--timeline-statuses) | M — 2–3 days | ✅ |
+| 10.3 | [Timelines — Full CRUD (API + UI)](#phase-103--timelines--full-crud-api--ui) | M — 2–3 days | 🔄 |
+| 10.4.1 | [Preference Consumption & Session Handling](#phase-1041--preference-consumption--session-handling) | S–M — 1–2 days | 🔄 |
+| 10.4.2 | [Activity Schema Normalization — Drop team_id](#phase-1042--activity-schema-normalization--drop-team_id) | S — ½–1 day | ✅ |
+| 10.4.3 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1043--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ✅ |
+| 10.4.4 | [Gantt Interaction & Activity Edit Polish](#phase-1044--gantt-interaction--activity-edit-polish) | M — 2–3 days | 🔄 |
+| 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
+| 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
+| 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | ⬜ |
+| 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
+| 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
+| 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
+| 13 | [AI Key Management](#phase-13--ai-key-management) | M — 2–3 days | ⬜ |
+| 14 | [Localization & Language Support](#phase-14--localization--language-support) | L — 3–5 days | ⬜ |
+| 15 | [Calendar Sync — Google & CalDAV](#phase-15-calendar-sync--google--caldav) | XL — 1–2 wks | ⬜ |
+| 16 | [Shares — Multi-Share Views with Passwords](#phase-16-shares--multi-share-views-with-passwords) | M — 3–5 days | ⬜ |
+| 17 | [Data Portability & Exports](#phase-17-data-portability--exports) | L — 1 wk | ⬜ |
+| 18 | [External Connectors (Webhooks)](#phase-18-external-connectors-webhooks) | M — 3–5 days | ⬜ |
+| 19 | [Global Search](#phase-19-global-search) | M — 2–3 days | ⬜ |
+| 20 | [Backup & Restore](#phase-20--backup--restore) | M — 2–3 days | ⬜ |
+
+**Parking Lot (v2):** MySQL/Postgres adapters, CLI, MCP server, mobile apps, Microsoft/Outlook sync, multi-tenant hosting, SSO, notifications.
+
+---
+
+## Phase Detail
+
+### Phase 0 — Scaffold & Docs
+**Status:** ✅ Done — 2026-04-27
+
+Repo created. Requirements, architecture, conventions, and design docs written.
+
+---
+
+### Phase 1 — Project Infrastructure
+**Status:** ✅ Done — 2026-04-29 | **Effort:** S (2–4 hrs)
+
+**Scope:**
+- Go module initialized at `packages/api/`
+- React + TypeScript + Vite initialized at `packages/web/`
+- `pnpm-workspace.yaml` wiring both packages
+- `golangci-lint` config (`.golangci.yml`)
+- GitHub Actions CI: lint + test on PR
+- `docker-compose.yml` for local development
+
+**Exit criteria — safe to pause when:**
+- `go build ./...` completes without errors
+- `pnpm build` (web) completes without errors
+- CI pipeline is green on a test push
+- `docker compose up` starts both services without errors
+
+---
+
+### Phase 2 — API Foundation — DB & Auth
+**Status:** ✅ Done — 2026-04-30 | **Effort:** L (3–5 days)
+
+**Scope:**
+- DB abstraction layer with SQLite adapter (sqlc or sqlx)
+- Migration runner (auto-runs on startup, idempotent)
+- Initial schema: `users`, `teams`, `team_members`, `team_statuses`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`
+- JWT issue/validate, password hash/verify, invite token generate/validate
+- Endpoints: `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`
+
+**Exit criteria — safe to pause when:**
+- `POST /auth/register` (invite token required), `POST /auth/login`, and `POST /auth/refresh` all return correct responses
+- JWT validates on a subsequent authenticated request
+- All schema tables exist in the SQLite file
+- Migration runner re-run produces no changes (idempotent)
+
+---
+
+### Phase 3 — Core API — Activities & Teams (originally Events; renamed in Phase 9.5)
+**Status:** ✅ Done — 2026-05-03 | **Effort:** M (2–3 days)
+
+**Scope:**
+- `POST /teams` — create team
+- `POST /teams/:id/invites` — send invite
+- `GET /teams/:id/members`
+- `POST /teams/:id/activities` — create activity (shipped as `/events`; renamed in Phase 9.5)
+- `GET /teams/:id/activities` — list activities (date range filter)
+- `PATCH /activities/:id` — update activity
+- `DELETE /activities/:id` — delete activity
+
+**Exit criteria — safe to pause when:**
+- Full invite flow works: create team → send invite → register via token → list members
+- Activities can be created, listed (filtered by date range), updated, and deleted via HTTP with a valid JWT
+- All responses match the expected shape (verified manually or with a test script)
+
+---
+
+### Phase 4 — OpenAPI Spec & Type Generation
+**Status:** ✅ Done — 2026-05-04 | **Effort:** S (1 day)
+
+**Scope:**
+- `packages/shared/openapi.yaml` covering all Phase 2–3 endpoints
+- `openapi-typescript` codegen configured in `packages/shared/`
+- Generated types importable from `packages/web/`
+
+**Exit criteria — safe to pause when:**
+- `pnpm generate` (or equivalent) completes with no errors
+- All Phase 2–3 endpoints are represented in the spec
+- A generated type (e.g., `Event`) can be imported in a web file without TypeScript errors
+
+---
+
+### Phase 5 — API — Real-Time (WebSocket)
+**Status:** ✅ Done — 2026-05-14 | **Effort:** M (2–3 days)
+
+**Scope:**
+- WebSocket hub (`internal/ws/`)
+- Team-scoped subscription model
+- Broadcast on `events.*` internal bus events (create, update, delete)
+
+**Exit criteria — safe to pause when:**
+- Two browser clients subscribed to the same team both receive a broadcast delta within 500ms of an event mutation
+- A client subscribed to team A does not receive events from team B
+- 30-second heartbeat keeps idle connections alive without dropping
+
+---
+
+### Phase 6 — API — Timelines
+**Status:** ✅ Done — 2026-05-15 | **Effort:** S (½–1 day)
+
+**Scope:**
+- `POST /teams/:id/timelines` — create timeline
+- `GET /timelines/:id` — fetch timeline (auth-gated)
+- `GET /timelines/share/:token` — public share link handler
+- Timeline access list enforcement
+
+**Exit criteria — safe to pause when:**
+- Can create a timeline and retrieve it with a valid JWT
+- Public share token returns the timeline without auth
+- A user not on the access list is rejected with 403
+
+---
+
+### Phase 7 — Web — Scaffold
+**Status:** ✅ Done — 2026-05-17 | **Effort:** M (2–3 days)
+
+**Scope:**
+- shadcn/ui initialized (`pnpm dlx shadcn@latest init`)
+- Color tokens set in `src/index.css`
+- Dark mode toggle (localStorage + `prefers-color-scheme`)
+- Routing (React Router)
+- Auth flow: login page, register-via-invite page, token storage
+- API client: TanStack Query + fetch wrapper using generated types
+- WebSocket client hook (`useWebSocket`)
+- oapi-codegen wired for Go handler types (no drift between OpenAPI spec and Go)
+- React build embedded in Go binary via `//go:embed`; single container, single port
+
+**Exit criteria — safe to pause when:**
+- `/login` renders and authenticates against the live API (served from the Go binary)
+- Protected routes redirect unauthenticated users to `/login`
+- A TanStack Query hook successfully fetches and displays team events
+- WebSocket connects and emits events visible in browser DevTools Network tab
+- `docker build --target prod` produces a single image; the login page loads at port 8080 with no second container
+
+---
+
+### Phase 8.0 — RBAC Refactor + First-Run Setup
+**Status:** ✅ Done — 2026-05-18 | **Effort:** M (1–2 days)
+
+Prerequisite work before the web timeline phases: tightened the auth model and added a first-run experience.
+
+**Scope:**
+- Migration 003: `team_members` PK, nullable `user_id` (login-less Participants), `team_member_id` FKs on `event_assignments` and `timeline_access`, `role` on `timeline_access`, `visibility` dropped from `timelines`
+- First registered user auto-granted `is_superadmin`; team admins bypass timeline access checks; members require explicit grant
+- `GET /setup/status` public endpoint; 3-step first-run setup wizard (Account → Team → Timeline)
+- Production container runs as non-root user (uid 1000)
+
+**Exit criteria:**
+- Migration runs cleanly on a fresh DB; existing data preserved on upgrade
+- First user through the wizard lands in the app as superadmin with a team and timeline
+- Navigating to `/setup` after setup is complete redirects to `/login`
+- `go test ./...` all pass; `golangci-lint run` clean
+
+---
+
+### Phase 8.1 — Web — Gantt Shell & Event Rendering
+**Status:** ✅ Done — 2026-05-18 | **Effort:** L (3–5 days)
+
+Static, data-driven Gantt chart. No drag interactions — layout, rendering, grouping, sorting, and zoom only.
+
+**Design pivot (2026-05-18):** Switched from person-lane resource view to event-row Gantt layout based on first live preview. Person grouping is now one of several "Group by" options rather than the fixed row axis.
+
+**Scope:**
+- `GanttGrid` component: Gantt layout — one row per event, sticky label column (title + member avatars), horizontal time grid, horizontal scroll
+- `GanttToolbar` component: zoom (granularity), group-by selector (None / Member / Parent event), sort-by selector (Start date / End date / Title), Export stub
+- `GanttView` component: data container — fetches events + members, applies grouping + sorting, builds `GanttRow[]`, passes to `GanttGrid`
+- Pixel ↔ date math (map date range to X offset/width); variable column width for zoom
+- Wire to `GET /teams/:id/events?start=&end=` via TanStack Query
+- Wire to `GET /teams/:id/members` for group labels and member avatars
+- API additions: `GET /teams` (list user's teams), `GET /teams/:id/timelines` (list timelines for date bounds), `assignedMemberIds[]` on Event responses
+
+**Exit criteria — safe to pause when:**
+- Events render as bars in the correct date columns, with correct width
+- Group by Member shows one section per assignee with correct events beneath
+- Group by Parent shows children indented under their parent event
+- Sort by Start date / End date / Title reorders rows within groups
+- Zoom steps change column width and the grid scrolls correctly
+- Gantt toolbar renders and all controls are functional
+
+---
+
+### Phase 8.1.1 — Rename Timeline View → Gantt
+**Status:** ✅ Done — 2026-05-19 | **Effort:** XS (1 hr)
+
+Renamed the Gantt view components to eliminate confusion between the "Timeline" data entity (date-bounded event container) and the view layer.
+
+**Scope:**
+- Renamed directory `components/timeline/` → `components/gantt/`
+- Renamed `TimelineView` → `GanttView`, `TimelineGrid` → `GanttGrid`, `TimelineToolbar` → `GanttToolbar`
+- Updated `ViewMode` type: `'timeline'` → `'gantt'`
+- All data entity code (Sidebar, API, hooks) untouched
+
+---
+
+### Phase 8.1.2 — Gantt View Polish
+**Status:** ✅ Done — 2026-05-19 | **Effort:** M (1–2 days)
+
+Three polish items bundled together.
+
+**Scope:**
+- Reusable `EmptyState` component (`components/shared/EmptyState.tsx`) — draba icon, message, optional description; dark-mode aware via `currentColor`
+- Fixed empty state centering — renders outside the scroll container so it stays centered on screen
+- Zoom rethink — replaced pixel-width slider with time granularity dropdown (Auto / Day / Week / Month / Quarter / Year). Auto-fit picks the finest granularity that fills the viewport. New `granularity.ts` utility for column generation and fractional event positioning.
+
+**Exit criteria — safe to pause when:**
+- Empty state shows centered draba icon + "No viewable events" when no events exist
+- Zoom dropdown changes time granularity; Auto picks an appropriate level based on timeline duration
+- Event bars position correctly with fractional column math at all granularity levels
+
+---
+
+### Phase 8.2 — Web — Gantt Interactions
+**Status:** ✅ Done — 2026-05-19 | **Effort:** L (3–5 days)
+
+Builds on 8.1. Full CRUD interactions on the timeline.
+
+**Scope:**
+- Click activity block → open `ActivityDetailPanel` (view mode) *(shipped as `EventDetailPanel`; renamed in Phase 9.5)*
+- Edit button → inline editing form (title, description, date range, status, assignees)
+- Save → `PATCH /activities/:id`, optimistic update, close panel *(shipped as `PATCH /events/:id`; renamed in Phase 9.5)*
+- Delete → `DELETE /activities/:id`, confirm dialog, remove from timeline *(shipped as `DELETE /events/:id`; renamed in Phase 9.5)*
+- Drag on empty lane cell → capture start/end date range → open `ActivityCreatePanel` pre-filled with lane member + dates *(shipped as `EventCreateForm`; renamed in Phase 9.5)*
+- Submit form → `POST /teams/:id/activities`, add block to timeline *(shipped as `POST /teams/:id/events`; renamed in Phase 9.5)*
+
+**Exit criteria — safe to pause when:**
+- Clicking an activity block opens an edit panel; changes save and reflect immediately in the UI
+- Dragging on an empty lane cell opens a creation form pre-filled with the selected range
+- Created and edited events appear correctly in the timeline without page reload
+
+---
+
+### Phase 8.2.1 — Gantt Bar Drag — Resize & Move
+**Status:** ✅ Done — 2026-05-19 | **Effort:** M (1–2 days)
+
+Builds on 8.2. Direct manipulation of event bars on the Gantt chart.
+
+**Scope:**
+- **Edge drag (resize):** mousedown on the left or right 8px edge of an event bar → drag to change start or end date; show date tooltip during drag; PATCH on mouseup
+- **Body drag (move):** mousedown on the bar body → drag horizontally to shift both start and end dates by the same delta; show date tooltip during drag; PATCH on mouseup
+- Visual feedback: bar moves/resizes live during drag (optimistic); ghost/overlay at original position optional
+- Snap to column boundaries (e.g. day, week) matching the active granularity
+- `is_external` events (Phase 18) are non-draggable (read-only)
+
+**Exit criteria — safe to pause when:**
+- Dragging a bar edge changes the event's start or end date and saves on mouseup without a page reload
+- Dragging a bar body shifts both dates by the same amount and saves on mouseup
+- A date tooltip shows the new date(s) during drag
+- Snap-to-column works at all granularity levels
+
+---
+
+### Phase 8.3 — Web — Real-Time WebSocket Sync
+**Status:** ✅ Done — 2026-05-19 | **Effort:** M (1–2 days)
+
+Builds on 8.2. Wire live WebSocket deltas into the timeline's state.
+
+**Scope:**
+- Connect `useWebSocket` hook (Phase 7) to subscribe to `events.*` messages for the active team
+- On `activity.created` delta: insert new event block into TanStack Query cache
+- On `activity.updated` delta: update existing block in cache (position + content)
+- On `activity.deleted` delta: remove block from cache
+- Handle optimistic update conflicts (local edit in-flight when WS delta arrives for same event)
+
+**Exit criteria — safe to pause when:**
+- A second browser tab's Gantt view updates within 500ms when an activity is mutated in the first tab
+- No duplicate or ghost blocks after rapid create/edit/delete sequences
+
+---
+
+### Phase 8.4 — Persistent View Settings
+**Status:** ✅ Done — 2026-05-20 | **Effort:** M (2–3 days)
+
+Server-side user preferences so view settings survive login/logout and sync across devices.
+
+**Scope:**
+- New `user_preferences` table: `id`, `user_id`, `timeline_id` (nullable), `key`, `value` (JSON), `updated_at`; unique on `(user_id, timeline_id, key)`
+- Global preferences (timeline_id NULL): theme, selected_team, selected_timeline
+- Per-timeline preferences: filter preset, group_by, sort_by, zoom_granularity
+- API: `GET /users/me/preferences?timeline_id=`, `PUT /users/me/preferences`
+- Frontend: `usePreferences(timelineId?)` hook — reads/writes, caches via TanStack Query
+- On timeline switch: fetch per-timeline prefs, apply to toolbar state
+- On login: fetch global prefs, restore theme/team/timeline selection
+
+**Exit criteria — safe to pause when:**
+- Changing zoom/group/sort on a timeline, switching to another timeline, and switching back restores the original settings
+- Dark mode and selected team persist across logout/login
+- Settings sync between two browser tabs via API (not just localStorage)
+
+---
+
+### Phase 8.5 — Find (In-View)
+**Status:** ✅ Done — 2026-05-20 | **Effort:** M (1–2 days)
+
+Browser-style "find in page" for the active view. Scoped to events the current view has already loaded; respects active filters. **Global cross-team search is deferred to [Phase 19](#phase-19-global-search).**
+
+**Design rationale:**
+Two distinct tools, not one box. **Find** answers *"highlight what I'm looking at"* — fast, keyboard-driven, walks matches. Global **Search** (Phase 19) answers *"find an event when I don't know where it lives"* — palette-style, navigates across teams/timelines. Mixing them in one input is where these UIs get muddy. With Find + the upcoming List view (Phase 11), we expect ~95% of real-world lookup needs to be covered.
+
+**Scope:**
+
+*Trigger & layout:*
+- Find bar opens on `Ctrl/Cmd+F` (and via a search icon in the TopBar between FilterDropdown and ProfileMenu)
+- `Esc` closes; clear button (×) resets the query
+- Bar shows: query input · match counter (`3 / 12`) · prev/next chevrons · close
+
+*Match scope (client-side, against already-fetched events):*
+- Event title, description, tag names, assignee display names, parent event title
+- Case-insensitive, debounced (~150ms)
+- Search respects active filters by default — the visible view defines the search world
+
+*Visual treatment:*
+- Matching events: amber outline / glow (uses existing design tokens)
+- Non-matching events: dimmed to ~0.3 opacity
+- **Active** match (the one prev/next is parked on): stronger outline + subtle pulse, so users can tell it apart from the other matches
+- For non-title matches, a small badge or tooltip on hover surfaces *why it matched* (e.g. `matched tag #urgent`, `matched assignee Jane`) so highlights on otherwise-blank-looking cards aren't mysterious
+
+*Navigation:*
+- `Enter` / `Shift+Enter` (and the ◀ ▶ chevrons) walk forward/backward through matches
+- On step, the Gantt auto-scrolls **both axes** to center the active match (horizontal pan to the event's date range, vertical scroll to its row)
+- If the active match lives inside a collapsed group, the group expands automatically
+
+*Empty-state behavior:*
+- Zero matches, no filters active → bar shows `No matches`
+- Zero matches **in view**, but filters are active → soft inline callout: *"No matches in current view. [Clear filters]"*. (We do **not** silently search outside the filters — that's Phase 19's job.)
+
+*Persistence:*
+- The query itself is **not** persisted across navigation or reloads — Find is ephemeral by design (matches browser Cmd+F muscle memory)
+- Open/closed state of the bar is also ephemeral
+
+**Out of scope (explicitly):**
+- Cross-team or cross-timeline search → Phase 19
+- Server-side full-text search → Phase 19
+- Saved searches / recent queries → Phase 19
+- Highlighting matches that aren't in the currently-loaded event set (no dynamic loading exists yet; revisit when/if windowed loading lands)
+
+**Exit criteria — safe to pause when:**
+- `Ctrl/Cmd+F` opens the Find bar; `Esc` closes it
+- Typing dims non-matches and highlights matches across title, description, tags, assignees, and parent title
+- Match counter shows `N / M` and updates as the query changes
+- Prev/next (and `Enter` / `Shift+Enter`) cycle through matches, auto-scrolling the Gantt to center each one
+- Active match is visually distinguishable from other matches
+- Non-title matches surface a "why matched" hint on hover
+- With filters active and zero in-view matches, the "Clear filters" callout appears
+- Find works correctly at all granularity levels and with all group-by modes
+
+---
+
+### Phase 9 — API Token Auth & Archive
+**Status:** ✅ Done — 2026-05-20 | **Effort:** M (1–2 days)
+
+**Scope:**
+- `POST /tokens`, `GET /tokens`, `DELETE /tokens/:id`
+- Auth middleware accepts Bearer (JWT or API token) on all authenticated routes
+- Read-only token scope enforcement (blocked from mutations)
+- `POST /events/:id/archive`, `POST /events/:id/unarchive`
+- `POST /timelines/:id/archive`, `POST /timelines/:id/unarchive`
+- List endpoints exclude archived records by default; `?archived=true` to include
+
+> **Note:** Phase 9 ships the API surface only. The token management **UI** (create / list / revoke from a settings page) lands in [Phase 10.1.3 — Settings](#phase-1013--settings--profile-tokens--admin). Until 10.1.3 ships, tokens are created via direct API calls or a temporary admin script.
+
+**Exit criteria — safe to pause when:**
+- Can create an API token and use its value as a Bearer token on a GET request
+- A read-only token is rejected (403) on a POST/PATCH/DELETE request
+- Archiving an event removes it from the default event list; `?archived=true` restores it
+
+---
+
+### Phase 9.5 — Rename Event → Activity (The Great Rename)
+**Status:** ✅ Done — 2026-05-21 | **Effort:** M (1–2 days)
+
+Rename the domain entity `Event` → `Activity` end-to-end (DB, Go API, OpenAPI, generated TS, web hooks/components, user-facing copy, docs). The pub/sub bus keeps its `internal/events` package name (correct event-driven-architecture term), but its message-type constants and wire strings move to `activity.*`. Calendar fields (`google_event_id`, `caldav_uid`) are preserved — they map to external VEVENT identifiers.
+
+**Why now:** the name collides with internal pub/sub events and with calendar VEVENTs. Cost of disambiguation grows fast in Phase 15 (Calendar Sync) and Phase 18 (Webhooks). Cheapest to fix while pre-1.0, single LAN test instance, no external API consumers.
+
+**Approach:** hard cutover. No `/events` aliases, no dual message types. Single migration via `ALTER TABLE RENAME`. See **[GreatEventToActivity.md](GreatEventToActivity.md)** for the full runbook (token map, per-layer checklist, verification, rollback).
+
+**Scope (summary — see runbook for the full list):**
+- DB: `events` → `activities`, `event_tags` → `activity_tags`, `event_assignments` → `activity_assignments`, `parent_event_id` → `parent_activity_id`. New migration `005_rename_events_to_activities.sql`. **Keep** `google_event_id` and `caldav_uid`.
+- Go: `models.Event` → `Activity`; `EventRepo` → `ActivityRepo`; `event_handler.go` → `activity_handler.go`; all routes `/events*` → `/activities*`; bus constants `EventCreated/Updated/Deleted` → `ActivityCreated/Updated/Deleted` and wire strings `event.*` → `activity.*`. **Keep** `internal/events` package name and `TimelineCreated/Updated`.
+- OpenAPI: `Event` schema → `Activity`; all operationIds, tags, paths. **Keep** `googleEventId`/`caldavUid` fields. Regenerate TS types.
+- Web: `useTeamEvents` → `useTeamActivities`; `EventDetailPanel`/`EventCreatePanel`/`EventPanel` → `Activity*`; `DrabaEvent`/`EventStatus`/`EVENT_COLORS` → `Activity*`/`ACTIVITY_COLORS`; UI strings ("Add Event" → "Add Activity", sidebar "Events" → "Activities", etc.); WebSocket message switch updated.
+- Tests, seed (`seed-find-test-events.sql` → `…-activities.sql`), and docs (ROADMAP/REQUIREMENTS/ARCHITECTURE/CONVENTIONS/TESTING/UX_PATTERNS) swept.
+
+**Exit criteria — safe to pause when:**
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+- Migration applies cleanly against a copy of the production DB; row counts unchanged; `PRAGMA foreign_key_check` returns no rows
+- Smoke test on test docker passes: create / edit / archive / unarchive / delete an Activity; WebSocket frames arrive as `activity.created` (not `event.created`)
+- `googleEventId` / `caldavUid` still present in OpenAPI `Activity` schema and in the `activities` table
+- Final-sweep grep returns only the expected remaining matches (bus package, calendar fields, historical log)
+- `docs/log.md` Phase 9.5 entry written
+
+---
+
+### Phase 9.6 — Identity System (Color + Icon)
+**Status:** 🔄 In Progress — 2026-05-24, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
+
+Builds a reusable Identity component system — a color + icon pair that gives every major entity (activities, timelines, teams, members) a consistent visual fingerprint. Ships the component library, expands the color palette from 8 to 16, adds schema fields where missing, and swaps the new components into every existing UI surface that edits color or icon.
+
+**Why now:** Phase 10.x builds full CRUD for teams, timelines, and members. Each will need an identity editor. Building the component system now means 10.x simply drops `<IdentityWidget>` into each form instead of inventing bespoke color/icon pickers per entity. The existing `ActivityDetailPanel` already has a color picker (8 squares) and an icon stub ("coming soon") — this phase replaces both with the real thing.
+
+**Design reference:** [docs/design/IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md) — full spec, palette, component API. Prototype: `docs/design/assets/identity-widget-prototype.html`.
+
+**Scope:**
+
+*Schema (migration 006):*
+- Add `icon TEXT` column to `team_members` (nullable)
+- Add `color TEXT`, `icon TEXT` columns to `teams` (nullable)
+- Add `color TEXT`, `icon TEXT` columns to `timelines` (nullable)
+- Convert existing `activities.color` hex values → color IDs (e.g. `#288C9B` → `teal`)
+- Convert existing `team_members.color` hex values → color IDs
+- Activities already have both `icon` and `color` columns — no structural change needed
+
+*API:*
+- Update `models.go`: add `Icon` and `Color` fields to `Team` and `Timeline`; add `Icon` field to `TeamMember`
+- Update OpenAPI spec: add `icon`/`color` to `Team` and `Timeline` schemas; add `icon` to `TeamMember` schema
+- Existing PATCH endpoints already handle `color` and `icon` for activities — no new endpoints needed; Team/Timeline PATCH lands in Phase 10.x
+- Regenerate TypeScript types
+
+*Web — component library (`src/components/identity/`):*
+- `identity-constants.ts` — 16-color palette, 64-icon list, name-text helpers, legacy hex→colorId mapping
+- `Badge.tsx` — read-only identity display (replaces and supersedes `MemberAvatar`)
+- `IdentityTrigger.tsx` — clickable badge with chevron pip
+- `IdentityPicker.tsx` — popover panel: color grid + name options + icon grid
+- `IdentityWidget.tsx` — composed trigger + popover with portal positioning
+
+*Web — integration into existing surfaces:*
+- `ActivityDetailPanel`: replace the 8-color swatch grid and icon stub with `<IdentityWidget>`; color changes now persist as color IDs
+- `ActivityCreatePanel`: add optional `<IdentityWidget>` for setting identity at creation time
+- Gantt bar label column: replace inline color dot with `<Badge>` (square, 20px)
+- Sidebar timeline rows: replace inline colored squares with `<Badge>` (square, 22px)
+- Sidebar member rows: replace inline colored circles with `<Badge>` (circle, 22px)
+- `MemberAvatar`: refactor to delegate to `<Badge>` internally (preserves existing API, avoids a sweeping import change)
+- Update `ACTIVITY_COLORS` and `MEMBER_COLORS` arrays → import from `identity-constants.ts`
+- Update CSS custom properties `--member-N-*` → identity palette hex values
+
+*Design system docs:*
+- Update `DESIGN_SYSTEM.md`: replace 8-color member palette section with 16-color identity palette
+- Add `IDENTITY_SYSTEM.md` as the canonical reference for the identity data model and component specs
+
+**Exit criteria — safe to pause when:**
+- `<Badge>` renders correctly in all four modes: Lucide icon, 1-letter, 2-letter, none — at sizes 20–40px, both shapes
+- `<IdentityWidget>` opens a popover with 16 colors, 4 name options, and 64 icons; selecting any fires `onChange` immediately
+- The `ActivityDetailPanel` uses `<IdentityWidget>` instead of the old color grid + icon stub; color persists as a color ID (e.g. `"violet"`, not `"#8B5CF6"`)
+- Existing activities with legacy hex colors display correctly (hex→colorId mapping works)
+- Sidebar member and timeline rows use `<Badge>` instead of inline styled divs
+- Migration 006 applies cleanly: new columns added, existing hex values converted to color IDs
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+- `docs/log.md` Phase 9.6 entry written
+
+---
+
+### Phase 10 — Entity Management (data-cornerstone CRUD)
+
+**Framing:** Phase 10 closes the gaps in CRUD for the three core data entities — Teams, Timelines, Activities (renamed from Events in Phase 9.5) — plus the cross-cutting settings shell. Today the first-run wizard creates one of each and there is no path to manage them afterward. We tackle them entity-by-entity, top-down, so that by the time Phase 11 (views) ships, the data layer underneath is fully manageable. Activities are already CRUD-complete from Phases 3 / 8.2 / 8.2.1 (archive lands in Phase 9), so Phase 10 only needs to address Teams and Timelines.
+
+Sub-phase dependency: 9.6 (Identity) → 10.1.1 (Teams) → 10.1.2 (Members) → 10.2 (Statuses) → 10.3 (Timelines) → 10.4 (Profile/Tokens/Admin). All entity forms use the `<IdentityWidget>` from 9.6 for color/icon editing. 10.1.2 depends on 10.1.1 because the Members tab lives inside the Team Modal and member API endpoints are team-scoped. 10.2 depends on 10.1.2 because the statuses tab sits alongside the Members tab in team settings. 10.3 doesn't strictly depend on 10.2 but is sequenced after for clean delivery.
+
+**Design references:**
+- Team Modal handoff: `docs/design/handoffs/team-modal/` — create + edit flows, Settings tab, Members tab, archive confirmation
+- Member Edit Modal handoff: `docs/design/handoffs/member-modal/` — member profile editing, stats, admin actions
+
+---
+
+### Phase 10.1.1 — Teams — CRUD & Management
+**Status:** 🔄 In Progress — 2026-05-25, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2 days)
+
+Closes the Teams data entity. Today a user can create one team via the first-run wizard and never manage it again. After this phase, teams are a fully manageable entity from both API and UI. Ships the Team Modal component with the Settings tab functional; the Members tab UI is scaffolded but locked until 10.1.2.
+
+**Design rationale:**
+Teams are the outermost data scope — everything else (timelines, activities, members, statuses, tokens, shares) hangs off a team. Without a way to rename, reconfigure, or add additional teams, the rest of the app is essentially read-only at the structural level. This phase focuses on the team entity itself; member management is split to [Phase 10.1.2](#phase-1012--members--management--editing) to keep each phase focused.
+
+**Scope:**
+
+*Schema (migration 008):*
+- Add `description TEXT` column to `teams` (nullable)
+- Add `notes TEXT` column to `teams` (nullable)
+- Add `archived_at DATETIME` column to `teams` (nullable)
+
+*API — team-level:*
+- `GET /teams/:id` — full team detail (name, description, notes, icon, color, timezone, week start, member count, timeline count, archived_at)
+- `PATCH /teams/:id` — update name, description, notes, icon, color (admin only)
+- `POST /teams/:id/archive` and `POST /teams/:id/unarchive` (depends on Phase 9 archive pattern)
+- Update `POST /teams` to accept `description`, `notes`, `icon`, `color` on creation
+- `GET /teams` already exists — add `?archived=true` to include archived teams
+
+*Web — Team Modal component (`<TeamModal>`):*
+- Modal shell: header (identity badge + team name), tab bar (Settings / Members), scrollable content, footer
+- Two modes: `new` (create) and `edit` (existing team)
+- **Settings tab**: identity picker (square shape), name (required), description, notes fields
+- **Members tab**: scaffolded as locked/disabled in this phase — tooltip "Save the team first" in new mode; placeholder content in edit mode until 10.1.2 ships
+- Footer: Cancel, Save changes / Create team (primary button uses team color); Archive team button (edit mode only)
+- "Saved" banner: shown briefly after new team creation, auto-dismisses after 3 seconds
+- New-team flow: Settings tab only → Create team → banner → Members tab unlocks (but content is 10.1.2)
+- Archive confirmation dialog: replaces modal content, amber styling, preserves all data
+
+*Web — team picker + settings shell:*
+- "New team" affordance in the team picker dropdown → opens Team Modal in `new` mode
+- Existing team gear/edit icon → opens Team Modal in `edit` mode
+- `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2)
+- Archived teams surfaced in team picker under a collapsed "Archived" section with unarchive affordance
+
+*OpenAPI + types:*
+- Update `Team` schema: add `description`, `notes`, `archivedAt` fields
+- Update `CreateTeamInput` and `PatchTeamInput` bodies
+- Regenerate TypeScript types
+
+**Exit criteria — safe to pause when:**
+- A user can create a second team from the team picker without going through the first-run wizard
+- The Team Modal opens in both `new` and `edit` modes with correct behavior
+- A team admin can edit name, description, notes, icon, and color via the Settings tab
+- The Members tab is visible but locked/placeholder (ready for 10.1.2 to fill in)
+- Archiving a team removes it from the active picker; unarchive restores it
+- The "Saved" banner appears after creating a new team and auto-dismisses
+- A non-admin member cannot access team edit actions (modal opens in read-only or is hidden)
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 10.1.2 — Members — Management & Editing
+**Status:** 🔄 In Progress — 2026-05-25, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
+
+Fills in the Members tab of the Team Modal and adds the standalone Member Edit Modal. Covers the full member lifecycle: add, edit, role changes, inactivation, removal, participant management, and both email invites and reusable invite links.
+
+**Design rationale:**
+Member management is the most interaction-dense part of team administration. Splitting it from the team entity work (10.1.1) keeps each phase focused — 10.1.1 closes the "team as a data entity" gap, while 10.1.2 closes the "people within a team" gap. The Member Edit Modal introduces member-level stats and admin actions that require new API endpoints and computation.
+
+**Terminology mapping:**
+- **Participant** = login-less team member (team_members with `user_id = NULL`). The design handoffs use "stub" but we use "Participant" — it's the established codebase term (Phase 8.0) and more user-friendly. The UI displays "Participant" in role dropdowns and "No login" pills; the backend model is unchanged.
+- "Inactivate" in the UI maps to the existing `archived_at` pattern on `team_members`. Archiving a member disables their access but preserves their data and activity assignments.
+- "Super Admin" in the UI maps to the existing `users.is_superadmin` field.
+
+**Scope:**
+
+*Schema (migration 009):*
+- Add `archived_at DATETIME` column to `team_members` (nullable) — supports member inactivation
+- Add `archived_at DATETIME` column to `users` (nullable) — supports account-level inactivation by superadmin
+- Add `invite_link_token TEXT` column to `teams` (nullable, unique) — reusable team invite link
+
+*API — member CRUD:*
+- `GET /teams/:id/members/:memberId` — full member detail including stats (timeline counts, activity counts by date status)
+- `GET /teams/:id/members/:memberId/stats` — lightweight stat-only endpoint (same data as the stats object in the detail response)
+- `POST /teams/:id/members` — add existing registered user by `userId` (admin only)
+- `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; member can set own display name/color/icon)
+- `DELETE /teams/:id/members/:memberId` — remove member from team; reject if last admin
+- `POST /teams/:id/members/:memberId/archive` — inactivate member (sets `archived_at`)
+- `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clears `archived_at`)
+
+*API — participant CRUD:*
+- `POST /teams/:id/participants` — create login-less participant (admin only); accepts name, icon, color, optional email (reference only)
+- Participants are managed via the same `PATCH` and `DELETE` member endpoints (role is always `member`, `user_id` stays NULL)
+
+*API — invites:*
+- `GET /teams/:id/invites` — list pending invites (email, sent date, status)
+- `DELETE /teams/:id/invites/:inviteId` — revoke/cancel a pending invite
+- `POST /teams/:id/invites` already exists (Phase 3) — verified working
+- `POST /teams/:id/invite-link` — generate or regenerate a reusable team invite link token
+- `POST /teams/:id/invite-link/reset` — alias for regenerate (invalidates old token); stub for now, wired to email-sending sub-phase
+- `GET /teams/:id/invite-link` — get the current invite link (or null if none)
+- `DELETE /teams/:id/invite-link` — revoke the current invite link
+- `POST /auth/register` — update to accept reusable invite link tokens (in addition to existing one-time invite tokens)
+
+*API — member stats (computed, not stored):*
+- Timeline counts: active timelines the member has access to, archived timelines
+- Activity counts (date-relative, not status-relative):
+  - **Past due**: end date passed, on an active timeline
+  - **Running**: start date passed + end date in future, on an active timeline
+  - **Upcoming**: start date not yet reached, on an active timeline
+  - **Unscheduled**: no start or end date set, on an active timeline
+  - **Archived**: on archived timelines (historical count)
+
+*API — superadmin actions:*
+- `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only; not applicable to participants)
+- `POST /users/:id/archive` — inactivate user account (superadmin only; sets `users.archived_at`)
+- `POST /users/:id/unarchive` — reactivate user account (superadmin only)
+- `DELETE /users/:id` — hard delete user (superadmin only; only when deletable — no active activities, single team)
+- Auth middleware: reject login attempts from archived users with a clear error message
+
+*Web — Team Modal Members tab:*
+- Search/add input: search registered users by name/email, or type an email to send an invite
+- Search results dropdown: user matches with "Add" button, email-only results with "Invite" button; already-added users shown muted
+- Participant creation: inline expandable form with identity picker, name (required), optional email
+- Member list: each row shows avatar (dashed border if participant), name, "No login" pill (participants), email, role dropdown, remove (×) button
+- Role dropdown (`<RoleDropdown>`): three options — Admin (teal), Member (muted), Participant (amber) — with descriptions; role changes save immediately via PATCH
+- Pending invitations section: invite rows with email, sent date, "Revoke" button (red)
+- Invite link section: generated URL with copy button (transitions to "Copied!" for 2s), explanatory note; admins can regenerate or revoke
+
+*Web — Member Edit Modal (`<MemberModal>`):*
+- Opened from member list rows (in Team Modal or sidebar gear icon)
+- Header: identity picker (40px circle, editable), subline (participant/team member + viewer role), name with role badges
+- Scrollable content:
+  - Name + email fields (email read-only for stubs)
+  - Timeline stats chips (active, archived) with color-coded top borders
+  - Activity stats chips (past due, running, upcoming, unscheduled, archived) — date-relative
+  - Joined date + last active date (read-only)
+  - Teams list showing all teams the member belongs to with role pills
+  - Account section (non-participant only): password reset button — UI present but shows "SMTP not configured" until SMTP is configured (Phase 10.1.3)
+  - Super Admin actions section (superadmin viewer only): promote to super admin, inactivate/delete with confirmation dialogs
+- Footer: Cancel + Save changes (in member's identity color)
+- Role permission matrix: team admins can edit name/email/identity; superadmins additionally see promote/inactivate/delete
+- Confirmation dialogs: promote (indigo), inactivate (amber), delete (red) — each with icon, title, body copy, cancel/confirm buttons
+- Deletable rule: member can be deleted only when they have zero active activities and belong to a single team
+
+*Web — sidebar integration:*
+- Member rows in sidebar: gear icon on hover → opens Member Edit Modal
+- Inactivated members: shown with reduced opacity and "Inactive" indicator; filterable
+
+**Exit criteria — safe to pause when:**
+- The Team Modal Members tab is fully functional: search/add users, send email invites, create participants, manage roles, revoke invites
+- A team admin can add a registered user, invite a new email, create a participant, change a member's role, and remove a member
+- The reusable invite link can be generated, copied, and used to register a new account
+- The Member Edit Modal opens from member list rows and shows correct stats and fields
+- A superadmin can promote a member to super admin, inactivate an account, and delete a deletable member — all with confirmation dialogs
+- Inactivated members cannot log in; reactivation restores access
+- A non-admin member sees member list in read-only form (no role changes, no add/remove)
+- Removing the last admin from a team returns a validation error
+- Password reset button is present but shows "SMTP not configured" state
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 10.1.3 — Settings — Profile, Tokens & Admin
+**Status:** 🔄 In Progress — 2026-05-26, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
+
+Builds out the `/settings` page shell (already scaffolded in 10.1.1) into a working settings experience. Every user gets a profile page, identity management, preferences, and API token management; superadmins get SMTP configuration, instance defaults, and an orphaned-users view. Also ships the forgot-password flow, which depends on SMTP.
+
+**Why now (before 10.1.4):** Users currently cannot change their own display name, password, or identity without API calls. Self-service profile editing and password management are table-stakes for any multi-user deployment. SMTP configuration unlocks email-based invite delivery and password reset — both of which become increasingly painful to lack as more users join. Shipping this before the data-lifecycle hardening in 10.1.4 means admins have full visibility into users and accounts before we tighten deletion semantics.
+
+**What exists today:**
+- Settings page shell with left-nav (`SettingsPage.tsx`) — links to Profile, Tokens, Teams, Admin; only Teams has content
+- `GET /auth/me` returns the current user's profile
+- No `PATCH /users/me` endpoint — display name and password cannot be changed from the UI
+- `reset_password.go` CLI subcommand exists (hashes + updates by email) but no HTTP endpoint
+- API token CRUD is fully implemented in the backend (`POST /tokens`, `GET /tokens`, `DELETE /tokens/:id`)
+- No SMTP infrastructure — invites work via manual token copy, no emails sent
+- `users` table has no color/icon fields; identity lives at the `team_members` level only
+- `user_preferences` table and `GET/PUT /users/me/preferences` endpoints exist (shipped in Phase 8.4) — used for per-timeline view settings but no UI for account-level preferences
+
+**Scope:**
+
+*Schema (migration 010):*
+- Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity, same value space as `team_members.color/icon`
+- Add `instance_settings` table (`key` TEXT PK, `value` TEXT, `updated_at`) — stores SMTP config and instance-level defaults
+- Add `password_reset_tokens` table (`id`, `user_id`, `token_hash`, `expires_at`, `used_at`, `created_at`)
+
+*API — profile management:*
+- `PATCH /users/me` — update `display_name`, `color`, `icon`; validates non-empty name, trims whitespace; when color or icon changes, propagates to all `team_members` rows for the user where the member's color/icon has not been explicitly overridden by a team admin (i.e. where `team_members.color/icon` currently matches the user's old value, or is NULL)
+- `PUT /users/me/password` — change password; requires `currentPassword` + `newPassword`; verifies current hash before updating; returns 401 `WRONG_PASSWORD` on mismatch
+- Email remains read-only for v1 (changing email would require verification flow)
+
+*API — forgot password:*
+- `POST /auth/forgot-password` — accepts `{ email }`; generates a time-limited reset token (1 hour), stores hash in `password_reset_tokens` table; sends reset link via SMTP if configured; always returns 200 (no email enumeration)
+- `POST /auth/reset-password` — accepts `{ token, newPassword }`; validates token not expired, hashes new password, updates user, invalidates token; returns 200 or 400 `TOKEN_INVALID`/`TOKEN_EXPIRED`
+
+*API — SMTP configuration (superadmin only):*
+- `GET /admin/smtp` — returns current SMTP config (password masked); superadmin only
+- `PUT /admin/smtp` — upsert SMTP config; validates by sending a test email to the calling user's address; returns success/failure with error details; superadmin only
+- `POST /admin/smtp/test` — sends a test email without saving config; superadmin only
+- `DELETE /admin/smtp` — clears SMTP config; superadmin only
+- Internal `mailer` package: wraps `net/smtp`; reads config from `instance_settings` at send time (no restart needed); exposes `Send(to, subject, htmlBody)` and `IsConfigured() bool`
+- When SMTP is not configured: `forgot-password` returns 200 but logs a warning; invite endpoints continue to return the token for manual copy
+
+*API — orphaned users (superadmin only):*
+- `GET /admin/users` — returns all users with their team membership counts and account status (active/archived); supports `?orphaned=true` filter (users with zero active team memberships); superadmin only
+- This reuses the existing user model; no new tables needed
+
+*API — instance settings (superadmin only):*
+- `GET /admin/settings` — returns all instance-level settings (registration policy, default timezone, default date format, default week start); superadmin only
+- `PATCH /admin/settings` — update one or more instance-level settings; superadmin only
+- Settings stored in `instance_settings` table alongside SMTP config
+- Instance defaults provide fallbacks for users who haven't set personal preferences
+
+*Web — Profile (`/settings/profile`):*
+- Display name field with save button; calls `PATCH /users/me`
+- **Identity picker:** color + icon selector (reuses the existing `IdentityWidget` component from 9.6); changing identity here propagates to all team memberships
+- Email shown read-only with explanatory note
+- Success/error feedback inline (no toast system needed — keep it simple)
+
+*Web — Security (`/settings/security`):*
+- Change password form: current password + new password + confirm; calls `PUT /users/me/password`
+- Validation: new + confirm must match; new ≥ 8 chars; save disabled until valid
+- Success/error feedback inline
+
+*Web — Preferences (`/settings/preferences`):*
+- **Defaults:** default team (dropdown of user's teams), default timeline (filtered by selected team) — stored via existing `PUT /users/me/preferences`
+- **Regional:** timezone (IANA selector), date format (`MMM D, YYYY` / `MM/DD/YYYY` / `DD/MM/YYYY` / `YYYY-MM-DD`), week starts on (Monday / Sunday)
+- **Appearance:** theme toggle (Light / Dark / System) — already partially wired via localStorage; this phase persists it server-side
+- All preferences use the existing `user_preferences` API; this phase adds the UI and stores the values but does **not** require the Gantt or other views to consume them yet (that lands in 10.4.1)
+
+*Web — API Tokens (`/settings/tokens`):*
+- Table: name, scope badge, last used (relative time), created date, revoke button
+- Create dialog: name input + scope picker (read-only / add / edit-own / edit-all) with brief descriptions of each scope
+- On creation: one-time secret reveal with copy-to-clipboard; warning that it won't be shown again
+- Revoke: confirmation dialog, then `DELETE /tokens/:id`
+
+*Web — Admin (`/settings/admin`, superadmin only):*
+- **Instance defaults section:** default timezone, default date format, default week start — these serve as fallbacks for users who haven't set personal preferences; calls `PATCH /admin/settings`
+- **Registration policy:** toggle between invite-only and open registration (stored in `instance_settings`)
+- **SMTP section:** form with host, port, username, password, from address, from name, encryption dropdown (none/TLS/STARTTLS); "Test connection" button sends test email; "Save" validates then stores; info note: "When SMTP is not configured, password resets and email invitations are unavailable"
+- **Users section:** table of all users (name, email, team count, status badge); orphaned alert banner with count + filter toggle; search by name/email; click row opens existing MemberModal; "Assign team" action on orphaned users
+
+*Web — Forgot password flow:*
+- `/forgot-password` public page: email input → calls `POST /auth/forgot-password` → shows "check your email" message (regardless of whether email exists)
+- `/reset-password?token=...` public page: new password + confirm → calls `POST /auth/reset-password` → success redirects to login
+- Login page: "Forgot password?" link
+- When SMTP is not configured: forgot-password page shows "Password reset is not available — contact your administrator"
+
+**Error-reduction notes:** Recent phases (10.1.1, 10.1.2) had significant bug fix rounds. To reduce errors in this phase:
+- Each API endpoint gets at least one happy-path and one error-path test before moving to the next endpoint
+- Frontend forms are tested against the real API (via dev proxy to Docker) before marking the section complete, not just type-checked
+- SMTP send is tested with a real mail server (or a local test tool like MailHog) before marking SMTP complete
+- The forgot-password flow is tested end-to-end (request → email received → click link → new password works) before exit
+
+**Exit criteria — safe to pause when:**
+- A user can change their display name and identity (color/icon) from `/settings/profile`; identity change propagates to all team memberships; visible in sidebar and member lists
+- A user can change their password from `/settings/security`; the old password stops working and the new one works
+- A user can set preferences (default team/timeline, timezone, date format, week start, theme) from `/settings/preferences`; values persist across logout (views don't need to consume them yet)
+- Forgot-password: requesting a reset sends an email (when SMTP configured); clicking the link allows setting a new password; the token expires after 1 hour and after use
+- Forgot-password without SMTP: the page shows a clear "contact admin" message instead of a broken form
+- A user can create an API token, see the secret once, copy it, and use it to authenticate an API call; can revoke it and it stops working
+- A superadmin can configure SMTP from the admin page; test email arrives; saving persists without restart
+- A superadmin can set instance defaults (timezone, date format, week start); these are stored and retrievable
+- A superadmin can view all users and filter to orphaned users; clicking a user opens their detail; "Assign team" works on orphaned users
+- A superadmin can toggle registration policy; the setting takes effect immediately
+- A non-superadmin does not see the Admin section
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 10.1.4 — Member Access & Data Lifecycle
+**Status:** 🔄 In Progress — 2026-05-27, all automated checks pass; manual Docker verification still needed | **Effort:** S–M (1–2 days)
+
+Closes the data-integrity and access-revocation gaps left open by 10.1.2. Defines explicit semantics for every lifecycle state a member can be in and ensures that activity data is never silently orphaned or destroyed.
+
+**The problem 10.1.2 leaves open:**
+- `DELETE /teams/:id/members/:memberId` attempts to hard-delete the `team_members` row. If the member has `activity_assignments`, SQLite FK behavior (RESTRICT, CASCADE, or no-op depending on pragma state) is undefined and may leave orphaned assignment rows or silently destroy assignment history.
+- There is no UI affordance to distinguish *"this member can be fully removed"* from *"this member has history — inactivate instead."*
+- The three access states (active → inactivated membership → deactivated account) are implemented but not clearly surfaced or documented in the UI.
+- There is no single "revoke all access" operation for superadmins — today they would need to inactivate the user account and individually inactivate each team membership in separate steps across potentially many modals.
+
+**Lifecycle states defined:**
+
+| State | `users.archived_at` | `team_members.archived_at` | Can log in? | Data preserved? |
+|-------|---------------------|-----------------------------|-------------|-----------------|
+| Active member | NULL | NULL | ✅ | ✅ |
+| Inactivated membership | NULL | set | ✅ (other teams) | ✅ |
+| Deactivated account | set | any | ❌ | ✅ |
+| Removed from team | — | row deleted | ✅ (other teams) | ✅ only if zero assignments |
+
+Hard-delete of a `team_members` row is only ever permitted when the member has zero `activity_assignments`. All other cases must use inactivation (soft delete). This invariant protects historical activity data unconditionally.
+
+**Scope:**
+
+*Schema (migration 011):*
+- Verify `activity_assignments.team_member_id` FK is declared with `ON DELETE RESTRICT`; add an explicit constraint migration if not
+- Same for `timeline_access.team_member_id`
+- Enable `PRAGMA foreign_keys = ON` in the DB initialization path (currently SQLite defaults to off) to enforce the constraint at runtime
+
+*API — removal guard:*
+- `DELETE /teams/:id/members/:memberId` — before deleting, count `activity_assignments` for the member; if count > 0, respond 409 `MEMBER_HAS_ASSIGNMENTS` with `{ assignmentCount: N }` in the error body; direct the caller to use archive/inactivate instead
+- Hard-delete proceeds only when assignment count is 0 — no behavior change for clean removals
+
+*API — full revoke (superadmin only):*
+- `POST /users/:id/revoke` — new endpoint; atomically: (1) sets `users.archived_at` (blocks login everywhere), (2) sets `archived_at` on every `team_members` row for the user (inactivates all memberships), (3) hard-deletes any `team_members` rows where assignment count is 0 (cleans up zero-history memberships); returns `{ accountDeactivated: true, membershipsInactivated: N, membershipsRemoved: N }`
+- Superadmin only; 403 if caller is not superadmin; 400 `CANNOT_SELF_REVOKE` if caller targets their own account
+- Note: the original spec listed a 409 for participant targets. This is unreachable — participants have no `users` row so `/users/:id/revoke` returns 404 naturally; no separate guard is needed.
+
+*Web — TeamModal Members tab:*
+- Remove (×) button: on 409 `MEMBER_HAS_ASSIGNMENTS`, show an inline error beneath the member row: *"N assignment(s) found — [Inactivate instead]"* where the bracketed text is a direct action button that calls the archive endpoint
+- On success, replace the error with confirmation and re-fetch the member list
+
+*Web — MemberModal:*
+- Add **"Revoke all access"** button to the Super Admin Actions section (red, below Inactivate); opens a confirmation dialog that lists the three effects (account deactivated, all memberships inactivated, zero-history memberships removed), shows the return summary once complete
+- After confirmation, calls `POST /users/:id/revoke`, then closes the modal and invalidates relevant query cache
+- Button is hidden if the user is already fully inactivated (`users.archived_at` set AND all `team_members.archived_at` set)
+
+*Web — activity display:*
+- Inactivated members: already shown at 50% opacity in sidebar and member list; no change needed
+- Gantt bars and detail panels: assignee badge continues to render using the preserved `team_members` row data (name + color/icon); no display change — historical data reads accurately
+- Removed members (zero-assignment clean removals): those `activity_assignments` rows don't exist, so no badge to render; this is already correct behavior
+
+**Exit criteria — safe to pause when:**
+- Attempting to remove a member with existing assignments returns 409 with assignment count; the TeamModal shows *"N assignment(s) — Inactivate instead"* with a one-click inactivate action
+- Removing a member with zero assignments succeeds as before
+- `POST /users/:id/revoke` atomically deactivates account + inactivates all memberships + cleans zero-assignment memberships; returns the summary breakdown
+- MemberModal "Revoke all access" confirmation dialog shows the three effects and calls the endpoint on confirm
+- `PRAGMA foreign_keys = ON` is in effect at startup; attempting a raw FK violation in a test is rejected
+- Inactivated members' avatars still render correctly on existing Gantt bars (data preserved, no orphaned rows)
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 10.2 — Status Templates & Timeline Statuses
+**Status:** ✅ Done — 2026-05-27 | **Effort:** M (2–3 days)
+
+Statuses represent phases for an activity (e.g., Planned → In Progress → Done). They are **timeline-scoped** — each timeline has its own set. To reduce setup friction, teams maintain **status templates** (reusable presets). When a timeline is created, a template's items are copied into timeline-specific status rows; from that point the timeline's statuses are independent of the template. Activities default to null status (no auto-assignment). Required before Phase 11.3 (Kanban) so admins can configure columns.
+
+**Data model:**
+
+*`status_templates` (team-level reusable presets):*
+- `id`, `team_id` (FK teams), `name`, `description`, `position`, `created_by` (FK users), `created_at`, `updated_at`
+
+*`status_template_items` (statuses within a template):*
+- `id`, `template_id` (FK status_templates CASCADE), `name`, `color`, `icon`, `is_closed` (boolean — closure flag for filtering), `position`
+
+*`statuses` (live statuses on a timeline, copied from template):*
+- `id`, `timeline_id` (FK timelines CASCADE), `name`, `color`, `icon`, `is_closed`, `position`, `created_at`, `updated_at`
+
+*Migration:* `activities.status_id` FK moves from `team_statuses` → `statuses`; drop `team_statuses`.
+
+**Scope:**
+
+*API — templates (team-level):*
+- Seed one default template ("Simple": Planned / In Progress / Done; Done is `is_closed`) on team creation
+- `GET /teams/:id/status-templates` — list templates with items
+- `POST /teams/:id/status-templates` — create template
+- `PATCH /status-templates/:id` — rename, reorder
+- `DELETE /status-templates/:id` — blocked if last template on team
+- `POST /status-templates/:id/items` — add item
+- `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder
+- `DELETE /status-template-items/:id` — blocked if last item in template
+
+*API — timeline statuses:*
+- On timeline creation, copy items from chosen template (or team's first template) into `statuses`
+- `GET /timelines/:id/statuses` — list statuses for a timeline
+
+*Web — Team Modal → "Status Templates" tab:*
+- List templates with expand/collapse to show items
+- Create template, rename, delete (with guard)
+- Within a template: add/remove/reorder items, inline edit name + identity (color/icon) + is_closed toggle
+- Drag-to-reorder items
+
+**Exit criteria — safe to pause when:**
+- New team gets one "Simple" template with 3 statuses (last marked closed)
+- Templates can be created, edited, reordered, deleted from team modal
+- Creating a timeline copies the selected template's statuses into `statuses` table
+- `GET /timelines/:id/statuses` returns the copied statuses
+- `is_closed` flag stored and returned in API responses
+
+---
+
+### Phase 10.3 — Timelines — Full CRUD (API + UI)
+**Status:** 🔄 In Progress — 2026-05-27, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
+
+Closes the Timelines cornerstone. Same problem space as 10.1: today timelines can be created in the wizard and never managed afterward, and access lists exist in the schema (Phase 8.0) with no CRUD endpoints. Also wires the status system from 10.2 into the timeline and activity UIs.
+
+**Scope:**
+
+*API — timeline-level:*
+- `PATCH /timelines/:id` — rename, change start/end date, change description (admin only)
+- `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (depends on Phase 9)
+- `DELETE /timelines/:id` — hard delete; admin only; confirms via second action
+
+*API — timeline statuses (editing):*
+- `POST /timelines/:id/statuses` — add a status
+- `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder
+- `DELETE /statuses/:id` — requires `replacementStatusId` if activities reference it; blocked if last status
+
+*API — access-list:*
+- `GET /timelines/:id/access` — list current grants (team member + role)
+- `PUT /timelines/:id/access/:memberId` — grant or update role (admin / member)
+- `DELETE /timelines/:id/access/:memberId` — revoke grant
+
+*Web — timeline CRUD:*
+- "New timeline" affordance in the sidebar → create-timeline modal (name, date range, **template picker** with status preview)
+- Edit-timeline modal reachable from each timeline in the sidebar: rename, change date range, archive, delete
+- Access-list management UI: search-pick team members, role toggle, remove
+- Sidebar shows archived timelines under a collapsed "Archived" group; unarchive from there
+
+*Web — status uplifts (wiring 10.2 into the UI):*
+- **Timeline status management:** within edit-timeline modal, a "Statuses" tab where admins can add, rename, reorder, delete statuses; delete-with-replacement dialog shows affected activity count; identity (color/icon) and is_closed toggle inline
+- **Activity detail status picker:** `ActivityDetailPanel` gets a status dropdown populated from `GET /timelines/:id/statuses`; shows identity (color dot + icon) next to each option; null = "No status"
+- **"Hide closed" filter toggle:** in the Gantt toolbar filter area, hides activities whose status has `is_closed = true`
+
+*Deferred:*
+- "Re-apply template" (replace timeline statuses from a template with merge semantics) — future effort
+- Gantt bar status indicator (small color dot/icon on bars) — polish pass
+
+**Exit criteria — safe to pause when:**
+- A user can create a second timeline without going through the first-run wizard
+- Timeline creation modal shows template picker; selected template's statuses are previewed and copied
+- A timeline admin can rename a timeline and change its date range; activities outside the new range are not deleted, just hidden from default views
+- Timeline status management: add, rename, reorder, delete (with replacement) all work from the UI
+- Activity detail panel shows status dropdown; selected status persists across reload
+- "Hide closed" toggle hides activities with a closed status; removing the filter restores them
+- Archiving a timeline removes it from the active sidebar; unarchive restores it
+- The access-list UI lets an admin grant / revoke access for any team member; a non-admin attempting these actions is rejected
+- A team member without an access grant cannot open the timeline (existing 8.0 enforcement) — verified end-to-end through the new UI
+
+---
+
+### Phase 10.4.1 — Preference Consumption & Session Handling
+**Status:** 🔄 In Progress — 2026-05-28, all automated checks pass; manual Docker verification still needed | **Effort:** S–M (1–2 days)
+
+Wires the user and instance preferences stored in 10.1.3 into the rest of the system, fixes the broken session lifecycle, and adds cosmetic branding for admins.
+
+**Why now:** User preferences for date format, week start, and theme are stored (Phase 10.1.3) but not consumed by any view. The Gantt hardcodes Monday week-start and `en-US` date formatting. Additionally, access tokens expire after 15 minutes with no refresh interceptor — after 15 minutes of use, every API call silently fails.
+
+**Scope:**
+
+*Session lifecycle (token refresh):*
+- Add a 401 interceptor to `apiFetch` in `packages/web/src/lib/api.ts`: on 401, attempt silent refresh using stored refresh token, retry the original request with the new access token; if refresh also fails (expired/revoked), clear tokens and redirect to `/login`
+- Use a mutex/queue so concurrent 401s don't fire multiple refresh calls
+- Completely invisible to the user — no toast, no banner (standard SPA pattern)
+- Best practice: short-lived access token (15 min — already correct) + silent refresh on 401 + hard redirect when refresh fails
+
+*Preference consumption (system-wide):*
+- **Date format:** Create a `useFormatDate()` hook that reads user's `date_format` preference and returns a formatter; wire into `granularity.ts` `formatLabel()` (currently hardcoded to `en-US`), `ActivityDetailPanel` date displays, and any other date-displaying surface
+- **Week start:** Pass user's `week_start` preference into `granularity.ts` `startOfWeek()` (currently hardcodes Monday); Gantt column alignment shifts to match the user's chosen start day
+- **Timezone:** Stored and displayed; actual date math conversion deferred (complex, low urgency for self-hosted single-timezone teams)
+- **Theme sync:** On login, read server-side theme preference and apply it; `useDarkMode.ts` currently ignores the server value and only reads localStorage
+- **Instance defaults fallback:** For public/shared timeline views (no logged-in user), read instance-level defaults from `GET /admin/settings`
+
+*Admin — branding (`/settings/admin`, superadmin only — extends 10.1.3):*
+- Instance name field (stored in `instance_settings`); shown in browser tab title and login page
+- Accent color override (stored in `instance_settings`); applies globally via CSS custom property
+- Optional logo upload (stretch)
+
+**Exit criteria — safe to pause when:**
+- After 15+ minutes of use, API calls silently refresh the access token; if the refresh token is also expired, the user is redirected to `/login` cleanly
+- Gantt view renders dates using the user's chosen date format; public views use instance defaults
+- Week-start preference shifts the Gantt grid column alignment (e.g., Sunday start when configured)
+- Theme persists across devices — logging in on a new browser picks up the server-side theme
+- A superadmin can set a custom instance name; it appears in the browser tab title and on the login page
+- A superadmin can set an accent color override; the change applies globally
+- Settings persist across container restarts
+
+---
+
+### Phase 10.4.2 — Activity Schema Normalization — Drop team_id
+**Status:** ✅ Done — 2026-05-28 | **Effort:** S (½–1 day)
+
+Removes `activities.team_id` now that `timeline_id` is stored and the relationship `activity → timeline → team` is sufficient. `team_id` is a transitive dependency (`activity_id → timeline_id → team_id`) — a violation of 3NF that creates two sources of truth for the same fact. If timelines are ever moved between teams, every activity row would also need updating or the data silently lies.
+
+**Why now:** Phase 10.4.1 added `timeline_id`. The redundant column is cheapest to remove before more code accumulates that reads `activity.TeamID` directly. The auth checks and WebSocket routing that currently use `activity.TeamID` are straightforward to reroute through the timeline.
+
+**Prerequisite:** `activities.timeline_id` is currently nullable (migration 014 used `ON DELETE SET NULL` for backward compatibility). This phase hardens it to `NOT NULL`.
+
+**Scope:**
+
+*Schema (migration 015 — table rebuild):*
+- Backfill: `UPDATE activities SET timeline_id = (SELECT id FROM timelines WHERE team_id = activities.team_id ORDER BY created_at LIMIT 1) WHERE timeline_id IS NULL` — assigns any orphaned activities to the team's oldest timeline; log a warning if any activities remain NULL after backfill (manual remediation required)
+- Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE`; use the SQLite table-rebuild pattern (CREATE new → INSERT → DROP old → RENAME) to enforce the NOT NULL constraint cleanly and add the cascade
+- Recreate `idx_activities_timeline_id` on the new table
+
+*API — Go:*
+- `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string`
+- `ActivityRepo.Create`: remove `team_id` from INSERT
+- `ActivityRepo.ListByTeam`: rename to `ListByTimeline(timelineID string, ...)` — query becomes `WHERE timeline_id = ?` directly; remove the `timelineID *string` optional filter added in 10.4.1 since it is now the only filter
+- `handleUpdateActivity`, `handleDeleteActivity`, `handleArchiveActivity`/`handleUnarchiveActivity`: replace `activity.TeamID` usage with a timeline lookup — call `s.timelines.GetByID(activity.TimelineID)` to retrieve `timeline.TeamID` for the membership check
+- WebSocket broadcasts: derive `TeamID` from the same timeline lookup before `s.bus.Publish`
+- Move activity routes to timeline scope: `POST /teams/{id}/activities` → `POST /timelines/{id}/activities`; `GET /teams/{id}/activities` → `GET /timelines/{id}/activities` (no `?timelineId=` param — it is now the path param); remove the old team-scoped routes
+- `handleCreateActivity`: path param is now `timelineId`; look up the timeline to get `teamID` for the membership check; `timelineId` is no longer in the request body
+- `handleListActivities`: path param is now `timelineId`; no query param needed
+- Add `/timelines` prefix to the Go mux and Vite proxy (activities already sit under `/timelines/*` for status routes — this is consistent)
+
+*Frontend:*
+- `Activity` generated type: `teamId` field removed; `timelineId` becomes `string` (non-optional)
+- Rename `useTeamActivities(teamId, from, to, timelineId)` → `useTimelineActivities(timelineId, from, to)` — URL becomes `/timelines/{id}/activities`
+- Rename `useCreateActivity(teamId)` → `useCreateActivity(timelineId)` — URL becomes `/timelines/{id}/activities`; remove `timelineId` from request body since it is in the URL
+- Update cache keys: `keys.teamActivities` → `keys.timelineActivities(timelineId, from, to)`; WS cache updates match on `['timelines', timelineId, 'activities']`
+- `GanttView`: prop changes from `teamId + timelineId` to just `timelineId` for the activities query (still receives `teamId` for the members query)
+- `ActivityCreatePanel`: `teamId` prop removed (only `timelineId` needed); `useCreateActivity` called with `timelineId`
+- `DashboardPage`: pass `activeTimelineId` to `ActivityCreatePanel` (already done); update `GanttView` activities hook call; keep `teamId` only for the members query
+- Update OpenAPI spec: move activity endpoints under `/timelines/{timelineId}/activities`; regenerate TS types
+
+*Tests:*
+- Update `TestCreateActivity_*`, `TestListActivities_*`, `TestUpdateActivity_*` handler tests: seed a timeline, use `/timelines/{timelineId}/activities` path, remove `teamId` from activity body
+- Update `TestActivityRepo_*` db tests: `makeActivity` helper no longer sets `TeamID`; all `ListByTeam` calls become `ListByTimeline`
+- Add `TestActivityRepo_ListByTimeline_Filter` to verify timeline scoping works correctly
+
+**Exit criteria — safe to pause when:**
+- `activities` table has no `team_id` column; `timeline_id` is `NOT NULL`
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+- Gantt view still loads activities for the active timeline
+- Creating an activity from the panel associates it with the correct timeline; creating on a different timeline does not bleed into the wrong Gantt view
+- `PRAGMA foreign_key_check` returns no rows after migration runs against a copy of the test DB
+- No remaining references to `activity.TeamID` / `activity["teamId"]` in Go or TS source (grep confirms)
+
+---
+
+### Phase 10.4.3 — UI Consistency — Modals, Sidebar & Toolbar
+**Status:** ✅ Done — 2026-05-28 | **Effort:** M (1–2 days)
+
+Standardizes visual patterns across the three main modals (Team, Member, Timeline), the sidebar, and the Gantt toolbar. Today these surfaces use three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and a mix of hardcoded hex colors vs CSS variables.
+
+**Why now:** Every new modal or surface built from here forward will inherit whatever pattern exists. Standardizing now prevents compounding inconsistency as the UI grows through Phase 11 (views) and beyond.
+
+**Scope:**
+
+*Inline name editing (3 patterns → 1):*
+- Current: `MemberModal` uses always-input with focus underline; `TeamModal` toggles between div and input via a state machine; `TimelineModal` uses always-input with no visual cue
+- Standardize to: always-input with subtle bottom border on hover/focus (refined MemberModal pattern); extract to a shared `InlineEditableTitle` component used by all three modals
+
+*Archive/restore buttons (3 styles → 1):*
+- Current: `MemberModal` uses amber background + border + icon (most prominent); `TeamModal` uses neutral gray that looks disabled; `TimelineModal` uses amber border-only with no icon
+- Standardize to: consistent amber styling with Archive icon for archive, teal for restore; extract shared button style constants or a small `ArchiveButton` / `RestoreButton` component
+
+*Confirmation dialogs (3 implementations → 1):*
+- Current: `MemberModal` uses a custom `ConfirmDialog`; `TeamModal` uses `ArchiveDialog`; `TimelineModal` uses inline confirmation panels
+- Standardize to: single `ConfirmDialog` component with color variants (red = destructive, amber = archive, indigo = promote, teal = restore)
+
+*Color system (mixed → CSS variables):*
+- Current: `TeamModal` and `MemberModal` hardcode hex colors (`#21262d`, `#30363d`, etc.); `TimelineModal` uses CSS variables (`var(--card)`, `var(--border)`)
+- Standardize to: CSS variables everywhere; migrate all hardcoded hex values in modal components
+
+*Sidebar & toolbar audit:*
+- Sidebar member/timeline rows: verify Badge usage, hover states, and gear icon consistency across all row types
+- Gantt toolbar controls: verify button styling consistency with the new modal patterns
+- Fix any inconsistencies found
+
+**Exit criteria — safe to pause when:**
+- All three modals use the same `InlineEditableTitle` component for name editing — identical visual behavior
+- Archive and restore buttons look identical across all three modals (amber archive, teal restore, both with icons)
+- All confirmation dialogs use the same `ConfirmDialog` component with appropriate color variants
+- No hardcoded hex colors remain in modal components; all use CSS variables or design-token references
+- Sidebar member rows and timeline rows have consistent hover states and gear icon placement
+- Gantt toolbar buttons are visually consistent with modal footer button patterns
+
+---
+
+### Phase 10.4.4 — Gantt Interaction & Activity Edit Polish
+**Status:** 🔄 In Progress — 2026-05-29, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
+
+Refines the Gantt chart's direct-manipulation UX and overhauls the Activity Edit sidebar to match the Activity Create sidebar's layout, adds missing fields, and removes unnecessary UI elements.
+
+**Why now:** The Gantt bar interactions have rough edges (accidental drags, coarse snap, no live feedback to sidebar) and the edit sidebar diverges from the create sidebar in layout and style. Polishing these before Phase 11 (new views) ensures the core interaction patterns are solid before they're replicated.
+
+**Scope:**
+
+*Gantt — resizable activity column:*
+- The label column (`LABEL_COL_W = 240`) becomes user-resizable via a drag handle on its right edge
+- Min: 140px, Max: 400px; header and all rows use the same live width
+- Optionally persist width as a per-timeline user preference
+
+*Gantt — click-to-activate before drag:*
+- First click on a bar **selects** it (existing behavior); only a **selected** bar shows grab/ew-resize cursors and allows drag/resize
+- Unselected bars show `cursor: pointer` — prevents accidental date changes when users just want to inspect an activity
+
+*Gantt — bar drag updates sidebar dates live:*
+- When dragging or resizing a bar, the `ActivityDetailPanel` start/end date inputs update in real-time to reflect the current snapped dates
+- On mouseup, the PATCH fires as today and the panel re-syncs from the API response
+
+*Gantt — finer-grained snap during drag:*
+- Snap one level finer than the active granularity (except day, which stays day):
+  - Day → day (no finer unit)
+  - Week → snap to day
+  - Month → snap to week
+  - Quarter → snap to month
+  - Year → snap to quarter
+- The drag tooltip already shows exact dates; this is primarily a math change in the mousemove handler
+
+*Gantt — "Hide closed" moves to filter preset:*
+- Remove the `hideClosed` checkbox from `GanttToolbar`
+- Add an `'open'` preset to the `FilterDropdown` presets list — "Open only" with description "Hide activities with a closed status"
+- Wire the `'open'` filter into `GanttView`'s `visibleActivities` memo where `hideClosed` currently lives
+
+*Activity Edit Sidebar — layout and field changes:*
+- **Remove** "All day" checkbox — all activities are implicitly all-day; remove state and toggle
+- **Simplify dates** — remove the human-readable date summary line; keep only the two date picker inputs
+- **Move description** — from bottom ("Notes" section) to directly below the date pickers, matching create panel order
+- **Assigned to** — restyle to match the create panel's bordered-card style (colored border + tint when selected) instead of opacity-based toggle buttons
+- **Status dropdown** — replace plain `<select>` with a custom dropdown showing each status's color dot, icon, and name, ordered by position
+- **Remove "Identity" line** — from Classify section (the identity widget in the header is self-evident)
+- **Rename "Details" → "Advanced"**
+- **Add Notes field** — multi-line `<textarea>` at the bottom (above footer/delete); requires adding `notes TEXT` column to activities table (migration 016), OpenAPI schema update, and TS type regeneration
+
+*Schema (migration 016):*
+- Add `notes TEXT` column to `activities` (nullable)
+
+*Final edit panel field order (top to bottom):*
+1. Header — Identity widget + Title
+2. When — Date pickers (start → end)
+3. Description — single-line input
+4. Assigned to — bordered card style
+5. Classify — Status (rich dropdown), Tags (stub)
+6. Advanced — Parent (stub), Progress (stub), Location, URL
+7. Notes — multi-line textarea
+8. Footer — Delete button
+
+**Exit criteria — safe to pause when:**
+- Activity column is resizable by dragging the right edge; width persists during session
+- Bar requires a selection click before drag/resize cursors appear; unselected bars show pointer cursor
+- Dragging a bar updates the sidebar date pickers in real-time
+- Drag snaps at one level finer than the zoom granularity (week→day, month→week, etc.)
+- "Hide closed" checkbox removed from toolbar; "Open only" preset appears in filter dropdown and hides closed-status activities
+- All-day checkbox removed from edit sidebar; date section shows only the pickers
+- Edit sidebar field order matches the spec (description under dates, notes at bottom)
+- Assigned-to section styled like the create panel (bordered cards with color tint)
+- Status dropdown shows color dot + icon + name per option
+- "Identity" line removed from Classify; "Details" section renamed to "Advanced"
+- Notes field (multi-line) added at bottom; backed by new `notes` column on activities
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 10.4.5 — Activity Tags, Parent & Progress Fields
+**Status:** ✅ Done — 2026-05-30 | **Effort:** M (2–3 days)
+
+Replaces the three "coming soon" stubs in the activity edit panel with fully functional fields: **tags** (team-scoped, normalized), **parent activity** (searchable picker), and **progress** (editable slider). Tags require a new schema and full API; parent and progress already have backend support but need frontend controls.
+
+**Why now:** These fields are prerequisites for Phase 10.4.6 (Filters) — the filter builder needs tags to exist as a filterable dimension, and progress/parent filters need editable values to be meaningful. Shipping stubs into the filter UI would create dead controls.
+
+**Design decisions:**
+- **Tags are normalized.** A team-scoped `tags` table (id, team_id, name, color) + a junction table (`activity_tags` referencing tag IDs) replaces the original simple (activity_id, tag_text) design. This enables colored tag pills, rename-all-at-once, autocomplete from existing tags, and name-based filter matching across timelines.
+- **The original `activity_tags` table** (migration 001, renamed in 005) has **never been wired to any Go code or API** — no repo methods, no handlers, not in OpenAPI. It is safe to DROP and recreate with the new schema. No data migration needed.
+
+**Detailed plan:** [docs/plans/phase-10.4.5.md](plans/phase-10.4.5.md)
+
+**Scope summary:**
+
+*Schema (migration 017):*
+- New `tags` table: `id TEXT PK`, `team_id TEXT FK`, `name TEXT NOT NULL`, `color TEXT`, `created_by TEXT FK`, `created_at DATETIME`; unique on `(team_id, name)`
+- Rebuild `activity_tags`: drop old (activity_id, tag text) table, create new (activity_id FK, tag_id FK) with cascade deletes
+
+*API — tag CRUD:*
+- `GET /teams/{id}/tags` — list team tags (any member)
+- `POST /teams/{id}/tags` — create tag (any member; sets `created_by` from JWT)
+- `PATCH /tags/{id}` — update name/color (any member)
+- `DELETE /tags/{id}` — delete tag (any member; cascades from activity_tags)
+
+*API — activity tag wiring:*
+- `Activity` model gains `TagIDs []string` field (same `db:"-"` pattern as `AssignedMemberIDs`)
+- `ActivityRepo` gains `SetTags` / `GetTags` methods (same transaction pattern as `SetAssignments` / `GetAssignments`)
+- `ListByTimeline` batch-populates `TagIDs` on returned activities (same JOIN pattern as `AssignedMemberIDs`)
+- Activity create/update handlers accept `tagIds`; activity list responses include `tagIds`
+
+*Web — tags:*
+- `useTags.ts` hook — CRUD following `useSavedFilters.ts` pattern
+- `TagInput.tsx` component — combobox with colored pills, autocomplete from team tags, "Create tag" option for on-the-fly creation
+- Replaces stub in `ActivityDetailPanel` and added to `ActivityCreatePanel`
+
+*Web — parent picker:*
+- Backend already handles `parentActivityId` in create/update — no API changes needed
+- Replace stub in `ActivityDetailPanel` with searchable combobox of activities in same timeline
+- Exclude self and descendants to prevent cycles
+- Save on select; null to clear
+
+*Web — progress:*
+- Backend already handles `percentComplete` in create/update — no API changes needed
+- Replace read-only progress bar stub with range slider (0–100)
+- Save on mouse-up
+- Optional: Gantt bar partial-fill indicator (darker overlay at `percentComplete%` width)
+
+*Web — Gantt tree expand/collapse (ratified in-scope):*
+- Activities with `parentActivityId` render indented under their parent in the Gantt grid
+- Chevron toggle per row collapses/expands that parent's children
+- Group-level rows (assignee / status grouping) have their own collapse toggle
+- `collapsedParents` and `collapsedGroups` state in `GanttView`; `buildRows` rewritten for arbitrary-depth nesting
+- `GanttView.tree.test.ts` covers the `buildRows` tree and collapse logic
+
+*Sample data:*
+- `sample_data/10_tags.sql` — 5–8 tags per team + activity_tags associations
+
+**Exit criteria — safe to pause when:**
+- Tag CRUD API works end-to-end; activities carry `tagIds` in create/update/list responses
+- Tag combobox in detail + create panels; create-on-the-fly produces a new team tag and associates it
+- Parent picker: searchable dropdown within same timeline, replaces stub; cycles prevented
+- Progress slider: editable 0–100 range, saves on change, replaces stub
+- Sample data includes tags and activity-tag associations
+- Gantt tree expand/collapse renders parent-child hierarchy with per-row chevron toggles
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 10.4.6 — Filter Implementation
+**Status:** 🔄 In Progress — 2026-05-30, all automated checks pass; manual Docker verification still needed | **Effort:** M–L (3–4 days)
+
+Makes the filter system fully operational. Today only the "Open only" preset actually filters activities — the other five presets, member filters, and saved filters exist as UI selections but are never evaluated. This phase ships: a filter definition language, a client-side filter engine, a visual filter builder, team-scoped filter promotion, and the "Manage filters" admin experience.
+
+**Depends on:** 10.4.5 (tags must exist for tag-based filtering)
+
+**Design decisions:**
+- **Filters are team-scoped, not timeline-scoped.** Status filter conditions match by **name** (case-insensitive), not by status ID. A filter for "In Progress" works across all timelines that have a status with that name. If a timeline lacks a matching status, the condition simply finds no matches — nothing breaks. Tags and assignees are already team-scoped. This makes filters intuitive and portable.
+- **Filter admin lives inline in the filter dropdown**, not in a separate Team Modal tab. A "Manage filters" link opens a management panel in the existing right sidebar. This keeps the workflow close to where users interact with filters.
+- **Client-side evaluation for v1.** Activities are already fully fetched per-timeline. The filter engine is a pure function that can later move server-side when data volumes warrant it.
+
+**Detailed plan:** [docs/plans/phase-10.4.6.md](plans/phase-10.4.6.md)
+
+**Scope summary:**
+
+*Filter definition schema (stored as JSON in `saved_filters.definition`):*
+- A filter is `{ logic: 'and' | 'or', conditions: FilterCondition[] }`
+- Each condition is `{ field, op, value }` with field-specific operator and value types
+- Supported fields: `status` (name match), `tag` (name match), `assignee` (member ID), `title` (string), `progress` (number), `hasParent` (boolean), `startDate` / `endDate` (date)
+- Operators vary by type: equals, not_equals, contains, in, not_in, gt, lt, is_empty, is_not_empty, before, after, between, is_true, is_false
+
+*Schema (migration 018):*
+- `ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0`
+
+*API — team filter support:*
+- `SavedFilter` model gains `IsTeamFilter bool`
+- `ListByTeamUser` returns user's own filters + all team filters (`WHERE team_id = ? AND (user_id = ? OR is_team_filter = 1)`)
+- `PATCH /saved_filters/{id}` accepts `isTeamFilter` (admin-only to set `true`)
+- Admins can delete team filters they don't own
+
+*Web — filter engine (`lib/filterEngine.ts`):*
+- Pure function: `matchesFilter(activity, filterDef, context) → boolean`
+- Resolves status name from `statusId` using timeline's status list (case-insensitive comparison)
+- Resolves tag names from `tagIds` using team's tag list
+- Evaluates conditions, combines with AND/OR
+
+*Web — unified filter application:*
+- `applyActiveFilter(activities, activeFilter, context)` — single function handling all filter kinds
+- Replaces the current GanttView open-only filtering (lines 358–363) with full evaluation
+- Makes all 6 presets actually work: all, open (uses isClosed flag), upcoming (7-day window), my (assigned to current user), overdue (past end + not closed), noassign (empty assignees)
+- Member filter kind: filters by selected member's assignments
+- Saved filter kind: parses definition JSON, evaluates via filter engine
+
+*Web — filter builder (`components/filters/FilterEditor.tsx`):*
+- Replaces "coming soon" in the RightSidebar
+- Filter name input, AND/OR toggle, condition rows with + / − buttons, Save / Delete footer
+- `FilterConditionRow.tsx`: field dropdown → operator dropdown → contextual value input (status: multi-select from deduped names across timelines; tag: multi-select from team tags; assignee: multi-select from members; dates: date picker; etc.)
+
+*Web — team filters & management:*
+- `FilterDropdown.tsx`: "Team filters" section shows filters where `isTeamFilter === true`; replaces current stub
+- "Manage filters" link at bottom of dropdown opens `FilterManagePanel.tsx` in the right sidebar
+- Management panel: lists user's filters + team filters; edit/delete buttons; admins see "Promote to team" on user filters
+
+*API — admin list-all:*
+- `GET /teams/{id}/saved_filters/all` — admin-only endpoint that returns all filters for a team (both private and team-scoped). Enables the admin "Members" tab in the management modal.
+
+*Web — additional filter fields:*
+- `FilterConditionRow.tsx` includes `progress` and `hasParent` fields (not in the original spec but prerequisite for a complete filter builder given that these fields were shipped in 10.4.5). `filterEngine.ts` already evaluates both.
+
+*Web — UX polish included in scope:*
+- Selecting an activity is auto-cleared when the active filter changes (avoids showing a detail panel for a now-hidden row).
+- Active filter resets to "all" when the user switches timelines (prevents stale filter state).
+- `FilterManageModal.tsx` replaces the planned `FilterManagePanel.tsx` sidebar with a single dialog that consolidates create/edit/duplicate/promote/demote flows and an admin "Members" tab for browsing all team members' filters.
+
+*Forward compatibility:*
+- Shared views (Phase 16) will reference saved filters by ID — the `saved_filters` table and team-scoping design support this
+- Exports (Phase 17) will accept a filter ID to scope exported data
+- New activity fields added in future phases should be added to the `FilterCondition` union and the filter engine
+
+**Exit criteria — safe to pause when:**
+- All 6 preset filters actually filter activities (not just "Open only")
+- Member filter kind filters by assignee
+- Filter builder UI: add/remove conditions, pick field/op/value for all supported fields, AND/OR toggle
+- Save/load/edit/delete custom filters works end-to-end
+- Status conditions match by name (case-insensitive) across timelines
+- Tag conditions match by tag name
+- Team filter flag works: admins can promote a user filter to a team filter
+- Team filters visible to all team members in the filter dropdown
+- "Manage filters" panel accessible from dropdown; shows all filters with admin actions
+- Filter engine has comprehensive unit tests (each field type, each operator, AND/OR logic, edge cases)
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
+
+---
+
+### Phase 11.1 — Web — List View
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+A curated, inline-editable **List** view of the active timeline's activities — the surface a team lead reaches for when they'd otherwise plan in Excel or a Google Doc. Two goals: (1) edit activities like a spreadsheet (keyboard-first, quick single-cell edits, no modal round-trips), and (2) curate a *digestible* column set — hide/show/reorder columns so the whole list reads in one sitting. Ships first so the view-switcher infrastructure lands here and the later views (11.2 Calendar, 11.3 Kanban) slot in.
+
+Deliberately **not** a power-user database grid: no virtualization (our timelines are tens-to-low-hundreds of activities, not thousands), no Excel range gestures (paste-fill / fill handle are out — that's what a future import path is for), no heavy bulk-mutation toolbar.
+
+**Detailed plan:** [docs/plans/phase-11.1-list-view.md](plans/phase-11.1-list-view.md) — column catalog, keyboard editing model (selection vs. edit mode, TanStack Table v8 + @dnd-kit), column-curation persistence, group-by/color-by mirroring Gantt, build order, and exit criteria all live there. Scope is reviewed and settled.
+
+**Scope (summary — see plan doc for detail):**
+- *View-switcher infra* (reused by 11.2 / 11.3): `ViewMode` extended to `'gantt' | 'list' | 'calendar' | 'kanban'`; switcher control in the sub-toolbar persisted per-timeline; per-view toolbar slots.
+- *List view:* default columns (Title, Start, End, Duration, Status, Assignees, Tags) with a column catalog for the rest; hide/show + drag-reorder + resize, persisted per-timeline-per-user; pinned Title; density toggle; single-column sort; inline editing with field-appropriate editors (text, date, status pill, assignee/tag/parent popovers) saving via `PATCH /activities/:id`; group-by / color-by mirroring Gantt; respects active filter and Find highlight (8.5).
+- *Not this phase:* light multi-select (maybe later), paste-fill / fill handle (out), virtualization (deferred until proven needed).
+
+**Exit criteria — safe to pause when:**
+- View switcher toggles Gantt ↔ List, persisting the choice per timeline
+- List shows the active timeline's activities with the default columns and respects the active filter
+- Hiding, reordering, and resizing columns works and survives a reload (persisted per-timeline-per-user)
+- Density toggle changes row height and persists
+- Keyboard editing works: arrows move selection, Enter/F2 enters edit, Esc cancels, Tab/Enter commit-and-move
+- Inline editing Title / Start / End / Status saves via PATCH and reflects in Gantt when switched back
+- Title column stays pinned/visible when scrolled horizontally
+- Sorting by a column header reorders rows without losing selection
+- Group-by and Color-by controls work and persist per-timeline
+- Find bar highlights matching rows the same way it highlights bars in Gantt
+
+---
+
+### Phase 11.2 — Web — Calendar View
+**Status:** ⬜ | **Effort:** L (3–5 days)
+
+Three calendar sub-layouts (Month / Week / Day) sharing one component skeleton. Week / Day need an overlapping-event lane algorithm; Month is the cheaper grid.
+
+**Design rationale:**
+A familiar surface for users coming from Google Calendar / Outlook. Not a Gantt replacement — it answers "what's happening this week?" rather than "how does this project unfold?". Multi-day events render as continuous bars across cells (Month) or pinned to an all-day strip above the time grid (Week / Day).
+
+**Scope:**
+
+*Shared:*
+- Sub-layout switcher (Month / Week / Day) inside the view's toolbar slot
+- Today / prev / next navigation; "jump to date" picker
+- Click empty cell → open Event create form, prefilled with that date
+- Click event → open `EventDetailPanel`
+- Drag event between cells → PATCH new start/end (preserving duration); only valid on Week / Day for v1
+
+*Month layout:*
+- 6-week grid; multi-day events render as continuous bars spanning cells; overflow handled with a "+N more" affordance per cell
+
+*Week layout:*
+- 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
+- All-day strip at the top for events without time components
+- Overlapping-event lane algorithm: side-by-side columns within a day
+
+*Day layout:*
+- Single-day variant of Week; same time grid and lane algorithm
+
+**Open question (resolve early in phase):**
+- Events without time components (date-only) — do they all live in the all-day strip, or do they get a default block at e.g. 9am? Affects sync compatibility with Phase 15 (Calendar Sync).
+
+**Exit criteria — safe to pause when:**
+- Switching to Calendar from List/Gantt renders the current month with all events in correct cells
+- Month / Week / Day sub-toggles each render correctly with no data discrepancy
+- A multi-day event renders as a continuous bar in Month and pinned to the all-day strip in Week / Day
+- Two overlapping events in Week view render side-by-side without occlusion
+- Dragging an event to a different day in Week view updates start/end via PATCH
+- Find highlights matching events in all three sub-layouts
+
+---
+
+### Phase 11.3 — Web — Kanban View (Read-Only)
+**Status:** ⬜ | **Effort:** S–M (1–2 days)
+
+Read-only Kanban per [REQUIREMENTS.md](REQUIREMENTS.md). Columns are team statuses in their configured order; cards are events colored by primary assignee. Drag-to-change-status is explicitly v2.
+
+**Depends on:** Phase 10.2 (statuses API + UI), so admins can actually configure columns.
+
+**Scope:**
+- Columns from `team_statuses` in display order; column header colored from status color
+- Cards: title, date range, assignee avatars (stacked color indicators for multi-assignee), parent badge if nested
+- Empty column shows muted "No events" placeholder
+- Column scroll independently when card count exceeds viewport height
+- Card click → `EventDetailPanel`
+- Respects active filter, Find highlight, archived hiding
+
+**Exit criteria — safe to pause when:**
+- Kanban columns appear in the same order as the team's configured statuses
+- Cards show the correct member color (or stacked indicators for multi-assignee)
+- A status renamed / recolored in Settings updates the Kanban column header without refresh
+- Find highlights matching cards across columns
+- Attempting to drag a card produces no errors and no state change (read-only enforcement)
+
+---
+
+### Phase 12 — Communications Testing
+**Status:** ⬜ | **Effort:** S (1 day)
+
+Comprehensive automated tests for every outbound email flow. No new features; this phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production.
+
+**Scope:**
+
+*Flows to cover (one integration test each):*
+- Invite email: `POST /teams/:id/invites` → mailer.SendInvite called with correct recipient and link
+- Password reset request: `POST /auth/forgot-password` with a known-SMTP server → email delivered; token stored hashed
+- Password reset confirm: `POST /auth/reset-password` → password updated; token marked used; second attempt rejected
+- SMTP validation: `PUT /admin/smtp` with a valid test server → test email sent before config is persisted
+- SMTP test: `POST /admin/smtp/test` → email sent to caller; no config persisted
+
+*Mailer unit tests:*
+- `SaveConfig` → password is encrypted before storage (sentinel prefix present)
+- `LoadConfig` → encrypted password is decrypted on read; plaintext fallback for legacy values
+- `Send` with no config → no-op (returns nil)
+- `encryptPassword` / `decryptPassword` round-trip
+
+*Test infrastructure:*
+- Add a `newTestSMTPServer(t)` helper using `net/smtp` or a simple TCP listener to capture outbound SMTP without a real mail server
+
+**Exit criteria — safe to pause when:**
+- All flows above have at least one passing integration test
+- `SaveConfig`/`LoadConfig` encryption round-trip has a unit test
+- `go test ./...` passes clean
+
+---
+
+### Phase 13 — AI Key Management
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Ships the AI/LLM key configuration surface stubbed in Phase 10.1.3. Adds encrypted storage, model routing, and a usage log so superadmins can connect AI providers and see which features are consuming tokens.
+
+**Scope:**
+
+*API:*
+- New table `ai_provider_keys`: id, provider (anthropic | openai | google | custom), api_key (encrypted AES-256-GCM, same pattern as SMTP password), model_override, created_at, updated_at
+- `GET /admin/ai/keys` — list configured providers (key masked); superadmin only
+- `PUT /admin/ai/keys/:provider` — upsert a provider key; validates by making a lightweight test call; superadmin only
+- `DELETE /admin/ai/keys/:provider` — remove a provider key; superadmin only
+
+*Web — `/settings/ai` (replaces current stub):*
+- Real form replacing the placeholder cards: provider selector, API key input (masked), model override field
+- "Test connection" button calls a test endpoint before saving
+- Usage log section (read-only): last 10 AI requests with timestamp, provider, model, token count
+
+*Encryption:*
+- Reuse the AES-256-GCM pattern introduced for SMTP passwords in Phase 10.1.3
+
+**Exit criteria — safe to pause when:**
+- A superadmin can configure an Anthropic key and verify via the test connection button
+- The key is stored encrypted and masked in the GET response
+- Removing a key clears it from the DB
+- `golangci-lint run` clean; `go test ./...` passes
+
+---
+
+### Phase 14 — Localization & Language Support
+**Status:** ⬜ | **Effort:** L (3–5 days)
+
+Adds i18n infrastructure and ships the first non-English locale. The "Default language" fields in `/settings/preferences` and `/settings/organization` (currently disabled stubs) become functional.
+
+**Scope:**
+
+*Infrastructure:*
+- Adopt `react-i18next` (or equivalent) for the web client
+- Extract all user-facing strings from React components into locale JSON files
+- Add a `language` column to `user_preferences` (per-user) and a `default_language` key to `instance_settings`
+- `PATCH /users/me/preferences` accepts `language` key; `PATCH /admin/settings` accepts `default_language`
+
+*Locales:*
+- `en` — English (extracted from existing strings; the baseline)
+- Ship at least one additional locale to validate the pipeline (e.g. `es` — Spanish, or `fr` — French)
+
+*Web — settings surfaces:*
+- Enable the "Language" dropdown in `/settings/preferences` (user-level)
+- Enable the "Default language" dropdown in `/settings/organization` (instance-level)
+- Language change takes effect on next page load (no hard reload required)
+
+**Exit criteria — safe to pause when:**
+- Switching to the second locale changes all UI strings in the web app
+- User language preference persists across logout/login
+- Instance default language is used when the user has no preference set
+- Adding a new locale requires only a new JSON file (no code changes)
+- `pnpm --filter web lint` clean
+
+---
+
+### Phase 15 — Calendar Sync — Google & CalDAV
+**Status:** ⬜ | **Effort:** XL (1–2 wks)
+
+**Scope:**
+- Google Calendar OAuth connect flow
+- Outbound sync: push draba events to Google on create/update/delete
+- Inbound sync: Google webhook handler → upsert event in draba
+- Built-in CalDAV server (`internal/caldav/`)
+- CalDAV connect flow (user provides URL + credentials)
+- Outbound sync: push draba events to CalDAV on create/update/delete
+- Team iCal feed: `GET /timelines/:ical_token/feed.ics` (public, no private notes)
+
+**Exit criteria — safe to pause when:**
+- Connecting Google Calendar and creating a draba event causes it to appear in Google Calendar within 30s
+- Editing that event in Google Calendar updates the draba event within 30s (webhook round-trip)
+- A CalDAV client (e.g., iOS Calendar) can subscribe to a user's feed and see their draba events
+- The iCal feed URL is importable into a calendar app without errors
+
+---
+
+### Phase 16 — Shares — Multi-Share Views with Passwords
+**Status:** ⬜ | **Effort:** M (3–5 days)
+
+A first-class **Share** entity. One timeline can have many shares; each share is a frozen pairing of `{ view type + view config + optional password + optional expiry }`. This is the feature that lets a team publish, e.g., a public Gantt sorted by start date with the "Marketing" filter applied, alongside a password-protected List view of the same data for an external stakeholder.
+
+**Design rationale:**
+The existing single share token on `timelines` is too coarse — it shares "the timeline" with no opinion about which view, filter, sort, or grouping the viewer should land in. With four view types live (Gantt + 11.1 + 11.2 + 11.3), the surface a sharer wants to publish is the *configured view*, not the raw timeline. Multiple shares per timeline also enable stakeholder-specific snapshots (different filters, different views, different passwords) without forcing the team into a one-link compromise.
+
+**Scope:**
+
+*Schema:*
+- New `shares` table: `id`, `timeline_id`, `view_type` (gantt/list/calendar/kanban), `view_config` JSON (filter preset, group_by, sort_by, granularity, visible-columns, etc.), `password_hash` (nullable, bcrypt), `expires_at` (nullable), `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`
+- Public-token column on `shares` (unguessable, URL-safe) — the existing single token on `timelines` is migrated to the first share row
+- `timelines.share_token` deprecated and removed in a follow-up migration once UI references are migrated
+
+*API:*
+- `POST /timelines/:id/shares` — create share; body carries `view_type`, `view_config`, optional `password`, optional `expires_at`
+- `GET /timelines/:id/shares` — list shares for a timeline (creator + admins only)
+- `PATCH /shares/:id` — rename / change password / extend expiry / revoke
+- `DELETE /shares/:id` — hard delete
+- `GET /shares/:token` — public lookup; if password-protected returns 401 with a `passwordRequired: true` marker (no data leakage)
+- `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
+
+*Web — creating shares:*
+- "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
+- Click → modal that snapshots the current toolbar state (filter, sort, group, zoom, etc.) into `view_config`, offers password + expiry toggles, then returns the URL with copy button
+- View-config snapshot is **frozen** at creation time — later changes to the live view do not mutate existing shares
+
+*Web — viewing shares:*
+- Public viewer route `/s/:token` — no auth required; if password-protected, gates behind a password prompt; on success, mounts the corresponding view component in read-only mode with `view_config` applied
+- Read-only enforcement: no drag, no inline edit, no create — the same lockdown used for `is_external` events (Phase 18) applied to the whole surface
+- Branding strip at the top: team name, "Shared view," last-updated timestamp
+
+*Web — managing shares:*
+- "Manage shares" section on each timeline (also reachable from `/settings/team/:id` via a Timelines tab if scope allows): list, view counts, revoke, edit
+- Indicator chip on a timeline tile showing active share count
+
+**Open questions (resolve before starting):**
+- Do password-protected shares get a rate limit on unlock attempts? (Probably yes — N attempts per IP per hour.)
+- Should the unlock JWT be tied to the share's `view_config` snapshot, or refetch live? (Snapshot — that's the whole point.)
+- Do we expose share view counts to non-creators with admin access, or keep them creator-private?
+
+**Exit criteria — safe to pause when:**
+- A user can create a share from any of the four views, with the current toolbar state captured in `view_config`
+- Visiting the share URL renders the saved view exactly as it was configured at creation time
+- A password-protected share prompts for the password; wrong password is rejected; correct password renders the view
+- Setting an expiry causes the share to return 410 Gone after that date
+- A revoked share returns 410 Gone immediately and the URL is no longer usable
+- One timeline can host at least three independent shares with different view types and configurations
+- Public viewers cannot mutate any data through the share URL (no edits, no drags, no creates)
+
+---
+
+### Phase 17 — Data Portability & Exports
+**Status:** ⬜ | **Effort:** L (1 wk)
+
+Tabular import / export plus view-aware exports (Gantt → PDF, Kanban → PDF, List → Markdown, etc.). Each visual export respects the active filter / sort / group at time of export — the deliverable is "what's on the screen right now," not the raw event list.
+
+**Implementation note (PDF engine):**
+PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency in the Docker image). This keeps the binary lean at the cost of reimplementing Gantt / Kanban / Calendar layouts in PDF primitives — accepted tradeoff because the alternative (chromedp) significantly inflates the image size and breaks the "single binary" promise. Visual fidelity for the Gantt PDF will not match the live view pixel-for-pixel; the target is "readable and recognizable," not "screenshot quality."
+
+**Scope:**
+
+*Tabular import / export (was the old Phase 13):*
+- `GET /timelines/:id/export.csv` and `.xlsx`
+- `POST /teams/:id/events/import` — CSV/Excel import with preview + validation step
+- `GET /import-template.csv` and `.xlsx` downloadable template
+- Password reset flow (requires SMTP or transactional email provider) — kept here because import errors / reset emails are the first time we need SMTP
+
+*Visual / textual exports (per view):*
+- **Gantt → PDF:** landscape, paginated by date range; columns scale to fit a printable width per page; legend strip with member colors; export current filter/sort/group state. Gantt → PNG as a single-page variant.
+- **Kanban → PDF:** columns laid out side-by-side; if more columns than fit a printable width, paginate across pages with a column-overflow indicator. Kanban → PNG single-page.
+- **List → CSV, xlsx, Markdown, PDF.** Markdown export uses a GitHub-flavored table; PDF is a styled table with the same columns shown in the UI.
+- **Calendar → PDF:** Month layout → one page per month in range; Week layout → one page per week; Day layout → one page per day.
+- All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description.
+
+*Wiring:*
+- The Gantt toolbar's existing "Export" stub (Phase 8.1) becomes a real menu: CSV / xlsx / PDF / PNG
+- Same menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to each view's relevant formats
+
+**Open questions (resolve before starting):**
+- Are exports synchronous (block and return the file) or async (job queue with a download link)? Probably sync for v1; revisit if multi-hundred-page PDFs become slow.
+- Do exports respect Find highlights or just the filter? (Filter only — Find is ephemeral.)
+
+**Exit criteria — safe to pause when:**
+- Exporting a timeline to CSV and xlsx produces files containing all visible events with the active filter applied
+- Importing the exported CSV back in shows a preview, validates rows, and creates events on confirm
+- Gantt → PDF renders a recognizable Gantt chart with bars in the correct positions and a member-color legend
+- Kanban → PDF renders the visible columns and cards in the same order shown on screen
+- List → Markdown produces a clean GitHub-flavored table that renders correctly in a Markdown previewer
+- Calendar → PDF in Month layout produces one page per month with events in correct cells
+- Password reset flow sends an email and allows setting a new password
+- All export menus are reachable from their respective view toolbars; format options match the view type
+
+---
+
+### Phase 18 — External Connectors (Webhooks)
+**Status:** ⬜ | **Effort:** M (3–5 days)
+
+**Scope:**
+- Schema changes: `event_links`, `team_inbound_webhooks`, `is_external` flag on `events`
+- `POST /teams/:id/webhooks` to generate inbound webhook URLs
+- Generic JSON parsing for inbound webhook payload mapping (e.g. Asana, Aha)
+- Disabling edit UI for `is_external` blocks in the timeline (read-only)
+
+**Exit criteria — safe to pause when:**
+- Generating a webhook creates a unique URL for the team
+- Sending a dummy JSON payload to that URL creates an `is_external` event block mapped to a user
+- Trying to drag or edit that block in the UI is prevented (read-only mode)
+
+---
+
+### Phase 19 — Global Search
+**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
+
+Cross-team, cross-timeline event search via a command palette. Complements (does **not** replace) the in-view Find from [Phase 8.5](#phase-85-find-in-view).
+
+**Why a separate phase:**
+By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), and likely more events per team than fit in one fetch. Global Search needs server-side full-text and a different UX surface (a palette, not an inline bar), so it earns its own phase. With Find + List already shipped, this should feel like the natural "I genuinely don't know where this event is" escape hatch — used rarely but valued when needed.
+
+**Directional scope (to be firmed up before the phase):**
+- Command palette opened via `Ctrl/Cmd+K` (separate keybinding from Find's `Ctrl/Cmd+F`)
+- Server-side search endpoint: `GET /search/events?q=` — scoped to teams/timelines the caller can access
+- Full-text index over title, description, tags, assignee names (SQLite FTS5 for the default backend; equivalent for MySQL/Postgres adapters when those land)
+- Results grouped by team → timeline, each row showing event title, date range, assignees, and a snippet of the matched field
+- Selecting a result navigates to that timeline and **hands off to Find**, pre-seeding the query so the event is highlighted on arrival (reuses 8.5's scroll-to-match logic)
+- Keyboard-first: arrow keys to move, Enter to navigate, Esc to close
+- Recent searches / pinned searches — stretch goal, evaluate during the phase
+
+**Open questions (resolve before starting):**
+- Does Search surface archived events by default, or behind a toggle?
+- Do we index event descriptions in v1, or just title/tags/assignees? (description indexing has size implications for SQLite FTS5)
+- Permission model: do we filter results post-query or push the auth predicate into the FTS query?
+
+**Exit criteria (placeholder — refine in-phase):**
+- `Ctrl/Cmd+K` opens a palette returning results across every team the user belongs to
+- Selecting a result navigates to the correct timeline and the event is visibly highlighted on arrival
+- Users with no access to a team never see that team's events in results
+- Search returns within ~200ms for a database with 10k events
+
+---
+
+### Phase 20 — Backup & Restore
+**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
+
+Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container.
+
+**Directional scope (to be firmed up before the phase):**
+
+*Backup status (read-only admin surface):*
+- `/settings/admin/backup` page: current DB file path, file size, last-modified timestamp, WAL size (SQLite), connection count
+- Health indicator: green when last backup < 24h old, amber when 1–7 days, red when > 7 days or no backup exists
+- For MySQL/Postgres adapters: show connection string (masked), database size, last `pg_dump`/`mysqldump` timestamp if available
+
+*Manual backup:*
+- "Back up now" button → triggers a hot copy of the SQLite file (using `VACUUM INTO` or the backup API) to a configurable backup directory
+- For MySQL/Postgres: trigger `pg_dump`/`mysqldump` to the backup directory
+- Download backup file directly from the admin UI (optional — evaluate security implications)
+
+*Scheduled backups:*
+- Cron-style schedule configuration (daily at 2am, every 6 hours, etc.)
+- Retention policy: keep last N backups, or keep backups for N days
+- Backup location: local directory (default), or S3-compatible object storage (stretch)
+- Notification on backup failure (via SMTP if configured)
+
+*API:*
+- `GET /admin/backup/status` — current backup state (superadmin only)
+- `POST /admin/backup` — trigger immediate backup (superadmin only)
+- `GET /admin/backup/history` — list recent backups with size and status
+- `GET/PUT /admin/backup/schedule` — read/update backup schedule config
+- `DELETE /admin/backup/:id` — delete a specific backup file
+
+**Open questions (resolve before starting):**
+- Should backup files be downloadable from the admin UI, or only stored on the server filesystem? (Security tradeoff: convenience vs. risk of unauthorized download)
+- For SQLite, `VACUUM INTO` vs. the SQLite backup API — which handles concurrent writes better under WAL mode?
+- Do we need backup encryption at rest? (Probably not for v1 if the backup directory is on the same host)
+
+**Exit criteria (placeholder — refine in-phase):**
+- A superadmin can see the current DB status (path, size, last modified) on the admin backup page
+- "Back up now" creates a usable copy of the database in the configured backup directory
+- A scheduled backup runs at the configured interval and produces a valid backup file
+- Retention policy automatically cleans up old backups beyond the configured limit
+- Backup history shows the last N backups with timestamps and sizes
+
+---
+
+## How to Use This Document
+
+1. Work phases in order — each phase's exit criteria assume the previous phase is complete.
+2. After finishing a phase, flip its status to ✅ and update the summary table.
+3. Use the exit criteria as your acceptance checklist before calling a phase done.
+4. For the granular task list within each phase, refer to [TASKS.md](TASKS.md).
 ````
