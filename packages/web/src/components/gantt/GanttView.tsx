@@ -30,9 +30,14 @@ import { matchEvents } from '@/lib/findMatcher';
 import { useFind } from '@/contexts/FindContext';
 import { useFilter } from '@/contexts/FilterContext';
 import { usePreferenceMap } from '@/hooks/usePreferences';
+import { useAuth } from '@/contexts/AuthContext';
+import { applyActiveFilter } from '@/lib/presetFilters';
 
 type ApiActivity = components['schemas']['Activity'];
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
 
 interface Props {
   teamId: string;
@@ -46,8 +51,15 @@ interface Props {
   sortBy: SortBy;
   granularity: TimeGranularity | 'auto';
   colorBy: ColorBy;
-  /** Set of status IDs that are marked is_closed. Used when the 'open' filter preset is active. */
-  closedStatusIds?: Set<string>;
+  /**
+   * Timeline statuses — used to derive closedStatusIds and resolve status names
+   * in the filter engine. Replaces the old closedStatusIds prop.
+   */
+  timelineStatuses?: Status[];
+  /** Saved filters for the active team — evaluated by the filter engine. */
+  savedFilters?: SavedFilter[];
+  /** Team tags — used to resolve tag names in the filter engine. */
+  tags?: Tag[];
   selectedActivityId?: string | null;
   onSelectActivity?: (id: string | null) => void;
   /** Called when the user drags on an empty lane to create an activity. */
@@ -304,7 +316,9 @@ export default function GanttView({
   sortBy,
   granularity,
   colorBy,
-  closedStatusIds,
+  timelineStatuses,
+  savedFilters,
+  tags,
   selectedActivityId = null,
   onSelectActivity = () => {},
   onLaneDrag,
@@ -345,6 +359,7 @@ export default function GanttView({
 
   const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
   const { activeFilter } = useFilter();
+  const { user } = useAuth();
 
   const globalPrefs = usePreferenceMap();
   const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
@@ -421,12 +436,49 @@ export default function GanttView({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [members]);
 
-  const hideClosedActive = activeFilter.kind === 'preset' && activeFilter.id === 'open'
-  const visibleActivities = useMemo(() => {
-    if (!hideClosedActive || !closedStatusIds?.size) return apiActivities
-    return filterOpenActivities(apiActivities, closedStatusIds)
+  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(member => {
+      if (member.userId) {
+        const existing = m.get(member.userId) ?? [];
+        m.set(member.userId, [...existing, member.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const currentUserId = (user as { id?: string } | null)?.id ?? '';
+  const currentUserMemberIds = useMemo(
+    () => memberIdsByUserId.get(currentUserId) ?? [],
+    [currentUserId, memberIdsByUserId],
+  );
+
+  const visibleActivities = useMemo(() => applyActiveFilter(
+    apiActivities,
+    activeFilter,
+    memberIdsByUserId,
+    {
+      closedStatusIds,
+      currentUserMemberIds,
+      savedFilters: savedFilters ?? [],
+      statuses: statusesByTimeline,
+      tags: tags ?? [],
+    },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiActivities, hideClosedActive, closedStatusIds])
+  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, currentUserMemberIds, savedFilters, statusesByTimeline, tags]);
 
   const rows: GanttRow[] = useMemo(() => {
     const richActivities = visibleActivities

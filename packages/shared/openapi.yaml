@@ -438,7 +438,7 @@ components:
 
     SavedFilter:
       type: object
-      required: [id, teamId, userId, name, definition, createdAt, updatedAt]
+      required: [id, teamId, userId, name, definition, isTeamFilter, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -451,6 +451,10 @@ components:
         definition:
           type: string
           description: Opaque JSON filter spec (validated client-side).
+        isTeamFilter:
+          type: boolean
+          description: When true, the filter is visible to all team members (set by admins only).
+          default: false
         createdAt:
           type: string
           format: date-time
@@ -2603,6 +2607,9 @@ paths:
                 definition:
                   type: string
                   description: Opaque JSON filter spec (validated client-side).
+                isTeamFilter:
+                  type: boolean
+                  description: When true, visible to all team members (admin-only).
       responses:
         "201":
           description: Saved filter created.
@@ -2638,6 +2645,9 @@ paths:
                   minLength: 1
                 definition:
                   type: string
+                isTeamFilter:
+                  type: boolean
+                  description: When true, visible to all team members (admin-only to set true).
       responses:
         "200":
           description: Updated saved filter.

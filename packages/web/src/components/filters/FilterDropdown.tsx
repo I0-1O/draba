@@ -1,14 +1,13 @@
 /**
- * Top-bar filter selector. Surfaces presets, a per-member section, a
- * team-promoted filters section (stub), and the user's saved filters.
- * Selection is stored in FilterContext; wiring to the events list lands
- * when real views render in Phase 8.
+ * Top-bar filter selector. Surfaces presets, a per-member section,
+ * team-promoted filters, and the user's saved filters. Selection is
+ * stored in FilterContext and evaluated by applyActiveFilter in GanttView.
  */
 
 import { useEffect, useRef, useState } from 'react'
 import {
   Layers, Clock, User, AlertCircle, UserX, CheckCircle,
-  ChevronDown, Plus, Check, Settings2,
+  ChevronDown, Plus, Check, Settings2, List,
 } from 'lucide-react'
 import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
 import { useTeamMembers } from '@/hooks/useTeamActivities'
@@ -18,6 +17,7 @@ import { useAuth } from '@/contexts/AuthContext'
 interface Props {
   teamId?: string
   onOpenEditor: () => void
+  onOpenManager: () => void
 }
 
 // ── Preset definitions ───────────────────────────────────────────────────────
@@ -218,7 +218,7 @@ function Divider() {
 
 // ── Main component ───────────────────────────────────────────────────────────
 
-export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
+export default function FilterDropdown({ teamId = '', onOpenEditor, onOpenManager }: Props) {
   const { activeFilter, setActiveFilter } = useFilter()
   const { user } = useAuth()
   const { data: members = [] } = useTeamMembers(teamId)
@@ -246,6 +246,10 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
   const label = activeLabel(activeFilter, membersWithUser, saved)
   const memberDotColor = activeMemberColor(activeFilter, membersWithUser)
   const currentUserId = (user as { id?: string } | null)?.id ?? ''
+
+  // Partition saved filters: team-promoted vs. user's own personal
+  const teamFilters = saved.filter(f => f.isTeamFilter)
+  const myFilters = saved.filter(f => !f.isTeamFilter)
 
   const isDefaultFilter = activeFilter.kind === 'preset' && activeFilter.id === 'all'
 
@@ -361,19 +365,31 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
             </>
           )}
 
-          {/* Team filters — stub; no API support yet */}
-          <Divider />
-          <SectionHeader label="Team filters" teamBadge />
-          <div style={{ padding: '6px 14px 4px', fontSize: 12, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-            No team filters yet
-          </div>
+          {/* Team filters */}
+          {teamFilters.length > 0 && (
+            <>
+              <Divider />
+              <SectionHeader label="Team filters" teamBadge />
+              {teamFilters.map(s => {
+                const f: ActiveFilter = { kind: 'saved', id: s.id }
+                return (
+                  <ItemRow
+                    key={s.id}
+                    label={s.name}
+                    active={isSelected(f)}
+                    onClick={() => select(f)}
+                  />
+                )
+              })}
+            </>
+          )}
 
           {/* My filters */}
-          {saved.length > 0 && (
+          {myFilters.length > 0 && (
             <>
               <Divider />
               <SectionHeader label="My filters" />
-              {saved.map(s => {
+              {myFilters.map(s => {
                 const f: ActiveFilter = { kind: 'saved', id: s.id }
                 return (
                   <ItemRow
@@ -388,12 +404,45 @@ export default function FilterDropdown({ teamId = '', onOpenEditor }: Props) {
             </>
           )}
 
-          {/* Footer — add filter */}
+          {/* Footer */}
           <Divider />
+          <ManageFiltersRow onClick={() => { onOpenManager(); setOpen(false) }} />
           <AddFilterRow onClick={() => { onOpenEditor(); setOpen(false) }} />
         </div>
       )}
     </div>
+  )
+}
+
+// ── Manage filters footer row ─────────────────────────────────────────────────
+
+function ManageFiltersRow({ onClick }: { onClick: () => void }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        width: '100%',
+        padding: '7px 14px',
+        background: hovered ? 'var(--muted)' : 'transparent',
+        border: 'none',
+        fontSize: 13,
+        fontWeight: hovered ? 600 : 400,
+        color: hovered ? 'var(--foreground)' : 'var(--muted-foreground)',
+        cursor: 'pointer',
+        fontFamily: 'var(--font-sans)',
+        textAlign: 'left',
+        transition: 'all 0.1s',
+      }}
+    >
+      <List size={14} strokeWidth={2} />
+      Manage filters
+    </button>
   )
 }
 

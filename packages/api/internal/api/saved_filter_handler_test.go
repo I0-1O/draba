@@ -241,3 +241,143 @@ func TestDeleteSavedFilter_OwnerSuccess(t *testing.T) {
 		map[string]any{"name": "X"}, token))
 	assert.Equal(t, http.StatusNotFound, wUpd.Code)
 }
+
+// ── Team filter flag tests ─────────────────────────────────────────────────────
+
+// TestListSavedFilters_IncludesTeamFilters checks that ListByTeamUser returns
+// team filters alongside the caller's own filters.
+func TestListSavedFilters_IncludesTeamFilters(t *testing.T) {
+	srv, aliceToken, teamID := savedFilterTestSetup(t)
+	bobToken := addTeamMember(t, srv, aliceToken, teamID, "bob2@savedfilter.com", "Bob2")
+
+	// Alice creates a filter then promotes it to team scope.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/saved_filters", teamID),
+		map[string]any{"name": "alice-team", "definition": "{}"}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var f map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&f))
+	filterID := f["id"].(string)
+
+	// Promote to team filter.
+	wProm := httptest.NewRecorder()
+	srv.ServeHTTP(wProm, authReq(http.MethodPatch, fmt.Sprintf("/saved_filters/%s", filterID),
+		map[string]any{"isTeamFilter": true}, aliceToken))
+	require.Equal(t, http.StatusOK, wProm.Code, "promote: %s", wProm.Body)
+
+	// Bob creates his own personal filter.
+	wBob := httptest.NewRecorder()
+	srv.ServeHTTP(wBob, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/saved_filters", teamID),
+		map[string]any{"name": "bob-personal", "definition": "{}"}, bobToken))
+	require.Equal(t, http.StatusCreated, wBob.Code)
+
+	// Bob's list should include both alice's team filter and bob's own filter.
+	wList := httptest.NewRecorder()
+	srv.ServeHTTP(wList, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/saved_filters", teamID), nil, bobToken))
+	require.Equal(t, http.StatusOK, wList.Code)
+	var list []map[string]any
+	require.NoError(t, json.NewDecoder(wList.Body).Decode(&list))
+	assert.Len(t, list, 2, "bob should see the team filter + his own: %v", list)
+
+	var names []string
+	for _, item := range list {
+		names = append(names, item["name"].(string))
+	}
+	assert.Contains(t, names, "alice-team")
+	assert.Contains(t, names, "bob-personal")
+}
+
+// TestUpdateSavedFilter_AdminCanPromoteOthersFilter checks that an admin can
+// set isTeamFilter=true on a filter they don't own.
+func TestUpdateSavedFilter_AdminCanPromoteOthersFilter(t *testing.T) {
+	srv, aliceToken, teamID := savedFilterTestSetup(t)
+	bobToken := addTeamMember(t, srv, aliceToken, teamID, "bob3@savedfilter.com", "Bob3")
+
+	// Bob creates a filter.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/saved_filters", teamID),
+		map[string]any{"name": "bob-filter", "definition": "{}"}, bobToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var f map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&f))
+	filterID := f["id"].(string)
+
+	// Alice (admin) promotes it.
+	wProm := httptest.NewRecorder()
+	srv.ServeHTTP(wProm, authReq(http.MethodPatch, fmt.Sprintf("/saved_filters/%s", filterID),
+		map[string]any{"isTeamFilter": true}, aliceToken))
+	require.Equal(t, http.StatusOK, wProm.Code, "body: %s", wProm.Body)
+
+	var updated map[string]any
+	require.NoError(t, json.NewDecoder(wProm.Body).Decode(&updated))
+	assert.Equal(t, true, updated["isTeamFilter"])
+}
+
+// TestUpdateSavedFilter_NonAdminCannotPromote checks that a non-admin member
+// cannot set isTeamFilter=true.
+func TestUpdateSavedFilter_NonAdminCannotPromote(t *testing.T) {
+	srv, aliceToken, teamID := savedFilterTestSetup(t)
+	bobToken := addTeamMember(t, srv, aliceToken, teamID, "bob4@savedfilter.com", "Bob4")
+
+	// Bob creates a filter.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/saved_filters", teamID),
+		map[string]any{"name": "bob-priv", "definition": "{}"}, bobToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var f map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&f))
+	filterID := f["id"].(string)
+
+	// Bob (member) tries to promote — should be 403.
+	wProm := httptest.NewRecorder()
+	srv.ServeHTTP(wProm, authReq(http.MethodPatch, fmt.Sprintf("/saved_filters/%s", filterID),
+		map[string]any{"isTeamFilter": true}, bobToken))
+	assert.Equal(t, http.StatusForbidden, wProm.Code)
+}
+
+// TestDeleteSavedFilter_AdminCanDeleteTeamFilter checks that an admin can
+// delete a team filter they don't own.
+func TestDeleteSavedFilter_AdminCanDeleteTeamFilter(t *testing.T) {
+	srv, aliceToken, teamID := savedFilterTestSetup(t)
+	bobToken := addTeamMember(t, srv, aliceToken, teamID, "bob5@savedfilter.com", "Bob5")
+
+	// Bob creates a filter; Alice promotes it.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/saved_filters", teamID),
+		map[string]any{"name": "bob-team-filter", "definition": "{}"}, bobToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var f map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&f))
+	filterID := f["id"].(string)
+
+	wProm := httptest.NewRecorder()
+	srv.ServeHTTP(wProm, authReq(http.MethodPatch, fmt.Sprintf("/saved_filters/%s", filterID),
+		map[string]any{"isTeamFilter": true}, aliceToken))
+	require.Equal(t, http.StatusOK, wProm.Code)
+
+	// Alice (admin) deletes a team filter she doesn't own.
+	wDel := httptest.NewRecorder()
+	srv.ServeHTTP(wDel, authReq(http.MethodDelete, fmt.Sprintf("/saved_filters/%s", filterID), nil, aliceToken))
+	assert.Equal(t, http.StatusNoContent, wDel.Code)
+}
+
+// TestDeleteSavedFilter_NonAdminCannotDeleteOthersTeamFilter checks that a
+// regular member cannot delete a team filter they don't own.
+func TestDeleteSavedFilter_NonAdminCannotDeleteOthersTeamFilter(t *testing.T) {
+	srv, aliceToken, teamID := savedFilterTestSetup(t)
+	bobToken := addTeamMember(t, srv, aliceToken, teamID, "bob6@savedfilter.com", "Bob6")
+
+	// Alice creates a team filter.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/saved_filters", teamID),
+		map[string]any{"name": "alice-team-filter", "definition": "{}", "isTeamFilter": true}, aliceToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var f map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&f))
+	filterID := f["id"].(string)
+
+	// Bob (member) tries to delete it — forbidden.
+	wDel := httptest.NewRecorder()
+	srv.ServeHTTP(wDel, authReq(http.MethodDelete, fmt.Sprintf("/saved_filters/%s", filterID), nil, bobToken))
+	assert.Equal(t, http.StatusForbidden, wDel.Code)
+}

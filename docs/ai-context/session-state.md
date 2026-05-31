@@ -2,25 +2,25 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-05-30 (Phase 10.4.5 built and Docker-verified)
+**Last updated:** 2026-05-30 (Phase 10.4.6 built; automated checks pass; Docker verification pending)
 
 ---
 
 ## Phase Status
 
-**All phases through 10.4.5 are complete and Docker-verified.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), and the 10.4.1–10.4.5 polish series (preferences/session handling, activity schema normalization, UI consistency, Gantt interaction, and activity tags/parent/progress fields).
+**All phases through 10.4.5 are complete and Docker-verified.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), and the 10.4.1–10.4.5 polish series.
+
+**Phase 10.4.6 — Filter Implementation:** all automated checks pass (`golangci-lint`, `go test ./...`, `pnpm --filter web lint`, `pnpm --filter web build`, 117 frontend tests). Awaiting Docker deploy and manual verification of filter presets, builder UI, team filter promotion, and manage panel.
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **10.4.6** | Filter Implementation | [docs/plans/phase-10.4.6.md](../plans/phase-10.4.6.md) |
-
-Recommended starting point: read the 10.4.6 plan, then `docs/log.md` (top entry) for the most recent state.
+| **10.5** | Communications Testing | see ROADMAP.md |
 
 ---
 
 ## Open Issues
 
-None outstanding — every shipped phase has been verified on Docker. New issues get logged here as they're found.
+None — 10.4.6 automated checks all pass. Manual filter verification items tracked in TASKS.md under Phase 10.4.6.
 
 ---
 

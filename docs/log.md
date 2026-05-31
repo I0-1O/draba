@@ -2,6 +2,63 @@
 
 ---
 
+## 2026-05-30 — Phase 10.4.6: Filter Implementation
+
+**Goal:** Make the filter system fully operational. Previously only "Open only" actually filtered activities. This phase ships a filter definition language, a client-side filter engine, all 6 presets wired, a visual filter builder, team-scoped filter promotion, and a "Manage filters" management panel.
+
+**Backend:**
+- Migration 018: `ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0`
+- `models.SavedFilter`: added `IsTeamFilter bool` (`db:"is_team_filter"`, `json:"isTeamFilter"`)
+- `SavedFilterRepo.Create/Update`: include `is_team_filter` in SQL statements
+- `SavedFilterRepo.ListByTeamUser`: changed `WHERE team_id = ? AND user_id = ?` → `WHERE team_id = ? AND (user_id = ? OR is_team_filter = 1)` — users now see their own filters plus all team-promoted filters
+- `handleCreateSavedFilter`: accepts optional `isTeamFilter` in body; admin-only to set `true` at creation
+- `handleUpdateSavedFilter`: owners can update name/definition of their own filters; admins can promote/demote `isTeamFilter` on any filter; admins can edit name/definition of existing team filters (not personal ones they don't own)
+- `handleDeleteSavedFilter`: owners can always delete; admins can delete team filters they don't own
+
+**OpenAPI + types:**
+- `SavedFilter` schema: added `isTeamFilter: boolean` (required, default false) to spec
+- `CreateSavedFilterJSONBody` and `UpdateSavedFilterJSONBody` in spec updated with `isTeamFilter` field
+- `api_types.gen.go` manually updated to match (same field in Go generated types)
+- TypeScript types regenerated
+
+**Frontend — filter engine (`lib/`):**
+- `filterTypes.ts`: `FilterLogic`, `FilterCondition` union (status/tag/assignee/title/progress/hasParent/startDate/endDate), `FilterDefinition`, `parseFilterDefinition` — the data language for filter specs stored as JSON
+- `filterEngine.ts`: `matchesFilter(activity, filter, ctx)` — pure function evaluating a `FilterDefinition` against one activity. Status matched by name (case-insensitive) via `statusesByTimeline` lookup; tags matched by name via `ctx.tags`; assignees by member ID; dates via ISO string comparison
+- `presetFilters.ts`: `applyActiveFilter(activities, activeFilter, memberIdsByUserId, ctx)` — single entry point for all filter kinds. Preset implementations: `all` (passthrough), `open` (excludes closed status IDs), `upcoming` (start/end within 7 days), `my` (assigned to current user's member IDs), `overdue` (past end + not closed), `noassign` (empty assignees). Member kind resolves team_member_ids from the userId→memberIds map. Saved kind parses definition JSON and delegates to `matchesFilter`
+
+**Frontend — GanttView wiring:**
+- Replaced `closedStatusIds?: Set<string>` prop with `timelineStatuses?: Status[]`, `savedFilters?: SavedFilter[]`, `tags?: Tag[]`
+- Inside component: derives `closedStatusIds` from `timelineStatuses`; builds `statusesByTimeline` Map (single entry for this timeline); builds `memberIdsByUserId` from `apiMembers`; computes `currentUserMemberIds` from auth user + member map
+- Replaced old `hideClosedActive/filterOpenActivities` memo with a single `applyActiveFilter` call — all 6 presets now filter activities, not just "Open only"
+- Added `useAuth` import to get current user ID
+
+**Frontend — filter builder UI (`components/filters/`):**
+- `FilterConditionRow.tsx`: single condition row — field dropdown (8 options), operator dropdown (contextual by field type), value input (MultiSelect for set fields, text/number/date for scalar fields), remove (×) button. `MultiSelect` is an inline portal-rendered multi-checkbox dropdown
+- `FilterEditor.tsx`: full filter builder panel — name input, AND/OR segmented toggle, scrollable condition list, "+ Add condition" button, Save/Delete/Cancel footer. Edit mode pre-populates from existing filter's definition JSON. Calls `useCreateSavedFilter` / `useUpdateSavedFilter` / `useDeleteSavedFilter`; in-panel delete confirmation
+- `FilterManagePanel.tsx`: manages all user and team filters. Splits into "Team Filters" and "My Filters" sections. Per-row: Edit button, Promote to team / Make personal (admin only), Delete (owner or admin for team filters). Inline delete confirmation per row
+
+**Frontend — FilterDropdown updates:**
+- Partitions `useSavedFilters` results into `teamFilters` (is_team_filter = true) and `myFilters` (is_team_filter = false)
+- Team filters section now renders real data (was a static "No team filters yet" stub)
+- Added "Manage filters" row at bottom of dropdown (above "Add filter") → calls `onOpenManager`
+- Added `onOpenManager` prop; `List` icon imported
+
+**Frontend — DashboardPage + TopBar wiring:**
+- Added `useSavedFilters(teamId)` and `useTags(teamId)` data fetches
+- Added `filterManageOpen` state and `editingFilter: SavedFilter | null` state
+- Two `RightSidebar` panels: one for `FilterManagePanel` (manage mode), one for `FilterEditor` (new/edit mode). FilterManagePanel's "Edit" button transitions to editor with the filter pre-loaded
+- TopBar gained `onOpenFilterManager` prop; FilterDropdown gains `onOpenManager` prop; GanttView call-site updated to pass `timelineStatuses`, `savedFilters`, `tags`
+- `useSavedFilters.ts`: added `isTeamFilter?: boolean` to `UpdateSavedFilterInput`
+
+**Tests:**
+- `lib/filterEngine.test.ts` (new): 20 unit tests covering all 8 field types, all operator categories, AND/OR logic, empty-conditions edge case, null/missing fields, and case-insensitive status/tag matching
+- `lib/presetFilters.test.ts` (new): 11 unit tests covering each of the 6 presets, the member filter kind, and saved filter delegation (match, not-found fallback)
+- `saved_filter_handler_test.go` (extended): 5 new tests — `ListSavedFilters_IncludesTeamFilters`, `AdminCanPromoteOthersFilter`, `NonAdminCannotPromote`, `AdminCanDeleteTeamFilter`, `NonAdminCannotDeleteOthersTeamFilter`
+- `migrations_test.go`: assertion that `saved_filters.is_team_filter` column exists after migration 018
+- All automated checks: `golangci-lint run` clean; `go test ./...` all pass (including 5 new handler tests); `pnpm --filter web lint` clean; `pnpm --filter web build` clean; `pnpm --filter web test` 117 tests pass across 12 test files
+
+---
+
 ## 2026-05-30 — Phase 10.4.5: Activity Tags, Parent & Progress Fields
 
 **Goal:** Replace the three "coming soon" stubs in the activity edit panel with fully functional fields. Tags are normalized (team-scoped `tags` table + FK junction). Parent and progress already had backend support; this phase adds the UI controls and a Gantt bar progress indicator.

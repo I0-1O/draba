@@ -162,13 +162,14 @@ type Timeline struct {
 // an opaque JSON string interpreted by the client; the server treats it as
 // arbitrary text and only validates that it parses as JSON.
 type SavedFilter struct {
-	ID         string    `db:"id"         json:"id"`
-	TeamID     string    `db:"team_id"    json:"teamId"`
-	UserID     string    `db:"user_id"    json:"userId"`
-	Name       string    `db:"name"       json:"name"`
-	Definition string    `db:"definition" json:"definition"`
-	CreatedAt  time.Time `db:"created_at" json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at" json:"updatedAt"`
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
 }
 
 // UserPreference stores a single key/value setting for a user, optionally

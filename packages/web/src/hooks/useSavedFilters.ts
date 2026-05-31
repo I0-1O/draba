@@ -48,6 +48,7 @@ interface UpdateSavedFilterInput {
   id: string
   name?: string
   definition?: string
+  isTeamFilter?: boolean
 }
 
 /** Updates an existing saved filter (owner-only) and invalidates the list. */

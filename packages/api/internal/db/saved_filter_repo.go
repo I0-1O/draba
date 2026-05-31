@@ -22,9 +22,9 @@ func NewSavedFilterRepo(db *sqlx.DB) *SavedFilterRepo {
 func (r *SavedFilterRepo) Create(f *models.SavedFilter) error {
 	_, err := r.db.NamedExec(`
 		INSERT INTO saved_filters (
-			id, team_id, user_id, name, definition, created_at, updated_at
+			id, team_id, user_id, name, definition, is_team_filter, created_at, updated_at
 		) VALUES (
-			:id, :team_id, :user_id, :name, :definition, :created_at, :updated_at
+			:id, :team_id, :user_id, :name, :definition, :is_team_filter, :created_at, :updated_at
 		)
 	`, f)
 	if err != nil {
@@ -45,11 +45,12 @@ func (r *SavedFilterRepo) GetByID(id string) (*models.SavedFilter, error) {
 }
 
 // ListByTeamUser returns all saved filters owned by userID within teamID,
+// plus all team-promoted filters (is_team_filter = 1) regardless of owner,
 // ordered by creation time ascending.
 func (r *SavedFilterRepo) ListByTeamUser(teamID, userID string) ([]*models.SavedFilter, error) {
 	fs := make([]*models.SavedFilter, 0)
 	err := r.db.Select(&fs,
-		`SELECT * FROM saved_filters WHERE team_id = ? AND user_id = ? ORDER BY created_at ASC`,
+		`SELECT * FROM saved_filters WHERE team_id = ? AND (user_id = ? OR is_team_filter = 1) ORDER BY created_at ASC`,
 		teamID, userID,
 	)
 	if err != nil {
@@ -58,11 +59,11 @@ func (r *SavedFilterRepo) ListByTeamUser(teamID, userID string) ([]*models.Saved
 	return fs, nil
 }
 
-// Update writes name, definition, and updated_at for an existing row.
+// Update writes name, definition, is_team_filter, and updated_at for an existing row.
 func (r *SavedFilterRepo) Update(f *models.SavedFilter) error {
 	_, err := r.db.NamedExec(`
 		UPDATE saved_filters
-		SET name = :name, definition = :definition, updated_at = :updated_at
+		SET name = :name, definition = :definition, is_team_filter = :is_team_filter, updated_at = :updated_at
 		WHERE id = :id
 	`, f)
 	if err != nil {

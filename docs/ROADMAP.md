@@ -45,7 +45,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.3 | [UI Consistency — Modals, Sidebar & Toolbar](#phase-1043--ui-consistency--modals-sidebar--toolbar) | M — 1–2 days | ✅ |
 | 10.4.4 | [Gantt Interaction & Activity Edit Polish](#phase-1044--gantt-interaction--activity-edit-polish) | M — 2–3 days | 🔄 |
 | 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
-| 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | ⬜ |
+| 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
 | 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
 | 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
 | 10.7 | [Localization & Language Support](#phase-107--localization--language-support) | L — 3–5 days | ⬜ |
@@ -1226,7 +1226,7 @@ Replaces the three "coming soon" stubs in the activity edit panel with fully fun
 ---
 
 ### Phase 10.4.6 — Filter Implementation
-**Status:** ⬜ | **Effort:** M–L (3–4 days)
+**Status:** 🔄 In Progress — 2026-05-30, all automated checks pass; manual Docker verification still needed | **Effort:** M–L (3–4 days)
 
 Makes the filter system fully operational. Today only the "Open only" preset actually filters activities — the other five presets, member filters, and saved filters exist as UI selections but are never evaluated. This phase ships: a filter definition language, a client-side filter engine, a visual filter builder, team-scoped filter promotion, and the "Manage filters" admin experience.
 

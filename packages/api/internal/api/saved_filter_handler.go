@@ -30,11 +30,13 @@ func (s *Server) handleListSavedFilters(w http.ResponseWriter, r *http.Request) 
 
 // handleCreateSavedFilter handles POST /teams/{id}/saved_filters. The
 // authenticated user must be a member of the team and becomes the owner.
+// Setting isTeamFilter=true at creation time requires admin role.
 func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
 
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
 		return
 	}
 
@@ -52,15 +54,25 @@ func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	isTeamFilter := false
+	if req.IsTeamFilter != nil && *req.IsTeamFilter {
+		if member.Role != "admin" {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can create team filters")
+			return
+		}
+		isTeamFilter = true
+	}
+
 	now := time.Now()
 	filter := &models.SavedFilter{
-		ID:         newID(),
-		TeamID:     teamID,
-		UserID:     claims.UserID,
-		Name:       req.Name,
-		Definition: req.Definition,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:           newID(),
+		TeamID:       teamID,
+		UserID:       claims.UserID,
+		Name:         req.Name,
+		Definition:   req.Definition,
+		IsTeamFilter: isTeamFilter,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 	if err := s.savedFilters.Create(filter); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create saved filter")
@@ -69,8 +81,10 @@ func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusCreated, filter)
 }
 
-// handleUpdateSavedFilter handles PATCH /saved_filters/{id}. Only the owner
-// of the filter may modify it.
+// handleUpdateSavedFilter handles PATCH /saved_filters/{id}. Owners may
+// update name and definition. Setting isTeamFilter=true is admin-only;
+// admins may also update filters they don't own when the filter is already
+// a team filter.
 func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request) {
 	filterID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
@@ -84,16 +98,35 @@ func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
 		return
 	}
-	if filter.UserID != claims.UserID {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
-		return
-	}
 
 	var req UpdateSavedFilterJSONBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
 	}
+
+	// Determine whether the caller is a team admin for permission checks.
+	isAdmin := false
+	if adminMember, ok := s.requireTeamMember(w, r, filter.TeamID); ok {
+		isAdmin = adminMember.Role == "admin"
+	} else {
+		return
+	}
+
+	isOwner := filter.UserID == claims.UserID
+
+	// Name and definition can be updated by:
+	//   • The filter owner (any role)
+	//   • A team admin, but only when the filter is already a team filter
+	//     (admins promote first, then edit).
+	wantsNameOrDef := req.Name != nil || req.Definition != nil
+	if wantsNameOrDef && !isOwner {
+		if !isAdmin || !filter.IsTeamFilter {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
+			return
+		}
+	}
+
 	if req.Name != nil {
 		if *req.Name == "" {
 			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
@@ -108,6 +141,15 @@ func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request)
 		}
 		filter.Definition = *req.Definition
 	}
+	// Only admins may promote/demote isTeamFilter (on any filter in the team,
+	// regardless of ownership — this is how personal filters get promoted).
+	if req.IsTeamFilter != nil {
+		if !isAdmin {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can change team filter status")
+			return
+		}
+		filter.IsTeamFilter = *req.IsTeamFilter
+	}
 	filter.UpdatedAt = time.Now()
 
 	if err := s.savedFilters.Update(filter); err != nil {
@@ -117,8 +159,9 @@ func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, filter)
 }
 
-// handleDeleteSavedFilter handles DELETE /saved_filters/{id}. Only the owner
-// of the filter may delete it.
+// handleDeleteSavedFilter handles DELETE /saved_filters/{id}. The owner may
+// always delete their own filter. Team admins may additionally delete any
+// team filter (is_team_filter = true) even if they aren't the owner.
 func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request) {
 	filterID := r.PathValue("id")
 	claims := claimsFromContext(r.Context())
@@ -132,7 +175,16 @@ func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
 		return
 	}
-	if filter.UserID != claims.UserID {
+
+	// Check membership to determine admin status.
+	adminMember, ok := s.requireTeamMember(w, r, filter.TeamID)
+	if !ok {
+		return
+	}
+	isAdmin := adminMember.Role == "admin"
+
+	// Owner can always delete; admin can delete team filters they don't own.
+	if filter.UserID != claims.UserID && !(isAdmin && filter.IsTeamFilter) {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
 		return
 	}

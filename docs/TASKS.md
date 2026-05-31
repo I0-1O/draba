@@ -930,6 +930,76 @@ Replaces the three "coming soon" stubs in the activity edit panel with functiona
 
 ---
 
+### Filter Implementation (Phase 10.4.6)
+Full filter system: filter definition language, client-side engine, all 6 presets wired, filter builder UI, team filter promotion, and management panel.
+
+**Schema (migration 018):**
+- [x] `ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0` — 2026-05-30
+
+**Backend:**
+- [x] `SavedFilter` model: add `IsTeamFilter bool` — 2026-05-30
+- [x] `SavedFilterRepo.Create`: include `is_team_filter` in INSERT — 2026-05-30
+- [x] `SavedFilterRepo.Update`: include `is_team_filter` in UPDATE — 2026-05-30
+- [x] `SavedFilterRepo.ListByTeamUser`: return user's own filters + all team filters (`is_team_filter = 1`) — 2026-05-30
+- [x] `handleCreateSavedFilter`: accept `isTeamFilter` (admin-only to set true) — 2026-05-30
+- [x] `handleUpdateSavedFilter`: admin can promote/demote; admin can edit name/def of existing team filters — 2026-05-30
+- [x] `handleDeleteSavedFilter`: admin can delete team filters they don't own — 2026-05-30
+
+**OpenAPI + types:**
+- [x] Add `isTeamFilter` boolean to `SavedFilter` schema — 2026-05-30
+- [x] Add `isTeamFilter` to `CreateSavedFilterJSONBody` and `PatchSavedFilterJSONBody` — 2026-05-30
+- [x] Update `api_types.gen.go` manually with new fields — 2026-05-30
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-30
+
+**Frontend — filter engine:**
+- [x] `lib/filterTypes.ts` — FilterDefinition type system (logic, conditions, operators per field type) — 2026-05-30
+- [x] `lib/filterEngine.ts` — `matchesFilter(activity, filter, ctx)` pure function — 2026-05-30
+- [x] `lib/presetFilters.ts` — `applyActiveFilter(activities, activeFilter, memberIdsByUserId, ctx)` — all 6 presets + member + saved filter kinds — 2026-05-30
+
+**Frontend — GanttView wiring:**
+- [x] Replace `closedStatusIds` prop with `timelineStatuses`, `savedFilters`, `tags` props — 2026-05-30
+- [x] Derive `closedStatusIds`, `statusesByTimeline`, `memberIdsByUserId`, `currentUserMemberIds` inside GanttView — 2026-05-30
+- [x] Replace old open-only filter with `applyActiveFilter` — makes all 6 presets + member + saved filters work — 2026-05-30
+
+**Frontend — filter builder UI:**
+- [x] `components/filters/FilterConditionRow.tsx` — field/op/value row with multi-select, text, number, date inputs — 2026-05-30
+- [x] `components/filters/FilterEditor.tsx` — name input, AND/OR toggle, condition rows, Save/Delete/Cancel footer — 2026-05-30
+- [x] `components/filters/FilterManagePanel.tsx` — My Filters + Team Filters sections with edit/delete/promote/demote — 2026-05-30
+
+**Frontend — FilterDropdown updates:**
+- [x] Partition saved filters into `teamFilters` and `myFilters` — 2026-05-30
+- [x] Render "Team filters" section with real data (replacing stub) — 2026-05-30
+- [x] Add "Manage filters" link at bottom of dropdown — 2026-05-30
+- [x] Add `onOpenManager` prop — 2026-05-30
+
+**Frontend — DashboardPage wiring:**
+- [x] Add `useSavedFilters` and `useTags` hooks — 2026-05-30
+- [x] Add `filterManageOpen` and `editingFilter` state — 2026-05-30
+- [x] Wire `FilterEditor` and `FilterManagePanel` into `RightSidebar` — 2026-05-30
+- [x] Pass `timelineStatuses`, `savedFilters`, `tags` to GanttView — 2026-05-30
+- [x] Add `onOpenFilterManager` to `TopBar` — 2026-05-30
+- [x] Update `useSavedFilters.ts`: add `isTeamFilter` to `UpdateSavedFilterInput` — 2026-05-30
+
+**Tests:**
+- [x] `lib/filterEngine.test.ts` — 20+ unit tests: each field type, each operator, AND/OR, edge cases, case-insensitive — 2026-05-30
+- [x] `lib/presetFilters.test.ts` — 11 unit tests: each preset, member filter, saved filter delegation — 2026-05-30
+- [x] `saved_filter_handler_test.go`: 5 new tests — team filter list includes team filters, admin can promote, non-admin cannot promote, admin can delete team filter, non-admin cannot — 2026-05-30
+- [x] `migrations_test.go`: assert `is_team_filter` column exists after migration 018 — 2026-05-30
+- [x] `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean — 2026-05-30
+
+**Manual verification (Docker):**
+- [ ] All 6 preset filters actually filter activities (open, upcoming, my, overdue, noassign, all)
+- [ ] Member filter kind filters by assignee
+- [ ] Filter builder: add/remove conditions, pick field/op/value for all supported fields, AND/OR toggle
+- [ ] Save/load/edit/delete custom filters end-to-end
+- [ ] Status conditions match by name across timelines
+- [ ] Tag conditions match by tag name
+- [ ] Team filter flag: admin promotes user filter → visible to all team members
+- [ ] "Manage filters" panel accessible from dropdown
+- [ ] `docs/log.md` Phase 10.4.6 entry written — 2026-05-30
+
+---
+
 ### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
 Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
 

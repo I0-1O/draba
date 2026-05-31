@@ -241,12 +241,15 @@ type SavedFilter struct {
 	CreatedAt time.Time `json:"createdAt"`
 
 	// Definition Opaque JSON filter spec (validated client-side).
-	Definition string    `json:"definition"`
-	Id         string    `json:"id"`
-	Name       string    `json:"name"`
-	TeamId     string    `json:"teamId"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	UserId     string    `json:"userId"`
+	Definition string `json:"definition"`
+	Id         string `json:"id"`
+
+	// IsTeamFilter When true, the filter is visible to all team members (set by admins only).
+	IsTeamFilter bool      `json:"isTeamFilter"`
+	Name         string    `json:"name"`
+	TeamId       string    `json:"teamId"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+	UserId       string    `json:"userId"`
 }
 
 // Team defines model for Team.
@@ -393,8 +396,9 @@ type UpdateActivityJSONBody struct {
 
 // UpdateSavedFilterJSONBody defines parameters for UpdateSavedFilter.
 type UpdateSavedFilterJSONBody struct {
-	Definition *string `json:"definition,omitempty"`
-	Name       *string `json:"name,omitempty"`
+	Definition   *string `json:"definition,omitempty"`
+	IsTeamFilter *bool   `json:"isTeamFilter,omitempty"`
+	Name         *string `json:"name,omitempty"`
 }
 
 // CreateTeamJSONBody defines parameters for CreateTeam.
@@ -457,8 +461,9 @@ type CreateInviteJSONBodyRole string
 // CreateSavedFilterJSONBody defines parameters for CreateSavedFilter.
 type CreateSavedFilterJSONBody struct {
 	// Definition Opaque JSON filter spec (validated client-side).
-	Definition string `json:"definition"`
-	Name       string `json:"name"`
+	Definition   string `json:"definition"`
+	IsTeamFilter *bool  `json:"isTeamFilter,omitempty"`
+	Name         string `json:"name"`
 }
 
 // CreateTimelineJSONBody defines parameters for CreateTimeline.

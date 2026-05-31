@@ -157,6 +157,12 @@ func TestMigrate_Idempotent(t *testing.T) {
 				"activities.status_id FK should reference statuses, not team_statuses")
 		}
 	}
+
+	// Verify migration 018: is_team_filter column added to saved_filters.
+	var isTeamFilterCount int
+	require.NoError(t, database.Get(&isTeamFilterCount,
+		`SELECT COUNT(*) FROM pragma_table_info('saved_filters') WHERE name = 'is_team_filter'`))
+	assert.Equal(t, 1, isTeamFilterCount, "saved_filters.is_team_filter should exist after migration 018")
 }
 
 // TestMigrate_015_NormalizesActivities verifies that migration 015 drops

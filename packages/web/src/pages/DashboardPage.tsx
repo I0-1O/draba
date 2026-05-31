@@ -24,9 +24,13 @@ import { Badge } from '@/components/identity/Badge'
 import type { Identity } from '@/components/identity/identity-constants'
 import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
 import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useSavedFilters } from '@/hooks/useSavedFilters'
+import { useTags } from '@/hooks/useTags'
 import TeamModal from '@/components/TeamModal'
 import MemberModal from '@/components/MemberModal'
 import TimelineModal from '@/components/TimelineModal'
+import FilterEditor from '@/components/filters/FilterEditor'
+import FilterManagePanel from '@/components/filters/FilterManagePanel'
 import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
@@ -67,6 +71,8 @@ function DashboardShell() {
   const [ganttMembers, setGanttMembers] = useState<Member[]>([])
   const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
   const [filterEditorOpen, setFilterEditorOpen] = useState(false)
+  const [filterManageOpen, setFilterManageOpen] = useState(false)
+  const [editingFilter, setEditingFilter] = useState<components['schemas']['SavedFilter'] | null>(null)
   const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
   // Gantt toolbar state
   const [groupBy, setGroupBy] = useState<GroupBy>('none')
@@ -177,6 +183,8 @@ function DashboardShell() {
   const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
   const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
   const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
+  const { data: savedFilters = [] } = useSavedFilters(teamId)
+  const { data: tags = [] } = useTags(teamId)
   // Initialize activeTimelineId from the saved global pref (selected_timeline),
   // falling back to timelines[0] when no pref is stored or the saved timeline
   // is no longer in the list. Waits for global prefs to settle so we don't
@@ -311,7 +319,8 @@ function DashboardShell() {
           timelineName={activeTimelineName}
           timelineIdentity={activeTimelineIdentity}
           onViewChange={setView}
-          onOpenFilterEditor={() => setFilterEditorOpen(true)}
+          onOpenFilterEditor={() => { setEditingFilter(null); setFilterEditorOpen(true); setFilterManageOpen(false) }}
+          onOpenFilterManager={() => { setFilterManageOpen(true); setFilterEditorOpen(false) }}
           rightSlot={
             <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
               <button
@@ -405,7 +414,9 @@ function DashboardShell() {
               sortBy={sortBy}
               granularity={granularity}
               colorBy={colorBy}
-              closedStatusIds={new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
               selectedActivityId={selectedActivityId}
               onSelectActivity={(id) => {
                 setSelectedActivityId(id)
@@ -467,13 +478,38 @@ function DashboardShell() {
       />
 
       <RightSidebar
-        open={filterEditorOpen}
-        title="Filter editor"
-        onClose={() => setFilterEditorOpen(false)}
+        open={filterManageOpen}
+        title="Manage filters"
+        onClose={() => setFilterManageOpen(false)}
       >
-        <p style={{ color: 'var(--muted-foreground)', fontSize: 13, lineHeight: 1.5 }}>
-          Filter editor coming soon.
-        </p>
+        {filterManageOpen && (
+          <FilterManagePanel
+            teamId={teamId}
+            isAdmin={canEditTeam}
+            onEdit={(filter) => {
+              setEditingFilter(filter)
+              setFilterManageOpen(false)
+              setFilterEditorOpen(true)
+            }}
+            onClose={() => setFilterManageOpen(false)}
+          />
+        )}
+      </RightSidebar>
+
+      <RightSidebar
+        open={filterEditorOpen}
+        title={editingFilter ? 'Edit filter' : 'New filter'}
+        onClose={() => { setFilterEditorOpen(false); setEditingFilter(null) }}
+      >
+        {filterEditorOpen && (
+          <FilterEditor
+            teamId={teamId}
+            timelineId={activeTimelineId ?? ''}
+            filter={editingFilter ?? undefined}
+            onSave={() => { setFilterEditorOpen(false); setEditingFilter(null) }}
+            onClose={() => { setFilterEditorOpen(false); setEditingFilter(null) }}
+          />
+        )}
       </RightSidebar>
 
       {/* Team modal — create or edit */}

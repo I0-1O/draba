@@ -1267,6 +1267,11 @@ export interface components {
             name: string;
             /** @description Opaque JSON filter spec (validated client-side). */
             definition: string;
+            /**
+             * @description When true, the filter is visible to all team members (set by admins only).
+             * @default false
+             */
+            isTeamFilter: boolean;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -3149,6 +3154,8 @@ export interface operations {
                     name: string;
                     /** @description Opaque JSON filter spec (validated client-side). */
                     definition: string;
+                    /** @description When true, visible to all team members (admin-only). */
+                    isTeamFilter?: boolean;
                 };
             };
         };
@@ -3208,6 +3215,8 @@ export interface operations {
                 "application/json": {
                     name?: string;
                     definition?: string;
+                    /** @description When true, visible to all team members (admin-only to set true). */
+                    isTeamFilter?: boolean;
                 };
             };
         };
