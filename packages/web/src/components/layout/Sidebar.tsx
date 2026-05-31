@@ -881,8 +881,9 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
               active={true}
               collapsed={false}
               showDate={false}
+              canEdit={canEditTeam}
               onClick={() => setTimelinesOpen(true)}
-              onSettings={() => {}}
+              onSettings={() => onEditTimeline?.(activeTimeline.id)}
             />
           ))}
         </div>

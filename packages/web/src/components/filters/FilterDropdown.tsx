@@ -38,7 +38,7 @@ const PRESETS: Preset[] = [
   { id: 'open',     label: 'Open only',       icon: <CheckCircle {...ICON_PRESET} />, subtitle: 'Hide activities with a closed status' },
   { id: 'upcoming', label: 'Upcoming',         icon: <Clock       {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
   { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
-  { id: 'noassign', label: 'No assignee',      icon: <UserX       {...ICON_PRESET} /> },
+  { id: 'noassign', label: 'No one assigned',   icon: <UserX       {...ICON_PRESET} /> },
 ]
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
