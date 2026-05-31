@@ -273,6 +273,7 @@ packages/
       lib/
         api.test.ts
         api.ts
+        filterColors.ts
         filterEngine.test.ts
         filterEngine.ts
         filterTypes.ts
@@ -14734,1208 +14735,6 @@ export default function FilterConditionRow({
 }
 ````
 
-## File: packages/web/src/components/filters/FilterManageModal.tsx
-````typescript
-/**
- * Unified filter management modal. Replaces the FilterManagePanel and
- * FilterEditor sidebars with a single dialog for creating, editing,
- * duplicating, promoting, and demoting saved filters.
- */
-
-import { useState, useMemo, useEffect } from 'react'
-import { createPortal } from 'react-dom'
-import type { components } from '@draba/shared'
-import type { FilterCondition, FilterDefinition } from '@/lib/filterTypes'
-import {
-  useSavedFilters,
-  useAllTeamSavedFilters,
-  useCreateSavedFilter,
-  useUpdateSavedFilter,
-  useDeleteSavedFilter,
-} from '@/hooks/useSavedFilters'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useTags } from '@/hooks/useTags'
-import { useAuth } from '@/contexts/AuthContext'
-import FilterConditionRow from './FilterConditionRow'
-import {
-  Filter, X, Plus, ArrowLeft, Eye, Pencil, Trash2, Copy,
-  Globe, Lock, Users, AlertCircle, ArrowUp, Search, Check,
-} from 'lucide-react'
-
-type SavedFilter = components['schemas']['SavedFilter']
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-type TabId = 'mine' | 'team' | 'members'
-type EditorMode = 'new' | 'edit' | 'view'
-
-interface EditorState {
-  mode: EditorMode
-  filter?: SavedFilter
-  readOnly: boolean
-}
-
-// ���─ Helpers ───────────────────────────────────────────────────────────────────
-
-function makeBlank(): FilterCondition {
-  return { field: 'title', op: 'contains', value: '' }
-}
-
-function summarize(filter: SavedFilter): string {
-  try {
-    const def = JSON.parse(filter.definition) as FilterDefinition
-    if (!def.conditions?.length) return ''
-    const sep = def.logic === 'or' ? ' or ' : ' and '
-    return def.conditions
-      .map(c => `${c.field} ${String(c.op).replace(/_/g, ' ')}`)
-      .join(sep)
-  } catch { return '' }
-}
-
-function parseDraft(filter: SavedFilter): { logic: 'and' | 'or'; conditions: FilterCondition[] } {
-  try {
-    const def = JSON.parse(filter.definition) as FilterDefinition
-    return {
-      logic: def.logic ?? 'and',
-      conditions: def.conditions?.length ? def.conditions : [makeBlank()],
-    }
-  } catch {
-    return { logic: 'and', conditions: [makeBlank()] }
-  }
-}
-
-// ─��� Shared styles ─────────────────────────────────────────────────────────────
-
-const ICON_BTN: React.CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  width: 28,
-  height: 28,
-  border: '1px solid var(--border)',
-  borderRadius: 6,
-  background: 'transparent',
-  cursor: 'pointer',
-  color: 'var(--muted-foreground)',
-  flexShrink: 0,
-  fontFamily: 'var(--font-sans)',
-}
-
-const BTN: React.CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 5,
-  padding: '5px 12px',
-  border: '1px solid var(--border)',
-  borderRadius: 6,
-  fontSize: 12,
-  fontWeight: 500,
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  background: 'transparent',
-  color: 'var(--foreground)',
-  transition: 'all 0.1s',
-}
-
-const BTN_PRIMARY: React.CSSProperties = {
-  ...BTN,
-  background: 'var(--primary)',
-  color: 'white',
-  border: 'none',
-}
-
-const BTN_DANGER: React.CSSProperties = {
-  ...BTN,
-  color: 'var(--destructive)',
-  borderColor: 'rgba(239,68,68,.4)',
-}
-
-const BTN_PROMOTE: React.CSSProperties = {
-  ...BTN,
-  color: '#5B69E0',
-  borderColor: 'rgba(91,105,224,.35)',
-}
-
-// ── ScopePill ─────────────────────────────────────────────────────────────────
-
-function ScopePill({ isTeam }: { isTeam: boolean }) {
-  return (
-    <span style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 3,
-      padding: '2px 7px',
-      borderRadius: 99,
-      fontSize: 10,
-      fontWeight: 700,
-      background: isTeam ? 'rgba(40,140,155,.1)' : 'var(--muted)',
-      color: isTeam ? 'var(--primary)' : 'var(--muted-foreground)',
-      border: `1px solid ${isTeam ? 'rgba(40,140,155,.28)' : 'var(--border)'}`,
-      flexShrink: 0,
-    }}>
-      {isTeam
-        ? <Globe size={9} strokeWidth={2} />
-        : <Lock size={9} strokeWidth={2} />}
-      {isTeam ? 'Team' : 'Private'}
-    </span>
-  )
-}
-
-// ── FilterRow ─────────────────────────────────────────────────────────────────
-
-interface FilterRowProps {
-  filter: SavedFilter
-  currentUserId: string
-  isAdmin: boolean
-  /** Determines which action set to show. */
-  context: 'mine' | 'team' | 'member-admin'
-  onEdit?: () => void
-  onView?: () => void
-  onDuplicate?: () => void
-  onDelete?: () => void
-  onPromote?: () => void
-  onDemote?: () => void
-  ownerLabel?: string
-}
-
-function FilterRow({
-  filter, currentUserId, isAdmin, context,
-  onEdit, onView, onDuplicate, onDelete, onPromote, onDemote,
-  ownerLabel,
-}: FilterRowProps) {
-  const [hovered, setHovered] = useState(false)
-  const [confirmDel, setConfirmDel] = useState(false)
-  const summary = summarize(filter)
-  // member-admin always shows actions; others reveal on hover
-  const showActions = context === 'member-admin' || hovered
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => { setHovered(false); setConfirmDel(false) }}
-      style={{
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: 10,
-        padding: '10px 12px',
-        borderRadius: 8,
-        background: 'var(--card)',
-        border: `1px solid ${hovered ? 'rgba(0,0,0,.1)' : 'var(--border)'}`,
-        transition: 'background 0.08s, border-color 0.08s',
-      }}
-    >
-      {/* Icon tile */}
-      <div style={{
-        width: 28,
-        height: 28,
-        borderRadius: 6,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flexShrink: 0,
-        background: filter.isTeamFilter ? 'rgba(40,140,155,.1)' : 'var(--muted)',
-        border: `1px solid ${filter.isTeamFilter ? 'rgba(40,140,155,.25)' : 'var(--border)'}`,
-        color: filter.isTeamFilter ? 'var(--primary)' : 'var(--muted-foreground)',
-        marginTop: 1,
-      }}>
-        <Filter size={12} strokeWidth={1.8} />
-      </div>
-
-      {/* Content */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <span style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: 'var(--foreground)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}>
-            {filter.name}
-          </span>
-          <ScopePill isTeam={filter.isTeamFilter} />
-          {ownerLabel && (
-            <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
-              by {filter.userId === currentUserId ? 'you' : ownerLabel}
-            </span>
-          )}
-        </div>
-        {summary && (
-          <div style={{
-            fontSize: 11,
-            color: 'var(--muted-foreground)',
-            marginTop: 2,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}>
-            {summary}
-          </div>
-        )}
-
-        {/* Actions */}
-        {!confirmDel && (
-          <div style={{
-            display: 'flex',
-            gap: 5,
-            marginTop: 6,
-            flexWrap: 'wrap',
-            opacity: showActions ? 1 : 0,
-            transition: 'opacity 0.1s',
-          }}>
-            {context === 'member-admin' && (
-              <>
-                <button onClick={onView} style={ICON_BTN} title="View filter">
-                  <Eye size={12} strokeWidth={1.8} />
-                </button>
-                <button onClick={onPromote} style={BTN_PROMOTE}>
-                  <ArrowUp size={11} strokeWidth={2} />
-                  Promote to team
-                </button>
-              </>
-            )}
-            {context === 'team' && (
-              isAdmin ? (
-                <>
-                  <button onClick={onEdit} style={ICON_BTN} title="Edit">
-                    <Pencil size={12} strokeWidth={1.8} />
-                  </button>
-                  <button onClick={onDemote} style={ICON_BTN} title="Remove from team">
-                    <Lock size={12} strokeWidth={1.8} />
-                  </button>
-                  <button
-                    onClick={() => setConfirmDel(true)}
-                    style={{ ...ICON_BTN, color: 'var(--destructive)' }}
-                    title="Delete"
-                  >
-                    <Trash2 size={12} strokeWidth={1.8} />
-                  </button>
-                </>
-              ) : (
-                <button onClick={onView} style={ICON_BTN} title="View filter">
-                  <Eye size={12} strokeWidth={1.8} />
-                </button>
-              )
-            )}
-            {context === 'mine' && (
-              <>
-                <button onClick={onDuplicate} style={ICON_BTN} title="Duplicate">
-                  <Copy size={12} strokeWidth={1.8} />
-                </button>
-                <button onClick={onEdit} style={ICON_BTN} title="Edit">
-                  <Pencil size={12} strokeWidth={1.8} />
-                </button>
-                {isAdmin && (
-                  <button onClick={onPromote} style={BTN_PROMOTE}>
-                    <ArrowUp size={11} strokeWidth={2} />
-                    Promote
-                  </button>
-                )}
-                <button
-                  onClick={() => setConfirmDel(true)}
-                  style={{ ...ICON_BTN, color: 'var(--destructive)' }}
-                  title="Delete"
-                >
-                  <Trash2 size={12} strokeWidth={1.8} />
-                </button>
-              </>
-            )}
-          </div>
-        )}
-
-        {confirmDel && (
-          <div style={{ display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' }}>
-            <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flex: 1 }}>
-              Delete "{filter.name}"?
-            </span>
-            <button onClick={() => setConfirmDel(false)} style={BTN}>Cancel</button>
-            <button
-              onClick={() => { setConfirmDel(false); onDelete?.() }}
-              style={{ ...BTN, background: 'var(--destructive)', color: 'white', border: 'none' }}
-            >
-              Delete
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ── EmptyState ────────────────────────────────────────────────────────────────
-
-function EmptyState({ icon, title, body, onAction, actionLabel }: {
-  icon: React.ReactNode
-  title: string
-  body: string
-  onAction?: () => void
-  actionLabel?: string
-}) {
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      padding: '32px 24px',
-      border: '1px dashed var(--border)',
-      borderRadius: 10,
-      textAlign: 'center',
-      gap: 8,
-      color: 'var(--muted-foreground)',
-    }}>
-      <div style={{ marginBottom: 4 }}>{icon}</div>
-      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{title}</div>
-      <div style={{ fontSize: 12, maxWidth: 280 }}>{body}</div>
-      {onAction && actionLabel && (
-        <button onClick={onAction} style={{ ...BTN_PRIMARY, marginTop: 4 }}>
-          {actionLabel}
-        </button>
-      )}
-    </div>
-  )
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
-
-export interface FilterManageModalProps {
-  open: boolean
-  onClose: () => void
-  teamId: string
-  timelineId: string
-  isAdmin: boolean
-}
-
-export default function FilterManageModal({
-  open,
-  onClose,
-  teamId,
-  timelineId,
-  isAdmin,
-}: FilterManageModalProps) {
-  const { user } = useAuth()
-  const currentUserId = (user as { id?: string } | null)?.id ?? ''
-
-  // Data
-  const { data: filters = [] } = useSavedFilters(teamId)
-  const { data: allFilters = [] } = useAllTeamSavedFilters(teamId, isAdmin && open)
-  const { data: members = [] } = useTeamMembers(teamId)
-  const { data: tags = [] } = useTags(teamId)
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
-
-  const statusOptions = useMemo(() => {
-    const seen = new Set<string>()
-    return statuses
-      .filter(s => {
-        const k = s.name.toLowerCase()
-        if (seen.has(k)) return false
-        seen.add(k)
-        return true
-      })
-      .map(s => ({ value: s.name, label: s.name }))
-  }, [statuses])
-
-  // Mutations
-  const createFilter = useCreateSavedFilter(teamId)
-  const updateFilter = useUpdateSavedFilter(teamId)
-  const deleteFilter = useDeleteSavedFilter(teamId)
-
-  // Modal state
-  const [tab, setTab] = useState<TabId>('mine')
-  const [editor, setEditor] = useState<EditorState | null>(null)
-  const [search, setSearch] = useState('')
-  const [toast, setToast] = useState<string | null>(null)
-  const [editorError, setEditorError] = useState<string | null>(null)
-
-  // Editor draft state
-  const [draftName, setDraftName] = useState('')
-  const [draftLogic, setDraftLogic] = useState<'and' | 'or'>('and')
-  const [draftConditions, setDraftConditions] = useState<FilterCondition[]>([makeBlank()])
-
-  // Derived filter lists
-  const myFilters = filters.filter(f => f.userId === currentUserId && !f.isTeamFilter)
-  const teamFilters = filters.filter(f => f.isTeamFilter)
-  const memberPrivateFilters = allFilters.filter(f => !f.isTeamFilter)
-
-  // Group member filters by owner
-  const memberGroups = useMemo(() => {
-    const groups = new Map<string, SavedFilter[]>()
-    memberPrivateFilters.forEach(f => {
-      const g = groups.get(f.userId) ?? []
-      g.push(f)
-      groups.set(f.userId, g)
-    })
-    return groups
-  }, [memberPrivateFilters])
-
-  // Build userId → display name map
-  const memberNameById = useMemo(() => {
-    const map = new Map<string, string>()
-    members.forEach(m => {
-      if (m.userId) map.set(m.userId, m.displayName || m.email || 'Unknown')
-    })
-    return map
-  }, [members])
-
-  // Toast auto-dismiss
-  useEffect(() => {
-    if (!toast) return
-    const t = setTimeout(() => setToast(null), 2400)
-    return () => clearTimeout(t)
-  }, [toast])
-
-  // Escape key: close editor first, then modal
-  useEffect(() => {
-    if (!open) return
-    function onKey(e: KeyboardEvent) {
-      if (e.key !== 'Escape') return
-      if (editor) setEditor(null)
-      else onClose()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [open, editor, onClose])
-
-  // ── Editor helpers ──────────────────────────────────────────────────────────
-
-  function openNew() {
-    setDraftName('')
-    setDraftLogic('and')
-    setDraftConditions([makeBlank()])
-    setEditorError(null)
-    setEditor({ mode: 'new', readOnly: false })
-  }
-
-  function openEdit(filter: SavedFilter) {
-    const { logic, conditions } = parseDraft(filter)
-    setDraftName(filter.name)
-    setDraftLogic(logic)
-    setDraftConditions(conditions)
-    setEditorError(null)
-    setEditor({ mode: 'edit', filter, readOnly: false })
-  }
-
-  function openView(filter: SavedFilter) {
-    const { logic, conditions } = parseDraft(filter)
-    setDraftName(filter.name)
-    setDraftLogic(logic)
-    setDraftConditions(conditions)
-    setEditorError(null)
-    setEditor({ mode: 'view', filter, readOnly: true })
-  }
-
-  async function handleSave() {
-    if (!draftName.trim()) { setEditorError('Filter name is required.'); return }
-    setEditorError(null)
-    const definition = JSON.stringify({ logic: draftLogic, conditions: draftConditions } as FilterDefinition)
-    try {
-      if (editor?.mode === 'edit' && editor.filter) {
-        await updateFilter.mutateAsync({ id: editor.filter.id, name: draftName.trim(), definition })
-        setToast(`"${draftName.trim()}" updated.`)
-      } else {
-        await createFilter.mutateAsync({ name: draftName.trim(), definition })
-        setToast(`"${draftName.trim()}" created.`)
-      }
-      setEditor(null)
-    } catch {
-      setEditorError('Failed to save. Please try again.')
-    }
-  }
-
-  async function handleDelete(filter: SavedFilter) {
-    try {
-      await deleteFilter.mutateAsync(filter.id)
-      setToast(`"${filter.name}" deleted.`)
-    } catch {
-      setToast('Delete failed.')
-    }
-  }
-
-  async function handleDuplicate(filter: SavedFilter) {
-    try {
-      await createFilter.mutateAsync({
-        name: `${filter.name} copy`,
-        definition: filter.definition,
-      })
-      setToast(`Duplicated "${filter.name}".`)
-    } catch {
-      setToast('Duplicate failed.')
-    }
-  }
-
-  async function handlePromote(filter: SavedFilter) {
-    try {
-      await updateFilter.mutateAsync({ id: filter.id, isTeamFilter: true })
-      setToast(`"${filter.name}" promoted to Team filters.`)
-      setEditor(null)
-      setTab('team')
-    } catch {
-      setToast('Promote failed.')
-    }
-  }
-
-  async function handleDemote(filter: SavedFilter) {
-    try {
-      await updateFilter.mutateAsync({ id: filter.id, isTeamFilter: false })
-      setToast(`"${filter.name}" removed from Team filters.`)
-      setEditor(null)
-    } catch {
-      setToast('Failed to remove from team.')
-    }
-  }
-
-  const isSaving = createFilter.isPending || updateFilter.isPending
-
-  if (!open) return null
-
-  return createPortal(
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,.55)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 1000,
-        padding: 24,
-      }}
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}
-    >
-      <div
-        style={{
-          position: 'relative',
-          width: 700,
-          maxWidth: '100%',
-          maxHeight: '88vh',
-          display: 'flex',
-          flexDirection: 'column',
-          background: 'var(--card)',
-          border: '1px solid var(--border)',
-          borderRadius: 12,
-          boxShadow: '0 24px 64px rgba(0,0,0,.2)',
-        }}
-        onClick={e => e.stopPropagation()}
-      >
-        {/* ── Header ──────────────────────────────────────────────────────── */}
-        <div style={{
-          padding: '14px 18px',
-          borderBottom: '1px solid var(--border)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          flexShrink: 0,
-        }}>
-          <div style={{
-            width: 32,
-            height: 32,
-            borderRadius: 8,
-            background: 'rgba(40,140,155,.1)',
-            border: '1px solid rgba(40,140,155,.25)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}>
-            <Filter size={15} strokeWidth={1.8} color="var(--primary)" />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--foreground)' }}>Filters</div>
-            <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1 }}>
-              Manage, build, and share your timeline filters
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            style={{ ...ICON_BTN, border: 'none' }}
-            title="Close"
-          >
-            <X size={16} strokeWidth={1.8} />
-          </button>
-        </div>
-
-        {/* ── Tab bar (list mode only) ─────────────────────────────────────── */}
-        {!editor && (
-          <div style={{
-            padding: '0 18px',
-            borderBottom: '1px solid var(--border)',
-            display: 'flex',
-            flexShrink: 0,
-          }}>
-            {([
-              { id: 'mine' as TabId, label: 'My filters' },
-              { id: 'team' as TabId, label: 'Team filters', teamBadge: true },
-              ...(isAdmin ? [{ id: 'members' as TabId, label: "Members' filters", count: memberPrivateFilters.length }] : []),
-            ]).map(t => (
-              <button
-                key={t.id}
-                onClick={() => setTab(t.id)}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 5,
-                  padding: '10px 12px',
-                  background: 'transparent',
-                  border: 'none',
-                  borderBottom: tab === t.id ? '2px solid var(--primary)' : '2px solid transparent',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  fontWeight: tab === t.id ? 600 : 400,
-                  color: tab === t.id ? 'var(--foreground)' : 'var(--muted-foreground)',
-                  fontFamily: 'var(--font-sans)',
-                  marginBottom: -1,
-                  whiteSpace: 'nowrap',
-                  transition: 'color 0.1s, border-color 0.1s',
-                }}
-              >
-                {t.label}
-                {'teamBadge' in t && t.teamBadge && (
-                  <span style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    color: 'var(--primary)',
-                    background: 'rgba(40,140,155,.1)',
-                    border: '1px solid rgba(40,140,155,.25)',
-                    borderRadius: 99,
-                    padding: '1px 5px',
-                  }}>
-                    Team
-                  </span>
-                )}
-                {'count' in t && typeof t.count === 'number' && t.count > 0 && (
-                  <span style={{
-                    fontSize: 10,
-                    fontWeight: 600,
-                    background: 'var(--muted)',
-                    borderRadius: 99,
-                    padding: '1px 6px',
-                    color: 'var(--muted-foreground)',
-                  }}>
-                    {t.count}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* ── Editor sub-header ────────────────────────────────────────────── */}
-        {editor && (
-          <div style={{
-            padding: '10px 18px',
-            borderBottom: '1px solid var(--border)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            flexShrink: 0,
-          }}>
-            <button onClick={() => setEditor(null)} style={ICON_BTN} title="Back">
-              <ArrowLeft size={14} strokeWidth={2} />
-            </button>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{
-                fontSize: 10,
-                fontWeight: 700,
-                color: 'var(--muted-foreground)',
-                letterSpacing: '0.6px',
-                textTransform: 'uppercase',
-              }}>
-                {editor.mode === 'new' ? 'New filter' : editor.mode === 'edit' ? 'Edit filter' : 'Filter details'}
-              </div>
-              {editor.filter && (
-                <div style={{
-                  fontSize: 13,
-                  fontWeight: 600,
-                  color: 'var(--foreground)',
-                  marginTop: 1,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}>
-                  {editor.filter.name}
-                </div>
-              )}
-            </div>
-            <ScopePill isTeam={Boolean(editor.filter?.isTeamFilter)} />
-          </div>
-        )}
-
-        {/* ── Body ──────────────────────────────────────────────────────────── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-
-          {/* List mode */}
-          {!editor && tab === 'mine' && (
-            <div>
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                marginBottom: 12,
-                gap: 12,
-              }}>
-                <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0 }}>
-                  Private filters only you can see.
-                </p>
-                <button onClick={openNew} style={BTN_PRIMARY}>
-                  <Plus size={12} strokeWidth={2} />
-                  New filter
-                </button>
-              </div>
-              {myFilters.length === 0 ? (
-                <EmptyState
-                  icon={<Filter size={32} strokeWidth={1.2} />}
-                  title="No filters yet"
-                  body="Create a filter to quickly focus on the activities that matter to you."
-                  onAction={openNew}
-                  actionLabel="Create your first filter"
-                />
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {myFilters.map(f => (
-                    <FilterRow
-                      key={f.id}
-                      filter={f}
-                      currentUserId={currentUserId}
-                      isAdmin={isAdmin}
-                      context="mine"
-                      onEdit={() => openEdit(f)}
-                      onView={() => openView(f)}
-                      onDuplicate={() => handleDuplicate(f)}
-                      onDelete={() => handleDelete(f)}
-                      onPromote={() => handlePromote(f)}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {!editor && tab === 'team' && (
-            <div>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 12 }}>
-                Shared with everyone — these appear in every member's filter dropdown.{' '}
-                {isAdmin
-                  ? 'As an admin you can edit, demote, or remove them.'
-                  : 'Only team admins can change them.'}
-              </p>
-              {teamFilters.length === 0 ? (
-                <EmptyState
-                  icon={<Globe size={32} strokeWidth={1.2} />}
-                  title="No team filters"
-                  body={
-                    isAdmin
-                      ? 'Promote a member filter to make it available to everyone.'
-                      : 'Team admins can promote filters to share them here.'
-                  }
-                />
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {teamFilters.map(f => (
-                    <FilterRow
-                      key={f.id}
-                      filter={f}
-                      currentUserId={currentUserId}
-                      isAdmin={isAdmin}
-                      context="team"
-                      onEdit={() => openEdit(f)}
-                      onView={() => openView(f)}
-                      onDelete={() => handleDelete(f)}
-                      onDemote={() => handleDemote(f)}
-                      ownerLabel={memberNameById.get(f.userId)}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {!editor && tab === 'members' && isAdmin && (
-            <div>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 10 }}>
-                Every member's private filters. Promote any to a{' '}
-                <strong>Team filter</strong> to share it with the whole team.
-              </p>
-
-              <div style={{ position: 'relative', marginBottom: 12 }}>
-                <Search
-                  size={13}
-                  strokeWidth={1.8}
-                  style={{
-                    position: 'absolute',
-                    left: 9,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    color: 'var(--muted-foreground)',
-                    pointerEvents: 'none',
-                  }}
-                />
-                <input
-                  value={search}
-                  onChange={e => setSearch(e.target.value)}
-                  placeholder="Search by member or filter name…"
-                  style={{
-                    width: '100%',
-                    padding: '6px 8px 6px 28px',
-                    border: '1px solid var(--border)',
-                    borderRadius: 7,
-                    background: 'var(--background)',
-                    color: 'var(--foreground)',
-                    fontSize: 12,
-                    fontFamily: 'var(--font-sans)',
-                    boxSizing: 'border-box',
-                  }}
-                />
-              </div>
-
-              {memberGroups.size === 0 ? (
-                <EmptyState
-                  icon={<Users size={32} strokeWidth={1.2} />}
-                  title="No private filters"
-                  body="Members haven't created any private filters yet."
-                />
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                  {Array.from(memberGroups.entries()).map(([userId, filts]) => {
-                    const name = memberNameById.get(userId) ?? 'Unknown member'
-                    const q = search.toLowerCase()
-                    const visible = filts.filter(f =>
-                      !q || name.toLowerCase().includes(q) || f.name.toLowerCase().includes(q),
-                    )
-                    if (visible.length === 0) return null
-                    return (
-                      <div key={userId}>
-                        <div style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 6,
-                          marginBottom: 6,
-                          fontSize: 12,
-                          fontWeight: 600,
-                          color: 'var(--foreground)',
-                        }}>
-                          <div style={{
-                            width: 20,
-                            height: 20,
-                            borderRadius: 99,
-                            background: 'var(--primary)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontSize: 10,
-                            fontWeight: 700,
-                            color: 'white',
-                            flexShrink: 0,
-                          }}>
-                            {(name[0] ?? '?').toUpperCase()}
-                          </div>
-                          {userId === currentUserId ? `${name} (you)` : name}
-                          <span style={{
-                            fontSize: 10,
-                            fontWeight: 600,
-                            background: 'var(--muted)',
-                            borderRadius: 99,
-                            padding: '1px 6px',
-                            color: 'var(--muted-foreground)',
-                          }}>
-                            {visible.length}
-                          </span>
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                          {visible.map(f => (
-                            <FilterRow
-                              key={f.id}
-                              filter={f}
-                              currentUserId={currentUserId}
-                              isAdmin={isAdmin}
-                              context="member-admin"
-                              onView={() => openView(f)}
-                              onPromote={() => handlePromote(f)}
-                              onDelete={() => handleDelete(f)}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-
-              {memberPrivateFilters.length > 0 && (
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: 7,
-                  marginTop: 16,
-                  padding: '9px 12px',
-                  background: 'var(--muted)',
-                  borderRadius: 7,
-                  fontSize: 11,
-                  color: 'var(--muted-foreground)',
-                }}>
-                  <AlertCircle size={13} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 1 }} />
-                  <span>
-                    {memberPrivateFilters.length} private filter
-                    {memberPrivateFilters.length !== 1 ? 's' : ''} across the team.
-                    Promoting moves a filter into Team filters for everyone; you can remove it any time.
-                  </span>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Editor mode */}
-          {editor && (
-            <div>
-              {editor.readOnly && (
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '8px 12px',
-                  background: 'var(--muted)',
-                  borderRadius: 7,
-                  marginBottom: 16,
-                  fontSize: 12,
-                  color: 'var(--muted-foreground)',
-                }}>
-                  <Eye size={13} strokeWidth={1.8} style={{ flexShrink: 0 }} />
-                  Read-only —{' '}
-                  {editor.filter?.isTeamFilter
-                    ? 'only team admins can edit team filters.'
-                    : 'this filter belongs to another member.'}
-                </div>
-              )}
-
-              <div style={{
-                pointerEvents: editor.readOnly ? 'none' : undefined,
-                opacity: editor.readOnly ? 0.85 : 1,
-              }}>
-                {/* Name */}
-                <div style={{ marginBottom: 14 }}>
-                  <label style={{
-                    display: 'block',
-                    fontSize: 10,
-                    fontWeight: 700,
-                    color: 'var(--muted-foreground)',
-                    letterSpacing: '0.6px',
-                    textTransform: 'uppercase',
-                    marginBottom: 5,
-                  }}>
-                    Filter name
-                  </label>
-                  <input
-                    value={draftName}
-                    onChange={e => setDraftName(e.target.value)}
-                    placeholder="e.g. My open tasks"
-                    // eslint-disable-next-line jsx-a11y/no-autofocus
-                    autoFocus={!editor.readOnly}
-                    style={{
-                      width: '100%',
-                      padding: '8px 10px',
-                      border: '1px solid var(--border)',
-                      borderRadius: 6,
-                      background: 'var(--background)',
-                      color: 'var(--foreground)',
-                      fontSize: 13,
-                      fontFamily: 'var(--font-sans)',
-                      boxSizing: 'border-box',
-                    }}
-                  />
-                </div>
-
-                {/* Match toggle */}
-                <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>Match</span>
-                  <div style={{
-                    display: 'flex',
-                    background: 'var(--muted)',
-                    borderRadius: 6,
-                    padding: 2,
-                    border: '1px solid var(--border)',
-                  }}>
-                    {(['and', 'or'] as const).map(l => (
-                      <button
-                        key={l}
-                        type="button"
-                        onClick={() => setDraftLogic(l)}
-                        style={{
-                          padding: '3px 10px',
-                          border: 'none',
-                          borderRadius: 4,
-                          fontSize: 12,
-                          fontWeight: 600,
-                          cursor: 'pointer',
-                          fontFamily: 'var(--font-sans)',
-                          background: draftLogic === l ? 'var(--primary)' : 'transparent',
-                          color: draftLogic === l ? 'white' : 'var(--muted-foreground)',
-                          transition: 'all 0.1s',
-                        }}
-                      >
-                        {l === 'and' ? 'All' : 'Any'}
-                      </button>
-                    ))}
-                  </div>
-                  <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>of the following conditions</span>
-                </div>
-
-                {/* Conditions */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
-                  {draftConditions.map((c, i) => (
-                    <FilterConditionRow
-                      key={i}
-                      condition={c}
-                      statusOptions={statusOptions}
-                      tags={tags}
-                      members={members}
-                      onChange={next =>
-                        setDraftConditions(prev => prev.map((x, j) => j === i ? next : x))
-                      }
-                      onRemove={() =>
-                        setDraftConditions(prev => {
-                          const next = prev.filter((_, j) => j !== i)
-                          return next.length ? next : [makeBlank()]
-                        })
-                      }
-                    />
-                  ))}
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setDraftConditions(prev => [...prev, makeBlank()])}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    padding: '6px 12px',
-                    border: '1px dashed var(--border)',
-                    borderRadius: 6,
-                    background: 'transparent',
-                    color: 'var(--muted-foreground)',
-                    cursor: 'pointer',
-                    fontSize: 12,
-                    fontFamily: 'var(--font-sans)',
-                  }}
-                >
-                  <Plus size={12} strokeWidth={2} />
-                  Add condition
-                </button>
-              </div>
-
-              {editorError && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)', marginTop: 10 }}>
-                  {editorError}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* ── Footer ──────────────────────────────────────────────────────── */}
-        <div style={{
-          padding: '12px 18px',
-          borderTop: '1px solid var(--border)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexShrink: 0,
-          gap: 8,
-        }}>
-          {!editor ? (
-            <>
-              <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
-                {teamFilters.length} team · {myFilters.length} private
-              </span>
-              <button onClick={onClose} style={BTN_PRIMARY}>Done</button>
-            </>
-          ) : (
-            <>
-              {/* Left cluster — destructive / scope actions */}
-              <div style={{ display: 'flex', gap: 8 }}>
-                {editor.mode === 'edit' && editor.filter && !editor.readOnly && (
-                  <button
-                    onClick={async () => {
-                      if (!editor.filter) return
-                      await handleDelete(editor.filter)
-                      setEditor(null)
-                    }}
-                    style={BTN_DANGER}
-                  >
-                    <Trash2 size={11} strokeWidth={2} />
-                    Delete
-                  </button>
-                )}
-                {editor.mode === 'edit' && editor.filter && isAdmin && !editor.filter.isTeamFilter && (
-                  <button onClick={() => editor.filter && handlePromote(editor.filter)} style={BTN_PROMOTE}>
-                    <ArrowUp size={11} strokeWidth={2} />
-                    Promote to team
-                  </button>
-                )}
-                {editor.mode === 'edit' && editor.filter?.isTeamFilter && isAdmin && (
-                  <button onClick={() => editor.filter && handleDemote(editor.filter)} style={BTN}>
-                    <Lock size={11} strokeWidth={2} />
-                    Remove from team
-                  </button>
-                )}
-              </div>
-
-              {/* Right cluster */}
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={() => setEditor(null)} style={BTN}>
-                  {editor.readOnly ? 'Back' : 'Cancel'}
-                </button>
-                {!editor.readOnly && (
-                  <button
-                    onClick={handleSave}
-                    disabled={isSaving || !draftName.trim()}
-                    style={{
-                      ...BTN_PRIMARY,
-                      opacity: isSaving || !draftName.trim() ? 0.6 : 1,
-                      cursor: isSaving || !draftName.trim() ? 'not-allowed' : 'pointer',
-                    }}
-                  >
-                    <Check size={12} strokeWidth={2.5} />
-                    {isSaving ? 'Saving…' : editor.mode === 'new' ? 'Create filter' : 'Save changes'}
-                  </button>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* ── Toast ───────────────────────────────────────────────────────── */}
-        {toast && (
-          <div style={{
-            position: 'fixed',
-            bottom: 24,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 99,
-            padding: '7px 16px',
-            fontSize: 12,
-            color: 'var(--foreground)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 7,
-            boxShadow: '0 4px 16px rgba(0,0,0,.12)',
-            whiteSpace: 'nowrap',
-            pointerEvents: 'none',
-            zIndex: 1001,
-          }}>
-            <Check size={13} strokeWidth={2.5} color="var(--primary)" />
-            {toast}
-          </div>
-        )}
-      </div>
-    </div>,
-    document.body,
-  )
-}
-````
-
 ## File: packages/web/src/components/gantt/GanttView.filter.test.ts
 ````typescript
 import { describe, it, expect } from 'vitest'
@@ -17181,6 +15980,34 @@ describe('ApiError', () => {
     expect(err.code).toBe('NOT_FOUND')
   })
 })
+````
+
+## File: packages/web/src/lib/filterColors.ts
+````typescript
+/**
+ * Derives a consistent accent color for a saved filter from its ID.
+ * Uses a simple hash so the same filter always gets the same color
+ * without storing color in the database.
+ */
+
+const PALETTE = [
+  '#E05252', // red
+  '#E07A3A', // orange
+  '#C4980F', // amber
+  '#3AAD6E', // green
+  '#1E9E9E', // teal
+  '#4A7FD4', // blue
+  '#7B52D4', // purple
+  '#C4528B', // pink
+]
+
+export function filterColor(id: string): string {
+  let h = 0
+  for (let i = 0; i < id.length; i++) {
+    h = (h * 31 + id.charCodeAt(i)) >>> 0
+  }
+  return PALETTE[h % PALETTE.length]
+}
 ````
 
 ## File: packages/web/src/lib/filterEngine.test.ts
@@ -21301,6 +20128,1180 @@ INSERT INTO activity_tags (activity_id, tag_id) VALUES
   ('a-reb-14', 'tag-mcf-launch'),
   ('a-reb-15', 'tag-mcf-analytics'),
   ('a-reb-15', 'tag-mcf-launch');
+````
+
+## File: packages/web/src/components/filters/FilterManageModal.tsx
+````typescript
+/**
+ * Unified filter management modal. Replaces the FilterManagePanel and
+ * FilterEditor sidebars with a single dialog for creating, editing,
+ * duplicating, promoting, and demoting saved filters.
+ */
+
+import { useState, useMemo, useEffect } from 'react'
+import { createPortal } from 'react-dom'
+import type { components } from '@draba/shared'
+import type { FilterCondition, FilterDefinition } from '@/lib/filterTypes'
+import {
+  useSavedFilters,
+  useAllTeamSavedFilters,
+  useCreateSavedFilter,
+  useUpdateSavedFilter,
+  useDeleteSavedFilter,
+} from '@/hooks/useSavedFilters'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useTags } from '@/hooks/useTags'
+import { useAuth } from '@/contexts/AuthContext'
+import FilterConditionRow from './FilterConditionRow'
+import {
+  Filter, X, Plus, ArrowLeft, Eye, Pencil, Trash2, Copy,
+  Globe, Lock, Users, AlertCircle, ArrowUp, Search, Check,
+} from 'lucide-react'
+import { filterColor } from '@/lib/filterColors'
+
+type SavedFilter = components['schemas']['SavedFilter']
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+type TabId = 'mine' | 'team' | 'members'
+type EditorMode = 'new' | 'edit' | 'view'
+
+interface EditorState {
+  mode: EditorMode
+  filter?: SavedFilter
+  readOnly: boolean
+}
+
+// ���─ Helpers ───────────────────────────────────────────────────────────────────
+
+function makeBlank(): FilterCondition {
+  return { field: 'title', op: 'contains', value: '' }
+}
+
+
+function parseDraft(filter: SavedFilter): { logic: 'and' | 'or'; conditions: FilterCondition[] } {
+  try {
+    const def = JSON.parse(filter.definition) as FilterDefinition
+    return {
+      logic: def.logic ?? 'and',
+      conditions: def.conditions?.length ? def.conditions : [makeBlank()],
+    }
+  } catch {
+    return { logic: 'and', conditions: [makeBlank()] }
+  }
+}
+
+// ─��� Shared styles ─────────────────────────────────────────────────────────────
+
+const ICON_BTN: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: 28,
+  height: 28,
+  border: '1px solid var(--border)',
+  borderRadius: 6,
+  background: 'transparent',
+  cursor: 'pointer',
+  color: 'var(--muted-foreground)',
+  flexShrink: 0,
+  fontFamily: 'var(--font-sans)',
+}
+
+const BTN: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 5,
+  padding: '5px 12px',
+  border: '1px solid var(--border)',
+  borderRadius: 6,
+  fontSize: 12,
+  fontWeight: 500,
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+  background: 'transparent',
+  color: 'var(--foreground)',
+  transition: 'all 0.1s',
+}
+
+const BTN_PRIMARY: React.CSSProperties = {
+  ...BTN,
+  background: 'var(--primary)',
+  color: 'white',
+  border: 'none',
+}
+
+const BTN_DANGER: React.CSSProperties = {
+  ...BTN,
+  color: 'var(--destructive)',
+  borderColor: 'rgba(239,68,68,.4)',
+}
+
+const BTN_PROMOTE: React.CSSProperties = {
+  ...BTN,
+  color: '#5B69E0',
+  borderColor: 'rgba(91,105,224,.35)',
+}
+
+// ── ScopePill ─────────────────────────────────────────────────────────────────
+
+function ScopePill({ isTeam }: { isTeam: boolean }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 3,
+      padding: '2px 7px',
+      borderRadius: 99,
+      fontSize: 10,
+      fontWeight: 700,
+      background: isTeam ? 'rgba(40,140,155,.1)' : 'var(--muted)',
+      color: isTeam ? 'var(--primary)' : 'var(--muted-foreground)',
+      border: `1px solid ${isTeam ? 'rgba(40,140,155,.28)' : 'var(--border)'}`,
+      flexShrink: 0,
+    }}>
+      {isTeam
+        ? <Globe size={9} strokeWidth={2} />
+        : <Lock size={9} strokeWidth={2} />}
+      {isTeam ? 'Team' : 'Private'}
+    </span>
+  )
+}
+
+// ── FilterRow ─────────────────────────────────────────────────────────────────
+
+interface FilterRowProps {
+  filter: SavedFilter
+  currentUserId: string
+  isAdmin: boolean
+  /** Determines which action set to show. */
+  context: 'mine' | 'team' | 'member-admin'
+  onEdit?: () => void
+  onView?: () => void
+  onDuplicate?: () => void
+  onDelete?: () => void
+  onPromote?: () => void
+  onDemote?: () => void
+  ownerLabel?: string
+}
+
+function FilterRow({
+  filter, currentUserId, isAdmin, context,
+  onEdit, onView, onDuplicate, onDelete, onPromote, onDemote,
+  ownerLabel,
+}: FilterRowProps) {
+  const [hovered, setHovered] = useState(false)
+  const [confirmDel, setConfirmDel] = useState(false)
+  const color = filterColor(filter.id)
+  // member-admin always shows actions; others reveal on hover
+  const showActions = context === 'member-admin' || hovered
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => { setHovered(false); setConfirmDel(false) }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '10px 12px',
+        borderRadius: 8,
+        background: 'var(--card)',
+        border: `1px solid ${hovered ? 'rgba(0,0,0,.1)' : 'var(--border)'}`,
+        transition: 'background 0.08s, border-color 0.08s',
+      }}
+    >
+      {/* Icon tile — color derived from filter ID */}
+      <div style={{
+        width: 28,
+        height: 28,
+        borderRadius: 6,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+        background: `${color}20`,
+        border: `1px solid ${color}50`,
+        color,
+      }}>
+        <Filter size={12} strokeWidth={1.8} />
+      </div>
+
+      {/* Name + pill */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: 'var(--foreground)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            {filter.name}
+          </span>
+          <ScopePill isTeam={filter.isTeamFilter} />
+          {ownerLabel && (
+            <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
+              by {filter.userId === currentUserId ? 'you' : ownerLabel}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Right-side actions — revealed on hover */}
+      {confirmDel ? (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+          <button onClick={() => setConfirmDel(false)} style={BTN}>Cancel</button>
+          <button
+            onClick={() => { setConfirmDel(false); onDelete?.() }}
+            style={{ ...BTN, background: 'var(--destructive)', color: 'white', border: 'none' }}
+          >
+            Delete
+          </button>
+        </div>
+      ) : (
+        <div style={{
+          display: 'flex',
+          gap: 5,
+          flexShrink: 0,
+          alignItems: 'center',
+          opacity: showActions ? 1 : 0,
+          transition: 'opacity 0.1s',
+        }}>
+          {context === 'member-admin' && (
+            <>
+              <button onClick={onView} style={ICON_BTN} title="View filter">
+                <Eye size={12} strokeWidth={1.8} />
+              </button>
+              <button onClick={onPromote} style={BTN_PROMOTE}>
+                <ArrowUp size={11} strokeWidth={2} />
+                Promote to team
+              </button>
+            </>
+          )}
+          {context === 'team' && (
+            isAdmin ? (
+              <>
+                <button onClick={onEdit} style={ICON_BTN} title="Edit">
+                  <Pencil size={12} strokeWidth={1.8} />
+                </button>
+                <button onClick={onDemote} style={ICON_BTN} title="Remove from team">
+                  <Lock size={12} strokeWidth={1.8} />
+                </button>
+                <button
+                  onClick={() => setConfirmDel(true)}
+                  style={{ ...ICON_BTN, color: 'var(--destructive)' }}
+                  title="Delete"
+                >
+                  <Trash2 size={12} strokeWidth={1.8} />
+                </button>
+              </>
+            ) : (
+              <button onClick={onView} style={ICON_BTN} title="View filter">
+                <Eye size={12} strokeWidth={1.8} />
+              </button>
+            )
+          )}
+          {context === 'mine' && (
+            <>
+              <button onClick={onDuplicate} style={ICON_BTN} title="Duplicate">
+                <Copy size={12} strokeWidth={1.8} />
+              </button>
+              <button onClick={onEdit} style={ICON_BTN} title="Edit">
+                <Pencil size={12} strokeWidth={1.8} />
+              </button>
+              {isAdmin && (
+                <button onClick={onPromote} style={BTN_PROMOTE}>
+                  <ArrowUp size={11} strokeWidth={2} />
+                  Promote
+                </button>
+              )}
+              <button
+                onClick={() => setConfirmDel(true)}
+                style={{ ...ICON_BTN, color: 'var(--destructive)' }}
+                title="Delete"
+              >
+                <Trash2 size={12} strokeWidth={1.8} />
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── EmptyState ────────────────────────────────────────────────────────────────
+
+function EmptyState({ icon, title, body, onAction, actionLabel }: {
+  icon: React.ReactNode
+  title: string
+  body: string
+  onAction?: () => void
+  actionLabel?: string
+}) {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      padding: '32px 24px',
+      border: '1px dashed var(--border)',
+      borderRadius: 10,
+      textAlign: 'center',
+      gap: 8,
+      color: 'var(--muted-foreground)',
+    }}>
+      <div style={{ marginBottom: 4 }}>{icon}</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{title}</div>
+      <div style={{ fontSize: 12, maxWidth: 280 }}>{body}</div>
+      {onAction && actionLabel && (
+        <button onClick={onAction} style={{ ...BTN_PRIMARY, marginTop: 4 }}>
+          {actionLabel}
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+
+export interface FilterManageModalProps {
+  open: boolean
+  onClose: () => void
+  teamId: string
+  timelineId: string
+  isAdmin: boolean
+}
+
+export default function FilterManageModal({
+  open,
+  onClose,
+  teamId,
+  timelineId,
+  isAdmin,
+}: FilterManageModalProps) {
+  const { user } = useAuth()
+  const currentUserId = (user as { id?: string } | null)?.id ?? ''
+
+  // Data
+  const { data: filters = [] } = useSavedFilters(teamId)
+  const { data: allFilters = [] } = useAllTeamSavedFilters(teamId, isAdmin && open)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const { data: tags = [] } = useTags(teamId)
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
+
+  const statusOptions = useMemo(() => {
+    const seen = new Set<string>()
+    return statuses
+      .filter(s => {
+        const k = s.name.toLowerCase()
+        if (seen.has(k)) return false
+        seen.add(k)
+        return true
+      })
+      .map(s => ({ value: s.name, label: s.name }))
+  }, [statuses])
+
+  // Mutations
+  const createFilter = useCreateSavedFilter(teamId)
+  const updateFilter = useUpdateSavedFilter(teamId)
+  const deleteFilter = useDeleteSavedFilter(teamId)
+
+  // Modal state
+  const [tab, setTab] = useState<TabId>('mine')
+  const [editor, setEditor] = useState<EditorState | null>(null)
+  const [search, setSearch] = useState('')
+  const [toast, setToast] = useState<string | null>(null)
+  const [editorError, setEditorError] = useState<string | null>(null)
+
+  // Editor draft state
+  const [draftName, setDraftName] = useState('')
+  const [draftLogic, setDraftLogic] = useState<'and' | 'or'>('and')
+  const [draftConditions, setDraftConditions] = useState<FilterCondition[]>([makeBlank()])
+
+  // Derived filter lists
+  const myFilters = filters.filter(f => f.userId === currentUserId && !f.isTeamFilter)
+  const teamFilters = filters.filter(f => f.isTeamFilter)
+  const memberPrivateFilters = allFilters.filter(f => !f.isTeamFilter)
+
+  // Group member filters by owner
+  const memberGroups = useMemo(() => {
+    const groups = new Map<string, SavedFilter[]>()
+    memberPrivateFilters.forEach(f => {
+      const g = groups.get(f.userId) ?? []
+      g.push(f)
+      groups.set(f.userId, g)
+    })
+    return groups
+  }, [memberPrivateFilters])
+
+  // Build userId → display name map
+  const memberNameById = useMemo(() => {
+    const map = new Map<string, string>()
+    members.forEach(m => {
+      if (m.userId) map.set(m.userId, m.displayName || m.email || 'Unknown')
+    })
+    return map
+  }, [members])
+
+  // Toast auto-dismiss
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 2400)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  // Escape key: close editor first, then modal
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return
+      if (editor) setEditor(null)
+      else onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open, editor, onClose])
+
+  // ── Editor helpers ──────────────────────────────────────────────────────────
+
+  function openNew() {
+    setDraftName('')
+    setDraftLogic('and')
+    setDraftConditions([makeBlank()])
+    setEditorError(null)
+    setEditor({ mode: 'new', readOnly: false })
+  }
+
+  function openEdit(filter: SavedFilter) {
+    const { logic, conditions } = parseDraft(filter)
+    setDraftName(filter.name)
+    setDraftLogic(logic)
+    setDraftConditions(conditions)
+    setEditorError(null)
+    setEditor({ mode: 'edit', filter, readOnly: false })
+  }
+
+  function openView(filter: SavedFilter) {
+    const { logic, conditions } = parseDraft(filter)
+    setDraftName(filter.name)
+    setDraftLogic(logic)
+    setDraftConditions(conditions)
+    setEditorError(null)
+    setEditor({ mode: 'view', filter, readOnly: true })
+  }
+
+  async function handleSave() {
+    if (!draftName.trim()) { setEditorError('Filter name is required.'); return }
+    setEditorError(null)
+    const definition = JSON.stringify({ logic: draftLogic, conditions: draftConditions } as FilterDefinition)
+    try {
+      if (editor?.mode === 'edit' && editor.filter) {
+        await updateFilter.mutateAsync({ id: editor.filter.id, name: draftName.trim(), definition })
+        setToast(`"${draftName.trim()}" updated.`)
+      } else {
+        await createFilter.mutateAsync({ name: draftName.trim(), definition })
+        setToast(`"${draftName.trim()}" created.`)
+      }
+      setEditor(null)
+    } catch {
+      setEditorError('Failed to save. Please try again.')
+    }
+  }
+
+  async function handleDelete(filter: SavedFilter) {
+    try {
+      await deleteFilter.mutateAsync(filter.id)
+      setToast(`"${filter.name}" deleted.`)
+    } catch {
+      setToast('Delete failed.')
+    }
+  }
+
+  async function handleDuplicate(filter: SavedFilter) {
+    try {
+      await createFilter.mutateAsync({
+        name: `${filter.name} copy`,
+        definition: filter.definition,
+      })
+      setToast(`Duplicated "${filter.name}".`)
+    } catch {
+      setToast('Duplicate failed.')
+    }
+  }
+
+  async function handlePromote(filter: SavedFilter) {
+    try {
+      await updateFilter.mutateAsync({ id: filter.id, isTeamFilter: true })
+      setToast(`"${filter.name}" promoted to Team filters.`)
+      setEditor(null)
+      setTab('team')
+    } catch {
+      setToast('Promote failed.')
+    }
+  }
+
+  async function handleDemote(filter: SavedFilter) {
+    try {
+      await updateFilter.mutateAsync({ id: filter.id, isTeamFilter: false })
+      setToast(`"${filter.name}" removed from Team filters.`)
+      setEditor(null)
+    } catch {
+      setToast('Failed to remove from team.')
+    }
+  }
+
+  const isSaving = createFilter.isPending || updateFilter.isPending
+
+  if (!open) return null
+
+  return createPortal(
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,.55)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000,
+        padding: 24,
+      }}
+    >
+      <div
+        style={{
+          position: 'relative',
+          width: 700,
+          maxWidth: '100%',
+          maxHeight: '88vh',
+          display: 'flex',
+          flexDirection: 'column',
+          background: 'var(--card)',
+          border: '1px solid var(--border)',
+          borderRadius: 12,
+          boxShadow: '0 24px 64px rgba(0,0,0,.2)',
+        }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* ── Header ──────────────────────────────────────────────────────── */}
+        <div style={{
+          padding: '14px 18px',
+          borderBottom: '1px solid var(--border)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          flexShrink: 0,
+        }}>
+          <div style={{
+            width: 32,
+            height: 32,
+            borderRadius: 8,
+            background: 'rgba(40,140,155,.1)',
+            border: '1px solid rgba(40,140,155,.25)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <Filter size={15} strokeWidth={1.8} color="var(--primary)" />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--foreground)' }}>Filters</div>
+            <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1 }}>
+              Manage, build, and share your timeline filters
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{ ...ICON_BTN, border: 'none' }}
+            title="Close"
+          >
+            <X size={16} strokeWidth={1.8} />
+          </button>
+        </div>
+
+        {/* ── Tab bar (list mode only) ─────────────────────────────────────── */}
+        {!editor && (
+          <div style={{
+            padding: '0 18px',
+            borderBottom: '1px solid var(--border)',
+            display: 'flex',
+            flexShrink: 0,
+          }}>
+            {([
+              { id: 'mine' as TabId, label: 'My filters' },
+              { id: 'team' as TabId, label: 'Team filters', teamBadge: true },
+              ...(isAdmin ? [{ id: 'members' as TabId, label: "Members' filters", count: memberPrivateFilters.length }] : []),
+            ]).map(t => (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  padding: '10px 12px',
+                  background: 'transparent',
+                  border: 'none',
+                  borderBottom: tab === t.id ? '2px solid var(--primary)' : '2px solid transparent',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  fontWeight: tab === t.id ? 600 : 400,
+                  color: tab === t.id ? 'var(--foreground)' : 'var(--muted-foreground)',
+                  fontFamily: 'var(--font-sans)',
+                  marginBottom: -1,
+                  whiteSpace: 'nowrap',
+                  transition: 'color 0.1s, border-color 0.1s',
+                }}
+              >
+                {t.label}
+                {'teamBadge' in t && t.teamBadge && (
+                  <span style={{
+                    fontSize: 9,
+                    fontWeight: 700,
+                    color: 'var(--primary)',
+                    background: 'rgba(40,140,155,.1)',
+                    border: '1px solid rgba(40,140,155,.25)',
+                    borderRadius: 99,
+                    padding: '1px 5px',
+                  }}>
+                    Team
+                  </span>
+                )}
+                {'count' in t && typeof t.count === 'number' && t.count > 0 && (
+                  <span style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    background: 'var(--muted)',
+                    borderRadius: 99,
+                    padding: '1px 6px',
+                    color: 'var(--muted-foreground)',
+                  }}>
+                    {t.count}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* ── Editor sub-header ────────────────────────────────────────────── */}
+        {editor && (
+          <div style={{
+            padding: '10px 18px',
+            borderBottom: '1px solid var(--border)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            flexShrink: 0,
+          }}>
+            <button onClick={() => setEditor(null)} style={ICON_BTN} title="Back">
+              <ArrowLeft size={14} strokeWidth={2} />
+            </button>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{
+                fontSize: 10,
+                fontWeight: 700,
+                color: 'var(--muted-foreground)',
+                letterSpacing: '0.6px',
+                textTransform: 'uppercase',
+              }}>
+                {editor.mode === 'new' ? 'New filter' : editor.mode === 'edit' ? 'Edit filter' : 'Filter details'}
+              </div>
+              {editor.filter && (
+                <div style={{
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: 'var(--foreground)',
+                  marginTop: 1,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}>
+                  {editor.filter.name}
+                </div>
+              )}
+            </div>
+            <ScopePill isTeam={Boolean(editor.filter?.isTeamFilter)} />
+          </div>
+        )}
+
+        {/* ── Body ──────────────────────────────────────────────────────────── */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+
+          {/* List mode */}
+          {!editor && tab === 'mine' && (
+            <div>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: 12,
+                gap: 12,
+              }}>
+                <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0 }}>
+                  Private filters only you can see.
+                </p>
+                <button onClick={openNew} style={BTN_PRIMARY}>
+                  <Plus size={12} strokeWidth={2} />
+                  New filter
+                </button>
+              </div>
+              {myFilters.length === 0 ? (
+                <EmptyState
+                  icon={<Filter size={32} strokeWidth={1.2} />}
+                  title="No filters yet"
+                  body="Create a filter to quickly focus on the activities that matter to you."
+                  onAction={openNew}
+                  actionLabel="Create your first filter"
+                />
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {myFilters.map(f => (
+                    <FilterRow
+                      key={f.id}
+                      filter={f}
+                      currentUserId={currentUserId}
+                      isAdmin={isAdmin}
+                      context="mine"
+                      onEdit={() => openEdit(f)}
+                      onView={() => openView(f)}
+                      onDuplicate={() => handleDuplicate(f)}
+                      onDelete={() => handleDelete(f)}
+                      onPromote={() => handlePromote(f)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {!editor && tab === 'team' && (
+            <div>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 12 }}>
+                Shared with everyone — these appear in every member's filter dropdown.{' '}
+                {isAdmin
+                  ? 'As an admin you can edit, demote, or remove them.'
+                  : 'Only team admins can change them.'}
+              </p>
+              {teamFilters.length === 0 ? (
+                <EmptyState
+                  icon={<Globe size={32} strokeWidth={1.2} />}
+                  title="No team filters"
+                  body={
+                    isAdmin
+                      ? 'Promote a member filter to make it available to everyone.'
+                      : 'Team admins can promote filters to share them here.'
+                  }
+                />
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {teamFilters.map(f => (
+                    <FilterRow
+                      key={f.id}
+                      filter={f}
+                      currentUserId={currentUserId}
+                      isAdmin={isAdmin}
+                      context="team"
+                      onEdit={() => openEdit(f)}
+                      onView={() => openView(f)}
+                      onDelete={() => handleDelete(f)}
+                      onDemote={() => handleDemote(f)}
+                      ownerLabel={memberNameById.get(f.userId)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {!editor && tab === 'members' && isAdmin && (
+            <div>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 10 }}>
+                Every member's private filters. Promote any to a{' '}
+                <strong>Team filter</strong> to share it with the whole team.
+              </p>
+
+              <div style={{ position: 'relative', marginBottom: 12 }}>
+                <Search
+                  size={13}
+                  strokeWidth={1.8}
+                  style={{
+                    position: 'absolute',
+                    left: 9,
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    color: 'var(--muted-foreground)',
+                    pointerEvents: 'none',
+                  }}
+                />
+                <input
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Search by member or filter name…"
+                  style={{
+                    width: '100%',
+                    padding: '6px 8px 6px 28px',
+                    border: '1px solid var(--border)',
+                    borderRadius: 7,
+                    background: 'var(--background)',
+                    color: 'var(--foreground)',
+                    fontSize: 12,
+                    fontFamily: 'var(--font-sans)',
+                    boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+
+              {memberGroups.size === 0 ? (
+                <EmptyState
+                  icon={<Users size={32} strokeWidth={1.2} />}
+                  title="No private filters"
+                  body="Members haven't created any private filters yet."
+                />
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  {Array.from(memberGroups.entries()).map(([userId, filts]) => {
+                    const name = memberNameById.get(userId) ?? 'Unknown member'
+                    const q = search.toLowerCase()
+                    const visible = filts.filter(f =>
+                      !q || name.toLowerCase().includes(q) || f.name.toLowerCase().includes(q),
+                    )
+                    if (visible.length === 0) return null
+                    return (
+                      <div key={userId}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          marginBottom: 6,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          color: 'var(--foreground)',
+                        }}>
+                          <div style={{
+                            width: 20,
+                            height: 20,
+                            borderRadius: 99,
+                            background: 'var(--primary)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: 10,
+                            fontWeight: 700,
+                            color: 'white',
+                            flexShrink: 0,
+                          }}>
+                            {(name[0] ?? '?').toUpperCase()}
+                          </div>
+                          {userId === currentUserId ? `${name} (you)` : name}
+                          <span style={{
+                            fontSize: 10,
+                            fontWeight: 600,
+                            background: 'var(--muted)',
+                            borderRadius: 99,
+                            padding: '1px 6px',
+                            color: 'var(--muted-foreground)',
+                          }}>
+                            {visible.length}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                          {visible.map(f => (
+                            <FilterRow
+                              key={f.id}
+                              filter={f}
+                              currentUserId={currentUserId}
+                              isAdmin={isAdmin}
+                              context="member-admin"
+                              onView={() => openView(f)}
+                              onPromote={() => handlePromote(f)}
+                              onDelete={() => handleDelete(f)}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {memberPrivateFilters.length > 0 && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 7,
+                  marginTop: 16,
+                  padding: '9px 12px',
+                  background: 'var(--muted)',
+                  borderRadius: 7,
+                  fontSize: 11,
+                  color: 'var(--muted-foreground)',
+                }}>
+                  <AlertCircle size={13} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span>
+                    {memberPrivateFilters.length} private filter
+                    {memberPrivateFilters.length !== 1 ? 's' : ''} across the team.
+                    Promoting moves a filter into Team filters for everyone; you can remove it any time.
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Editor mode */}
+          {editor && (
+            <div>
+              {editor.readOnly && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '8px 12px',
+                  background: 'var(--muted)',
+                  borderRadius: 7,
+                  marginBottom: 16,
+                  fontSize: 12,
+                  color: 'var(--muted-foreground)',
+                }}>
+                  <Eye size={13} strokeWidth={1.8} style={{ flexShrink: 0 }} />
+                  Read-only —{' '}
+                  {editor.filter?.isTeamFilter
+                    ? 'only team admins can edit team filters.'
+                    : 'this filter belongs to another member.'}
+                </div>
+              )}
+
+              <div style={{
+                pointerEvents: editor.readOnly ? 'none' : undefined,
+                opacity: editor.readOnly ? 0.85 : 1,
+              }}>
+                {/* Name */}
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{
+                    display: 'block',
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: 'var(--muted-foreground)',
+                    letterSpacing: '0.6px',
+                    textTransform: 'uppercase',
+                    marginBottom: 5,
+                  }}>
+                    Filter name
+                  </label>
+                  <input
+                    value={draftName}
+                    onChange={e => setDraftName(e.target.value)}
+                    placeholder="e.g. My open tasks"
+                    // eslint-disable-next-line jsx-a11y/no-autofocus
+                    autoFocus={!editor.readOnly}
+                    style={{
+                      width: '100%',
+                      padding: '8px 10px',
+                      border: '1px solid var(--border)',
+                      borderRadius: 6,
+                      background: 'var(--background)',
+                      color: 'var(--foreground)',
+                      fontSize: 13,
+                      fontFamily: 'var(--font-sans)',
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+
+                {/* Match toggle */}
+                <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>Match</span>
+                  <div style={{
+                    display: 'flex',
+                    background: 'var(--muted)',
+                    borderRadius: 6,
+                    padding: 2,
+                    border: '1px solid var(--border)',
+                  }}>
+                    {(['and', 'or'] as const).map(l => (
+                      <button
+                        key={l}
+                        type="button"
+                        onClick={() => setDraftLogic(l)}
+                        style={{
+                          padding: '3px 10px',
+                          border: 'none',
+                          borderRadius: 4,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          fontFamily: 'var(--font-sans)',
+                          background: draftLogic === l ? 'var(--primary)' : 'transparent',
+                          color: draftLogic === l ? 'white' : 'var(--muted-foreground)',
+                          transition: 'all 0.1s',
+                        }}
+                      >
+                        {l === 'and' ? 'All' : 'Any'}
+                      </button>
+                    ))}
+                  </div>
+                  <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>of the following conditions</span>
+                </div>
+
+                {/* Conditions */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+                  {draftConditions.map((c, i) => (
+                    <FilterConditionRow
+                      key={i}
+                      condition={c}
+                      statusOptions={statusOptions}
+                      tags={tags}
+                      members={members}
+                      onChange={next =>
+                        setDraftConditions(prev => prev.map((x, j) => j === i ? next : x))
+                      }
+                      onRemove={() =>
+                        setDraftConditions(prev => {
+                          const next = prev.filter((_, j) => j !== i)
+                          return next.length ? next : [makeBlank()]
+                        })
+                      }
+                    />
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setDraftConditions(prev => [...prev, makeBlank()])}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    padding: '6px 12px',
+                    border: '1px dashed var(--border)',
+                    borderRadius: 6,
+                    background: 'transparent',
+                    color: 'var(--muted-foreground)',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    fontFamily: 'var(--font-sans)',
+                  }}
+                >
+                  <Plus size={12} strokeWidth={2} />
+                  Add condition
+                </button>
+              </div>
+
+              {editorError && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)', marginTop: 10 }}>
+                  {editorError}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ── Footer ──────────────────────────────────────────────────────── */}
+        <div style={{
+          padding: '12px 18px',
+          borderTop: '1px solid var(--border)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexShrink: 0,
+          gap: 8,
+        }}>
+          {!editor ? (
+            <>
+              <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
+                {teamFilters.length} team · {myFilters.length} private
+              </span>
+              <button onClick={onClose} style={BTN_PRIMARY}>Done</button>
+            </>
+          ) : (
+            <>
+              {/* Left cluster — destructive / scope actions */}
+              <div style={{ display: 'flex', gap: 8 }}>
+                {editor.mode === 'edit' && editor.filter && !editor.readOnly && (
+                  <button
+                    onClick={async () => {
+                      if (!editor.filter) return
+                      await handleDelete(editor.filter)
+                      setEditor(null)
+                    }}
+                    style={BTN_DANGER}
+                  >
+                    <Trash2 size={11} strokeWidth={2} />
+                    Delete
+                  </button>
+                )}
+                {editor.mode === 'edit' && editor.filter && isAdmin && !editor.filter.isTeamFilter && (
+                  <button onClick={() => editor.filter && handlePromote(editor.filter)} style={BTN_PROMOTE}>
+                    <ArrowUp size={11} strokeWidth={2} />
+                    Promote to team
+                  </button>
+                )}
+                {editor.mode === 'edit' && editor.filter?.isTeamFilter && isAdmin && (
+                  <button onClick={() => editor.filter && handleDemote(editor.filter)} style={BTN}>
+                    <Lock size={11} strokeWidth={2} />
+                    Remove from team
+                  </button>
+                )}
+              </div>
+
+              {/* Right cluster */}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => setEditor(null)} style={BTN}>
+                  {editor.readOnly ? 'Back' : 'Cancel'}
+                </button>
+                {!editor.readOnly && (
+                  <button
+                    onClick={handleSave}
+                    disabled={isSaving || !draftName.trim()}
+                    style={{
+                      ...BTN_PRIMARY,
+                      opacity: isSaving || !draftName.trim() ? 0.6 : 1,
+                      cursor: isSaving || !draftName.trim() ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    <Check size={12} strokeWidth={2.5} />
+                    {isSaving ? 'Saving…' : editor.mode === 'new' ? 'Create filter' : 'Save changes'}
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* ── Toast ───────────────────────────────────────────────────────── */}
+        {toast && (
+          <div style={{
+            position: 'fixed',
+            bottom: 24,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 99,
+            padding: '7px 16px',
+            fontSize: 12,
+            color: 'var(--foreground)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 7,
+            boxShadow: '0 4px 16px rgba(0,0,0,.12)',
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+            zIndex: 1001,
+          }}>
+            <Check size={13} strokeWidth={2.5} color="var(--primary)" />
+            {toast}
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
 ````
 
 ## File: packages/web/src/components/gantt/GanttToolbar.tsx
@@ -28209,423 +28210,6 @@ func newRepoID() string {
 }
 ````
 
-## File: packages/web/src/components/filters/FilterDropdown.tsx
-````typescript
-/**
- * Top-bar filter selector. Surfaces presets, a per-member section,
- * team-promoted filters, and the user's saved filters. Selection is
- * stored in FilterContext and evaluated by applyActiveFilter in GanttView.
- */
-
-import { useEffect, useRef, useState } from 'react'
-import {
-  Layers, Clock, AlertCircle, UserX, CheckCircle,
-  ChevronDown, Check, List,
-} from 'lucide-react'
-import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { useSavedFilters } from '@/hooks/useSavedFilters'
-import { useAuth } from '@/contexts/AuthContext'
-
-interface Props {
-  teamId?: string
-  onOpenManager: () => void
-}
-
-// ── Preset definitions ───────────────────────────────────────────────────────
-
-type PresetId = 'all' | 'upcoming' | 'overdue' | 'noassign' | 'open'
-
-interface Preset {
-  id: PresetId
-  label: string
-  icon: React.ReactNode
-  subtitle?: string
-}
-
-const ICON_PRESET = { size: 14, strokeWidth: 1.8 } as const
-
-const PRESETS: Preset[] = [
-  { id: 'all',      label: 'All activities',  icon: <Layers      {...ICON_PRESET} /> },
-  { id: 'open',     label: 'Open only',       icon: <CheckCircle {...ICON_PRESET} />, subtitle: 'Hide activities with a closed status' },
-  { id: 'upcoming', label: 'Upcoming',         icon: <Clock       {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
-  { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
-  { id: 'noassign', label: 'No assignee',      icon: <UserX       {...ICON_PRESET} /> },
-]
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Narrow TeamMemberWithUser to only those with a real user account. */
-function hasUserId<T extends { userId?: string | null }>(m: T): m is T & { userId: string } {
-  return typeof m.userId === 'string' && m.userId.length > 0
-}
-
-function activeLabel(
-  active: ActiveFilter,
-  members: { userId: string; displayName: string }[],
-  saved: { id: string; name: string }[],
-): string {
-  if (active.kind === 'preset') return PRESETS.find(p => p.id === active.id)?.label ?? 'Filter'
-  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.displayName ?? 'Member'
-  return saved.find(s => s.id === active.id)?.name ?? 'Saved filter'
-}
-
-function activeMemberColor(
-  active: ActiveFilter,
-  members: { userId: string; color?: string | null }[],
-): string | null {
-  if (active.kind !== 'member') return null
-  return members.find(m => m.userId === active.userId)?.color ?? null
-}
-
-// ── Sub-components ───────────────────────────────────────────────────────────
-
-interface ItemRowProps {
-  icon?: React.ReactNode
-  /** Rendered in the 8px-dot slot when provided (overrides icon). */
-  dotColor?: string
-  label: string
-  subtitle?: string
-  active: boolean
-  onClick: () => void
-}
-
-function ItemRow({ icon, dotColor, label, subtitle, active, onClick }: ItemRowProps) {
-  const [hovered, setHovered] = useState(false)
-
-  const rowBg = active
-    ? 'rgba(40,140,155,.09)'
-    : hovered
-    ? 'var(--muted)'
-    : 'transparent'
-
-  const labelColor = active ? 'var(--primary)' : 'var(--foreground)'
-  const labelWeight = active ? 600 : 400
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        padding: '5px 10px 5px 14px',
-        background: rowBg,
-        cursor: 'pointer',
-        transition: 'background 0.08s',
-      }}
-      onClick={onClick}
-    >
-      {/* 16px icon / dot slot */}
-      <div style={{ width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: active ? 'var(--primary)' : 'var(--muted-foreground)' }}>
-        {dotColor ? (
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor }} />
-        ) : (
-          icon
-        )}
-      </div>
-
-      {/* Label + subtitle */}
-      <div style={{ flex: 1, minWidth: 0, marginLeft: 8 }}>
-        <div style={{
-          fontSize: 13,
-          fontWeight: labelWeight,
-          color: labelColor,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-          title={label}
-        >
-          {label}
-        </div>
-        {subtitle && (
-          <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {subtitle}
-          </div>
-        )}
-      </div>
-
-      {/* 24px right slot — checkmark when active */}
-      <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-        {active && <Check size={13} strokeWidth={2.5} color="var(--primary)" />}
-      </div>
-    </div>
-  )
-}
-
-// ── Section header ───────────────────────────────────────────────────────────
-
-interface SectionHeaderProps {
-  label: string
-  teamBadge?: boolean
-}
-
-function SectionHeader({ label, teamBadge }: SectionHeaderProps) {
-  return (
-    <div style={{
-      padding: '10px 14px 3px',
-      fontSize: 10,
-      fontWeight: 700,
-      letterSpacing: '0.8px',
-      textTransform: 'uppercase',
-      color: 'var(--muted-foreground)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-    }}>
-      {label}
-      {teamBadge && (
-        <span style={{
-          fontSize: 9,
-          fontWeight: 700,
-          color: 'var(--primary)',
-          background: 'rgba(40,140,155,.1)',
-          border: '1px solid rgba(40,140,155,.25)',
-          borderRadius: 99,
-          padding: '1px 5px',
-          letterSpacing: 0,
-          textTransform: 'none',
-        }}>
-          Team
-        </span>
-      )}
-    </div>
-  )
-}
-
-function Divider() {
-  return <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
-}
-
-// ── Main component ───────────────────────────────────────────────────────────
-
-export default function FilterDropdown({ teamId = '', onOpenManager }: Props) {
-  const { activeFilter, setActiveFilter } = useFilter()
-  const { user } = useAuth()
-  const { data: members = [] } = useTeamMembers(teamId)
-  const { data: saved = [] } = useSavedFilters(teamId)
-
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [])
-
-  const membersWithUser = members.filter(hasUserId)
-  const label = activeLabel(activeFilter, membersWithUser, saved)
-  const memberDotColor = activeMemberColor(activeFilter, membersWithUser)
-  const currentUserId = (user as { id?: string } | null)?.id ?? ''
-
-  // Partition saved filters: team-promoted vs. user's own personal
-  const teamFilters = saved.filter(f => f.isTeamFilter)
-  const myFilters = saved.filter(f => !f.isTeamFilter)
-
-  const isDefaultFilter = activeFilter.kind === 'preset' && activeFilter.id === 'all'
-
-  function select(f: ActiveFilter) {
-    setActiveFilter(f)
-    setOpen(false)
-  }
-
-  function isSelected(f: ActiveFilter): boolean {
-    if (f.kind !== activeFilter.kind) return false
-    if (f.kind === 'preset' && activeFilter.kind === 'preset') return f.id === activeFilter.id
-    if (f.kind === 'member' && activeFilter.kind === 'member') return f.userId === activeFilter.userId
-    if (f.kind === 'saved' && activeFilter.kind === 'saved') return f.id === activeFilter.id
-    return false
-  }
-
-  // Trigger appearance — teal tint when a non-default filter is active.
-  const triggerBg = isDefaultFilter ? 'transparent' : 'rgba(40,140,155,.09)'
-  const triggerBorder = isDefaultFilter ? 'var(--border)' : 'rgba(40,140,155,.22)'
-  const triggerColor = isDefaultFilter ? 'var(--foreground)' : 'var(--primary)'
-  const triggerWeight = isDefaultFilter ? 400 : 600
-
-  return (
-    <div ref={ref} style={{ position: 'relative' }}>
-      {/* Trigger */}
-      <button
-        onClick={() => setOpen(o => !o)}
-        title="Filter"
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          cursor: 'pointer',
-          fontFamily: 'var(--font-sans)',
-          border: `1px solid ${triggerBorder}`,
-          borderRadius: 6,
-          background: triggerBg,
-          color: triggerColor,
-          padding: '5px 9px 5px 8px',
-          height: 30,
-          fontSize: 13,
-          fontWeight: triggerWeight,
-          maxWidth: 220,
-          transition: 'all 0.12s',
-        }}
-      >
-        {/* Icon: colored dot when a member filter is active, otherwise Filter icon */}
-        {memberDotColor && !isDefaultFilter ? (
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: memberDotColor, flexShrink: 0 }} />
-        ) : (
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: 'var(--muted-foreground)' }}>
-            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-          </svg>
-        )}
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-          {label}
-        </span>
-        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {/* Dropdown panel */}
-      {open && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 8px)',
-            right: 0,
-            width: 284,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 8,
-            boxShadow: '0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)',
-            zIndex: 100,
-            paddingBottom: 4,
-            overflowY: 'auto',
-          }}
-        >
-          {/* Presets */}
-          <SectionHeader label="Presets" />
-          {PRESETS.map(p => {
-            const f: ActiveFilter = { kind: 'preset', id: p.id }
-            return (
-              <ItemRow
-                key={p.id}
-                icon={p.icon}
-                label={p.label}
-                subtitle={p.subtitle}
-                active={isSelected(f)}
-                onClick={() => select(f)}
-              />
-            )
-          })}
-
-          {/* Members */}
-          {membersWithUser.length > 0 && (
-            <>
-              <Divider />
-              <SectionHeader label="Members" />
-              {membersWithUser.map(m => {
-                const f: ActiveFilter = { kind: 'member', userId: m.userId }
-                const name = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName
-                return (
-                  <ItemRow
-                    key={m.userId}
-                    dotColor={m.color ?? '#8b949e'}
-                    label={name}
-                    active={isSelected(f)}
-                    onClick={() => select(f)}
-                  />
-                )
-              })}
-            </>
-          )}
-
-          {/* Team filters */}
-          {teamFilters.length > 0 && (
-            <>
-              <Divider />
-              <SectionHeader label="Team filters" teamBadge />
-              {teamFilters.map(s => {
-                const f: ActiveFilter = { kind: 'saved', id: s.id }
-                return (
-                  <ItemRow
-                    key={s.id}
-                    label={s.name}
-                    active={isSelected(f)}
-                    onClick={() => select(f)}
-                  />
-                )
-              })}
-            </>
-          )}
-
-          {/* My filters */}
-          {myFilters.length > 0 && (
-            <>
-              <Divider />
-              <SectionHeader label="My filters" />
-              {myFilters.map(s => {
-                const f: ActiveFilter = { kind: 'saved', id: s.id }
-                return (
-                  <ItemRow
-                    key={s.id}
-                    label={s.name}
-                    active={isSelected(f)}
-                    onClick={() => select(f)}
-                  />
-                )
-              })}
-            </>
-          )}
-
-          {/* Footer */}
-          <Divider />
-          <ManageFiltersRow onClick={() => { onOpenManager(); setOpen(false) }} />
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Manage filters footer row ─────────────────────────────────────────────────
-
-function ManageFiltersRow({ onClick }: { onClick: () => void }) {
-  const [hovered, setHovered] = useState(false)
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        width: '100%',
-        padding: '7px 14px',
-        background: hovered ? 'var(--muted)' : 'transparent',
-        border: 'none',
-        fontSize: 13,
-        fontWeight: hovered ? 600 : 400,
-        color: hovered ? 'var(--foreground)' : 'var(--muted-foreground)',
-        cursor: 'pointer',
-        fontFamily: 'var(--font-sans)',
-        textAlign: 'left',
-        transition: 'all 0.1s',
-      }}
-    >
-      <List size={14} strokeWidth={2} />
-      Manage filters
-    </button>
-  )
-}
-````
-
 ## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
 ````typescript
 /**
@@ -30341,6 +29925,431 @@ func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Re
 	}
 
 	writeJSON(w, http.StatusOK, timeline)
+}
+````
+
+## File: packages/web/src/components/filters/FilterDropdown.tsx
+````typescript
+/**
+ * Top-bar filter selector. Surfaces presets, a per-member section,
+ * team-promoted filters, and the user's saved filters. Selection is
+ * stored in FilterContext and evaluated by applyActiveFilter in GanttView.
+ */
+
+import { useEffect, useRef, useState } from 'react'
+import {
+  Layers, Clock, AlertCircle, UserX, CheckCircle,
+  ChevronDown, Check, List,
+} from 'lucide-react'
+import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { useSavedFilters } from '@/hooks/useSavedFilters'
+import { useAuth } from '@/contexts/AuthContext'
+import { filterColor } from '@/lib/filterColors'
+
+interface Props {
+  teamId?: string
+  onOpenManager: () => void
+}
+
+// ── Preset definitions ───────────────────────────────────────────────────────
+
+type PresetId = 'all' | 'upcoming' | 'overdue' | 'noassign' | 'open'
+
+interface Preset {
+  id: PresetId
+  label: string
+  icon: React.ReactNode
+  subtitle?: string
+}
+
+const ICON_PRESET = { size: 14, strokeWidth: 1.8 } as const
+
+const PRESETS: Preset[] = [
+  { id: 'all',      label: 'All activities',  icon: <Layers      {...ICON_PRESET} /> },
+  { id: 'open',     label: 'Open only',       icon: <CheckCircle {...ICON_PRESET} />, subtitle: 'Hide activities with a closed status' },
+  { id: 'upcoming', label: 'Upcoming',         icon: <Clock       {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
+  { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
+  { id: 'noassign', label: 'No assignee',      icon: <UserX       {...ICON_PRESET} /> },
+]
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Narrow TeamMemberWithUser to only those with a real user account. */
+function hasUserId<T extends { userId?: string | null }>(m: T): m is T & { userId: string } {
+  return typeof m.userId === 'string' && m.userId.length > 0
+}
+
+function activeLabel(
+  active: ActiveFilter,
+  members: { userId: string; displayName: string }[],
+  saved: { id: string; name: string }[],
+): string {
+  if (active.kind === 'preset') return PRESETS.find(p => p.id === active.id)?.label ?? 'Filter'
+  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.displayName ?? 'Member'
+  return saved.find(s => s.id === active.id)?.name ?? 'Saved filter'
+}
+
+function activeDotColor(
+  active: ActiveFilter,
+  members: { userId: string; color?: string | null }[],
+  saved: { id: string }[],
+): string | null {
+  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.color ?? null
+  if (active.kind === 'saved') {
+    const s = saved.find(f => f.id === active.id)
+    return s ? filterColor(s.id) : null
+  }
+  return null
+}
+
+// ── Sub-components ───────────────────────────────────────────────────────────
+
+interface ItemRowProps {
+  icon?: React.ReactNode
+  /** Rendered in the 8px-dot slot when provided (overrides icon). */
+  dotColor?: string
+  label: string
+  subtitle?: string
+  active: boolean
+  onClick: () => void
+}
+
+function ItemRow({ icon, dotColor, label, subtitle, active, onClick }: ItemRowProps) {
+  const [hovered, setHovered] = useState(false)
+
+  const rowBg = active
+    ? 'rgba(40,140,155,.09)'
+    : hovered
+    ? 'var(--muted)'
+    : 'transparent'
+
+  const labelColor = active ? 'var(--primary)' : 'var(--foreground)'
+  const labelWeight = active ? 600 : 400
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        padding: '5px 10px 5px 14px',
+        background: rowBg,
+        cursor: 'pointer',
+        transition: 'background 0.08s',
+      }}
+      onClick={onClick}
+    >
+      {/* 16px icon / dot slot */}
+      <div style={{ width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: active ? 'var(--primary)' : 'var(--muted-foreground)' }}>
+        {dotColor ? (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor }} />
+        ) : (
+          icon
+        )}
+      </div>
+
+      {/* Label + subtitle */}
+      <div style={{ flex: 1, minWidth: 0, marginLeft: 8 }}>
+        <div style={{
+          fontSize: 13,
+          fontWeight: labelWeight,
+          color: labelColor,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+          title={label}
+        >
+          {label}
+        </div>
+        {subtitle && (
+          <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {subtitle}
+          </div>
+        )}
+      </div>
+
+      {/* 24px right slot — checkmark when active */}
+      <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        {active && <Check size={13} strokeWidth={2.5} color="var(--primary)" />}
+      </div>
+    </div>
+  )
+}
+
+// ── Section header ───────────────────────────────────────────────────────────
+
+interface SectionHeaderProps {
+  label: string
+  teamBadge?: boolean
+}
+
+function SectionHeader({ label, teamBadge }: SectionHeaderProps) {
+  return (
+    <div style={{
+      padding: '10px 14px 3px',
+      fontSize: 10,
+      fontWeight: 700,
+      letterSpacing: '0.8px',
+      textTransform: 'uppercase',
+      color: 'var(--muted-foreground)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+    }}>
+      {label}
+      {teamBadge && (
+        <span style={{
+          fontSize: 9,
+          fontWeight: 700,
+          color: 'var(--primary)',
+          background: 'rgba(40,140,155,.1)',
+          border: '1px solid rgba(40,140,155,.25)',
+          borderRadius: 99,
+          padding: '1px 5px',
+          letterSpacing: 0,
+          textTransform: 'none',
+        }}>
+          Team
+        </span>
+      )}
+    </div>
+  )
+}
+
+function Divider() {
+  return <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+}
+
+// ── Main component ───────────────────────────────────────────────────────────
+
+export default function FilterDropdown({ teamId = '', onOpenManager }: Props) {
+  const { activeFilter, setActiveFilter } = useFilter()
+  const { user } = useAuth()
+  const { data: members = [] } = useTeamMembers(teamId)
+  const { data: saved = [] } = useSavedFilters(teamId)
+
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [])
+
+  const membersWithUser = members.filter(hasUserId)
+  const label = activeLabel(activeFilter, membersWithUser, saved)
+  const triggerDotColor = activeDotColor(activeFilter, membersWithUser, saved)
+  const currentUserId = (user as { id?: string } | null)?.id ?? ''
+
+  // Partition saved filters: team-promoted vs. user's own personal
+  const teamFilters = saved.filter(f => f.isTeamFilter)
+  const myFilters = saved.filter(f => !f.isTeamFilter)
+
+  const isDefaultFilter = activeFilter.kind === 'preset' && activeFilter.id === 'all'
+
+  function select(f: ActiveFilter) {
+    setActiveFilter(f)
+    setOpen(false)
+  }
+
+  function isSelected(f: ActiveFilter): boolean {
+    if (f.kind !== activeFilter.kind) return false
+    if (f.kind === 'preset' && activeFilter.kind === 'preset') return f.id === activeFilter.id
+    if (f.kind === 'member' && activeFilter.kind === 'member') return f.userId === activeFilter.userId
+    if (f.kind === 'saved' && activeFilter.kind === 'saved') return f.id === activeFilter.id
+    return false
+  }
+
+  // Trigger appearance — teal tint when a non-default filter is active.
+  const triggerBg = isDefaultFilter ? 'transparent' : 'rgba(40,140,155,.09)'
+  const triggerBorder = isDefaultFilter ? 'var(--border)' : 'rgba(40,140,155,.22)'
+  const triggerColor = isDefaultFilter ? 'var(--foreground)' : 'var(--primary)'
+  const triggerWeight = isDefaultFilter ? 400 : 600
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      {/* Trigger */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        title="Filter"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          cursor: 'pointer',
+          fontFamily: 'var(--font-sans)',
+          border: `1px solid ${triggerBorder}`,
+          borderRadius: 6,
+          background: triggerBg,
+          color: triggerColor,
+          padding: '5px 9px 5px 8px',
+          height: 30,
+          fontSize: 13,
+          fontWeight: triggerWeight,
+          maxWidth: 220,
+          transition: 'all 0.12s',
+        }}
+      >
+        {/* Icon: colored dot when a non-preset filter is active, otherwise Filter icon */}
+        {triggerDotColor && !isDefaultFilter ? (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: triggerDotColor, flexShrink: 0 }} />
+        ) : (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: 'var(--muted-foreground)' }}>
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+          </svg>
+        )}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+          {label}
+        </span>
+        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {/* Dropdown panel */}
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 8px)',
+            right: 0,
+            width: 284,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            boxShadow: '0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)',
+            zIndex: 100,
+            paddingBottom: 4,
+            overflowY: 'auto',
+          }}
+        >
+          {/* Presets */}
+          <SectionHeader label="Presets" />
+          {PRESETS.map(p => {
+            const f: ActiveFilter = { kind: 'preset', id: p.id }
+            return (
+              <ItemRow
+                key={p.id}
+                icon={p.icon}
+                label={p.label}
+                subtitle={p.subtitle}
+                active={isSelected(f)}
+                onClick={() => select(f)}
+              />
+            )
+          })}
+
+          {/* Members */}
+          {membersWithUser.length > 0 && (
+            <>
+              <Divider />
+              <SectionHeader label="Members" />
+              {membersWithUser.map(m => {
+                const f: ActiveFilter = { kind: 'member', userId: m.userId }
+                const name = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName
+                return (
+                  <ItemRow
+                    key={m.userId}
+                    dotColor={m.color ?? '#8b949e'}
+                    label={name}
+                    active={isSelected(f)}
+                    onClick={() => select(f)}
+                  />
+                )
+              })}
+            </>
+          )}
+
+          {/* Team filters */}
+          {teamFilters.length > 0 && (
+            <>
+              <Divider />
+              <SectionHeader label="Team filters" teamBadge />
+              {teamFilters.map(s => {
+                const f: ActiveFilter = { kind: 'saved', id: s.id }
+                return (
+                  <ItemRow
+                    key={s.id}
+                    dotColor={filterColor(s.id)}
+                    label={s.name}
+                    active={isSelected(f)}
+                    onClick={() => select(f)}
+                  />
+                )
+              })}
+            </>
+          )}
+
+          {/* My filters */}
+          {myFilters.length > 0 && (
+            <>
+              <Divider />
+              <SectionHeader label="My filters" />
+              {myFilters.map(s => {
+                const f: ActiveFilter = { kind: 'saved', id: s.id }
+                return (
+                  <ItemRow
+                    key={s.id}
+                    dotColor={filterColor(s.id)}
+                    label={s.name}
+                    active={isSelected(f)}
+                    onClick={() => select(f)}
+                  />
+                )
+              })}
+            </>
+          )}
+
+          {/* Footer */}
+          <Divider />
+          <ManageFiltersRow onClick={() => { onOpenManager(); setOpen(false) }} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Manage filters footer row ─────────────────────────────────────────────────
+
+function ManageFiltersRow({ onClick }: { onClick: () => void }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        width: '100%',
+        padding: '7px 14px',
+        background: hovered ? 'var(--muted)' : 'transparent',
+        border: 'none',
+        fontSize: 13,
+        fontWeight: hovered ? 600 : 400,
+        color: hovered ? 'var(--foreground)' : 'var(--muted-foreground)',
+        cursor: 'pointer',
+        fontFamily: 'var(--font-sans)',
+        textAlign: 'left',
+        transition: 'all 0.1s',
+      }}
+    >
+      <List size={14} strokeWidth={2} />
+      Manage filters
+    </button>
+  )
 }
 ````
 
@@ -32737,64 +32746,6 @@ export default function LoginPage() {
 }
 ````
 
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/settings': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/status-templates': { target: apiTarget, changeOrigin: true },
-        '/status-template-items': { target: apiTarget, changeOrigin: true },
-        '/statuses': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/tags': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
-````
-
 ## File: packages/web/src/pages/settings/PreferencesPage.tsx
 ````typescript
 /**
@@ -32980,6 +32931,65 @@ export default function PreferencesPage() {
     </div>
   )
 }
+````
+
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/settings': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/statuses': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/tags': { target: apiTarget, changeOrigin: true },
+        '/saved_filters': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
 ````
 
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
@@ -37248,920 +37258,6 @@ export default function ActivityDetailPanel({
 }
 ````
 
-## File: packages/api/internal/models/models.go
-````go
-// Package models holds the domain types shared across the API, db,
-// and event-bus packages. These types are persisted directly via sqlx
-// (db tags) and serialised on the wire (json tags); changing tags is a
-// schema change.
-package models
-
-import "time"
-
-// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
-// non-nil when the activity is soft-deleted; list endpoints exclude archived
-// activities by default.
-//
-// AssignedMemberIDs is not stored on the activities table; it is populated by
-// the repository from activity_assignments after every list query.
-//
-// GoogleEventID and CaldavUID are preserved as-is — they identify the
-// corresponding records in external calendar systems (VEVENT identifiers).
-type Activity struct {
-	ID                string     `db:"id"                  json:"id"`
-	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
-	Title             string     `db:"title"               json:"title"`
-	Description       *string    `db:"description"         json:"description,omitempty"`
-	Notes             *string    `db:"notes"               json:"notes,omitempty"`
-	Icon              *string    `db:"icon"                json:"icon,omitempty"`
-	Color             *string    `db:"color"               json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"            json:"startAt"`
-	EndAt             time.Time  `db:"end_at"              json:"endAt"`
-	AllDay            bool       `db:"all_day"             json:"allDay"`
-	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
-	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"            json:"location,omitempty"`
-	URL               *string    `db:"url"                 json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"          json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
-	TagIDs            []string   `db:"-"                   json:"tagIds"`
-}
-
-// TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query. Participants
-// (no user account) have empty email and avatar; their display_name comes
-// from team_members.display_name via COALESCE in the query.
-type TeamMemberWithUser struct {
-	TeamMember
-	Email       string  `db:"email"        json:"email"`
-	DisplayName string  `db:"display_name" json:"displayName"`
-	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
-}
-
-// User is an authenticated account. PasswordHash is omitted from JSON
-// to avoid leaking it through any handler that returns a User.
-// ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users. Color and Icon are user-level identity fields (migration
-// 010); they propagate to team_members rows for the user when changed.
-type User struct {
-	ID           string     `db:"id"             json:"id"`
-	Email        string     `db:"email"          json:"email"`
-	PasswordHash string     `db:"password_hash"  json:"-"`
-	DisplayName  string     `db:"display_name"   json:"displayName"`
-	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	Color        *string    `db:"color"          json:"color,omitempty"`
-	Icon         *string    `db:"icon"           json:"icon,omitempty"`
-	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
-	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
-}
-
-// Team is a workspace that groups users and their scheduled work. Color and
-// Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
-// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
-// InviteLinkToken is a stable, reusable token added in migration 009; when
-// non-nil it can be used by anyone to join the team during registration.
-type Team struct {
-	ID              string     `db:"id"                  json:"id"`
-	Name            string     `db:"name"                json:"name"`
-	Slug            string     `db:"slug"                json:"slug"`
-	Description     *string    `db:"description"         json:"description,omitempty"`
-	Notes           *string    `db:"notes"               json:"notes,omitempty"`
-	Color           *string    `db:"color"               json:"color,omitempty"`
-	Icon            *string    `db:"icon"                json:"icon,omitempty"`
-	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
-	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-}
-
-// TeamMember is the join row that puts a person in a Team. UserID is nil
-// for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member". Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
-// ArchivedAt is non-nil when the member is inactivated (migration 009);
-// inactivated members lose access but their data and assignments are preserved.
-type TeamMember struct {
-	ID          string     `db:"id"           json:"id"`
-	TeamID      string     `db:"team_id"      json:"teamId"`
-	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
-	Role        string     `db:"role"         json:"role"`
-	Color       *string    `db:"color"        json:"color,omitempty"`
-	Icon        *string    `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
-	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
-}
-
-// MemberStats holds computed activity and timeline counts for a member.
-// All counts are date-relative and scoped to activities the member is assigned to.
-type MemberStats struct {
-	ActiveTimelines    int `json:"activeTimelines"`
-	ArchivedTimelines  int `json:"archivedTimelines"`
-	PastDue            int `json:"pastDue"`
-	Running            int `json:"running"`
-	Upcoming           int `json:"upcoming"`
-	Unscheduled        int `json:"unscheduled"`
-	ArchivedActivities int `json:"archivedActivities"`
-}
-
-// MemberDetail combines a TeamMemberWithUser with computed stats and the
-// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
-// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
-// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
-type MemberDetail struct {
-	TeamMemberWithUser
-	Stats          MemberStats          `json:"stats"`
-	Teams          []TeamMemberWithUser `json:"teams"`
-	Deletable      bool                 `json:"deletable"`
-	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
-}
-
-// Timeline is a named date range over a team's events. It is not a data
-// container — it is a view over a team's events for a given date window.
-// Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006). Description and Notes are free-text fields
-// added in migration 013.
-type Timeline struct {
-	ID          string     `db:"id"          json:"id"`
-	TeamID      string     `db:"team_id"     json:"teamId"`
-	Name        string     `db:"name"        json:"name"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	StartDate   string     `db:"start_date"  json:"startDate"`
-	EndDate     string     `db:"end_date"    json:"endDate"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken  string     `db:"share_token" json:"shareToken"`
-	IcalToken   string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy   string     `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
-}
-
-// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
-// an opaque JSON string interpreted by the client; the server treats it as
-// arbitrary text and only validates that it parses as JSON.
-type SavedFilter struct {
-	ID           string    `db:"id"             json:"id"`
-	TeamID       string    `db:"team_id"        json:"teamId"`
-	UserID       string    `db:"user_id"        json:"userId"`
-	Name         string    `db:"name"           json:"name"`
-	Definition   string    `db:"definition"     json:"definition"`
-	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
-}
-
-// UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is “” for global preferences so the
-// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
-// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
-type UserPreference struct {
-	ID         string    `db:"id"          json:"id"`
-	UserID     string    `db:"user_id"     json:"userId"`
-	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
-	Key        string    `db:"key"         json:"key"`
-	Value      string    `db:"value"       json:"value"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// APIToken is a long-lived Bearer credential a user issues for programmatic
-// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
-// caller only once on creation. RevokedAt is non-nil when the token has been
-// revoked; revoked tokens are not deleted so listing remains stable.
-type APIToken struct {
-	ID         string     `db:"id"           json:"id"`
-	UserID     string     `db:"user_id"      json:"userId"`
-	Name       string     `db:"name"         json:"name"`
-	TokenHash  string     `db:"token_hash"   json:"-"`
-	Scope      string     `db:"scope"        json:"scope"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
-	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
-}
-
-// InstanceSetting stores a single instance-level configuration value.
-// SMTP config and defaults live here. The value column is plain text;
-// the mailer package handles decryption of the SMTP password field.
-type InstanceSetting struct {
-	Key       string    `db:"key"        json:"key"`
-	Value     string    `db:"value"      json:"value"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
-}
-
-// PasswordResetToken is a single-use token for the forgot-password flow.
-// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
-// and never stored. UsedAt is set when the token is consumed.
-type PasswordResetToken struct {
-	ID        string     `db:"id"         json:"id"`
-	UserID    string     `db:"user_id"    json:"userId"`
-	TokenHash string     `db:"token_hash" json:"-"`
-	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
-	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
-	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
-}
-
-// AdminUserRow is a flat view of a user for the admin users list. It includes
-// the user's fields plus the count of active team memberships.
-type AdminUserRow struct {
-	User
-	TeamCount int `db:"team_count" json:"teamCount"`
-}
-
-// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
-// The three counters let the caller show a meaningful summary in the UI.
-type RevokeUserResult struct {
-	AccountDeactivated     bool `json:"accountDeactivated"`
-	MembershipsInactivated int  `json:"membershipsInactivated"`
-	MembershipsRemoved     int  `json:"membershipsRemoved"`
-}
-
-// StatusTemplate is a reusable named preset of statuses owned by a team.
-// When a timeline is created the team's chosen template's items are copied
-// into live Status rows for that timeline.
-type StatusTemplate struct {
-	ID          string    `db:"id"          json:"id"`
-	TeamID      string    `db:"team_id"     json:"teamId"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description,omitempty"`
-	Position    int       `db:"position"    json:"position"`
-	CreatedBy   string    `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
-	// Items is populated by the repository when listing templates.
-	Items []StatusTemplateItem `db:"-" json:"items"`
-}
-
-// StatusTemplateItem is one status value within a StatusTemplate.
-type StatusTemplateItem struct {
-	ID         string  `db:"id"          json:"id"`
-	TemplateID string  `db:"template_id" json:"templateId"`
-	Name       string  `db:"name"        json:"name"`
-	Color      string  `db:"color"       json:"color"`
-	Icon       *string `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
-	Position   int     `db:"position"    json:"position"`
-}
-
-// Status is a live status value on a specific timeline. Rows are copied from a
-// StatusTemplate's items when the timeline is created and then evolve independently.
-type Status struct {
-	ID         string    `db:"id"          json:"id"`
-	TimelineID string    `db:"timeline_id" json:"timelineId"`
-	Name       string    `db:"name"        json:"name"`
-	Color      string    `db:"color"       json:"color"`
-	Icon       *string   `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
-	Position   int       `db:"position"    json:"position"`
-	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// TimelineAccessEntry is a single timeline access grant joined with the team
-// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
-type TimelineAccessEntry struct {
-	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
-	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
-	Role         string  `db:"role"           json:"role"`
-	DisplayName  string  `db:"display_name"   json:"displayName"`
-	Email        string  `db:"email"          json:"email"`
-	Color        *string `db:"color"          json:"color,omitempty"`
-	Icon         *string `db:"icon"           json:"icon,omitempty"`
-	UserID       *string `db:"user_id"        json:"userId,omitempty"`
-}
-
-// Tag is a team-scoped label that can be applied to activities. Tags are
-// normalized: a team_id+name pair is unique, enabling rename-all and
-// name-based filter matching across timelines.
-type Tag struct {
-	ID        string    `db:"id"         json:"id"`
-	TeamID    string    `db:"team_id"    json:"teamId"`
-	Name      string    `db:"name"       json:"name"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	CreatedBy string    `db:"created_by" json:"createdBy"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
-}
-
-// Invite is a single-use token that grants an email address the right to
-// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
-// invites are rejected by the registration handler.
-type Invite struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Email      string     `db:"email"       json:"email"`
-	Token      string     `db:"token"       json:"token"`
-	Role       string     `db:"role"        json:"role"`
-	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
-	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
-	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
-}
-````
-
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { usePreferenceMap } from '@/hooks/usePreferences';
-import { applyActiveFilter } from '@/lib/presetFilters';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-
-interface Props {
-  teamId: string;
-  /** Active timeline ID — activities are fetched scoped to this timeline. */
-  timelineId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  /**
-   * Timeline statuses — used to derive closedStatusIds and resolve status names
-   * in the filter engine. Replaces the old closedStatusIds prop.
-   */
-  timelineStatuses?: Status[];
-  /** Saved filters for the active team — evaluated by the filter engine. */
-  savedFilters?: SavedFilter[];
-  /** Team tags — used to resolve tag names in the filter engine. */
-  tags?: Tag[];
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called during a bar drag with live snapped dates — for sidebar preview. */
-  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
-  /** Called when a bar drag completes (before the PATCH fires). */
-  onBarDragEnd?: () => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
-  labelColW?: number;
-  /** Called when the user drags the label column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-}
-
-/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
-function statusColorFromId(statusId: string | null | undefined): string {
-  if (!statusId) return '#6b7280';
-  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
-  let h = 0;
-  for (let i = 0; i < statusId.length; i++) {
-    h = statusId.charCodeAt(i) + ((h << 5) - h);
-    h |= 0;
-  }
-  return palette[Math.abs(h) % palette.length];
-}
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate type that carries original API fields alongside view-state. */
-export interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-/**
- * Builds the flat GanttRow list from positioned activities, applying grouping,
- * sorting, parent→child nesting (arbitrary depth), and collapse state.
- * Exported for unit testing of the tree/collapse logic.
- */
-export function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-  collapsedParents: Set<string>,
-  collapsedGroups: Set<string>,
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    // Flat list — no parent nesting, so children are not indented.
-    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
-  }
-
-  if (groupBy === 'member') {
-    const buckets: Record<string, RichActivity[]> = {};
-    for (const ev of sorted) {
-      const key = ev.primaryMemberId ?? '__none__';
-      (buckets[key] ??= []).push(ev);
-    }
-
-    const rows: GanttRow[] = [];
-    const pushBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
-      const collapsed = collapsedGroups.has(id);
-      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
-      if (collapsed) return;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    };
-
-    for (const m of members) {
-      const evs = buckets[m.id];
-      if (!evs?.length) continue;
-      pushBucket(m.id, m.name, m.color, evs);
-    }
-    const unassigned = buckets['__none__'];
-    if (unassigned?.length) {
-      pushBucket('__none__', 'Unassigned', 'var(--muted-foreground)', unassigned);
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    // Build a parent→children index, then emit rows via depth-first traversal so
-    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
-    // has no parent or its parent fell outside the current view.
-    const byId = new Map(sorted.map(a => [a.id, a]));
-    const childrenByParent = new Map<string, RichActivity[]>();
-    const roots: RichActivity[] = [];
-    for (const ev of sorted) {
-      const pid = ev.parentActivityId;
-      if (pid && byId.has(pid)) {
-        const list = childrenByParent.get(pid) ?? [];
-        list.push(ev);
-        childrenByParent.set(pid, list);
-      } else {
-        roots.push(ev);
-      }
-    }
-
-    const rows: GanttRow[] = [];
-    const seen = new Set<string>();   // emitted into rows (also guards cycles)
-    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
-
-    // Recursively mark a collapsed node's descendants as hidden so the leftover
-    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
-    const markHidden = (ev: RichActivity) => {
-      if (hidden.has(ev.id)) return;
-      hidden.add(ev.id);
-      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
-    };
-
-    const visit = (ev: RichActivity, depth: number) => {
-      if (seen.has(ev.id)) return;
-      seen.add(ev.id);
-      const kids = childrenByParent.get(ev.id) ?? [];
-      const hasChildren = kids.length > 0;
-      const collapsed = collapsedParents.has(ev.id);
-      rows.push({
-        kind: 'activity',
-        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
-      });
-      if (!hasChildren) return;
-      if (collapsed) for (const k of kids) markHidden(k);
-      else for (const k of kids) visit(k, depth + 1);
-    };
-
-    for (const r of roots) visit(r, 0);
-    // Safety net: emit any activity unreachable from a root (e.g. a parent-
-    // pointer cycle where no node qualifies as a root) at depth 0, but never
-    // resurrect a node intentionally hidden under a collapsed ancestor.
-    for (const ev of sorted) {
-      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
-    }
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-/**
- * Returns only the activities whose status is not in closedStatusIds.
- * Extracted as a named export so the 'open' filter preset logic can be
- * unit-tested without mounting the full component.
- */
-export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
-  activities: T[],
-  closedStatusIds: Set<string>,
-): T[] {
-  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-}
-
-export default function GanttView({
-  teamId,
-  timelineId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  timelineStatuses,
-  savedFilters,
-  tags,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onBarDragProgress,
-  onBarDragEnd,
-  onMembersLoaded,
-  onSelectApiActivity,
-  labelColW,
-  onLabelColWChange,
-}: Props) {
-  const queryClient = useQueryClient();
-  const updateActivity = useUpdateActivity(timelineId);
-  const today = todayMidnight();
-
-  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
-  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
-  // activities (member grouping). Both persist across re-renders and view tweaks.
-  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-
-  const toggleParent = useCallback((id: string) => {
-    setCollapsedParents(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const toggleGroup = useCallback((id: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  const globalPrefs = usePreferenceMap();
-  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
-  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
-  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
-  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
-  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setDate(d.getDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
-  const closedStatusIds = useMemo(
-    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-
-  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
-  const memberIdsByUserId = useMemo(() => {
-    const m = new Map<string, string[]>();
-    apiMembers.forEach(member => {
-      if (member.userId) {
-        const existing = m.get(member.userId) ?? [];
-        m.set(member.userId, [...existing, member.id]);
-      }
-    });
-    return m;
-  }, [apiMembers]);
-
-  const visibleActivities = useMemo(() => applyActiveFilter(
-    apiActivities,
-    activeFilter,
-    memberIdsByUserId,
-    {
-      closedStatusIds,
-      savedFilters: savedFilters ?? [],
-      statuses: statusesByTimeline,
-      tags: tags ?? [],
-    },
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns, collapsedParents, collapsedGroups]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    const patch = {
-      startAt: newStartDate.toISOString(),
-      endAt: newEndDate.toISOString(),
-    };
-
-    // Synchronously update the cache so the bar doesn't flash back to old
-    // position when GanttGrid clears its drag state in the same render cycle.
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-    );
-
-    // Push updated activity to the sidebar so it shows new dates immediately
-    // instead of the stale snapshot from when the activity was selected.
-    if (onSelectApiActivity) {
-      const updated = apiActivities.find(a => a.id === activityId);
-      if (updated) onSelectApiActivity({ ...updated, ...patch });
-    }
-
-    onBarDragEnd?.();
-    updateActivity.mutate({ activityId, patch });
-  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={onLaneDrag}
-        onBarDrag={handleBarDrag}
-        onBarDragProgress={onBarDragProgress}
-        resolvedGranularity={resolvedGranularity}
-        onClearFilters={filtersActive ? () => {} : undefined}
-        labelColW={labelColW}
-        onLabelColWChange={onLabelColWChange}
-        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
-        onToggleGroup={groupBy === 'member' ? toggleGroup : undefined}
-      />
-    </div>
-  );
-}
-````
-
 ## File: docs/TASKS.md
 ````markdown
 # Tasks
@@ -39335,6 +38431,920 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - Notifications (email, push)
 - Recurring event UI (RRULE editing)
 - Kanban drag-to-change-status (v2; v1 Kanban is read-only)
+````
+
+## File: packages/api/internal/models/models.go
+````go
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
+package models
+
+import "time"
+
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
+//
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
+}
+
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+}
+
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
+type User struct {
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash string     `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
+}
+
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
+type Team struct {
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+}
+
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
+type TeamMember struct {
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+}
+
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
+}
+
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+}
+
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
+type Timeline struct {
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+}
+
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+}
+
+// UserPreference stores a single key/value setting for a user, optionally
+// scoped to a timeline. TimelineID is “” for global preferences so the
+// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
+// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
+type UserPreference struct {
+	ID         string    `db:"id"          json:"id"`
+	UserID     string    `db:"user_id"     json:"userId"`
+	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
+	Key        string    `db:"key"         json:"key"`
+	Value      string    `db:"value"       json:"value"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// APIToken is a long-lived Bearer credential a user issues for programmatic
+// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
+// caller only once on creation. RevokedAt is non-nil when the token has been
+// revoked; revoked tokens are not deleted so listing remains stable.
+type APIToken struct {
+	ID         string     `db:"id"           json:"id"`
+	UserID     string     `db:"user_id"      json:"userId"`
+	Name       string     `db:"name"         json:"name"`
+	TokenHash  string     `db:"token_hash"   json:"-"`
+	Scope      string     `db:"scope"        json:"scope"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
+	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
+}
+
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
+
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+}
+
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
+type Invite struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Email      string     `db:"email"       json:"email"`
+	Token      string     `db:"token"       json:"token"`
+	Role       string     `db:"role"        json:"role"`
+	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
+	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
+	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
+}
+````
+
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
+import { applyActiveFilter } from '@/lib/presetFilters';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+
+interface Props {
+  teamId: string;
+  /** Active timeline ID — activities are fetched scoped to this timeline. */
+  timelineId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  /**
+   * Timeline statuses — used to derive closedStatusIds and resolve status names
+   * in the filter engine. Replaces the old closedStatusIds prop.
+   */
+  timelineStatuses?: Status[];
+  /** Saved filters for the active team — evaluated by the filter engine. */
+  savedFilters?: SavedFilter[];
+  /** Team tags — used to resolve tag names in the filter engine. */
+  tags?: Tag[];
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag completes (before the PATCH fires). */
+  onBarDragEnd?: () => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
+  labelColW?: number;
+  /** Called when the user drags the label column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+}
+
+/** Deterministic color from a statusId UUID — replaced by real status colors in Phase 10. */
+function statusColorFromId(statusId: string | null | undefined): string {
+  if (!statusId) return '#6b7280';
+  const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#3b82f6', '#84cc16'];
+  let h = 0;
+  for (let i = 0; i < statusId.length; i++) {
+    h = statusId.charCodeAt(i) + ((h << 5) - h);
+    h |= 0;
+  }
+  return palette[Math.abs(h) % palette.length];
+}
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate type that carries original API fields alongside view-state. */
+export interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? statusColorFromId((ev as ApiActivity & { statusId?: string | null }).statusId) :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+/**
+ * Builds the flat GanttRow list from positioned activities, applying grouping,
+ * sorting, parent→child nesting (arbitrary depth), and collapse state.
+ * Exported for unit testing of the tree/collapse logic.
+ */
+export function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+  collapsedParents: Set<string>,
+  collapsedGroups: Set<string>,
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    // Flat list — no parent nesting, so children are not indented.
+    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
+  }
+
+  if (groupBy === 'member') {
+    const buckets: Record<string, RichActivity[]> = {};
+    for (const ev of sorted) {
+      const key = ev.primaryMemberId ?? '__none__';
+      (buckets[key] ??= []).push(ev);
+    }
+
+    const rows: GanttRow[] = [];
+    const pushBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
+      const collapsed = collapsedGroups.has(id);
+      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
+      if (collapsed) return;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    };
+
+    for (const m of members) {
+      const evs = buckets[m.id];
+      if (!evs?.length) continue;
+      pushBucket(m.id, m.name, m.color, evs);
+    }
+    const unassigned = buckets['__none__'];
+    if (unassigned?.length) {
+      pushBucket('__none__', 'Unassigned', 'var(--muted-foreground)', unassigned);
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    // Build a parent→children index, then emit rows via depth-first traversal so
+    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
+    // has no parent or its parent fell outside the current view.
+    const byId = new Map(sorted.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, RichActivity[]>();
+    const roots: RichActivity[] = [];
+    for (const ev of sorted) {
+      const pid = ev.parentActivityId;
+      if (pid && byId.has(pid)) {
+        const list = childrenByParent.get(pid) ?? [];
+        list.push(ev);
+        childrenByParent.set(pid, list);
+      } else {
+        roots.push(ev);
+      }
+    }
+
+    const rows: GanttRow[] = [];
+    const seen = new Set<string>();   // emitted into rows (also guards cycles)
+    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
+
+    // Recursively mark a collapsed node's descendants as hidden so the leftover
+    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
+    const markHidden = (ev: RichActivity) => {
+      if (hidden.has(ev.id)) return;
+      hidden.add(ev.id);
+      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
+    };
+
+    const visit = (ev: RichActivity, depth: number) => {
+      if (seen.has(ev.id)) return;
+      seen.add(ev.id);
+      const kids = childrenByParent.get(ev.id) ?? [];
+      const hasChildren = kids.length > 0;
+      const collapsed = collapsedParents.has(ev.id);
+      rows.push({
+        kind: 'activity',
+        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
+      });
+      if (!hasChildren) return;
+      if (collapsed) for (const k of kids) markHidden(k);
+      else for (const k of kids) visit(k, depth + 1);
+    };
+
+    for (const r of roots) visit(r, 0);
+    // Safety net: emit any activity unreachable from a root (e.g. a parent-
+    // pointer cycle where no node qualifies as a root) at depth 0, but never
+    // resurrect a node intentionally hidden under a collapsed ancestor.
+    for (const ev of sorted) {
+      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
+    }
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+/**
+ * Returns only the activities whose status is not in closedStatusIds.
+ * Extracted as a named export so the 'open' filter preset logic can be
+ * unit-tested without mounting the full component.
+ */
+export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
+  activities: T[],
+  closedStatusIds: Set<string>,
+): T[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
+export default function GanttView({
+  teamId,
+  timelineId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  timelineStatuses,
+  savedFilters,
+  tags,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onBarDragProgress,
+  onBarDragEnd,
+  onMembersLoaded,
+  onSelectApiActivity,
+  labelColW,
+  onLabelColWChange,
+}: Props) {
+  const queryClient = useQueryClient();
+  const updateActivity = useUpdateActivity(timelineId);
+  const today = todayMidnight();
+
+  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
+  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
+  // activities (member grouping). Both persist across re-renders and view tweaks.
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  const toggleParent = useCallback((id: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleGroup = useCallback((id: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setDate(d.getDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(member => {
+      if (member.userId) {
+        const existing = m.get(member.userId) ?? [];
+        m.set(member.userId, [...existing, member.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const visibleActivities = useMemo(() => applyActiveFilter(
+    apiActivities,
+    activeFilter,
+    memberIdsByUserId,
+    {
+      closedStatusIds,
+      savedFilters: savedFilters ?? [],
+      statuses: statusesByTimeline,
+      tags: tags ?? [],
+    },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = visibleActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, viewStart, viewEnd, columns, collapsedParents, collapsedGroups]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    const patch = {
+      startAt: newStartDate.toISOString(),
+      endAt: newEndDate.toISOString(),
+    };
+
+    // Synchronously update the cache so the bar doesn't flash back to old
+    // position when GanttGrid clears its drag state in the same render cycle.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+    );
+
+    // Push updated activity to the sidebar so it shows new dates immediately
+    // instead of the stale snapshot from when the activity was selected.
+    if (onSelectApiActivity) {
+      const updated = apiActivities.find(a => a.id === activityId);
+      if (updated) onSelectApiActivity({ ...updated, ...patch });
+    }
+
+    onBarDragEnd?.();
+    updateActivity.mutate({ activityId, patch });
+  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={onLaneDrag}
+        onBarDrag={handleBarDrag}
+        onBarDragProgress={onBarDragProgress}
+        resolvedGranularity={resolvedGranularity}
+        onClearFilters={filtersActive ? () => {} : undefined}
+        labelColW={labelColW}
+        onLabelColWChange={onLabelColWChange}
+        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
+        onToggleGroup={groupBy === 'member' ? toggleGroup : undefined}
+      />
+    </div>
+  );
+}
 ````
 
 ## File: packages/shared/src/index.ts
