@@ -47,6 +47,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
 | 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | 🔄 In Progress |
+| 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ⬜ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
@@ -1335,6 +1336,34 @@ Deliberately **not** a power-user database grid: no virtualization (our timeline
 - Sorting by a column header reorders rows without losing selection
 - Group-by and Color-by controls work and persist per-timeline
 - Find bar highlights matching rows the same way it highlights bars in Gantt
+
+---
+
+### Phase 11.1.1 — Timezone-Safe Activity Dates
+**Status:** ⬜ | **Effort:** S–M (0.5–1 day)
+
+Activity start/end dates render one calendar day early for any user in a timezone behind UTC (e.g. `America/Denver`, −6): a date stored as `2026-05-31T00:00:00Z` shows as "May 30" in the List Start/End cells and Gantt labels, while the date *picker* correctly shows `2026-05-31`. The List/Gantt date pickers were unusable for a separate reason (a column-index bug, fixed during 11.1); this phase fixes the underlying timezone skew that remains.
+
+**Root cause:**
+`startAt`/`endAt` are `format: date-time` (RFC3339 instants) in the schema, but the app uses them as **calendar dates** — every write sends `${date}T00:00:00Z` and every edit reads `iso.slice(0,10)`, so the *storage and edit* paths are UTC-consistent. The defect is on the **display and positioning** paths, which do `new Date(iso)` and then read **local** components (`toLocaleDateString`, `getFullYear/Month/Date`, `setHours`). Midnight-UTC collapses to the previous local day for negative-offset zones.
+
+**Approach — Option A (treat all activity dates as all-day / calendar dates):**
+Format and position all activity `startAt`/`endAt` in **UTC** (no local conversion). This matches today's UI, which has no time-of-day editor — every activity is effectively all-day. The schema's `allDay` flag is **not** branched on yet; leave a `// TODO: branch on allDay when timed events ship (Phase 15 calendar sync)` marker where the formatter is chosen. Genuine timestamps (createdAt/updatedAt, member joinedAt, invite dates) stay in local time.
+
+**Scope:**
+- *Shared date module* (new, e.g. `packages/web/src/lib/activityDates.ts`): single source of truth — `formatActivityDate(iso, fmt)` using UTC components, `parseActivityDateUTC(iso): Date` for positioning math. Keep existing `toDateInput` (slice) / `toISODate` (`T00:00:00Z`) — already correct. Note: `hooks/useFormatDate.ts`'s `formatDate` uses local getters (`getFullYear/getMonth/getDate`) — that's the core defect for activity dates; route activity dates through the UTC formatter rather than changing the timestamp-oriented hook.
+- *List view:* `ListView.tsx` `formatDate` → UTC formatter for **Start/End cells only**. The same helper is reused by the **Created/Updated** cells, which are real timestamps and must stay local — keep those on the local path.
+- *Gantt labels:* `GanttGrid.tsx:184` and `granularity.ts:105–116` (`toLocaleDateString`).
+- *Gantt positioning (highest-risk piece):* events are parsed as UTC midnight (`GanttView.tsx:135–136` `new Date(toDateOnly(...))`) but the column axis is built in **local** time (`granularity.ts` `setHours(0,0,0,0)`, `new Date(y,m,1)`, `getDate()`, `setDate`) and the today marker (`GanttView.tsx:87` `todayMidnight()`) is local — so events map onto a local axis with UTC dates, shifting bars ~a day at boundaries. Pick **one basis (UTC)** for the axis, today marker, and event parsing together.
+- *Not this phase:* `allDay`-branching for timed events (deferred to Phase 15); backend emitting CalDAV `DATE` vs `DATE-TIME` (Phase 15 concern — backend stores/echoes RFC3339 verbatim and needs no change for the display bug).
+
+**Exit criteria — safe to pause when:**
+- A `TZ=America/Denver` test run (Vitest honors `process.env.TZ`) asserts a midnight-UTC date renders on the **same** calendar day — guards against silent regression
+- List Start/End cells show the same calendar day as their date picker, in a negative-offset timezone
+- Created/Updated cells still render in local time (unchanged)
+- Gantt day/week/month labels match the List dates for the same activity
+- Gantt bars sit on the correct day in a negative-offset timezone (axis, today marker, and event positions all on a UTC basis)
+- Round-trip holds: open a date picker, save unchanged, and the displayed date does not shift
 
 ---
 

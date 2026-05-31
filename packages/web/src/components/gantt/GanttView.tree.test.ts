@@ -25,6 +25,7 @@ function act(id: string, parentActivityId: string | null, memberId: string | nul
     parentActivityId,
     primaryMemberId: memberId,
     assignedMemberIds: memberId ? [memberId] : [],
+    statusId: null,
   }
 }
 

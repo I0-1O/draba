@@ -45,12 +45,12 @@ const select   = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-f
 export default function ListToolbar({
   columns,
   onColumnVisibilityChange,
-  density,
-  onDensityChange,
+  density: _density,
+  onDensityChange: _onDensityChange,
   groupBy,
   onGroupByChange,
-  sortBy,
-  onSortByChange,
+  sortBy: _sortBy,
+  onSortByChange: _onSortByChange,
   colorBy,
   onColorByChange,
   onExport,
@@ -70,7 +70,7 @@ export default function ListToolbar({
   }, []);
 
   return (
-    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0" style={{ position: 'relative', zIndex: 30 }}>
       {/* Columns menu */}
       <div ref={colMenuRef} className="relative">
         <button
@@ -128,27 +128,6 @@ export default function ListToolbar({
 
       <div className={divider} />
 
-      {/* Density */}
-      <span className={label}>Density</span>
-      <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
-        {(['comfortable', 'compact'] as const).map(d => (
-          <button
-            key={d}
-            onClick={() => onDensityChange(d)}
-            className={cn(
-              'h-[22px] px-2 rounded-[4px] text-[11px] font-medium cursor-pointer border-none',
-              density === d
-                ? 'bg-card text-foreground shadow-sm'
-                : 'bg-transparent text-muted-foreground',
-            )}
-          >
-            {d === 'comfortable' ? 'Comfortable' : 'Compact'}
-          </button>
-        ))}
-      </div>
-
-      <div className={divider} />
-
       {/* Group by */}
       <span className={label}>Group by</span>
       <select
@@ -160,22 +139,6 @@ export default function ListToolbar({
         <option value="member">Member</option>
         <option value="parent">Parent activity</option>
         <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Sort by */}
-      <span className={label}>Sort by</span>
-      <select
-        className={select}
-        value={sortBy}
-        onChange={e => onSortByChange(e.target.value as ListSortBy)}
-      >
-        <option value="startDate">Start date</option>
-        <option value="endDate">End date</option>
-        <option value="title">Title A–Z</option>
-        <option value="status">Status</option>
-        <option value="progress">Progress</option>
       </select>
 
       <div className={divider} />

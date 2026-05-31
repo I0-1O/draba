@@ -66,6 +66,8 @@ function DashboardShell() {
   // Gantt label-column width — held here so it survives switching to another
   // view and back (GanttView unmounts on view change, which would reset it).
   const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
+  // Close the detail sidebar when switching to list view (edits are inline there)
+  const prevView = useRef<ViewMode>('gantt')
   const [profileOpen, setProfileOpen] = useState(false)
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
   const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
@@ -87,6 +89,8 @@ function DashboardShell() {
   // Incremented seq lets ListView know a new toggle has arrived
   const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
   const listColToggleSeq = useRef(0)
+  // Incremented to trigger inline row creation in list view
+  const [listNewRowSeq, setListNewRowSeq] = useState(0)
   const profileRef = useRef<HTMLDivElement>(null)
   // Preference persistence
   const upsert = useUpsertPreference()
@@ -106,6 +110,16 @@ function DashboardShell() {
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
+
+  // Close the detail sidebar when switching to list view (list edits are inline).
+  useEffect(() => {
+    if (view === 'list' && prevView.current !== 'list') {
+      setSelectedActivityId(null)
+      setSelectedApiActivity(null)
+      setCreateDefaults(null)
+    }
+    prevView.current = view
+  }, [view])
 
   // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
   useEffect(() => {
@@ -343,7 +357,11 @@ function DashboardShell() {
           const today = new Date().toISOString().slice(0, 10)
           setSelectedActivityId(null)
           setSelectedApiActivity(null)
-          setCreateDefaults({ start: today, end: today, memberId: null })
+          if (view === 'list') {
+            setListNewRowSeq(s => s + 1)
+          } else {
+            setCreateDefaults({ start: today, end: today, memberId: null })
+          }
         }}
         activeTeam={activeTeam}
         activeTeams={activeTeams}
@@ -366,7 +384,7 @@ function DashboardShell() {
           onViewChange={setView}
           onOpenFilterManager={() => setFilterModalOpen(true)}
           rightSlot={
-            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
+            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
               <button
                 onClick={() => setProfileOpen(o => !o)}
                 style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
@@ -531,6 +549,7 @@ function DashboardShell() {
               }}
               onMembersLoaded={setGanttMembers}
               onColumnsChange={setListColumns}
+              triggerNewRow={listNewRowSeq}
             />
           ) : view === 'list' && (!teamId || !activeTimelineId) ? (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>

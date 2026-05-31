@@ -119,6 +119,7 @@ export interface RichActivity extends GanttActivity {
   parentActivityId: string | null;
   primaryMemberId: string | null;
   assignedMemberIds: string[];
+  statusId: string | null;
 }
 
 function toRichActivity(
@@ -162,6 +163,7 @@ function toRichActivity(
     parentActivityId: ev.parentActivityId ?? null,
     primaryMemberId: members[0]?.id ?? null,
     assignedMemberIds: assignedIds,
+    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
   };
 }
 
@@ -189,6 +191,7 @@ export function buildRows(
   sortBy: SortBy,
   collapsedParents: Set<string>,
   collapsedGroups: Set<string>,
+  statuses?: Status[],
 ): GanttRow[] {
   const sorted = sortActivities(activities, sortBy);
 
@@ -275,6 +278,37 @@ export function buildRows(
     // resurrect a node intentionally hidden under a collapsed ancestor.
     for (const ev of sorted) {
       if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
+    }
+    return rows;
+  }
+
+  if (groupBy === 'status') {
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = ev.statusId ?? '__no_status__';
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const rows: GanttRow[] = [];
+    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
+      const collapsed = collapsedGroups.has(id);
+      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
+      if (collapsed) return;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    };
+
+    if (statuses) {
+      for (const s of statuses) {
+        const evs = buckets.get(s.id);
+        if (!evs?.length) continue;
+        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
+      }
+    }
+    const noStatus = buckets.get('__no_status__');
+    if (noStatus?.length) {
+      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
     }
     return rows;
   }
@@ -470,9 +504,9 @@ export default function GanttView({
     const richActivities = visibleActivities
       .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
       .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups);
+    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups]);
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
 
   // ── Find: compute matches and register with context ───────────────────────
 
@@ -576,7 +610,7 @@ export default function GanttView({
         labelColW={labelColW}
         onLabelColWChange={onLabelColWChange}
         onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
-        onToggleGroup={groupBy === 'member' ? toggleGroup : undefined}
+        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
       />
     </div>
   );

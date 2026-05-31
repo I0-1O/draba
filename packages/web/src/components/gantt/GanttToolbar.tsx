@@ -9,7 +9,7 @@ import type { TimeGranularity } from './granularity';
 import { cn } from '@/lib/utils';
 
 export type { TimeGranularity } from './granularity';
-export type GroupBy = 'none' | 'member' | 'parent';
+export type GroupBy = 'none' | 'member' | 'parent' | 'status';
 export type SortBy = 'startDate' | 'endDate' | 'title';
 export type ColorBy = 'activity' | 'member' | 'status';
 
@@ -166,6 +166,7 @@ export default function GanttToolbar({
         <option value="none">None</option>
         <option value="member">Member</option>
         <option value="parent">Parent activity</option>
+        <option value="status">Status</option>
       </select>
 
       <div className={divider} />
