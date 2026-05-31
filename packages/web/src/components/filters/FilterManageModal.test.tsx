@@ -68,7 +68,7 @@ const baseProps = {
 
 describe('FilterManageModal', () => {
   beforeEach(() => {
-    vi.mocked(useSavedFilters).mockReturnValue({ data: [] } as ReturnType<typeof useSavedFilters>)
+    vi.mocked(useSavedFilters).mockReturnValue({ data: [] } as unknown as ReturnType<typeof useSavedFilters>)
   })
 
   it('does not render when open=false', () => {
