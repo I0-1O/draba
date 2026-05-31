@@ -47385,18 +47385,18 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.4 | [Gantt Interaction & Activity Edit Polish](#phase-1044--gantt-interaction--activity-edit-polish) | M — 2–3 days | 🔄 |
 | 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
-| 10.5 | [Communications Testing](#phase-105--communications-testing) | S — 1 day | ⬜ |
-| 10.6 | [AI Key Management](#phase-106--ai-key-management) | M — 2–3 days | ⬜ |
-| 10.7 | [Localization & Language Support](#phase-107--localization--language-support) | L — 3–5 days | ⬜ |
 | 11.1 | [Web — List / Spreadsheet View](#phase-111--web--list--spreadsheet-view) | M — 2–3 days | ⬜ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
-| 12 | [Calendar Sync — Google & CalDAV](#phase-12-calendar-sync--google--caldav) | XL — 1–2 wks | ⬜ |
-| 13 | [Shares — Multi-Share Views with Passwords](#phase-13-shares--multi-share-views-with-passwords) | M — 3–5 days | ⬜ |
-| 14 | [Data Portability & Exports](#phase-14-data-portability--exports) | L — 1 wk | ⬜ |
-| 15 | [External Connectors (Webhooks)](#phase-15-external-connectors-webhooks) | M — 3–5 days | ⬜ |
-| 16 | [Global Search](#phase-16-global-search) | M — 2–3 days | ⬜ |
-| 17 | [Backup & Restore](#phase-17--backup--restore) | M — 2–3 days | ⬜ |
+| 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
+| 13 | [AI Key Management](#phase-13--ai-key-management) | M — 2–3 days | ⬜ |
+| 14 | [Localization & Language Support](#phase-14--localization--language-support) | L — 3–5 days | ⬜ |
+| 15 | [Calendar Sync — Google & CalDAV](#phase-15-calendar-sync--google--caldav) | XL — 1–2 wks | ⬜ |
+| 16 | [Shares — Multi-Share Views with Passwords](#phase-16-shares--multi-share-views-with-passwords) | M — 3–5 days | ⬜ |
+| 17 | [Data Portability & Exports](#phase-17-data-portability--exports) | L — 1 wk | ⬜ |
+| 18 | [External Connectors (Webhooks)](#phase-18-external-connectors-webhooks) | M — 3–5 days | ⬜ |
+| 19 | [Global Search](#phase-19-global-search) | M — 2–3 days | ⬜ |
+| 20 | [Backup & Restore](#phase-20--backup--restore) | M — 2–3 days | ⬜ |
 
 **Parking Lot (v2):** MySQL/Postgres adapters, CLI, MCP server, mobile apps, Microsoft/Outlook sync, multi-tenant hosting, SSO, notifications.
 
@@ -47641,7 +47641,7 @@ Builds on 8.2. Direct manipulation of event bars on the Gantt chart.
 - **Body drag (move):** mousedown on the bar body → drag horizontally to shift both start and end dates by the same delta; show date tooltip during drag; PATCH on mouseup
 - Visual feedback: bar moves/resizes live during drag (optimistic); ghost/overlay at original position optional
 - Snap to column boundaries (e.g. day, week) matching the active granularity
-- `is_external` events (Phase 14) are non-draggable (read-only)
+- `is_external` events (Phase 18) are non-draggable (read-only)
 
 **Exit criteria — safe to pause when:**
 - Dragging a bar edge changes the event's start or end date and saves on mouseup without a page reload
@@ -47693,10 +47693,10 @@ Server-side user preferences so view settings survive login/logout and sync acro
 ### Phase 8.5 — Find (In-View)
 **Status:** ✅ Done — 2026-05-20 | **Effort:** M (1–2 days)
 
-Browser-style "find in page" for the active view. Scoped to events the current view has already loaded; respects active filters. **Global cross-team search is deferred to [Phase 15](#phase-15-global-search).**
+Browser-style "find in page" for the active view. Scoped to events the current view has already loaded; respects active filters. **Global cross-team search is deferred to [Phase 19](#phase-19-global-search).**
 
 **Design rationale:**
-Two distinct tools, not one box. **Find** answers *"highlight what I'm looking at"* — fast, keyboard-driven, walks matches. Global **Search** (Phase 15) answers *"find an event when I don't know where it lives"* — palette-style, navigates across teams/timelines. Mixing them in one input is where these UIs get muddy. With Find + the upcoming List view (Phase 11), we expect ~95% of real-world lookup needs to be covered.
+Two distinct tools, not one box. **Find** answers *"highlight what I'm looking at"* — fast, keyboard-driven, walks matches. Global **Search** (Phase 19) answers *"find an event when I don't know where it lives"* — palette-style, navigates across teams/timelines. Mixing them in one input is where these UIs get muddy. With Find + the upcoming List view (Phase 11), we expect ~95% of real-world lookup needs to be covered.
 
 **Scope:**
 
@@ -47723,16 +47723,16 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 
 *Empty-state behavior:*
 - Zero matches, no filters active → bar shows `No matches`
-- Zero matches **in view**, but filters are active → soft inline callout: *"No matches in current view. [Clear filters]"*. (We do **not** silently search outside the filters — that's Phase 15's job.)
+- Zero matches **in view**, but filters are active → soft inline callout: *"No matches in current view. [Clear filters]"*. (We do **not** silently search outside the filters — that's Phase 19's job.)
 
 *Persistence:*
 - The query itself is **not** persisted across navigation or reloads — Find is ephemeral by design (matches browser Cmd+F muscle memory)
 - Open/closed state of the bar is also ephemeral
 
 **Out of scope (explicitly):**
-- Cross-team or cross-timeline search → Phase 15
-- Server-side full-text search → Phase 15
-- Saved searches / recent queries → Phase 15
+- Cross-team or cross-timeline search → Phase 19
+- Server-side full-text search → Phase 19
+- Saved searches / recent queries → Phase 19
 - Highlighting matches that aren't in the currently-loaded event set (no dynamic loading exists yet; revisit when/if windowed loading lands)
 
 **Exit criteria — safe to pause when:**
@@ -47772,7 +47772,7 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 
 Rename the domain entity `Event` → `Activity` end-to-end (DB, Go API, OpenAPI, generated TS, web hooks/components, user-facing copy, docs). The pub/sub bus keeps its `internal/events` package name (correct event-driven-architecture term), but its message-type constants and wire strings move to `activity.*`. Calendar fields (`google_event_id`, `caldav_uid`) are preserved — they map to external VEVENT identifiers.
 
-**Why now:** the name collides with internal pub/sub events and with calendar VEVENTs. Cost of disambiguation grows fast in Phase 12 (Calendar Sync) and Phase 15 (Webhooks). Cheapest to fix while pre-1.0, single LAN test instance, no external API consumers.
+**Why now:** the name collides with internal pub/sub events and with calendar VEVENTs. Cost of disambiguation grows fast in Phase 15 (Calendar Sync) and Phase 18 (Webhooks). Cheapest to fix while pre-1.0, single LAN test instance, no external API consumers.
 
 **Approach:** hard cutover. No `/events` aliases, no dual message types. Single migration via `ALTER TABLE RENAME`. See **[GreatEventToActivity.md](GreatEventToActivity.md)** for the full runbook (token map, per-layer checklist, verification, rollback).
 
@@ -47995,7 +47995,7 @@ Member management is the most interaction-dense part of team administration. Spl
   - Activity stats chips (past due, running, upcoming, unscheduled, archived) — date-relative
   - Joined date + last active date (read-only)
   - Teams list showing all teams the member belongs to with role pills
-  - Account section (non-participant only): password reset button — UI present but shows "SMTP not configured" until Phase 14
+  - Account section (non-participant only): password reset button — UI present but shows "SMTP not configured" until SMTP is configured (Phase 10.1.3)
   - Super Admin actions section (superadmin viewer only): promote to super admin, inactivate/delete with confirmation dialogs
 - Footer: Cancel + Save changes (in member's identity color)
 - Role permission matrix: team admins can edit name/email/identity; superadmins additionally see promote/inactivate/delete
@@ -48630,8 +48630,8 @@ Makes the filter system fully operational. Today only the "Open only" preset act
 - `FilterManageModal.tsx` replaces the planned `FilterManagePanel.tsx` sidebar with a single dialog that consolidates create/edit/duplicate/promote/demote flows and an admin "Members" tab for browsing all team members' filters.
 
 *Forward compatibility:*
-- Shared views (Phase 13) will reference saved filters by ID — the `saved_filters` table and team-scoping design support this
-- Exports (Phase 14) will accept a filter ID to scope exported data
+- Shared views (Phase 16) will reference saved filters by ID — the `saved_filters` table and team-scoping design support this
+- Exports (Phase 17) will accept a filter ID to scope exported data
 - New activity fields added in future phases should be added to the `FilterCondition` union and the filter engine
 
 **Exit criteria — safe to pause when:**
@@ -48646,96 +48646,6 @@ Makes the filter system fully operational. Today only the "Open only" preset act
 - "Manage filters" panel accessible from dropdown; shows all filters with admin actions
 - Filter engine has comprehensive unit tests (each field type, each operator, AND/OR logic, edge cases)
 - `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
-
----
-
-### Phase 10.5 — Communications Testing
-**Status:** ⬜ | **Effort:** S (1 day)
-
-Comprehensive automated tests for every outbound email flow. No new features; this phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production.
-
-**Scope:**
-
-*Flows to cover (one integration test each):*
-- Invite email: `POST /teams/:id/invites` → mailer.SendInvite called with correct recipient and link
-- Password reset request: `POST /auth/forgot-password` with a known-SMTP server → email delivered; token stored hashed
-- Password reset confirm: `POST /auth/reset-password` → password updated; token marked used; second attempt rejected
-- SMTP validation: `PUT /admin/smtp` with a valid test server → test email sent before config is persisted
-- SMTP test: `POST /admin/smtp/test` → email sent to caller; no config persisted
-
-*Mailer unit tests:*
-- `SaveConfig` → password is encrypted before storage (sentinel prefix present)
-- `LoadConfig` → encrypted password is decrypted on read; plaintext fallback for legacy values
-- `Send` with no config → no-op (returns nil)
-- `encryptPassword` / `decryptPassword` round-trip
-
-*Test infrastructure:*
-- Add a `newTestSMTPServer(t)` helper using `net/smtp` or a simple TCP listener to capture outbound SMTP without a real mail server
-
-**Exit criteria — safe to pause when:**
-- All flows above have at least one passing integration test
-- `SaveConfig`/`LoadConfig` encryption round-trip has a unit test
-- `go test ./...` passes clean
-
----
-
-### Phase 10.6 — AI Key Management
-**Status:** ⬜ | **Effort:** M (2–3 days)
-
-Ships the AI/LLM key configuration surface stubbed in Phase 10.1.3. Adds encrypted storage, model routing, and a usage log so superadmins can connect AI providers and see which features are consuming tokens.
-
-**Scope:**
-
-*API:*
-- New table `ai_provider_keys`: id, provider (anthropic | openai | google | custom), api_key (encrypted AES-256-GCM, same pattern as SMTP password), model_override, created_at, updated_at
-- `GET /admin/ai/keys` — list configured providers (key masked); superadmin only
-- `PUT /admin/ai/keys/:provider` — upsert a provider key; validates by making a lightweight test call; superadmin only
-- `DELETE /admin/ai/keys/:provider` — remove a provider key; superadmin only
-
-*Web — `/settings/ai` (replaces current stub):*
-- Real form replacing the placeholder cards: provider selector, API key input (masked), model override field
-- "Test connection" button calls a test endpoint before saving
-- Usage log section (read-only): last 10 AI requests with timestamp, provider, model, token count
-
-*Encryption:*
-- Reuse the AES-256-GCM pattern introduced for SMTP passwords in Phase 10.1.3
-
-**Exit criteria — safe to pause when:**
-- A superadmin can configure an Anthropic key and verify via the test connection button
-- The key is stored encrypted and masked in the GET response
-- Removing a key clears it from the DB
-- `golangci-lint run` clean; `go test ./...` passes
-
----
-
-### Phase 10.7 — Localization & Language Support
-**Status:** ⬜ | **Effort:** L (3–5 days)
-
-Adds i18n infrastructure and ships the first non-English locale. The "Default language" fields in `/settings/preferences` and `/settings/organization` (currently disabled stubs) become functional.
-
-**Scope:**
-
-*Infrastructure:*
-- Adopt `react-i18next` (or equivalent) for the web client
-- Extract all user-facing strings from React components into locale JSON files
-- Add a `language` column to `user_preferences` (per-user) and a `default_language` key to `instance_settings`
-- `PATCH /users/me/preferences` accepts `language` key; `PATCH /admin/settings` accepts `default_language`
-
-*Locales:*
-- `en` — English (extracted from existing strings; the baseline)
-- Ship at least one additional locale to validate the pipeline (e.g. `es` — Spanish, or `fr` — French)
-
-*Web — settings surfaces:*
-- Enable the "Language" dropdown in `/settings/preferences` (user-level)
-- Enable the "Default language" dropdown in `/settings/organization` (instance-level)
-- Language change takes effect on next page load (no hard reload required)
-
-**Exit criteria — safe to pause when:**
-- Switching to the second locale changes all UI strings in the web app
-- User language preference persists across logout/login
-- Instance default language is used when the user has no preference set
-- Adding a new locale requires only a new JSON file (no code changes)
-- `pnpm --filter web lint` clean
 
 ---
 
@@ -48805,7 +48715,7 @@ A familiar surface for users coming from Google Calendar / Outlook. Not a Gantt 
 - Single-day variant of Week; same time grid and lane algorithm
 
 **Open question (resolve early in phase):**
-- Events without time components (date-only) — do they all live in the all-day strip, or do they get a default block at e.g. 9am? Affects sync compatibility with Phase 12.
+- Events without time components (date-only) — do they all live in the all-day strip, or do they get a default block at e.g. 9am? Affects sync compatibility with Phase 15 (Calendar Sync).
 
 **Exit criteria — safe to pause when:**
 - Switching to Calendar from List/Gantt renders the current month with all events in correct cells
@@ -48841,7 +48751,97 @@ Read-only Kanban per [REQUIREMENTS.md](REQUIREMENTS.md). Columns are team status
 
 ---
 
-### Phase 12 — Calendar Sync — Google & CalDAV
+### Phase 12 — Communications Testing
+**Status:** ⬜ | **Effort:** S (1 day)
+
+Comprehensive automated tests for every outbound email flow. No new features; this phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production.
+
+**Scope:**
+
+*Flows to cover (one integration test each):*
+- Invite email: `POST /teams/:id/invites` → mailer.SendInvite called with correct recipient and link
+- Password reset request: `POST /auth/forgot-password` with a known-SMTP server → email delivered; token stored hashed
+- Password reset confirm: `POST /auth/reset-password` → password updated; token marked used; second attempt rejected
+- SMTP validation: `PUT /admin/smtp` with a valid test server → test email sent before config is persisted
+- SMTP test: `POST /admin/smtp/test` → email sent to caller; no config persisted
+
+*Mailer unit tests:*
+- `SaveConfig` → password is encrypted before storage (sentinel prefix present)
+- `LoadConfig` → encrypted password is decrypted on read; plaintext fallback for legacy values
+- `Send` with no config → no-op (returns nil)
+- `encryptPassword` / `decryptPassword` round-trip
+
+*Test infrastructure:*
+- Add a `newTestSMTPServer(t)` helper using `net/smtp` or a simple TCP listener to capture outbound SMTP without a real mail server
+
+**Exit criteria — safe to pause when:**
+- All flows above have at least one passing integration test
+- `SaveConfig`/`LoadConfig` encryption round-trip has a unit test
+- `go test ./...` passes clean
+
+---
+
+### Phase 13 — AI Key Management
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Ships the AI/LLM key configuration surface stubbed in Phase 10.1.3. Adds encrypted storage, model routing, and a usage log so superadmins can connect AI providers and see which features are consuming tokens.
+
+**Scope:**
+
+*API:*
+- New table `ai_provider_keys`: id, provider (anthropic | openai | google | custom), api_key (encrypted AES-256-GCM, same pattern as SMTP password), model_override, created_at, updated_at
+- `GET /admin/ai/keys` — list configured providers (key masked); superadmin only
+- `PUT /admin/ai/keys/:provider` — upsert a provider key; validates by making a lightweight test call; superadmin only
+- `DELETE /admin/ai/keys/:provider` — remove a provider key; superadmin only
+
+*Web — `/settings/ai` (replaces current stub):*
+- Real form replacing the placeholder cards: provider selector, API key input (masked), model override field
+- "Test connection" button calls a test endpoint before saving
+- Usage log section (read-only): last 10 AI requests with timestamp, provider, model, token count
+
+*Encryption:*
+- Reuse the AES-256-GCM pattern introduced for SMTP passwords in Phase 10.1.3
+
+**Exit criteria — safe to pause when:**
+- A superadmin can configure an Anthropic key and verify via the test connection button
+- The key is stored encrypted and masked in the GET response
+- Removing a key clears it from the DB
+- `golangci-lint run` clean; `go test ./...` passes
+
+---
+
+### Phase 14 — Localization & Language Support
+**Status:** ⬜ | **Effort:** L (3–5 days)
+
+Adds i18n infrastructure and ships the first non-English locale. The "Default language" fields in `/settings/preferences` and `/settings/organization` (currently disabled stubs) become functional.
+
+**Scope:**
+
+*Infrastructure:*
+- Adopt `react-i18next` (or equivalent) for the web client
+- Extract all user-facing strings from React components into locale JSON files
+- Add a `language` column to `user_preferences` (per-user) and a `default_language` key to `instance_settings`
+- `PATCH /users/me/preferences` accepts `language` key; `PATCH /admin/settings` accepts `default_language`
+
+*Locales:*
+- `en` — English (extracted from existing strings; the baseline)
+- Ship at least one additional locale to validate the pipeline (e.g. `es` — Spanish, or `fr` — French)
+
+*Web — settings surfaces:*
+- Enable the "Language" dropdown in `/settings/preferences` (user-level)
+- Enable the "Default language" dropdown in `/settings/organization` (instance-level)
+- Language change takes effect on next page load (no hard reload required)
+
+**Exit criteria — safe to pause when:**
+- Switching to the second locale changes all UI strings in the web app
+- User language preference persists across logout/login
+- Instance default language is used when the user has no preference set
+- Adding a new locale requires only a new JSON file (no code changes)
+- `pnpm --filter web lint` clean
+
+---
+
+### Phase 15 — Calendar Sync — Google & CalDAV
 **Status:** ⬜ | **Effort:** XL (1–2 wks)
 
 **Scope:**
@@ -48861,7 +48861,7 @@ Read-only Kanban per [REQUIREMENTS.md](REQUIREMENTS.md). Columns are team status
 
 ---
 
-### Phase 13 — Shares — Multi-Share Views with Passwords
+### Phase 16 — Shares — Multi-Share Views with Passwords
 **Status:** ⬜ | **Effort:** M (3–5 days)
 
 A first-class **Share** entity. One timeline can have many shares; each share is a frozen pairing of `{ view type + view config + optional password + optional expiry }`. This is the feature that lets a team publish, e.g., a public Gantt sorted by start date with the "Marketing" filter applied, alongside a password-protected List view of the same data for an external stakeholder.
@@ -48891,7 +48891,7 @@ The existing single share token on `timelines` is too coarse — it shares "the 
 
 *Web — viewing shares:*
 - Public viewer route `/s/:token` — no auth required; if password-protected, gates behind a password prompt; on success, mounts the corresponding view component in read-only mode with `view_config` applied
-- Read-only enforcement: no drag, no inline edit, no create — the same lockdown used for `is_external` events (Phase 15) applied to the whole surface
+- Read-only enforcement: no drag, no inline edit, no create — the same lockdown used for `is_external` events (Phase 18) applied to the whole surface
 - Branding strip at the top: team name, "Shared view," last-updated timestamp
 
 *Web — managing shares:*
@@ -48914,7 +48914,7 @@ The existing single share token on `timelines` is too coarse — it shares "the 
 
 ---
 
-### Phase 14 — Data Portability & Exports
+### Phase 17 — Data Portability & Exports
 **Status:** ⬜ | **Effort:** L (1 wk)
 
 Tabular import / export plus view-aware exports (Gantt → PDF, Kanban → PDF, List → Markdown, etc.). Each visual export respects the active filter / sort / group at time of export — the deliverable is "what's on the screen right now," not the raw event list.
@@ -48957,7 +48957,7 @@ PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency i
 
 ---
 
-### Phase 15 — External Connectors (Webhooks)
+### Phase 18 — External Connectors (Webhooks)
 **Status:** ⬜ | **Effort:** M (3–5 days)
 
 **Scope:**
@@ -48973,7 +48973,7 @@ PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency i
 
 ---
 
-### Phase 16 — Global Search
+### Phase 19 — Global Search
 **Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
 
 Cross-team, cross-timeline event search via a command palette. Complements (does **not** replace) the in-view Find from [Phase 8.5](#phase-85-find-in-view).
@@ -49003,7 +49003,7 @@ By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), an
 
 ---
 
-### Phase 17 — Backup & Restore
+### Phase 20 — Backup & Restore
 **Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
 
 Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container.
