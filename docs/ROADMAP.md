@@ -46,7 +46,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.4 | [Gantt Interaction & Activity Edit Polish](#phase-1044--gantt-interaction--activity-edit-polish) | M — 2–3 days | 🔄 |
 | 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
-| 11.1 | [Web — List / Spreadsheet View](#phase-111--web--list--spreadsheet-view) | M — 2–3 days | ⬜ |
+| 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | ⬜ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
@@ -1310,40 +1310,31 @@ Makes the filter system fully operational. Today only the "Open only" preset act
 
 ---
 
-### Phase 11.1 — Web — List / Spreadsheet View
+### Phase 11.1 — Web — List View
 **Status:** ⬜ | **Effort:** M (2–3 days)
 
-The "spreadsheet" surface — a dense, sortable, inline-editable table view of the same events shown in Gantt. Cheapest of the three new views to build and the highest-utility for power users who want to bulk-scan or bulk-edit. Shipped first so the view-switcher infrastructure lands here and the later views slot in.
+A curated, inline-editable **List** view of the active timeline's activities — the surface a team lead reaches for when they'd otherwise plan in Excel or a Google Doc. Two goals: (1) edit activities like a spreadsheet (keyboard-first, quick single-cell edits, no modal round-trips), and (2) curate a *digestible* column set — hide/show/reorder columns so the whole list reads in one sitting. Ships first so the view-switcher infrastructure lands here and the later views (11.2 Calendar, 11.3 Kanban) slot in.
 
-**Design rationale:**
-Gantt answers "when," List answers "what" — a flat, scannable inventory with column-level sorting, density that fits 50+ events on screen, and inline edits without opening a side panel. This is the view most users will reach for once Find (8.5) gets them close to a row.
+Deliberately **not** a power-user database grid: no virtualization (our timelines are tens-to-low-hundreds of activities, not thousands), no Excel range gestures (paste-fill / fill handle are out — that's what a future import path is for), no heavy bulk-mutation toolbar.
 
-**Scope:**
+**Detailed plan:** [docs/plans/phase-11.1-list-view.md](plans/phase-11.1-list-view.md) — column catalog, keyboard editing model (selection vs. edit mode, TanStack Table v8 + @dnd-kit), column-curation persistence, group-by/color-by mirroring Gantt, build order, and exit criteria all live there. Scope is reviewed and settled.
 
-*View-switcher infrastructure (lands here, reused by 11.2 / 11.3):*
-- `ViewMode` extended to `'gantt' | 'list' | 'calendar' | 'kanban'`
-- View switcher control in the timeline sub-toolbar; per-timeline persisted via existing preferences (8.4)
-- View-specific toolbar slots so each view can contribute its own controls without crowding the shared bar
-
-*List view itself:*
-- Virtualized table (react-virtual or TanStack Virtual) — must scroll 1000+ rows smoothly
-- Default columns: Title, Start, End, Duration, Status, Assignees, Tags, Parent
-- Column show/hide menu; column order via drag; column widths resizable — persisted via preferences
-- Sort by clicking a column header (single-column sort for v1)
-- Density toggle (Comfortable / Compact)
-- Inline edit on click for title, dates, status — Tab/Shift+Tab/Enter navigation between cells
-- Row click (off-editable-cell) opens the existing `EventDetailPanel`
-- Bulk selection via checkbox column; bulk archive / delete / status-change actions in a contextual toolbar
-- Respects active filter, Find highlight (8.5), and granularity-independent — granularity does not apply to List
+**Scope (summary — see plan doc for detail):**
+- *View-switcher infra* (reused by 11.2 / 11.3): `ViewMode` extended to `'gantt' | 'list' | 'calendar' | 'kanban'`; switcher control in the sub-toolbar persisted per-timeline; per-view toolbar slots.
+- *List view:* default columns (Title, Start, End, Duration, Status, Assignees, Tags) with a column catalog for the rest; hide/show + drag-reorder + resize, persisted per-timeline-per-user; pinned Title; density toggle; single-column sort; inline editing with field-appropriate editors (text, date, status pill, assignee/tag/parent popovers) saving via `PATCH /activities/:id`; group-by / color-by mirroring Gantt; respects active filter and Find highlight (8.5).
+- *Not this phase:* light multi-select (maybe later), paste-fill / fill handle (out), virtualization (deferred until proven needed).
 
 **Exit criteria — safe to pause when:**
-- View switcher toggles between Gantt and List, persisting the choice per timeline
-- List shows all visible events with correct columns and respects the active filter
-- Sorting by any column reorders rows without losing scroll position
-- Inline editing title / dates / status saves via PATCH and reflects in Gantt when switched back
-- Bulk selecting 3+ events and applying "Archive" archives all selected events
-- 1000-row test fixture scrolls without jank
-- Find bar highlights matching rows in List view the same way it highlights bars in Gantt
+- View switcher toggles Gantt ↔ List, persisting the choice per timeline
+- List shows the active timeline's activities with the default columns and respects the active filter
+- Hiding, reordering, and resizing columns works and survives a reload (persisted per-timeline-per-user)
+- Density toggle changes row height and persists
+- Keyboard editing works: arrows move selection, Enter/F2 enters edit, Esc cancels, Tab/Enter commit-and-move
+- Inline editing Title / Start / End / Status saves via PATCH and reflects in Gantt when switched back
+- Title column stays pinned/visible when scrolled horizontally
+- Sorting by a column header reorders rows without losing selection
+- Group-by and Color-by controls work and persist per-timeline
+- Find bar highlights matching rows the same way it highlights bars in Gantt
 
 ---
 
