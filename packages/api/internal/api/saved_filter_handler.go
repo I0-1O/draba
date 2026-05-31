@@ -28,6 +28,28 @@ func (s *Server) handleListSavedFilters(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, filters)
 }
 
+// handleListAllTeamSavedFilters handles GET /teams/{id}/saved_filters/all.
+// Returns every saved filter in the team (private + team). Admin-only.
+func (s *Server) handleListAllTeamSavedFilters(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can list all team filters")
+		return
+	}
+
+	filters, err := s.savedFilters.ListAllByTeam(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
+		return
+	}
+	writeJSON(w, http.StatusOK, filters)
+}
+
 // handleCreateSavedFilter handles POST /teams/{id}/saved_filters. The
 // authenticated user must be a member of the team and becomes the owner.
 // Setting isTeamFilter=true at creation time requires admin role.

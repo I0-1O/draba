@@ -20,8 +20,6 @@ type Tag = components['schemas']['Tag']
 export interface ApplyFilterContext {
   /** Status IDs whose is_closed flag is true — used by 'open' and 'overdue'. */
   closedStatusIds: Set<string>
-  /** team_member_id values belonging to the currently logged-in user. */
-  currentUserMemberIds: string[]
   /** All saved filters (user's own + team filters) for the active team. */
   savedFilters: SavedFilter[]
   /** For saved filter engine: timeline_id → statuses map. */
@@ -52,14 +50,6 @@ function filterUpcoming(activities: Activity[]): Activity[] {
     const endsWithin = end !== null && end >= now && end <= cutoff
     return startsWithin || endsWithin
   })
-}
-
-function filterMy(activities: Activity[], currentUserMemberIds: string[]): Activity[] {
-  if (currentUserMemberIds.length === 0) return []
-  const idSet = new Set(currentUserMemberIds)
-  return activities.filter(a =>
-    (a.assignedMemberIds ?? []).some(mid => idSet.has(mid))
-  )
 }
 
 function filterOverdue(activities: Activity[], closedStatusIds: Set<string>): Activity[] {
@@ -99,7 +89,6 @@ export function applyActiveFilter(
       case 'all':       return filterAll(activities)
       case 'open':      return filterOpen(activities, ctx.closedStatusIds)
       case 'upcoming':  return filterUpcoming(activities)
-      case 'my':        return filterMy(activities, ctx.currentUserMemberIds)
       case 'overdue':   return filterOverdue(activities, ctx.closedStatusIds)
       case 'noassign':  return filterNoAssign(activities)
     }

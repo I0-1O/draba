@@ -72,6 +72,20 @@ func (r *SavedFilterRepo) Update(f *models.SavedFilter) error {
 	return nil
 }
 
+// ListAllByTeam returns every saved filter in the team, including private
+// filters from all members. Admin-only; callers must enforce access.
+func (r *SavedFilterRepo) ListAllByTeam(teamID string) ([]*models.SavedFilter, error) {
+	fs := make([]*models.SavedFilter, 0)
+	err := r.db.Select(&fs,
+		`SELECT * FROM saved_filters WHERE team_id = ? ORDER BY user_id, created_at ASC`,
+		teamID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing all team saved filters: %w", err)
+	}
+	return fs, nil
+}
+
 // Delete removes the row with the given id. No-op when the row is absent.
 func (r *SavedFilterRepo) Delete(id string) error {
 	_, err := r.db.Exec(`DELETE FROM saved_filters WHERE id = ?`, id)

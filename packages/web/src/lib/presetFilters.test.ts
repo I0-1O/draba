@@ -63,12 +63,10 @@ afterAll(() => {
 
 const closedStatusId = 'status-closed'
 const openStatusId = 'status-open'
-const currentMemberId = 'member-current'
 const otherMemberId = 'member-other'
 
 const baseCtx = {
   closedStatusIds: new Set([closedStatusId]),
-  currentUserMemberIds: [currentMemberId],
   savedFilters: [] as SavedFilter[],
   statuses: new Map<string, Status[]>([['tl-1', [makeStatus(openStatusId, 'Open'), makeStatus(closedStatusId, 'Done', true)]]]),
   tags: [makeTag('tag-1', 'urgent')] as Tag[],
@@ -128,21 +126,6 @@ describe("preset 'upcoming'", () => {
   })
 })
 
-// ── my preset ─────────────────────────────────────────────────────────────────
-
-describe("preset 'my'", () => {
-  it('returns only activities assigned to the current user', () => {
-    const activities = [
-      makeActivity({ id: 'mine',  assignedMemberIds: [currentMemberId] }),
-      makeActivity({ id: 'theirs', assignedMemberIds: [otherMemberId] }),
-      makeActivity({ id: 'none',  assignedMemberIds: [] }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'my' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['mine'])
-  })
-})
-
 // ── overdue preset ────────────────────────────────────────────────────────────
 
 describe("preset 'overdue'", () => {
@@ -163,7 +146,7 @@ describe("preset 'overdue'", () => {
 describe("preset 'noassign'", () => {
   it('returns only activities with no assignees', () => {
     const activities = [
-      makeActivity({ id: 'assigned', assignedMemberIds: [currentMemberId] }),
+      makeActivity({ id: 'assigned', assignedMemberIds: [otherMemberId] }),
       makeActivity({ id: 'free',     assignedMemberIds: [] }),
     ]
     const filter: ActiveFilter = { kind: 'preset', id: 'noassign' }

@@ -67,6 +67,17 @@ export function useUpdateSavedFilter(teamId: string) {
   })
 }
 
+/** Fetches all saved filters in a team (private + team). Admin-only endpoint. */
+export function useAllTeamSavedFilters(teamId: string, enabled: boolean) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: [...savedFiltersKey(teamId), 'all'] as const,
+    queryFn: () => authFetch<SavedFilter[]>(`/teams/${teamId}/saved_filters/all`),
+    enabled: Boolean(teamId) && enabled,
+  })
+}
+
 /** Deletes a saved filter (owner-only) and invalidates the list. */
 export function useDeleteSavedFilter(teamId: string) {
   const { getAccessToken } = useAuth()

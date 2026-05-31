@@ -6,8 +6,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import {
-  Layers, Clock, User, AlertCircle, UserX, CheckCircle,
-  ChevronDown, Plus, Check, Settings2, List,
+  Layers, Clock, AlertCircle, UserX, CheckCircle,
+  ChevronDown, Check, List,
 } from 'lucide-react'
 import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
 import { useTeamMembers } from '@/hooks/useTeamActivities'
@@ -16,13 +16,12 @@ import { useAuth } from '@/contexts/AuthContext'
 
 interface Props {
   teamId?: string
-  onOpenEditor: () => void
   onOpenManager: () => void
 }
 
 // ── Preset definitions ───────────────────────────────────────────────────────
 
-type PresetId = 'all' | 'upcoming' | 'my' | 'overdue' | 'noassign' | 'open'
+type PresetId = 'all' | 'upcoming' | 'overdue' | 'noassign' | 'open'
 
 interface Preset {
   id: PresetId
@@ -37,7 +36,6 @@ const PRESETS: Preset[] = [
   { id: 'all',      label: 'All activities',  icon: <Layers      {...ICON_PRESET} /> },
   { id: 'open',     label: 'Open only',       icon: <CheckCircle {...ICON_PRESET} />, subtitle: 'Hide activities with a closed status' },
   { id: 'upcoming', label: 'Upcoming',         icon: <Clock       {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
-  { id: 'my',       label: 'My events',        icon: <User        {...ICON_PRESET} /> },
   { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
   { id: 'noassign', label: 'No assignee',      icon: <UserX       {...ICON_PRESET} /> },
 ]
@@ -76,14 +74,11 @@ interface ItemRowProps {
   label: string
   subtitle?: string
   active: boolean
-  /** Gear button shown on hover for custom filters. */
-  onConfigure?: () => void
   onClick: () => void
 }
 
-function ItemRow({ icon, dotColor, label, subtitle, active, onConfigure, onClick }: ItemRowProps) {
+function ItemRow({ icon, dotColor, label, subtitle, active, onClick }: ItemRowProps) {
   const [hovered, setHovered] = useState(false)
-  const [gearHovered, setGearHovered] = useState(false)
 
   const rowBg = active
     ? 'rgba(40,140,155,.09)'
@@ -93,9 +88,6 @@ function ItemRow({ icon, dotColor, label, subtitle, active, onConfigure, onClick
 
   const labelColor = active ? 'var(--primary)' : 'var(--foreground)'
   const labelWeight = active ? 600 : 400
-
-  const showGear = onConfigure && hovered
-  const showCheck = active && !showGear
 
   return (
     <div
@@ -141,32 +133,9 @@ function ItemRow({ icon, dotColor, label, subtitle, active, onConfigure, onClick
         )}
       </div>
 
-      {/* 24px right slot */}
+      {/* 24px right slot — checkmark when active */}
       <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-        {showGear ? (
-          <button
-            onClick={e => { e.stopPropagation(); onConfigure?.() }}
-            onMouseEnter={() => setGearHovered(true)}
-            onMouseLeave={() => setGearHovered(false)}
-            style={{
-              width: 22,
-              height: 22,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: gearHovered ? '#dde2e8' : 'var(--muted, #EDF0F3)',
-              border: 'none',
-              borderRadius: 5,
-              cursor: 'pointer',
-              color: 'var(--muted-foreground)',
-              transition: 'background 0.1s',
-            }}
-          >
-            <Settings2 size={12} strokeWidth={1.8} />
-          </button>
-        ) : showCheck ? (
-          <Check size={13} strokeWidth={2.5} color="var(--primary)" />
-        ) : null}
+        {active && <Check size={13} strokeWidth={2.5} color="var(--primary)" />}
       </div>
     </div>
   )
@@ -218,7 +187,7 @@ function Divider() {
 
 // ── Main component ───────────────────────────────────────────────────────────
 
-export default function FilterDropdown({ teamId = '', onOpenEditor, onOpenManager }: Props) {
+export default function FilterDropdown({ teamId = '', onOpenManager }: Props) {
   const { activeFilter, setActiveFilter } = useFilter()
   const { user } = useAuth()
   const { data: members = [] } = useTeamMembers(teamId)
@@ -324,7 +293,6 @@ export default function FilterDropdown({ teamId = '', onOpenEditor, onOpenManage
             boxShadow: '0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)',
             zIndex: 100,
             paddingBottom: 4,
-            maxHeight: 460,
             overflowY: 'auto',
           }}
         >
@@ -396,7 +364,6 @@ export default function FilterDropdown({ teamId = '', onOpenEditor, onOpenManage
                     key={s.id}
                     label={s.name}
                     active={isSelected(f)}
-                    onConfigure={() => { onOpenEditor(); setOpen(false) }}
                     onClick={() => select(f)}
                   />
                 )
@@ -407,7 +374,6 @@ export default function FilterDropdown({ teamId = '', onOpenEditor, onOpenManage
           {/* Footer */}
           <Divider />
           <ManageFiltersRow onClick={() => { onOpenManager(); setOpen(false) }} />
-          <AddFilterRow onClick={() => { onOpenEditor(); setOpen(false) }} />
         </div>
       )}
     </div>
@@ -446,34 +412,3 @@ function ManageFiltersRow({ onClick }: { onClick: () => void }) {
   )
 }
 
-// ── Add filter footer row ─────────────────────────────────────────────────────
-
-function AddFilterRow({ onClick }: { onClick: () => void }) {
-  const [hovered, setHovered] = useState(false)
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        width: '100%',
-        padding: '7px 14px',
-        background: hovered ? 'var(--muted)' : 'transparent',
-        border: 'none',
-        fontSize: 13,
-        fontWeight: hovered ? 600 : 400,
-        color: hovered ? 'var(--primary)' : 'var(--muted-foreground)',
-        cursor: 'pointer',
-        fontFamily: 'var(--font-sans)',
-        textAlign: 'left',
-        transition: 'all 0.1s',
-      }}
-    >
-      <Plus size={14} strokeWidth={2} />
-      Add filter
-    </button>
-  )
-}

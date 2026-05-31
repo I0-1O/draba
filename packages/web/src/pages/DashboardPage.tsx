@@ -8,13 +8,12 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import Sidebar from '@/components/layout/Sidebar'
 import TopBar, { type ViewMode } from '@/components/layout/TopBar'
-import RightSidebar from '@/components/layout/RightSidebar'
 import GanttView from '@/components/gantt/GanttView'
 import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
 import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
 import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
 import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
-import { FilterProvider } from '@/contexts/FilterContext'
+import { FilterProvider, useFilter } from '@/contexts/FilterContext'
 import { FindProvider, useFind } from '@/contexts/FindContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useDarkMode } from '@/hooks/useDarkMode'
@@ -29,8 +28,7 @@ import { useTags } from '@/hooks/useTags'
 import TeamModal from '@/components/TeamModal'
 import MemberModal from '@/components/MemberModal'
 import TimelineModal from '@/components/TimelineModal'
-import FilterEditor from '@/components/filters/FilterEditor'
-import FilterManagePanel from '@/components/filters/FilterManagePanel'
+import FilterManageModal from '@/components/filters/FilterManageModal'
 import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
@@ -57,6 +55,7 @@ const DROPDOWN_BTN: React.CSSProperties = {
 
 function DashboardShell() {
   const { logout, accessToken, user } = useAuth()
+  const { activeFilter, setActiveFilter } = useFilter()
   const navigate = useNavigate()
   const { isDark, toggle: toggleDark, theme } = useDarkMode()
   const { setFindBarOpen } = useFind()
@@ -70,9 +69,7 @@ function DashboardShell() {
   const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
   const [ganttMembers, setGanttMembers] = useState<Member[]>([])
   const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
-  const [filterEditorOpen, setFilterEditorOpen] = useState(false)
-  const [filterManageOpen, setFilterManageOpen] = useState(false)
-  const [editingFilter, setEditingFilter] = useState<components['schemas']['SavedFilter'] | null>(null)
+  const [filterModalOpen, setFilterModalOpen] = useState(false)
   const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
   // Gantt toolbar state
   const [groupBy, setGroupBy] = useState<GroupBy>('none')
@@ -205,10 +202,18 @@ function DashboardShell() {
     icon: activeTimeline?.icon ?? '__none__',
   }
 
+  // Close the activity detail panel whenever the active filter changes so the
+  // filtered view is unobstructed by a stale selection.
+  useEffect(() => {
+    setSelectedActivityId(null)
+    setSelectedApiActivity(null)
+  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleTimelineChange = useCallback((id: string) => {
     prefsAppliedForTimeline.current = null
     setActiveTimelineId(id)
-  }, [])
+    setActiveFilter({ kind: 'preset', id: 'all' })
+  }, [setActiveFilter])
 
   useTeamActivitySync(teamId, accessToken)
 
@@ -297,7 +302,6 @@ function DashboardShell() {
           const today = new Date().toISOString().slice(0, 10)
           setSelectedActivityId(null)
           setSelectedApiActivity(null)
-          setFilterEditorOpen(false)
           setCreateDefaults({ start: today, end: today, memberId: null })
         }}
         activeTeam={activeTeam}
@@ -319,8 +323,7 @@ function DashboardShell() {
           timelineName={activeTimelineName}
           timelineIdentity={activeTimelineIdentity}
           onViewChange={setView}
-          onOpenFilterEditor={() => { setEditingFilter(null); setFilterEditorOpen(true); setFilterManageOpen(false) }}
-          onOpenFilterManager={() => { setFilterManageOpen(true); setFilterEditorOpen(false) }}
+          onOpenFilterManager={() => setFilterModalOpen(true)}
           rightSlot={
             <div ref={profileRef} style={{ position: 'relative', marginLeft: 4 }}>
               <button
@@ -425,7 +428,6 @@ function DashboardShell() {
               onSelectApiActivity={(activity) => {
                 setSelectedApiActivity(activity)
                 setCreateDefaults(null)
-                if (activity) setFilterEditorOpen(false)
               }}
               onBarDragProgress={(activityId, newStart, newEnd) => {
                 setLiveDragDates({
@@ -477,40 +479,13 @@ function DashboardShell() {
         onClose={() => setCreateDefaults(null)}
       />
 
-      <RightSidebar
-        open={filterManageOpen}
-        title="Manage filters"
-        onClose={() => setFilterManageOpen(false)}
-      >
-        {filterManageOpen && (
-          <FilterManagePanel
-            teamId={teamId}
-            isAdmin={canEditTeam}
-            onEdit={(filter) => {
-              setEditingFilter(filter)
-              setFilterManageOpen(false)
-              setFilterEditorOpen(true)
-            }}
-            onClose={() => setFilterManageOpen(false)}
-          />
-        )}
-      </RightSidebar>
-
-      <RightSidebar
-        open={filterEditorOpen}
-        title={editingFilter ? 'Edit filter' : 'New filter'}
-        onClose={() => { setFilterEditorOpen(false); setEditingFilter(null) }}
-      >
-        {filterEditorOpen && (
-          <FilterEditor
-            teamId={teamId}
-            timelineId={activeTimelineId ?? ''}
-            filter={editingFilter ?? undefined}
-            onSave={() => { setFilterEditorOpen(false); setEditingFilter(null) }}
-            onClose={() => { setFilterEditorOpen(false); setEditingFilter(null) }}
-          />
-        )}
-      </RightSidebar>
+      <FilterManageModal
+        open={filterModalOpen}
+        onClose={() => setFilterModalOpen(false)}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        isAdmin={canEditTeam}
+      />
 
       {/* Team modal — create or edit */}
       {teamModalMode && (

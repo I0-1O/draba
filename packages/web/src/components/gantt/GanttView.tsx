@@ -30,7 +30,6 @@ import { matchEvents } from '@/lib/findMatcher';
 import { useFind } from '@/contexts/FindContext';
 import { useFilter } from '@/contexts/FilterContext';
 import { usePreferenceMap } from '@/hooks/usePreferences';
-import { useAuth } from '@/contexts/AuthContext';
 import { applyActiveFilter } from '@/lib/presetFilters';
 
 type ApiActivity = components['schemas']['Activity'];
@@ -359,7 +358,6 @@ export default function GanttView({
 
   const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
   const { activeFilter } = useFilter();
-  const { user } = useAuth();
 
   const globalPrefs = usePreferenceMap();
   const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
@@ -460,25 +458,18 @@ export default function GanttView({
     return m;
   }, [apiMembers]);
 
-  const currentUserId = (user as { id?: string } | null)?.id ?? '';
-  const currentUserMemberIds = useMemo(
-    () => memberIdsByUserId.get(currentUserId) ?? [],
-    [currentUserId, memberIdsByUserId],
-  );
-
   const visibleActivities = useMemo(() => applyActiveFilter(
     apiActivities,
     activeFilter,
     memberIdsByUserId,
     {
       closedStatusIds,
-      currentUserMemberIds,
       savedFilters: savedFilters ?? [],
       statuses: statusesByTimeline,
       tags: tags ?? [],
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, currentUserMemberIds, savedFilters, statusesByTimeline, tags]);
+  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
 
   const rows: GanttRow[] = useMemo(() => {
     const richActivities = visibleActivities

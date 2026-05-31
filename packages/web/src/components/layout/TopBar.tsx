@@ -25,7 +25,6 @@ interface Props {
   timelineName?: string;
   timelineIdentity?: Identity;
   onViewChange: (view: ViewMode) => void;
-  onOpenFilterEditor: () => void;
   onOpenFilterManager: () => void;
   rightSlot?: React.ReactNode;
 }
@@ -43,7 +42,6 @@ export default function TopBar({
   timelineName,
   timelineIdentity,
   onViewChange,
-  onOpenFilterEditor,
   onOpenFilterManager,
   rightSlot,
 }: Props) {
@@ -109,7 +107,7 @@ export default function TopBar({
             <Search size={13} strokeWidth={1.8} />
           </button>
         )}
-        <FilterDropdown teamId={teamId} onOpenEditor={onOpenFilterEditor} onOpenManager={onOpenFilterManager} />
+        <FilterDropdown teamId={teamId} onOpenManager={onOpenFilterManager} />
         {rightSlot}
       </div>
     </div>
