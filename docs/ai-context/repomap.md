@@ -10783,6 +10783,234 @@ export function useFind(): FindContextValue {
 }
 ````
 
+## File: packages/web/src/hooks/useSettings.ts
+````typescript
+/**
+ * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
+ * profile, password change, forgot/reset password, SMTP config, instance
+ * settings, and the admin user list.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { apiFetch, createAuthFetch } from '@/lib/api'
+import type { components } from '@draba/shared'
+
+type User = components['schemas']['User']
+type SMTPConfig = components['schemas']['SMTPConfig']
+type APIToken = components['schemas']['APIToken']
+
+// ── Profile ──────────────────────────────────────────────────────────────────
+
+export function useUpdateProfile() {
+  const { getAccessToken, patchUser } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
+      authFetch<User>('/users/me', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: (updated) => {
+      qc.setQueryData(['me'], updated)
+      patchUser(updated)
+      // Invalidate all team member lists so the sidebar reflects the new color/icon.
+      void qc.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+// ── My stats ──────────────────────────────────────────────────────────────────
+
+interface MemberStats {
+  activeTimelines: number
+  archivedTimelines: number
+  pastDue: number
+  running: number
+  upcoming: number
+  unscheduled: number
+  archivedActivities: number
+}
+
+export function useMyStats() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: ['me', 'stats'],
+    queryFn: () => authFetch<MemberStats>('/users/me/stats'),
+  })
+}
+
+// ── Password ──────────────────────────────────────────────────────────────────
+
+export function useChangePassword() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
+      authFetch<{ status: string }>('/users/me/password', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Forgot / reset password (public, no auth required) ───────────────────────
+
+export function useForgotPassword() {
+  return useMutation({
+    mutationFn: (email: string) =>
+      apiFetch<{ status: string }>('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }),
+  })
+}
+
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: (data: { token: string; newPassword: string }) =>
+      apiFetch<{ status: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  })
+}
+
+// ── Admin: SMTP ──────────────────────────────────────────────────────────────
+
+export function useAdminSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'smtp'],
+    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
+  })
+}
+
+export function useSaveSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
+        method: 'PUT',
+        body: JSON.stringify(cfg),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+export function useTestSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (cfg: SMTPConfig) =>
+      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
+        method: 'POST',
+        body: JSON.stringify(cfg),
+      }),
+  })
+}
+
+export function useDeleteSMTP() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: () =>
+      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
+  })
+}
+
+// ── Admin: Instance settings ──────────────────────────────────────────────────
+
+export function useAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'settings'],
+    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
+  })
+}
+
+export function usePatchAdminSettings() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: Record<string, string>) =>
+      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
+  })
+}
+
+// ── API Tokens ────────────────────────────────────────────────────────────────
+
+export function useTokens() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: ['tokens'],
+    queryFn: () => authFetch<APIToken[]>('/tokens'),
+  })
+}
+
+export function useCreateToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { name: string; scope: string }) =>
+      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+export function useRevokeToken() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
+  })
+}
+
+// ── Admin: Users ──────────────────────────────────────────────────────────────
+
+export type AdminUserRow = User & { teamCount: number }
+
+export function useAdminUsers(orphanedOnly = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['admin', 'users', { orphanedOnly }],
+    queryFn: () =>
+      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
+  })
+}
+````
+
 ## File: packages/web/src/hooks/useWebSocket.ts
 ````typescript
 /**
@@ -11453,6 +11681,189 @@ export default function CommunicationPage() {
         <p className="text-xs text-muted-foreground mt-3">
           When SMTP is not configured, password resets and email invitations are unavailable.
         </p>
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/ProfilePage.tsx
+````typescript
+/**
+ * /settings/profile — Identity, display name, and stats for the current user.
+ */
+
+import { useState, useEffect } from 'react'
+import { Calendar, Activity } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useUpdateProfile, useMyStats } from '@/hooks/useSettings'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+
+// ── Stat chip ──────────────────────────────────────────────────────────────
+
+function StatChip({ value, label, color }: { value: number; label: string; color: string }) {
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      padding: '10px 14px', borderRadius: 8, flex: 1, minWidth: 0,
+      border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
+      background: `${color}0a`, textAlign: 'center',
+    }}>
+      <span style={{ fontSize: 20, fontWeight: 700, color }}>{value}</span>
+      <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{label}</span>
+    </div>
+  )
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────
+
+export default function ProfilePage() {
+  const { user } = useAuth()
+  const updateProfile = useUpdateProfile()
+  const { data: stats } = useMyStats()
+
+  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: user?.color ?? '#288C9B',
+    icon: user?.icon ?? '__none__',
+  })
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    if (user) {
+      setDisplayName(user.displayName)
+      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
+    }
+  }, [user])
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
+      setFeedback({ type: 'success', msg: 'Profile updated.' })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
+  const accentColor = identity.color
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Profile</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Changes to your name and identity propagate across all your team memberships.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] overflow-hidden mb-5">
+        {/* Header banner — identity + name (mirrors MemberModal / TeamModal pattern) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '20px 24px', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ flexShrink: 0 }}>
+            <IdentityWidget
+              identity={identity}
+              name={displayName}
+              shape="circle"
+              onChange={next => setIdentity(next)}
+            />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-1">
+              Your profile
+              {user?.isSuperadmin && (
+                <span className="ml-2 text-[11px] px-2 py-0.5 rounded bg-primary/15 text-primary font-semibold tracking-wide normal-case">
+                  Superadmin
+                </span>
+              )}
+            </div>
+            <input
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+              placeholder="Your name"
+              style={{
+                fontSize: 18, fontWeight: 600, color: 'var(--foreground)',
+                background: 'transparent', border: 'none', outline: 'none',
+                padding: '1px 4px', margin: '-1px -4px',
+                borderRadius: 4, fontFamily: 'inherit', width: '100%',
+              }}
+              onFocus={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.outline = `2px solid ${accentColor}44` }}
+              onBlur={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.outline = 'none' }}
+            />
+            <div className="text-xs text-muted-foreground mt-0.5">{user?.email ?? ''}</div>
+          </div>
+          {/* Live badge preview */}
+          <div style={{ flexShrink: 0 }}>
+            <Badge identity={identity} name={displayName} size={44} shape="circle" />
+          </div>
+        </div>
+
+        {/* Stats */}
+        {stats && (
+          <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border)' }}>
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
+              <Calendar size={11} /> Timelines
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              <StatChip value={stats.activeTimelines} label="Active" color="#1A97A2" />
+              <StatChip value={stats.archivedTimelines} label="Archived" color="#484f58" />
+            </div>
+
+            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
+              <Activity size={11} /> Activities
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <StatChip value={stats.pastDue} label="Past due" color={stats.pastDue > 0 ? '#EF4444' : '#484f58'} />
+              <StatChip value={stats.running} label="Running" color="#1A97A2" />
+              <StatChip value={stats.upcoming} label="Upcoming" color="#3B82F6" />
+              <StatChip value={stats.archivedActivities} label="Archived" color="#484f58" />
+            </div>
+          </div>
+        )}
+
+        {/* Fields */}
+        <div style={{ padding: '20px 24px' }}>
+          {/* Email (read-only) */}
+          <div className="flex flex-col gap-1.5 mb-5">
+            <Label>Email</Label>
+            <Input
+              value={user?.email ?? ''}
+              disabled
+              className="max-w-[360px] opacity-60"
+            />
+            <p className="text-xs text-muted-foreground m-0">Email changes are not yet supported.</p>
+          </div>
+
+          {feedback && (
+            <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+              {feedback.msg}
+            </p>
+          )}
+
+          <button
+            onClick={handleSave}
+            disabled={updateProfile.isPending || !displayName.trim()}
+            style={{
+              background: accentColor,
+              color: '#fff',
+              fontWeight: 600,
+              fontSize: 13,
+              padding: '8px 20px',
+              borderRadius: 7,
+              border: 'none',
+              cursor: updateProfile.isPending || !displayName.trim() ? 'not-allowed' : 'pointer',
+              opacity: updateProfile.isPending || !displayName.trim() ? 0.5 : 1,
+              fontFamily: 'inherit',
+              transition: 'opacity 0.15s',
+            }}
+          >
+            {updateProfile.isPending ? 'Saving…' : 'Save profile'}
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -12314,6 +12725,511 @@ export default function SettingsPage() {
           <Route path="*" element={<Navigate to="/settings/profile" replace />} />
         </Routes>
       </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/SetupPage.tsx
+````typescript
+/**
+ * First-run setup wizard. Shown once when no users exist.
+ * Collects account, team, and timeline details then creates all three on Finish.
+ */
+
+import { useState } from 'react'
+import { Navigate, useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/contexts/AuthContext'
+import { API_BASE, apiFetch, ApiError } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type Step = 1 | 2 | 3
+
+interface WizardData {
+  displayName: string
+  email: string
+  password: string
+  teamName: string
+  timelineName: string
+  startDate: string
+  endDate: string
+}
+
+// ---------------------------------------------------------------------------
+// Step indicator
+// ---------------------------------------------------------------------------
+
+const STEP_LABELS: Record<Step, string> = {
+  1: 'Account',
+  2: 'Team',
+  3: 'Timeline',
+}
+
+function StepIndicator({ current }: { current: Step }) {
+  const steps: Step[] = [1, 2, 3]
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 0,
+        marginBottom: 32,
+      }}
+    >
+      {steps.map((n, i) => {
+        const done = n < current
+        const active = n === current
+        return (
+          <div key={n} style={{ display: 'flex', alignItems: 'center' }}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 4,
+              }}
+            >
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background:
+                    done || active ? 'var(--primary)' : 'transparent',
+                  border:
+                    done || active
+                      ? 'none'
+                      : '2px solid var(--border)',
+                  color:
+                    done || active
+                      ? 'var(--primary-foreground)'
+                      : 'var(--muted-foreground)',
+                  fontSize: 13,
+                  fontWeight: 700,
+                  transition: 'background 0.2s',
+                }}
+              >
+                {done ? '✓' : n}
+              </div>
+              <span
+                style={{
+                  fontSize: 11,
+                  fontWeight: active ? 600 : 400,
+                  color: active
+                    ? 'var(--foreground)'
+                    : 'var(--muted-foreground)',
+                }}
+              >
+                {STEP_LABELS[n]}
+              </span>
+            </div>
+
+            {i < steps.length - 1 && (
+              <div
+                style={{
+                  width: 48,
+                  height: 2,
+                  // Shift up to align with the circle, not the label
+                  marginBottom: 20,
+                  background: done ? 'var(--primary)' : 'var(--border)',
+                  transition: 'background 0.2s',
+                }}
+              />
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Step content
+// ---------------------------------------------------------------------------
+
+interface StepProps {
+  data: WizardData
+  onChange: (patch: Partial<WizardData>) => void
+}
+
+function Step1({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <p
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: 'var(--primary)',
+            margin: '0 0 4px',
+          }}
+        >
+          Welcome to draba!
+        </p>
+        <CardTitle>Create your account</CardTitle>
+        <CardDescription>
+          You're the first person here, so this account will have full admin
+          access — you'll be able to create teams, invite users, and manage the
+          workspace.
+        </CardDescription>
+      </CardHeader>
+      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="displayName">Your name</Label>
+          <Input
+            id="displayName"
+            placeholder="Jane Smith"
+            autoComplete="name"
+            value={data.displayName}
+            onChange={e => onChange({ displayName: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="email">Email</Label>
+          <Input
+            id="email"
+            type="email"
+            placeholder="you@example.com"
+            autoComplete="email"
+            value={data.email}
+            onChange={e => onChange({ email: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="password">Password</Label>
+          <Input
+            id="password"
+            type="password"
+            placeholder="At least 8 characters"
+            autoComplete="new-password"
+            value={data.password}
+            onChange={e => onChange({ password: e.target.value })}
+          />
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+function Step2({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <CardTitle>Name your team</CardTitle>
+        <CardDescription>
+          A team is your shared workspace. Everyone you invite will work within
+          it, and all your timelines and events live inside one. You can
+          customize and add members after setup.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="teamName">Team name</Label>
+          <Input
+            id="teamName"
+            placeholder="Product Marketing"
+            autoComplete="off"
+            value={data.teamName}
+            onChange={e => onChange({ teamName: e.target.value })}
+          />
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+function Step3({ data, onChange }: StepProps) {
+  return (
+    <>
+      <CardHeader>
+        <CardTitle>Your first timeline</CardTitle>
+        <CardDescription>
+          A timeline is a named date window over your team's events — it's how
+          you see who's working on what, and when. Pick a range that fits your
+          next planning horizon.
+        </CardDescription>
+      </CardHeader>
+      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Label htmlFor="timelineName">Timeline name</Label>
+          <Input
+            id="timelineName"
+            placeholder="Q3 Roadmap"
+            autoComplete="off"
+            value={data.timelineName}
+            onChange={e => onChange({ timelineName: e.target.value })}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="startDate">Start date</Label>
+            <Input
+              id="startDate"
+              type="date"
+              value={data.startDate}
+              onChange={e => onChange({ startDate: e.target.value })}
+            />
+          </div>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Label htmlFor="endDate">End date</Label>
+            <Input
+              id="endDate"
+              type="date"
+              value={data.endDate}
+              onChange={e => onChange({ endDate: e.target.value })}
+            />
+          </div>
+        </div>
+      </CardContent>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+function validateStep(step: Step, data: WizardData): string | null {
+  if (step === 1) {
+    if (!data.displayName.trim()) return 'Please enter your name.'
+    if (!data.email.trim()) return 'Please enter your email.'
+    if (data.password.length < 8) return 'Password must be at least 8 characters.'
+    if (/\s/.test(data.password)) return 'Password must not contain spaces.'
+  }
+  if (step === 2) {
+    if (!data.teamName.trim()) return 'Please enter a team name.'
+  }
+  if (step === 3) {
+    if (!data.timelineName.trim()) return 'Please enter a timeline name.'
+    if (!data.startDate) return 'Please choose a start date.'
+    if (!data.endDate) return 'Please choose an end date.'
+    if (data.endDate < data.startDate) return 'End date must be on or after the start date.'
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Date helpers
+// ---------------------------------------------------------------------------
+
+function toDateString(d: Date): string {
+  return d.toISOString().split('T')[0]
+}
+
+function defaultDates(): { startDate: string; endDate: string } {
+  const start = new Date()
+  const end = new Date()
+  end.setMonth(end.getMonth() + 3)
+  return { startDate: toDateString(start), endDate: toDateString(end) }
+}
+
+// ---------------------------------------------------------------------------
+// Main wizard
+// ---------------------------------------------------------------------------
+
+interface SetupStatus {
+  needsSetup: boolean
+}
+
+export default function SetupPage() {
+  const { register, user } = useAuth()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+
+  // If setup has already been completed redirect to login rather than showing
+  // a broken wizard (handles back-navigation and direct URL access after setup).
+  const { data: setupStatus, isLoading: statusLoading } = useQuery<SetupStatus>({
+    queryKey: ['setup-status'],
+    queryFn: () =>
+      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
+    staleTime: Infinity,
+  })
+
+  const [step, setStep] = useState<Step>(1)
+  const [data, setData] = useState<WizardData>({
+    displayName: '',
+    email: '',
+    password: '',
+    teamName: '',
+    timelineName: '',
+    ...defaultDates(),
+  })
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  // Wait for the status check before rendering anything.
+  if (statusLoading) return null
+
+  // Setup already done — logged-in users go home, others go to login.
+  if (setupStatus && !setupStatus.needsSetup) {
+    return <Navigate to={user ? '/' : '/login'} replace />
+  }
+
+  function handleChange(patch: Partial<WizardData>) {
+    setData(d => ({ ...d, ...patch }))
+    setError(null)
+  }
+
+  function handleBack() {
+    setError(null)
+    setStep(s => (s > 1 ? ((s - 1) as Step) : s))
+  }
+
+  function handleNext() {
+    const err = validateStep(step, data)
+    if (err) {
+      setError(err)
+      return
+    }
+    setError(null)
+    setStep(s => (s < 3 ? ((s + 1) as Step) : s))
+  }
+
+  async function handleFinish() {
+    const err = validateStep(3, data)
+    if (err) {
+      setError(err)
+      return
+    }
+
+    setError(null)
+    setLoading(true)
+
+    try {
+      // 1. Create account — returns token directly to avoid racing the async
+      //    setState inside register() before the next render cycle.
+      const token = await register(data.email, data.password, data.displayName)
+
+      // 2. Create team
+      const team = await apiFetch<{ id: string }>('/teams', {
+        method: 'POST',
+        body: JSON.stringify({ name: data.teamName }),
+        accessToken: token,
+      })
+
+      // 3. Create timeline
+      await apiFetch(`/teams/${team.id}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: data.timelineName,
+          startDate: data.startDate,
+          endDate: data.endDate,
+        }),
+        accessToken: token,
+      })
+
+      // Mark setup as done in the query cache so ProtectedRoute doesn't
+      // replay the stale needsSetup:true value after the user logs out.
+      queryClient.setQueryData<SetupStatus>(['setup-status'], { needsSetup: false })
+      navigate('/', { replace: true })
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--background)',
+        padding: '24px',
+      }}
+    >
+      <div style={{ position: 'fixed', top: 16, right: 16 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Logo */}
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 2,
+          marginBottom: 24,
+        }}
+      >
+        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
+        <span
+          style={{
+            fontSize: 36,
+            fontWeight: 700,
+            color: 'var(--foreground)',
+            letterSpacing: '-0.02em',
+          }}
+        >
+          draba
+        </span>
+      </div>
+
+      <Card style={{ width: '100%', maxWidth: 440 }}>
+        <div style={{ padding: '24px 24px 0' }}>
+          <StepIndicator current={step} />
+        </div>
+
+        {step === 1 && <Step1 data={data} onChange={handleChange} />}
+        {step === 2 && <Step2 data={data} onChange={handleChange} />}
+        {step === 3 && <Step3 data={data} onChange={handleChange} />}
+
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+            padding: '0 24px 24px',
+          }}
+        >
+          {error && (
+            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>
+              {error}
+            </p>
+          )}
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button
+              variant="outline"
+              onClick={handleBack}
+              disabled={step === 1 || loading}
+              style={{ flex: 1 }}
+            >
+              Back
+            </Button>
+
+            {step < 3 ? (
+              <Button onClick={handleNext} disabled={loading} style={{ flex: 1 }}>
+                Next
+              </Button>
+            ) : (
+              <Button onClick={handleFinish} disabled={loading} style={{ flex: 1 }}>
+                {loading ? 'Setting up…' : 'Finish'}
+              </Button>
+            )}
+          </div>
+        </div>
+      </Card>
     </div>
   )
 }
@@ -17906,234 +18822,6 @@ export function usePublicSettings() {
 }
 ````
 
-## File: packages/web/src/hooks/useSettings.ts
-````typescript
-/**
- * TanStack Query hooks for the settings API endpoints shipped in Phase 10.1.3:
- * profile, password change, forgot/reset password, SMTP config, instance
- * settings, and the admin user list.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { apiFetch, createAuthFetch } from '@/lib/api'
-import type { components } from '@draba/shared'
-
-type User = components['schemas']['User']
-type SMTPConfig = components['schemas']['SMTPConfig']
-type APIToken = components['schemas']['APIToken']
-
-// ── Profile ──────────────────────────────────────────────────────────────────
-
-export function useUpdateProfile() {
-  const { getAccessToken, patchUser } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: { displayName?: string; color?: string | null; icon?: string | null }) =>
-      authFetch<User>('/users/me', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: (updated) => {
-      qc.setQueryData(['me'], updated)
-      patchUser(updated)
-      // Invalidate all team member lists so the sidebar reflects the new color/icon.
-      void qc.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-// ── My stats ──────────────────────────────────────────────────────────────────
-
-interface MemberStats {
-  activeTimelines: number
-  archivedTimelines: number
-  pastDue: number
-  running: number
-  upcoming: number
-  unscheduled: number
-  archivedActivities: number
-}
-
-export function useMyStats() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: ['me', 'stats'],
-    queryFn: () => authFetch<MemberStats>('/users/me/stats'),
-  })
-}
-
-// ── Password ──────────────────────────────────────────────────────────────────
-
-export function useChangePassword() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
-      authFetch<{ status: string }>('/users/me/password', {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Forgot / reset password (public, no auth required) ───────────────────────
-
-export function useForgotPassword() {
-  return useMutation({
-    mutationFn: (email: string) =>
-      apiFetch<{ status: string }>('/auth/forgot-password', {
-        method: 'POST',
-        body: JSON.stringify({ email }),
-      }),
-  })
-}
-
-export function useResetPassword() {
-  return useMutation({
-    mutationFn: (data: { token: string; newPassword: string }) =>
-      apiFetch<{ status: string }>('/auth/reset-password', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-  })
-}
-
-// ── Admin: SMTP ──────────────────────────────────────────────────────────────
-
-export function useAdminSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'smtp'],
-    queryFn: () => authFetch<{ smtp: SMTPConfig | null }>('/admin/smtp'),
-  })
-}
-
-export function useSaveSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ smtp: SMTPConfig }>('/admin/smtp', {
-        method: 'PUT',
-        body: JSON.stringify(cfg),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-export function useTestSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (cfg: SMTPConfig) =>
-      authFetch<{ status: string; to: string }>('/admin/smtp/test', {
-        method: 'POST',
-        body: JSON.stringify(cfg),
-      }),
-  })
-}
-
-export function useDeleteSMTP() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: () =>
-      authFetch<void>('/admin/smtp', { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'smtp'] }),
-  })
-}
-
-// ── Admin: Instance settings ──────────────────────────────────────────────────
-
-export function useAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'settings'],
-    queryFn: () => authFetch<{ settings: Record<string, string> }>('/admin/settings'),
-  })
-}
-
-export function usePatchAdminSettings() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-
-  return useMutation({
-    mutationFn: (data: Record<string, string>) =>
-      authFetch<{ settings: Record<string, string> }>('/admin/settings', {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'settings'] }),
-  })
-}
-
-// ── API Tokens ────────────────────────────────────────────────────────────────
-
-export function useTokens() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: ['tokens'],
-    queryFn: () => authFetch<APIToken[]>('/tokens'),
-  })
-}
-
-export function useCreateToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (data: { name: string; scope: string }) =>
-      authFetch<{ token: APIToken; rawValue: string }>('/tokens', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
-
-export function useRevokeToken() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) =>
-      authFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
-  })
-}
-
-// ── Admin: Users ──────────────────────────────────────────────────────────────
-
-export type AdminUserRow = User & { teamCount: number }
-
-export function useAdminUsers(orphanedOnly = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['admin', 'users', { orphanedOnly }],
-    queryFn: () =>
-      authFetch<{ users: AdminUserRow[] }>(`/admin/users${orphanedOnly ? '?orphaned=true' : ''}`),
-  })
-}
-````
-
 ## File: packages/web/src/hooks/useTags.test.ts
 ````typescript
 /**
@@ -19215,694 +19903,6 @@ describe('matchActivities', () => {
     expect(results[0].activityId).toBe('bare')
   })
 })
-````
-
-## File: packages/web/src/pages/settings/ProfilePage.tsx
-````typescript
-/**
- * /settings/profile — Identity, display name, and stats for the current user.
- */
-
-import { useState, useEffect } from 'react'
-import { Calendar, Activity } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useUpdateProfile, useMyStats } from '@/hooks/useSettings'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { ApiError } from '@/lib/api'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-
-// ── Stat chip ──────────────────────────────────────────────────────────────
-
-function StatChip({ value, label, color }: { value: number; label: string; color: string }) {
-  return (
-    <div style={{
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-      padding: '10px 14px', borderRadius: 8, flex: 1, minWidth: 0,
-      border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
-      background: `${color}0a`, textAlign: 'center',
-    }}>
-      <span style={{ fontSize: 20, fontWeight: 700, color }}>{value}</span>
-      <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{label}</span>
-    </div>
-  )
-}
-
-// ── Main ───────────────────────────────────────────────────────────────────
-
-export default function ProfilePage() {
-  const { user } = useAuth()
-  const updateProfile = useUpdateProfile()
-  const { data: stats } = useMyStats()
-
-  const [displayName, setDisplayName] = useState(user?.displayName ?? '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: user?.color ?? '#288C9B',
-    icon: user?.icon ?? '__none__',
-  })
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    if (user) {
-      setDisplayName(user.displayName)
-      setIdentity({ color: user.color ?? '#288C9B', icon: user.icon ?? '__none__' })
-    }
-  }, [user])
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await updateProfile.mutateAsync({ displayName, color: identity.color, icon: identity.icon })
-      setFeedback({ type: 'success', msg: 'Profile updated.' })
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to update profile.'
-      setFeedback({ type: 'error', msg })
-    }
-  }
-
-  const accentColor = identity.color
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Profile</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Changes to your name and identity propagate across all your team memberships.
-      </p>
-
-      <div className="bg-card border border-border rounded-[10px] overflow-hidden mb-5">
-        {/* Header banner — identity + name (mirrors MemberModal / TeamModal pattern) */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '20px 24px', borderBottom: '1px solid var(--border)' }}>
-          <div style={{ flexShrink: 0 }}>
-            <IdentityWidget
-              identity={identity}
-              name={displayName}
-              shape="circle"
-              onChange={next => setIdentity(next)}
-            />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-1">
-              Your profile
-              {user?.isSuperadmin && (
-                <span className="ml-2 text-[11px] px-2 py-0.5 rounded bg-primary/15 text-primary font-semibold tracking-wide normal-case">
-                  Superadmin
-                </span>
-              )}
-            </div>
-            <input
-              value={displayName}
-              onChange={e => setDisplayName(e.target.value)}
-              placeholder="Your name"
-              style={{
-                fontSize: 18, fontWeight: 600, color: 'var(--foreground)',
-                background: 'transparent', border: 'none', outline: 'none',
-                padding: '1px 4px', margin: '-1px -4px',
-                borderRadius: 4, fontFamily: 'inherit', width: '100%',
-              }}
-              onFocus={e => { e.currentTarget.style.background = 'var(--muted)'; e.currentTarget.style.outline = `2px solid ${accentColor}44` }}
-              onBlur={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.outline = 'none' }}
-            />
-            <div className="text-xs text-muted-foreground mt-0.5">{user?.email ?? ''}</div>
-          </div>
-          {/* Live badge preview */}
-          <div style={{ flexShrink: 0 }}>
-            <Badge identity={identity} name={displayName} size={44} shape="circle" />
-          </div>
-        </div>
-
-        {/* Stats */}
-        {stats && (
-          <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border)' }}>
-            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
-              <Calendar size={11} /> Timelines
-            </div>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-              <StatChip value={stats.activeTimelines} label="Active" color="#1A97A2" />
-              <StatChip value={stats.archivedTimelines} label="Archived" color="#484f58" />
-            </div>
-
-            <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.4px] mb-2 flex items-center gap-1.5">
-              <Activity size={11} /> Activities
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <StatChip value={stats.pastDue} label="Past due" color={stats.pastDue > 0 ? '#EF4444' : '#484f58'} />
-              <StatChip value={stats.running} label="Running" color="#1A97A2" />
-              <StatChip value={stats.upcoming} label="Upcoming" color="#3B82F6" />
-              <StatChip value={stats.archivedActivities} label="Archived" color="#484f58" />
-            </div>
-          </div>
-        )}
-
-        {/* Fields */}
-        <div style={{ padding: '20px 24px' }}>
-          {/* Email (read-only) */}
-          <div className="flex flex-col gap-1.5 mb-5">
-            <Label>Email</Label>
-            <Input
-              value={user?.email ?? ''}
-              disabled
-              className="max-w-[360px] opacity-60"
-            />
-            <p className="text-xs text-muted-foreground m-0">Email changes are not yet supported.</p>
-          </div>
-
-          {feedback && (
-            <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-              {feedback.msg}
-            </p>
-          )}
-
-          <button
-            onClick={handleSave}
-            disabled={updateProfile.isPending || !displayName.trim()}
-            style={{
-              background: accentColor,
-              color: '#fff',
-              fontWeight: 600,
-              fontSize: 13,
-              padding: '8px 20px',
-              borderRadius: 7,
-              border: 'none',
-              cursor: updateProfile.isPending || !displayName.trim() ? 'not-allowed' : 'pointer',
-              opacity: updateProfile.isPending || !displayName.trim() ? 0.5 : 1,
-              fontFamily: 'inherit',
-              transition: 'opacity 0.15s',
-            }}
-          >
-            {updateProfile.isPending ? 'Saving…' : 'Save profile'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/SetupPage.tsx
-````typescript
-/**
- * First-run setup wizard. Shown once when no users exist.
- * Collects account, team, and timeline details then creates all three on Finish.
- */
-
-import { useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/contexts/AuthContext'
-import { API_BASE, apiFetch, ApiError } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-type Step = 1 | 2 | 3
-
-interface WizardData {
-  displayName: string
-  email: string
-  password: string
-  teamName: string
-  timelineName: string
-  startDate: string
-  endDate: string
-}
-
-// ---------------------------------------------------------------------------
-// Step indicator
-// ---------------------------------------------------------------------------
-
-const STEP_LABELS: Record<Step, string> = {
-  1: 'Account',
-  2: 'Team',
-  3: 'Timeline',
-}
-
-function StepIndicator({ current }: { current: Step }) {
-  const steps: Step[] = [1, 2, 3]
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 0,
-        marginBottom: 32,
-      }}
-    >
-      {steps.map((n, i) => {
-        const done = n < current
-        const active = n === current
-        return (
-          <div key={n} style={{ display: 'flex', alignItems: 'center' }}>
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 4,
-              }}
-            >
-              <div
-                style={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: '50%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background:
-                    done || active ? 'var(--primary)' : 'transparent',
-                  border:
-                    done || active
-                      ? 'none'
-                      : '2px solid var(--border)',
-                  color:
-                    done || active
-                      ? 'var(--primary-foreground)'
-                      : 'var(--muted-foreground)',
-                  fontSize: 13,
-                  fontWeight: 700,
-                  transition: 'background 0.2s',
-                }}
-              >
-                {done ? '✓' : n}
-              </div>
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: active ? 600 : 400,
-                  color: active
-                    ? 'var(--foreground)'
-                    : 'var(--muted-foreground)',
-                }}
-              >
-                {STEP_LABELS[n]}
-              </span>
-            </div>
-
-            {i < steps.length - 1 && (
-              <div
-                style={{
-                  width: 48,
-                  height: 2,
-                  // Shift up to align with the circle, not the label
-                  marginBottom: 20,
-                  background: done ? 'var(--primary)' : 'var(--border)',
-                  transition: 'background 0.2s',
-                }}
-              />
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Step content
-// ---------------------------------------------------------------------------
-
-interface StepProps {
-  data: WizardData
-  onChange: (patch: Partial<WizardData>) => void
-}
-
-function Step1({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <p
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: 'var(--primary)',
-            margin: '0 0 4px',
-          }}
-        >
-          Welcome to draba!
-        </p>
-        <CardTitle>Create your account</CardTitle>
-        <CardDescription>
-          You're the first person here, so this account will have full admin
-          access — you'll be able to create teams, invite users, and manage the
-          workspace.
-        </CardDescription>
-      </CardHeader>
-      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="displayName">Your name</Label>
-          <Input
-            id="displayName"
-            placeholder="Jane Smith"
-            autoComplete="name"
-            value={data.displayName}
-            onChange={e => onChange({ displayName: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="email">Email</Label>
-          <Input
-            id="email"
-            type="email"
-            placeholder="you@example.com"
-            autoComplete="email"
-            value={data.email}
-            onChange={e => onChange({ email: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="password">Password</Label>
-          <Input
-            id="password"
-            type="password"
-            placeholder="At least 8 characters"
-            autoComplete="new-password"
-            value={data.password}
-            onChange={e => onChange({ password: e.target.value })}
-          />
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-function Step2({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <CardTitle>Name your team</CardTitle>
-        <CardDescription>
-          A team is your shared workspace. Everyone you invite will work within
-          it, and all your timelines and events live inside one. You can
-          customize and add members after setup.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="teamName">Team name</Label>
-          <Input
-            id="teamName"
-            placeholder="Product Marketing"
-            autoComplete="off"
-            value={data.teamName}
-            onChange={e => onChange({ teamName: e.target.value })}
-          />
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-function Step3({ data, onChange }: StepProps) {
-  return (
-    <>
-      <CardHeader>
-        <CardTitle>Your first timeline</CardTitle>
-        <CardDescription>
-          A timeline is a named date window over your team's events — it's how
-          you see who's working on what, and when. Pick a range that fits your
-          next planning horizon.
-        </CardDescription>
-      </CardHeader>
-      <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Label htmlFor="timelineName">Timeline name</Label>
-          <Input
-            id="timelineName"
-            placeholder="Q3 Roadmap"
-            autoComplete="off"
-            value={data.timelineName}
-            onChange={e => onChange({ timelineName: e.target.value })}
-          />
-        </div>
-        <div style={{ display: 'flex', gap: 12 }}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="startDate">Start date</Label>
-            <Input
-              id="startDate"
-              type="date"
-              value={data.startDate}
-              onChange={e => onChange({ startDate: e.target.value })}
-            />
-          </div>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Label htmlFor="endDate">End date</Label>
-            <Input
-              id="endDate"
-              type="date"
-              value={data.endDate}
-              onChange={e => onChange({ endDate: e.target.value })}
-            />
-          </div>
-        </div>
-      </CardContent>
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
-
-function validateStep(step: Step, data: WizardData): string | null {
-  if (step === 1) {
-    if (!data.displayName.trim()) return 'Please enter your name.'
-    if (!data.email.trim()) return 'Please enter your email.'
-    if (data.password.length < 8) return 'Password must be at least 8 characters.'
-    if (/\s/.test(data.password)) return 'Password must not contain spaces.'
-  }
-  if (step === 2) {
-    if (!data.teamName.trim()) return 'Please enter a team name.'
-  }
-  if (step === 3) {
-    if (!data.timelineName.trim()) return 'Please enter a timeline name.'
-    if (!data.startDate) return 'Please choose a start date.'
-    if (!data.endDate) return 'Please choose an end date.'
-    if (data.endDate < data.startDate) return 'End date must be on or after the start date.'
-  }
-  return null
-}
-
-// ---------------------------------------------------------------------------
-// Date helpers
-// ---------------------------------------------------------------------------
-
-function toDateString(d: Date): string {
-  return d.toISOString().split('T')[0]
-}
-
-function defaultDates(): { startDate: string; endDate: string } {
-  const start = new Date()
-  const end = new Date()
-  end.setMonth(end.getMonth() + 3)
-  return { startDate: toDateString(start), endDate: toDateString(end) }
-}
-
-// ---------------------------------------------------------------------------
-// Main wizard
-// ---------------------------------------------------------------------------
-
-interface SetupStatus {
-  needsSetup: boolean
-}
-
-export default function SetupPage() {
-  const { register, user } = useAuth()
-  const navigate = useNavigate()
-  const queryClient = useQueryClient()
-
-  // If setup has already been completed redirect to login rather than showing
-  // a broken wizard (handles back-navigation and direct URL access after setup).
-  const { data: setupStatus, isLoading: statusLoading } = useQuery<SetupStatus>({
-    queryKey: ['setup-status'],
-    queryFn: () =>
-      fetch(`${API_BASE}/setup/status`).then(r => r.json()) as Promise<SetupStatus>,
-    staleTime: Infinity,
-  })
-
-  const [step, setStep] = useState<Step>(1)
-  const [data, setData] = useState<WizardData>({
-    displayName: '',
-    email: '',
-    password: '',
-    teamName: '',
-    timelineName: '',
-    ...defaultDates(),
-  })
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  // Wait for the status check before rendering anything.
-  if (statusLoading) return null
-
-  // Setup already done — logged-in users go home, others go to login.
-  if (setupStatus && !setupStatus.needsSetup) {
-    return <Navigate to={user ? '/' : '/login'} replace />
-  }
-
-  function handleChange(patch: Partial<WizardData>) {
-    setData(d => ({ ...d, ...patch }))
-    setError(null)
-  }
-
-  function handleBack() {
-    setError(null)
-    setStep(s => (s > 1 ? ((s - 1) as Step) : s))
-  }
-
-  function handleNext() {
-    const err = validateStep(step, data)
-    if (err) {
-      setError(err)
-      return
-    }
-    setError(null)
-    setStep(s => (s < 3 ? ((s + 1) as Step) : s))
-  }
-
-  async function handleFinish() {
-    const err = validateStep(3, data)
-    if (err) {
-      setError(err)
-      return
-    }
-
-    setError(null)
-    setLoading(true)
-
-    try {
-      // 1. Create account — returns token directly to avoid racing the async
-      //    setState inside register() before the next render cycle.
-      const token = await register(data.email, data.password, data.displayName)
-
-      // 2. Create team
-      const team = await apiFetch<{ id: string }>('/teams', {
-        method: 'POST',
-        body: JSON.stringify({ name: data.teamName }),
-        accessToken: token,
-      })
-
-      // 3. Create timeline
-      await apiFetch(`/teams/${team.id}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify({
-          name: data.timelineName,
-          startDate: data.startDate,
-          endDate: data.endDate,
-        }),
-        accessToken: token,
-      })
-
-      // Mark setup as done in the query cache so ProtectedRoute doesn't
-      // replay the stale needsSetup:true value after the user logs out.
-      queryClient.setQueryData<SetupStatus>(['setup-status'], { needsSetup: false })
-      navigate('/', { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--background)',
-        padding: '24px',
-      }}
-    >
-      <div style={{ position: 'fixed', top: 16, right: 16 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Logo */}
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: 2,
-          marginBottom: 24,
-        }}
-      >
-        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
-        <span
-          style={{
-            fontSize: 36,
-            fontWeight: 700,
-            color: 'var(--foreground)',
-            letterSpacing: '-0.02em',
-          }}
-        >
-          draba
-        </span>
-      </div>
-
-      <Card style={{ width: '100%', maxWidth: 440 }}>
-        <div style={{ padding: '24px 24px 0' }}>
-          <StepIndicator current={step} />
-        </div>
-
-        {step === 1 && <Step1 data={data} onChange={handleChange} />}
-        {step === 2 && <Step2 data={data} onChange={handleChange} />}
-        {step === 3 && <Step3 data={data} onChange={handleChange} />}
-
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 12,
-            padding: '0 24px 24px',
-          }}
-        >
-          {error && (
-            <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>
-              {error}
-            </p>
-          )}
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Button
-              variant="outline"
-              onClick={handleBack}
-              disabled={step === 1 || loading}
-              style={{ flex: 1 }}
-            >
-              Back
-            </Button>
-
-            {step < 3 ? (
-              <Button onClick={handleNext} disabled={loading} style={{ flex: 1 }}>
-                Next
-              </Button>
-            ) : (
-              <Button onClick={handleFinish} disabled={loading} style={{ flex: 1 }}>
-                {loading ? 'Setting up…' : 'Finish'}
-              </Button>
-            )}
-          </div>
-        </div>
-      </Card>
-    </div>
-  )
-}
 ````
 
 ## File: packages/web/src/App.tsx
@@ -21348,6 +21348,353 @@ type GrantTimelineAccessJSONBody struct {
 }
 ````
 
+## File: packages/api/internal/api/user_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+)
+
+// handleUpdateProfile handles PATCH /users/me. Updates display_name, color,
+// and icon for the authenticated user. Color/icon changes propagate to all
+// team_members rows that have not been explicitly overridden.
+func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var body struct {
+		DisplayName *string `json:"displayName"`
+		Color       *string `json:"color"`
+		Icon        *string `json:"icon"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	// Apply changes only for fields that were provided.
+	displayName := user.DisplayName
+	if body.DisplayName != nil {
+		displayName = strings.TrimSpace(*body.DisplayName)
+		if displayName == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "displayName cannot be empty")
+			return
+		}
+	}
+
+	color := user.Color
+	if body.Color != nil {
+		color = body.Color
+	}
+	icon := user.Icon
+	if body.Icon != nil {
+		icon = body.Icon
+	}
+
+	if err := s.users.UpdateProfile(user.ID, displayName, color, icon); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	user.DisplayName = displayName
+	user.Color = color
+	user.Icon = icon
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleGetMyStats handles GET /users/me/stats. Returns aggregated activity and
+// timeline counts across all of the authenticated user's team memberships.
+func (s *Server) handleGetMyStats(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	stats, err := s.teams.GetUserStats(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleChangePassword handles PUT /users/me/password. Requires the caller
+// to supply the current password before setting a new one.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var body struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.CurrentPassword == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "currentPassword and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "new password must be at least 8 characters")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	// Verify the current password before allowing the change.
+	if err := auth.CheckPassword(user.PasswordHash, body.CurrentPassword); err != nil {
+		writeError(w, http.StatusUnauthorized, "WRONG_PASSWORD", "current password is incorrect")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(user.ID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleListAdminUsers handles GET /admin/users. Returns all users with team
+// membership counts. Supports ?orphaned=true to filter to zero-membership users.
+// Superadmin-only.
+func (s *Server) handleListAdminUsers(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	orphanedOnly := r.URL.Query().Get("orphaned") == "true"
+	rows, err := s.users.ListAll(orphanedOnly)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"users": rows})
+}
+
+// handlePromoteUser sets is_superadmin=true on a user. Superadmin-only.
+// Participants (no user account) cannot be promoted.
+func (s *Server) handlePromoteUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+
+	if err := s.users.SetSuperadmin(target.ID, true); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+
+	target.IsSuperadmin = true
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleArchiveUser inactivates a user account. Superadmin-only.
+// Archived users cannot log in; their data is preserved.
+func (s *Server) handleArchiveUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_ARCHIVE", "cannot archive your own account")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+
+	now := time.Now()
+	if err := s.users.SetArchived(target.ID, &now); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+
+	target.ArchivedAt = &now
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleUnarchiveUser reactivates an inactivated user account. Superadmin-only.
+func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+
+	if err := s.users.SetArchived(target.ID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+
+	target.ArchivedAt = nil
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleRevokeUser atomically revokes all access for a user. Superadmin-only.
+// Self-revoke is blocked to prevent a superadmin from locking themselves out.
+func (s *Server) handleRevokeUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_REVOKE", "cannot revoke your own account")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+
+	result, err := s.users.RevokeUser(target.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleDeleteUser hard-deletes a user. Superadmin-only. Only permitted when
+// the user has no active activity assignments and belongs to a single team.
+func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_DELETE", "cannot delete your own account")
+		return
+	}
+
+	if _, err := s.users.GetByID(userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+
+	teamCount, err := s.teams.CountTeamsForUser(userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	if teamCount > 1 {
+		writeError(w, http.StatusConflict, "MULTI_TEAM", "user belongs to multiple teams; remove them from each team first")
+		return
+	}
+
+	if err := s.users.Delete(userID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/api/internal/db/migrations/015_normalize_activities.sql
 ````sql
 -- Backfill any activities that lack a timeline_id by assigning them to the
@@ -21616,6 +21963,461 @@ func (r *TagRepo) ValidateTeamOwnership(teamID string, tagIDs []string) error {
 		return ErrTagOwnership
 	}
 	return nil
+}
+````
+
+## File: packages/api/internal/db/team_repo.go
+````go
+package db
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ErrDuplicateName is returned by TeamRepo.Create when the generated slug
+// collides with an existing team's slug (UNIQUE constraint on teams.slug).
+var ErrDuplicateName = errors.New("team name already taken")
+
+// TeamRepo is the persistence layer for Team records and their membership
+// join table.
+type TeamRepo struct {
+	db *sqlx.DB
+}
+
+// NewTeamRepo returns a TeamRepo backed by db.
+func NewTeamRepo(db *sqlx.DB) *TeamRepo {
+	return &TeamRepo{db: db}
+}
+
+// Create inserts a new Team row. Returns ErrDuplicateName if the slug is
+// already taken.
+func (r *TeamRepo) Create(team *models.Team) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO teams (id, name, slug, description, notes, color, icon, created_at, updated_at)
+		VALUES (:id, :name, :slug, :description, :notes, :color, :icon, :created_at, :updated_at)
+	`, team)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateName
+		}
+		return fmt.Errorf("creating team: %w", err)
+	}
+	return nil
+}
+
+// Update writes mutable team fields (name, slug, description, notes, color,
+// icon, updated_at). It does not touch archived_at or created_at.
+func (r *TeamRepo) Update(team *models.Team) error {
+	_, err := r.db.NamedExec(`
+		UPDATE teams
+		SET name = :name, slug = :slug, description = :description, notes = :notes,
+		    color = :color, icon = :icon, updated_at = :updated_at
+		WHERE id = :id
+	`, team)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateName
+		}
+		return fmt.Errorf("updating team: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears the archived_at timestamp on a team.
+func (r *TeamRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(`UPDATE teams SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now(), id)
+	if err != nil {
+		return fmt.Errorf("setting team archived: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Team by primary key.
+func (r *TeamRepo) GetByID(id string) (*models.Team, error) {
+	var t models.Team
+	err := r.db.Get(&t, `SELECT * FROM teams WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting team: %w", err)
+	}
+	return &t, nil
+}
+
+// AddMember inserts a team_members row. m.ID must be pre-populated by the caller.
+func (r *TeamRepo) AddMember(m *models.TeamMember) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at)
+		VALUES (:id, :team_id, :user_id, :display_name, :role, :color, :icon, :joined_at)
+	`, m)
+	if err != nil {
+		return fmt.Errorf("adding team member: %w", err)
+	}
+	return nil
+}
+
+// GetMember returns the team_members row for a given (team, user) pair.
+func (r *TeamRepo) GetMember(teamID, userID string) (*models.TeamMember, error) {
+	var m models.TeamMember
+	err := r.db.Get(&m, `
+		SELECT * FROM team_members WHERE team_id = ? AND user_id = ?
+	`, teamID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("getting team member: %w", err)
+	}
+	return &m, nil
+}
+
+// ListMembers returns active (non-archived) members of a team, including
+// login-less Participants. A LEFT JOIN handles Participants who have no users
+// row; COALESCE prefers the per-team display_name override, then falls back to users.
+func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, error) {
+	return r.listMembers(teamID, false)
+}
+
+// ListMembersAll returns all members of a team, including inactivated members.
+func (r *TeamRepo) ListMembersAll(teamID string) ([]*models.TeamMemberWithUser, error) {
+	return r.listMembers(teamID, true)
+}
+
+func (r *TeamRepo) listMembers(teamID string, includeArchived bool) ([]*models.TeamMemberWithUser, error) {
+	var members []*models.TeamMemberWithUser
+	query := `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.team_id = ?`
+	if !includeArchived {
+		query += ` AND tm.archived_at IS NULL`
+	}
+	query += ` ORDER BY tm.joined_at ASC`
+	if err := r.db.Select(&members, query, teamID); err != nil {
+		return nil, fmt.Errorf("listing team members: %w", err)
+	}
+	return members, nil
+}
+
+// ListByUserID returns all teams the given user belongs to, ordered by
+// creation date ascending. When includeArchived is false (the default),
+// archived teams are excluded.
+func (r *TeamRepo) ListByUserID(userID string, includeArchived bool) ([]*models.Team, error) {
+	teams := make([]*models.Team, 0)
+	query := `
+		SELECT t.* FROM teams t
+		JOIN team_members tm ON tm.team_id = t.id
+		WHERE tm.user_id = ?`
+	if !includeArchived {
+		query += ` AND t.archived_at IS NULL`
+	}
+	query += ` ORDER BY t.created_at ASC`
+	if err := r.db.Select(&teams, query, userID); err != nil {
+		return nil, fmt.Errorf("listing teams for user: %w", err)
+	}
+	return teams, nil
+}
+
+// ListAll returns every team in the system, optionally including archived ones.
+// Used by superadmin callers who need visibility across all teams.
+func (r *TeamRepo) ListAll(includeArchived bool) ([]*models.Team, error) {
+	teams := make([]*models.Team, 0)
+	query := `SELECT * FROM teams`
+	if !includeArchived {
+		query += ` WHERE archived_at IS NULL`
+	}
+	query += ` ORDER BY created_at ASC`
+	if err := r.db.Select(&teams, query); err != nil {
+		return nil, fmt.Errorf("listing all teams: %w", err)
+	}
+	return teams, nil
+}
+
+// Count returns the total number of teams.
+func (r *TeamRepo) Count() (int, error) {
+	var count int
+	err := r.db.Get(&count, `SELECT COUNT(*) FROM teams`)
+	if err != nil {
+		return 0, fmt.Errorf("counting teams: %w", err)
+	}
+	return count, nil
+}
+
+// GetMemberByID fetches a team_members row by its primary key. Unlike
+// GetMember (which looks up by team+userID pair), this is the canonical
+// lookup used by member-scoped routes that receive a memberId path param.
+func (r *TeamRepo) GetMemberByID(memberID string) (*models.TeamMemberWithUser, error) {
+	var m models.TeamMemberWithUser
+	err := r.db.Get(&m, `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.id = ?
+	`, memberID)
+	if err != nil {
+		return nil, fmt.Errorf("getting team member by id: %w", err)
+	}
+	return &m, nil
+}
+
+// UpdateMember applies mutable identity and role fields to a team_members row.
+// Only non-nil arguments are written; nil fields retain their current values.
+func (r *TeamRepo) UpdateMember(memberID string, displayName, color, icon, role *string) error {
+	// Fetch current values so we can apply the partial update.
+	type row struct {
+		DisplayName *string `db:"display_name"`
+		Color       *string `db:"color"`
+		Icon        *string `db:"icon"`
+		Role        string  `db:"role"`
+	}
+	var cur row
+	if err := r.db.Get(&cur, `SELECT display_name, color, icon, role FROM team_members WHERE id = ?`, memberID); err != nil {
+		return fmt.Errorf("fetching member for update: %w", err)
+	}
+	if displayName != nil {
+		cur.DisplayName = displayName
+	}
+	if color != nil {
+		cur.Color = color
+	}
+	if icon != nil {
+		cur.Icon = icon
+	}
+	if role != nil {
+		cur.Role = *role
+	}
+	_, err := r.db.Exec(`
+		UPDATE team_members SET display_name = ?, color = ?, icon = ?, role = ? WHERE id = ?
+	`, cur.DisplayName, cur.Color, cur.Icon, cur.Role, memberID)
+	if err != nil {
+		return fmt.Errorf("updating team member: %w", err)
+	}
+	return nil
+}
+
+// DeleteMember removes a team_members row. The caller is responsible for
+// verifying that the member is not the last admin before calling this, and
+// must delete the member's timeline_access rows first (RESTRICT FK).
+func (r *TeamRepo) DeleteMember(memberID string) error {
+	_, err := r.db.Exec(`DELETE FROM team_members WHERE id = ?`, memberID)
+	if err != nil {
+		return fmt.Errorf("deleting team member: %w", err)
+	}
+	return nil
+}
+
+// CountMemberAssignments returns how many activity_assignments rows reference
+// this team member. Callers use this count to block hard-delete when history exists.
+func (r *TeamRepo) CountMemberAssignments(memberID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?
+	`, memberID)
+	if err != nil {
+		return 0, fmt.Errorf("counting member assignments: %w", err)
+	}
+	return count, nil
+}
+
+// DeleteMemberTimelineAccess removes all timeline_access entries for a member.
+// Must be called before DeleteMember; the RESTRICT FK on
+// timeline_access.team_member_id blocks the team_members deletion otherwise.
+func (r *TeamRepo) DeleteMemberTimelineAccess(memberID string) error {
+	_, err := r.db.Exec(`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID)
+	if err != nil {
+		return fmt.Errorf("deleting member timeline access: %w", err)
+	}
+	return nil
+}
+
+// SetMemberArchived sets or clears archived_at on a team_members row.
+func (r *TeamRepo) SetMemberArchived(memberID string, at *time.Time) error {
+	_, err := r.db.Exec(`UPDATE team_members SET archived_at = ? WHERE id = ?`, at, memberID)
+	if err != nil {
+		return fmt.Errorf("setting member archived: %w", err)
+	}
+	return nil
+}
+
+// CountAdmins counts non-archived admin members of a team. Used to enforce
+// the "cannot remove last admin" constraint.
+func (r *TeamRepo) CountAdmins(teamID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM team_members
+		WHERE team_id = ? AND role = 'admin' AND archived_at IS NULL
+	`, teamID)
+	if err != nil {
+		return 0, fmt.Errorf("counting admins: %w", err)
+	}
+	return count, nil
+}
+
+// CountTeamsForUser returns how many teams a user belongs to. Used to enforce
+// the "single team" constraint for hard deletion.
+func (r *TeamRepo) CountTeamsForUser(userID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM team_members WHERE user_id = ? AND archived_at IS NULL
+	`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("counting user teams: %w", err)
+	}
+	return count, nil
+}
+
+// GetMemberStats computes activity and timeline counts for a team member.
+func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) {
+	now := time.Now()
+	var stats models.MemberStats
+
+	// Timeline counts via timeline_access.
+	if err := r.db.Get(&stats.ActiveTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		WHERE ta.team_member_id = ? AND t.archived_at IS NULL
+	`, memberID); err != nil {
+		return nil, fmt.Errorf("counting active timelines: %w", err)
+	}
+	if err := r.db.Get(&stats.ArchivedTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		WHERE ta.team_member_id = ? AND t.archived_at IS NOT NULL
+	`, memberID); err != nil {
+		return nil, fmt.Errorf("counting archived timelines: %w", err)
+	}
+
+	// Activity counts from activity_assignments.
+	rows, err := r.db.Query(`
+		SELECT
+			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                                     THEN 1 ELSE 0 END), 0) AS archived,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                                     THEN 1 ELSE 0 END), 0) AS past_due,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ?                   THEN 1 ELSE 0 END), 0) AS running,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                                     THEN 1 ELSE 0 END), 0) AS upcoming
+		FROM activity_assignments aa
+		JOIN activities a ON a.id = aa.activity_id
+		WHERE aa.team_member_id = ?
+	`, now, now, now, now, memberID)
+	if err != nil {
+		return nil, fmt.Errorf("computing activity stats: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
+			return nil, fmt.Errorf("scanning activity stats: %w", err)
+		}
+	}
+
+	return &stats, nil
+}
+
+// GetUserStats aggregates activity and timeline counts across all of a user's
+// team memberships. Used by GET /users/me/stats for the profile page.
+func (r *TeamRepo) GetUserStats(userID string) (*models.MemberStats, error) {
+	now := time.Now()
+	var stats models.MemberStats
+
+	if err := r.db.Get(&stats.ActiveTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting active timelines: %w", err)
+	}
+	if err := r.db.Get(&stats.ArchivedTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NOT NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting archived timelines: %w", err)
+	}
+
+	rows, err := r.db.Query(`
+		SELECT
+			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ? THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                   THEN 1 ELSE 0 END), 0)
+		FROM activity_assignments aa
+		JOIN activities a ON a.id = aa.activity_id
+		JOIN team_members tm ON tm.id = aa.team_member_id
+		WHERE tm.user_id = ?
+	`, now, now, now, now, userID)
+	if err != nil {
+		return nil, fmt.Errorf("computing activity stats: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
+			return nil, fmt.Errorf("scanning activity stats: %w", err)
+		}
+	}
+
+	return &stats, nil
+}
+
+// GetMemberAllTeams returns all team memberships for a user (across all teams).
+// Used to populate the "Teams" section of the Member Edit Modal.
+func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUser, error) {
+	var members []*models.TeamMemberWithUser
+	err := r.db.Select(&members, `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.user_id = ?
+		ORDER BY tm.joined_at ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("getting member all teams: %w", err)
+	}
+	return members, nil
+}
+
+// SetInviteLinkToken sets the reusable invite link token on a team. Passing
+// nil clears it (revoking the link).
+func (r *TeamRepo) SetInviteLinkToken(teamID string, token *string) error {
+	_, err := r.db.Exec(
+		`UPDATE teams SET invite_link_token = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		token, teamID,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return fmt.Errorf("invite link token collision: %w", err)
+		}
+		return fmt.Errorf("setting invite link token: %w", err)
+	}
+	return nil
+}
+
+// GetByInviteLinkToken looks up a team by its invite_link_token. Returns
+// sql.ErrNoRows (wrapped) when no matching team is found.
+func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
+	var t models.Team
+	err := r.db.Get(&t, `
+		SELECT * FROM teams WHERE invite_link_token = ? AND archived_at IS NULL
+	`, token)
+	if err != nil {
+		return nil, fmt.Errorf("getting team by invite link: %w", err)
+	}
+	return &t, nil
 }
 ````
 
@@ -23976,2263 +24778,6 @@ export default function ListToolbar({
         <Share2 size={13} strokeWidth={1.8} />
         Share
       </button>
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/list/ListView.tsx
-````typescript
-/**
- * ListView — inline-editable, curated table view of the active timeline's
- * activities.
- *
- * Uses TanStack Table v8 for column management (visibility, order, sizing,
- * pinning, sorting). Row rendering is manual to support group-by headers
- * interleaved between activity rows and to give full control over
- * keyboard selection/edit behavior.
- *
- * Integrates with FilterContext and FindContext so the same filter and find
- * query that drives the Gantt view also drives this view.
- */
-
-import { createPortal } from 'react-dom';
-import {
-  useState,
-  useEffect,
-  useRef,
-  useCallback,
-  useMemo,
-  KeyboardEvent,
-} from 'react';
-import {
-  useReactTable,
-  getCoreRowModel,
-  getSortedRowModel,
-  type ColumnDef,
-  type SortingState,
-  type ColumnOrderState,
-  type VisibilityState,
-  type ColumnSizingState,
-  type ColumnPinningState,
-} from '@tanstack/react-table';
-import {
-  DndContext,
-  type DragEndEvent,
-  PointerSensor,
-  useSensor,
-  useSensors,
-} from '@dnd-kit/core';
-import {
-  SortableContext,
-  horizontalListSortingStrategy,
-  useSortable,
-  arrayMove,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
-import { ChevronRight, ChevronDown, GripVertical, Search, Trash2 } from 'lucide-react';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity, useCreateActivity, useDeleteActivity } from '@/hooks/useTeamActivities';
-import { usePreferenceMap, useUpsertPreference, usePreferences } from '@/hooks/usePreferences';
-import { useFilter } from '@/contexts/FilterContext';
-import { useFind } from '@/contexts/FindContext';
-import { applyActiveFilter } from '@/lib/presetFilters';
-import { matchEvents } from '@/lib/findMatcher';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import { Badge } from '@/components/identity/Badge';
-import { IdentityPicker } from '@/components/identity/IdentityPicker';
-import type { Identity } from '@/components/identity/identity-constants';
-import TagInput from '@/components/TagInput';
-import type { components } from '@draba/shared';
-import type { Member } from '@/types';
-import type { ListGroupBy, ListSortBy, ListColorBy, ColumnConfig } from './ListToolbar';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-// ── Column catalog ─────────────────────────────────────────────────────────────
-
-interface ColMeta {
-  id: string;
-  label: string;
-  defaultVisible: boolean;
-  defaultWidth: number;
-  editable: boolean;
-  editType: 'text' | 'date' | 'status' | 'number' | 'identity' | 'assignees' | 'tags' | 'parent' | 'none';
-  /** Exclude from the columns toggle menu (e.g. fixed structural columns). */
-  noMenu?: boolean;
-}
-
-const COL_CATALOG: ColMeta[] = [
-  { id: 'colorBar',    label: '',             defaultVisible: true,  defaultWidth: 24,  editable: false, editType: 'none', noMenu: true },
-  { id: 'identity',    label: 'Identity',     defaultVisible: true,  defaultWidth: 52,  editable: true,  editType: 'identity' },
-  { id: 'title',       label: 'Title',        defaultVisible: true,  defaultWidth: 280, editable: true,  editType: 'text' },
-  { id: 'startAt',     label: 'Start',        defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
-  { id: 'endAt',       label: 'End',          defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
-  { id: 'duration',    label: 'Duration',     defaultVisible: true,  defaultWidth: 90,  editable: false, editType: 'none' },
-  { id: 'status',      label: 'Status',       defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'status' },
-  { id: 'assignees',   label: 'Assigned To',  defaultVisible: true,  defaultWidth: 140, editable: true,  editType: 'assignees' },
-  { id: 'tags',        label: 'Tags',         defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'tags' },
-  { id: 'progress',    label: 'Progress',     defaultVisible: false, defaultWidth: 90,  editable: true,  editType: 'number' },
-  { id: 'parent',      label: 'Parent',       defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'parent' },
-  { id: 'description', label: 'Description',  defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
-  { id: 'location',    label: 'Location',     defaultVisible: false, defaultWidth: 130, editable: true,  editType: 'text' },
-  { id: 'url',         label: 'URL',          defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'text' },
-  { id: 'notes',       label: 'Notes',        defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
-  { id: 'createdAt',   label: 'Created',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
-  { id: 'updatedAt',   label: 'Updated',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
-];
-
-const DEFAULT_COLUMN_ORDER = COL_CATALOG.map(c => c.id);
-const DEFAULT_VISIBILITY: VisibilityState = Object.fromEntries(
-  COL_CATALOG.map(c => [c.id, c.defaultVisible]),
-);
-const DEFAULT_WIDTHS: ColumnSizingState = Object.fromEntries(
-  COL_CATALOG.map(c => [c.id, c.defaultWidth]),
-);
-
-// ── Props ──────────────────────────────────────────────────────────────────────
-
-interface Props {
-  teamId: string;
-  timelineId: string;
-  groupBy: ListGroupBy;
-  sortBy: ListSortBy;
-  colorBy: ListColorBy;
-  density?: string; // kept for compat; ignored — always comfortable
-  timelineStatuses?: Status[];
-  savedFilters?: SavedFilter[];
-  tags?: Tag[];
-  onColumnsChange?: (configs: ColumnConfig[]) => void;
-  /** When set, the component applies the toggle and clears it on the next render. */
-  pendingColumnToggle?: { colId: string; visible: boolean; seq: number } | null;
-  onSelectActivity?: (id: string | null) => void;
-  onSelectApiActivity?: (a: ApiActivity | null) => void;
-  selectedActivityId?: string | null;
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Increment to trigger inline creation of a new activity row. */
-  triggerNewRow?: number;
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-function formatDate(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
-  if (!startAt || !endAt) return '—';
-  const start = new Date(startAt);
-  const end = new Date(endAt);
-  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
-  if (days < 0) return '—';
-  if (days === 0) return '1 day';
-  return `${days + 1} days`;
-}
-
-function toDateInput(iso: string | null | undefined): string {
-  if (!iso) return '';
-  return iso.slice(0, 10);
-}
-
-// ── Draggable column header ────────────────────────────────────────────────────
-
-function SortableColHeader({ colId, children, style, onSort, sortDir, resizeHandler, isResizing }: {
-  colId: string;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-  onSort?: () => void;
-  sortDir?: 'asc' | 'desc' | false;
-  resizeHandler?: (e: React.MouseEvent | React.TouchEvent) => void;
-  isResizing?: boolean;
-}) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: colId });
-
-  return (
-    <th
-      ref={setNodeRef}
-      style={{
-        ...style,
-        transform: CSS.Transform.toString(transform),
-        transition,
-        opacity: isDragging ? 0.5 : 1,
-        position: 'sticky',
-        top: 0,
-        background: 'var(--card)',
-        borderBottom: '2px solid var(--border)',
-        userSelect: 'none',
-        whiteSpace: 'nowrap',
-        textOverflow: 'ellipsis',
-        cursor: onSort ? 'pointer' : 'default',
-        fontWeight: 600,
-        fontSize: 11,
-        color: 'var(--muted-foreground)',
-        padding: 0,
-        textTransform: 'uppercase',
-        letterSpacing: '0.05em',
-        textAlign: 'left',
-        overflow: 'visible', // needed for resize handle
-      }}
-      onClick={onSort}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 8px', overflow: 'hidden' }}>
-        {/* drag handle */}
-        <span
-          {...attributes}
-          {...listeners}
-          style={{ cursor: 'grab', color: 'var(--muted-foreground)', opacity: 0.4, flexShrink: 0, paddingRight: 2 }}
-          onClick={e => e.stopPropagation()}
-          title="Drag to reorder"
-        >
-          <GripVertical size={12} />
-        </span>
-        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{children}</span>
-        {sortDir === 'asc' && <span style={{ opacity: 0.7, flexShrink: 0 }}>↑</span>}
-        {sortDir === 'desc' && <span style={{ opacity: 0.7, flexShrink: 0 }}>↓</span>}
-      </div>
-      {/* Resize handle — absolutely positioned on right edge */}
-      {resizeHandler && (
-        <div
-          onMouseDown={resizeHandler}
-          onTouchStart={resizeHandler}
-          onClick={e => e.stopPropagation()}
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: 0,
-            height: '100%',
-            width: 4,
-            cursor: 'col-resize',
-            background: isResizing ? 'var(--primary)' : 'transparent',
-            zIndex: 1,
-          }}
-          onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'var(--border)'; }}
-          onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
-        />
-      )}
-    </th>
-  );
-}
-
-// ── Status pill popover ────────────────────────────────────────────────────────
-
-function StatusPicker({
-  value,
-  statuses,
-  onChange,
-  onClose,
-  positionStyle,
-}: {
-  value: string | null | undefined;
-  statuses: Status[];
-  onChange: (id: string | null) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        ...positionStyle,
-        zIndex: 1000,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 160,
-        padding: '6px 0',
-      }}
-    >
-      <div
-        onClick={() => { onChange(null); onClose(); }}
-        style={{
-          padding: '6px 12px',
-          cursor: 'pointer',
-          fontSize: 12,
-          color: 'var(--muted-foreground)',
-        }}
-        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-      >
-        No status
-      </div>
-      {statuses.map(s => (
-        <div
-          key={s.id}
-          onClick={() => { onChange(s.id); onClose(); }}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            padding: '6px 12px',
-            cursor: 'pointer',
-            fontSize: 12,
-            color: 'var(--foreground)',
-            background: value === s.id ? 'var(--muted)' : 'transparent',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = value === s.id ? 'var(--muted)' : 'transparent')}
-        >
-          <span
-            style={{
-              width: 10,
-              height: 10,
-              borderRadius: '50%',
-              background: resolveColorHex(s.color ?? null) ?? '#888',
-              flexShrink: 0,
-            }}
-          />
-          {s.name}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Assignee picker popover ────────────────────────────────────────────────────
-
-function AssigneePicker({
-  members,
-  selectedIds,
-  onToggle,
-  onClose,
-  positionStyle,
-}: {
-  members: Member[];
-  selectedIds: string[];
-  onToggle: (id: string) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        ...positionStyle,
-        zIndex: 1000,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 180,
-        padding: '6px 0',
-      }}
-    >
-      {members.length === 0 && (
-        <div style={{ padding: '6px 12px', fontSize: 12, color: 'var(--muted-foreground)' }}>
-          No team members
-        </div>
-      )}
-      {members.map(m => {
-        const assigned = selectedIds.includes(m.id);
-        return (
-          <div
-            key={m.id}
-            onClick={() => onToggle(m.id)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8,
-              padding: '5px 12px', cursor: 'pointer', fontSize: 12,
-              background: assigned ? 'var(--muted)' : 'transparent',
-              color: 'var(--foreground)',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = assigned ? 'var(--muted)' : 'transparent')}
-          >
-            <Badge
-              identity={{ color: m.color, icon: '__name_2__' }}
-              name={m.name}
-              shape="circle"
-              size={20}
-            />
-            <span style={{ flex: 1 }}>{m.name}</span>
-            {assigned && (
-              <span style={{
-                width: 6, height: 6, borderRadius: '50%',
-                background: m.color, flexShrink: 0, display: 'inline-block',
-              }} />
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── Tag picker popover ─────────────────────────────────────────────────────────
-
-function TagPicker({
-  teamId,
-  tags,
-  selectedTagIds,
-  onChange,
-  onClose,
-  positionStyle,
-}: {
-  teamId: string;
-  tags: Tag[];
-  selectedTagIds: string[];
-  onChange: (ids: string[]) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        ...positionStyle,
-        zIndex: 1000,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 220,
-        padding: 8,
-      }}
-    >
-      <TagInput teamId={teamId} tags={tags} selectedTagIds={selectedTagIds} onChange={onChange} />
-    </div>
-  );
-}
-
-// ── Parent activity picker popover ─────────────────────────────────────────────
-
-function ParentPicker({
-  activities,
-  value,
-  onChange,
-  onClose,
-  positionStyle,
-}: {
-  activities: ApiActivity[];
-  value: string | null | undefined;
-  onChange: (id: string | null) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  const [query, setQuery] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  useEffect(() => { inputRef.current?.focus(); }, []);
-
-  const filtered = activities.filter(a =>
-    a.title.toLowerCase().includes(query.trim().toLowerCase()),
-  );
-
-  function choose(id: string | null) {
-    onChange(id);
-    onClose();
-  }
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        ...positionStyle,
-        zIndex: 1000,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 220,
-        overflow: 'hidden',
-      }}
-    >
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 6,
-        padding: '6px 8px', borderBottom: '1px solid var(--border)',
-      }}>
-        <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          placeholder="Search activities…"
-          style={{
-            flex: 1, border: 'none', outline: 'none', background: 'none',
-            fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
-          }}
-        />
-      </div>
-      <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-        <div
-          onClick={() => choose(null)}
-          style={{
-            padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
-            fontStyle: 'italic', cursor: 'pointer',
-            borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-        >
-          — None —
-        </div>
-        {filtered.map(a => (
-          <div
-            key={a.id}
-            onClick={() => choose(a.id)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8,
-              padding: '6px 10px', fontSize: 12, cursor: 'pointer',
-              background: a.id === value ? 'var(--muted)' : 'transparent',
-              fontWeight: a.id === value ? 600 : 400,
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
-          >
-            <Badge
-              identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }}
-              name={a.title}
-              size={16}
-            />
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {a.title}
-            </span>
-          </div>
-        ))}
-        {filtered.length === 0 && (
-          <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-            No matching activities
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-/** Position a popover below a cell, flipping above if there isn't enough space below. */
-function popoverPos(rect: DOMRect, w: number, h: number): { top: number; left: number } {
-  const spaceBelow = window.innerHeight - rect.bottom - 2;
-  const top = spaceBelow >= h
-    ? rect.bottom + 2
-    : Math.max(4, rect.top - h - 2);
-  return {
-    top,
-    left: Math.min(rect.left, window.innerWidth - w - 8),
-  };
-}
-
-// ── Main component ─────────────────────────────────────────────────────────────
-
-export default function ListView({
-  teamId,
-  timelineId,
-  groupBy,
-  sortBy,
-  colorBy,
-  timelineStatuses = [],
-  savedFilters = [],
-  tags = [],
-  onColumnsChange,
-  pendingColumnToggle,
-  onSelectActivity,
-  selectedActivityId,
-  onMembersLoaded,
-  triggerNewRow,
-}: Props) {
-  const { activeFilter } = useFilter();
-  const { debouncedQuery, registerMatches, matchedIds, activeMatchId } = useFind();
-
-  // ── Data fetching ──────────────────────────────────────────────────────────
-  const { data: rawActivities = [] } = useTimelineActivities(teamId, timelineId);
-  const { data: rawMembers = [] } = useTeamMembers(teamId);
-  const update = useUpdateActivity(timelineId);
-  const create = useCreateActivity(teamId, timelineId);
-  const deleteAct = useDeleteActivity(timelineId);
-
-  useEffect(() => {
-    if (rawMembers.length > 0 && onMembersLoaded) {
-      onMembersLoaded(rawMembers.map(m => ({
-        id: m.id,
-        name: m.displayName,
-        initials: m.displayName.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase(),
-        color: resolveColorHex(m.color ?? null) ?? '#888',
-      })));
-    }
-  }, [rawMembers, onMembersLoaded]);
-
-  function initialsFrom(name: string): string {
-    return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
-  }
-
-  const members: Member[] = useMemo(
-    () => rawMembers.map(m => ({
-      id: m.id,
-      name: m.displayName,
-      initials: initialsFrom(m.displayName),
-      color: resolveColorHex(m.color ?? null) ?? '#888',
-    })),
-    [rawMembers],
-  );
-
-  // ── Preference persistence ────────────────────────────────────────────────
-  const { isSuccess: prefsSettled } = usePreferences(timelineId);
-  const prefMap = usePreferenceMap(timelineId);
-  const upsert = useUpsertPreference();
-  const prefsApplied = useRef(false);
-
-  // Column state (managed by TanStack Table)
-  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(DEFAULT_VISIBILITY);
-  const [columnOrder, setColumnOrder] = useState<ColumnOrderState>(DEFAULT_COLUMN_ORDER);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(DEFAULT_WIDTHS);
-  const [sorting, setSorting] = useState<SortingState>([]);
-
-  // Apply saved column prefs once after they load
-  useEffect(() => {
-    if (!prefsSettled || prefsApplied.current) return;
-    prefsApplied.current = true;
-    const raw = prefMap['list_columns'];
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-      const config = raw as { order?: string[]; hidden?: string[]; widths?: Record<string, number> };
-      if (Array.isArray(config.order) && config.order.length > 0) {
-        const saved = config.order as string[];
-        const allIds = COL_CATALOG.map(c => c.id);
-        const newCols = allIds.filter(id => !saved.includes(id));
-        setColumnOrder([...saved, ...newCols]);
-      }
-      if (Array.isArray(config.hidden)) {
-        const vis: VisibilityState = { ...DEFAULT_VISIBILITY };
-        for (const id of config.hidden as string[]) {
-          if (id in vis) vis[id] = false;
-        }
-        setColumnVisibility(vis);
-      }
-      if (config.widths && typeof config.widths === 'object') {
-        setColumnSizing(prev => ({ ...prev, ...config.widths }));
-      }
-    }
-  }, [prefsSettled, prefMap]);
-
-  // Persist column config on change (debounced via a ref guard)
-  const saveCols = useCallback(
-    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
-      if (!timelineId) return;
-      const hidden = Object.entries(vis).filter(([, v]) => !v).map(([k]) => k);
-      const config = { order, hidden, widths: sizing };
-      upsert.mutate({ key: 'list_columns', value: JSON.stringify(config), timelineId });
-    },
-    [timelineId, upsert.mutate], // eslint-disable-line react-hooks/exhaustive-deps
-  );
-
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const debouncedSaveCols = useCallback(
-    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => saveCols(vis, order, sizing), 400);
-    },
-    [saveCols],
-  );
-
-  const handleVisibilityChange = useCallback(
-    (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
-      setColumnVisibility(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
-        return next;
-      });
-    },
-    [columnOrder, columnSizing, debouncedSaveCols],
-  );
-
-  const handleOrderChange = useCallback(
-    (updater: ColumnOrderState | ((prev: ColumnOrderState) => ColumnOrderState)) => {
-      setColumnOrder(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
-        return next;
-      });
-    },
-    [columnVisibility, columnSizing, debouncedSaveCols],
-  );
-
-  const handleSizingChange = useCallback(
-    (updater: ColumnSizingState | ((prev: ColumnSizingState) => ColumnSizingState)) => {
-      setColumnSizing(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(columnVisibility, columnOrder, next);
-        return next;
-      });
-    },
-    [columnVisibility, columnOrder, debouncedSaveCols],
-  );
-
-  // ── TanStack Table ─────────────────────────────────────────────────────────
-
-  const columnDefs = useMemo<ColumnDef<ApiActivity>[]>(
-    () =>
-      COL_CATALOG.map(meta => ({
-        id: meta.id,
-        header: meta.label,
-        size: DEFAULT_WIDTHS[meta.id] ?? 120,
-        minSize: 40,
-        maxSize: 800,
-        enableResizing: true,
-        enableSorting: meta.editType !== 'none' || meta.id === 'duration',
-      })),
-    [],
-  );
-
-  const table = useReactTable({
-    data: rawActivities,
-    columns: columnDefs,
-    state: {
-      columnVisibility,
-      columnOrder,
-      columnSizing,
-      columnPinning: { left: ['colorBar', 'identity', 'title'] } as ColumnPinningState,
-      sorting,
-    },
-    onSortingChange: setSorting,
-    onColumnVisibilityChange: handleVisibilityChange,
-    onColumnOrderChange: handleOrderChange,
-    onColumnSizingChange: handleSizingChange,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    columnResizeMode: 'onChange',
-  });
-
-  // Apply external column toggle from the toolbar (via DashboardPage)
-  const lastAppliedSeq = useRef<number | null>(null);
-  useEffect(() => {
-    if (!pendingColumnToggle) return;
-    if (pendingColumnToggle.seq === lastAppliedSeq.current) return;
-    lastAppliedSeq.current = pendingColumnToggle.seq;
-    setColumnVisibility(prev => {
-      const next = { ...prev, [pendingColumnToggle.colId]: pendingColumnToggle.visible };
-      if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
-      return next;
-    });
-  }, [pendingColumnToggle, columnOrder, columnSizing, debouncedSaveCols]);
-
-  // Expose ALL column configs (visible + hidden) to toolbar via callback.
-  // Uses a ref-based equality check to avoid calling onColumnsChange (which
-  // typically calls setListColumns in DashboardPage) with a new array reference
-  // every render — that would create an infinite setState→re-render loop.
-  const lastColConfigsRef = useRef<ColumnConfig[] | null>(null);
-  useEffect(() => {
-    if (!onColumnsChange) return;
-    const configs: ColumnConfig[] = table.getAllLeafColumns()
-      .filter(col => !COL_CATALOG.find(c => c.id === col.id)?.noMenu)
-      .map(col => ({
-        id: col.id,
-        label: COL_CATALOG.find(c => c.id === col.id)?.label ?? col.id,
-        visible: col.getIsVisible(),
-      }));
-    const prev = lastColConfigsRef.current;
-    const changed = !prev || prev.length !== configs.length ||
-      prev.some((c, i) => c.id !== configs[i].id || c.visible !== configs[i].visible || c.label !== configs[i].label);
-    if (changed) {
-      lastColConfigsRef.current = configs;
-      onColumnsChange(configs);
-    }
-  }); // runs every render so order/visibility changes propagate immediately
-
-  // ── Filter + sort ──────────────────────────────────────────────────────────
-
-  const memberIdsByUserId = useMemo<Map<string, string[]>>(() => {
-    const map = new Map<string, string[]>();
-    for (const m of rawMembers) {
-      if (!m.userId) continue;
-      const list = map.get(m.userId) ?? [];
-      list.push(m.id);
-      map.set(m.userId, list);
-    }
-    return map;
-  }, [rawMembers]);
-
-  const closedStatusIds = useMemo(
-    () => new Set(timelineStatuses.filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-
-  const filteredActivities = useMemo(
-    () =>
-      applyActiveFilter(rawActivities, activeFilter, memberIdsByUserId, {
-        closedStatusIds,
-        savedFilters,
-        statuses: statusesByTimeline,
-        tags,
-      }),
-    [rawActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
-  );
-
-  // Apply TanStack sorting
-  const sortedActivities = useMemo(() => {
-    const acts = [...filteredActivities];
-    const col = sorting[0];
-    if (!col) {
-      return acts.sort((a, b) => {
-        if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '');
-        if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '');
-        if (sortBy === 'title') return a.title.localeCompare(b.title);
-        if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '');
-        if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0);
-        return 0;
-      });
-    }
-    return acts.sort((a, b) => {
-      let av: string | number = '';
-      let bv: string | number = '';
-      switch (col.id) {
-        case 'title': av = a.title; bv = b.title; break;
-        case 'startAt': av = a.startAt ?? ''; bv = b.startAt ?? ''; break;
-        case 'endAt': av = a.endAt ?? ''; bv = b.endAt ?? ''; break;
-        case 'status': av = a.statusId ?? ''; bv = b.statusId ?? ''; break;
-        case 'progress': av = a.percentComplete ?? 0; bv = b.percentComplete ?? 0; break;
-        default: av = a.title; bv = b.title;
-      }
-      const cmp = typeof av === 'number' ? av - (bv as number) : (av as string).localeCompare(bv as string);
-      return col.desc ? -cmp : cmp;
-    });
-  }, [filteredActivities, sorting, sortBy]);
-
-  // ── Group-by ───────────────────────────────────────────────────────────────
-
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-  const toggleGroup = useCallback((key: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
-    });
-  }, []);
-
-  const memberById = useMemo<Map<string, TeamMemberWithUser>>(
-    () => new Map(rawMembers.map(m => [m.id, m])),
-    [rawMembers],
-  );
-  const statusById = useMemo<Map<string, Status>>(
-    () => new Map(timelineStatuses.map(s => [s.id, s])),
-    [timelineStatuses],
-  );
-  const activityById = useMemo<Map<string, ApiActivity>>(
-    () => new Map(rawActivities.map(a => [a.id, a])),
-    [rawActivities],
-  );
-
-  type DisplayRow =
-    | { kind: 'group'; key: string; label: string; count: number }
-    | { kind: 'activity'; activity: ApiActivity; depth: number; hasChildren: boolean; groupKey: string };
-
-  const displayRows = useMemo<DisplayRow[]>(() => {
-    const emptyRow = (a: ApiActivity): DisplayRow => ({
-      kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '',
-    });
-
-    if (groupBy === 'none') {
-      return sortedActivities.map(emptyRow);
-    }
-
-    if (groupBy === 'member') {
-      const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
-      for (const activity of sortedActivities) {
-        const ids = activity.assignedMemberIds ?? [];
-        const key = ids.length === 0 ? '__unassigned__' : ids[0];
-        const label = ids.length === 0 ? 'Unassigned' : (memberById.get(ids[0])?.displayName ?? 'Unknown');
-        const group = groups.get(key) ?? { label, activities: [] };
-        group.activities.push(activity);
-        groups.set(key, group);
-      }
-      const rows: DisplayRow[] = [];
-      for (const [key, { label, activities }] of groups) {
-        rows.push({ kind: 'group', key, label, count: activities.length });
-        if (!collapsedGroups.has(key)) {
-          for (const a of activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: key });
-        }
-      }
-      return rows;
-    }
-
-    if (groupBy === 'status') {
-      const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
-      for (const activity of sortedActivities) {
-        const key = activity.statusId ?? '__no_status__';
-        const label = activity.statusId ? (statusById.get(activity.statusId)?.name ?? 'Unknown') : 'No status';
-        const group = groups.get(key) ?? { label, activities: [] };
-        group.activities.push(activity);
-        groups.set(key, group);
-      }
-      // Emit statuses in order, then no-status
-      const rows: DisplayRow[] = [];
-      for (const s of timelineStatuses) {
-        const group = groups.get(s.id);
-        if (!group?.activities.length) continue;
-        rows.push({ kind: 'group', key: s.id, label: s.name, count: group.activities.length });
-        if (!collapsedGroups.has(s.id)) {
-          for (const a of group.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: s.id });
-        }
-      }
-      const noStatus = groups.get('__no_status__');
-      if (noStatus?.activities.length) {
-        rows.push({ kind: 'group', key: '__no_status__', label: 'No status', count: noStatus.activities.length });
-        if (!collapsedGroups.has('__no_status__')) {
-          for (const a of noStatus.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '__no_status__' });
-        }
-      }
-      return rows;
-    }
-
-    if (groupBy === 'parent') {
-      // Build tree like Gantt: parent activity rows are collapsible, children are indented
-      const byId = new Map(sortedActivities.map(a => [a.id, a]));
-      const childrenByParent = new Map<string, ApiActivity[]>();
-      const roots: ApiActivity[] = [];
-
-      for (const a of sortedActivities) {
-        if (a.parentActivityId && byId.has(a.parentActivityId)) {
-          const list = childrenByParent.get(a.parentActivityId) ?? [];
-          list.push(a);
-          childrenByParent.set(a.parentActivityId, list);
-        } else {
-          roots.push(a);
-        }
-      }
-
-      const rows: DisplayRow[] = [];
-      const seen = new Set<string>();
-      const hidden = new Set<string>();
-
-      const markHidden = (a: ApiActivity) => {
-        if (hidden.has(a.id)) return;
-        hidden.add(a.id);
-        for (const k of childrenByParent.get(a.id) ?? []) markHidden(k);
-      };
-
-      const visit = (a: ApiActivity, depth: number) => {
-        if (seen.has(a.id)) return;
-        seen.add(a.id);
-        const kids = childrenByParent.get(a.id) ?? [];
-        const hasChildren = kids.length > 0;
-        const isCollapsed = collapsedGroups.has(a.id);
-        rows.push({ kind: 'activity', activity: a, depth, hasChildren, groupKey: a.id });
-        if (!hasChildren) return;
-        if (isCollapsed) for (const k of kids) markHidden(k);
-        else for (const k of kids) visit(k, depth + 1);
-      };
-
-      for (const r of roots) visit(r, 0);
-      for (const a of sortedActivities) {
-        if (!seen.has(a.id) && !hidden.has(a.id)) visit(a, 0);
-      }
-      return rows;
-    }
-
-    return sortedActivities.map(emptyRow);
-  }, [sortedActivities, groupBy, memberById, statusById, activityById, timelineStatuses, collapsedGroups]);
-
-  // Flat list of activity rows (for keyboard navigation indices)
-  const activityRows = useMemo(
-    () => displayRows.filter((r): r is Extract<DisplayRow, { kind: 'activity' }> => r.kind === 'activity'),
-    [displayRows],
-  );
-
-  // ── Find integration ───────────────────────────────────────────────────────
-
-  useEffect(() => {
-    if (!debouncedQuery) {
-      registerMatches([], new Map());
-      return;
-    }
-    const results = matchEvents(debouncedQuery, filteredActivities, members, rawActivities);
-    const ids = results.map(r => r.activityId);
-    const reasons = new Map(results.map(r => [r.activityId, r.reasons]));
-    registerMatches(ids, reasons);
-  }, [debouncedQuery, filteredActivities, members, rawActivities, registerMatches]);
-
-  // Auto-scroll to active match
-  const activeRowRef = useRef<HTMLTableRowElement | null>(null);
-  useEffect(() => {
-    if (activeMatchId && activeRowRef.current) {
-      activeRowRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
-  }, [activeMatchId]);
-
-  // ── Selection & editing state ──────────────────────────────────────────────
-
-  const [selectedRowIdx, setSelectedRowIdx] = useState<number | null>(null);
-  const [selectedColIdx, setSelectedColIdx] = useState<number>(0);
-  const [editingCell, setEditingCell] = useState<{
-    rowIdx: number;
-    colIdx: number;
-    value: string;
-  } | null>(null);
-  const editInputRef = useRef<HTMLInputElement | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  // When a new activity is selected externally, sync row idx
-  useEffect(() => {
-    if (!selectedActivityId) { setSelectedRowIdx(null); return; }
-    const idx = activityRows.findIndex(r => r.activity.id === selectedActivityId);
-    if (idx >= 0) setSelectedRowIdx(idx);
-  }, [selectedActivityId, activityRows]);
-
-  useEffect(() => {
-    if (!editingCell || !editInputRef.current) return;
-    const inp = editInputRef.current;
-    inp.focus();
-    inp.scrollIntoView({ block: 'nearest' });
-    const colId = visibleColIds[editingCell.colIdx];
-    const meta = COL_CATALOG.find(c => c.id === colId);
-    if (meta?.editType === 'date') {
-      // showPicker() opens the calendar immediately. Deferred so the browser
-      // has processed the focus event first. Only one date input is ever in
-      // the DOM at a time (single-cell editing), so no range-picker pairing.
-      setTimeout(() => {
-        try { (inp as HTMLInputElement & { showPicker?(): void }).showPicker?.(); } catch { /* not all browsers */ }
-      }, 0);
-    } else {
-      inp.select();
-    }
-  }, [editingCell]); // visibleColIds intentionally excluded — always current in this render cycle
-
-  // Visible column ids, in the SAME order the cells are rendered.
-  //
-  // Cells render from `table.getHeaderGroups()`, which moves pinned-left
-  // columns (colorBar, identity, title) to the front. `getVisibleLeafColumns()`
-  // does NOT apply pinning — it follows raw `columnOrder`. When a persisted
-  // `columnOrder` doesn't place the pinned columns first (e.g. a saved order
-  // from before `colorBar`/`identity` existed appends them at the end), the two
-  // orderings diverge and every colIdx→colId lookup (enterEdit, commitEdit,
-  // showPicker, keyboard nav) targets the wrong column. Deriving from the
-  // header groups keeps colIdx aligned with what the user actually clicked.
-  const visibleColIds = useMemo(
-    () => (table.getHeaderGroups()[0]?.headers ?? []).map(h => h.id),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [columnOrder, columnVisibility],
-  );
-
-  const commitEdit = useCallback(
-    (rowIdx: number, colId: string, value: string) => {
-      const row = activityRows[rowIdx];
-      if (!row) return;
-      const a = row.activity;
-
-      const patch: Partial<ApiActivity> & { notes?: string | null } = {};
-      if (colId === 'title' && value.trim() !== '') patch.title = value.trim();
-      else if (colId === 'startAt') patch.startAt = value ? `${value}T00:00:00Z` : undefined;
-      else if (colId === 'endAt') patch.endAt = value ? `${value}T00:00:00Z` : undefined;
-      else if (colId === 'description') patch.description = value || undefined;
-      else if (colId === 'location') patch.location = value || undefined;
-      else if (colId === 'url') patch.url = value || undefined;
-      else if (colId === 'notes') patch.notes = value || undefined;
-      else if (colId === 'progress') {
-        const n = parseInt(value, 10);
-        if (!isNaN(n) && n >= 0 && n <= 100) patch.percentComplete = n;
-      }
-
-      if (Object.keys(patch).length > 0) {
-        update.mutate({ activityId: a.id, patch });
-      }
-    },
-    [activityRows, update],
-  );
-
-  const enterEdit = useCallback((rowIdx: number, colIdx: number) => {
-    const row = activityRows[rowIdx];
-    if (!row) return;
-    const colId = visibleColIds[colIdx];
-    const meta = COL_CATALOG.find(c => c.id === colId);
-    if (!meta?.editable || meta.editType === 'status') return;
-    const a = row.activity;
-    let val = '';
-    if (colId === 'title') val = a.title;
-    else if (colId === 'startAt') val = toDateInput(a.startAt);
-    else if (colId === 'endAt') val = toDateInput(a.endAt);
-    else if (colId === 'description') val = a.description ?? '';
-    else if (colId === 'location') val = a.location ?? '';
-    else if (colId === 'url') val = a.url ?? '';
-    else if (colId === 'notes') val = (a as ApiActivity & { notes?: string | null }).notes ?? '';
-    else if (colId === 'progress') val = String(a.percentComplete ?? 0);
-    setEditingCell({ rowIdx, colIdx, value: val });
-  }, [activityRows, visibleColIds]);
-
-  const cancelEdit = useCallback(() => setEditingCell(null), []);
-
-  const commitAndMove = useCallback(
-    (dir: 'down' | 'right' | 'left') => {
-      if (!editingCell) return;
-      commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
-      setEditingCell(null);
-
-      if (dir === 'down') {
-        const nextRow = Math.min(editingCell.rowIdx + 1, activityRows.length - 1);
-        setSelectedRowIdx(nextRow);
-      } else if (dir === 'right') {
-        let nextColIdx = editingCell.colIdx + 1;
-        let nextRowIdx = editingCell.rowIdx;
-        if (nextColIdx >= visibleColIds.length) {
-          if (editingCell.rowIdx < activityRows.length - 1) {
-            nextColIdx = 0;
-            nextRowIdx = editingCell.rowIdx + 1;
-          } else {
-            nextColIdx = visibleColIds.length - 1; // clamp at last cell of last row
-          }
-        }
-        setSelectedColIdx(nextColIdx);
-        setSelectedRowIdx(nextRowIdx);
-        const colId = visibleColIds[nextColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
-          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
-          meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isText) enterEdit(nextRowIdx, nextColIdx);
-      } else if (dir === 'left') {
-        let prevColIdx = editingCell.colIdx - 1;
-        let prevRowIdx = editingCell.rowIdx;
-        if (prevColIdx < 0) {
-          if (editingCell.rowIdx > 0) {
-            prevColIdx = visibleColIds.length - 1;
-            prevRowIdx = editingCell.rowIdx - 1;
-          } else {
-            prevColIdx = 0; // clamp at first cell of first row
-          }
-        }
-        setSelectedColIdx(prevColIdx);
-        setSelectedRowIdx(prevRowIdx);
-        const colId = visibleColIds[prevColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
-          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
-          meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isText) enterEdit(prevRowIdx, prevColIdx);
-      }
-    },
-    [editingCell, commitEdit, visibleColIds, activityRows.length, enterEdit],
-  );
-
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLDivElement>) => {
-      if (editingCell) {
-        // Edit mode key handling is in the input's own onKeyDown
-        return;
-      }
-
-      if (e.key === 'Tab') {
-        e.preventDefault();
-        if (activityRows.length === 0) return;
-        if (selectedRowIdx === null) {
-          setSelectedRowIdx(0);
-          setSelectedColIdx(0);
-          return;
-        }
-        if (e.shiftKey) {
-          let prevCol = selectedColIdx - 1;
-          let prevRow = selectedRowIdx;
-          if (prevCol < 0) {
-            if (selectedRowIdx > 0) {
-              prevCol = visibleColIds.length - 1;
-              prevRow = selectedRowIdx - 1;
-            } else {
-              prevCol = 0; // clamp at first cell of first row
-            }
-          }
-          setSelectedColIdx(prevCol);
-          setSelectedRowIdx(prevRow);
-        } else {
-          let nextCol = selectedColIdx + 1;
-          let nextRow = selectedRowIdx;
-          if (nextCol >= visibleColIds.length) {
-            if (selectedRowIdx < activityRows.length - 1) {
-              nextCol = 0;
-              nextRow = selectedRowIdx + 1;
-            } else {
-              nextCol = visibleColIds.length - 1; // clamp at last cell of last row
-            }
-          }
-          setSelectedColIdx(nextCol);
-          setSelectedRowIdx(nextRow);
-        }
-        return;
-      }
-
-      if (selectedRowIdx === null) {
-        if (e.key === 'ArrowDown') { setSelectedRowIdx(0); e.preventDefault(); }
-        return;
-      }
-
-      if (e.key === 'ArrowDown') {
-        setSelectedRowIdx(r => Math.min((r ?? 0) + 1, activityRows.length - 1));
-        e.preventDefault();
-      } else if (e.key === 'ArrowUp') {
-        setSelectedRowIdx(r => Math.max((r ?? 0) - 1, 0));
-        e.preventDefault();
-      } else if (e.key === 'ArrowRight') {
-        setSelectedColIdx(c => Math.min(c + 1, visibleColIds.length - 1));
-        e.preventDefault();
-      } else if (e.key === 'ArrowLeft') {
-        setSelectedColIdx(c => Math.max(c - 1, 0));
-        e.preventDefault();
-      } else if (e.key === 'Enter' || e.key === 'F2') {
-        const colId = visibleColIds[selectedColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
-          meta.editType !== 'status' && meta.editType !== 'identity' &&
-          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isTextEditable) enterEdit(selectedRowIdx, selectedColIdx);
-        e.preventDefault();
-      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-        const colId = visibleColIds[selectedColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
-          meta.editType !== 'status' && meta.editType !== 'identity' &&
-          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isTextEditable) setEditingCell({ rowIdx: selectedRowIdx, colIdx: selectedColIdx, value: e.key });
-      }
-    },
-    [editingCell, selectedRowIdx, selectedColIdx, activityRows, visibleColIds, enterEdit],
-  );
-
-  // When triggerNewRow increments, create a new "New Activity" row and queue title edit
-  useEffect(() => {
-    if (!triggerNewRow || triggerNewRow === prevTriggerNewRow.current) return;
-    prevTriggerNewRow.current = triggerNewRow;
-    const today = new Date().toISOString().slice(0, 10);
-    create.mutate(
-      { title: 'New Activity', startAt: `${today}T00:00:00Z`, endAt: `${today}T00:00:00Z` },
-      { onSuccess: (created) => { pendingEditActivityId.current = created.id; } },
-    );
-  }, [triggerNewRow]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // After a new activity appears in activityRows, enter title-edit mode on it
-  useEffect(() => {
-    if (!pendingEditActivityId.current) return;
-    const rowIdx = activityRows.findIndex(r => r.activity.id === pendingEditActivityId.current);
-    if (rowIdx < 0) return;
-    pendingEditActivityId.current = null;
-    setSelectedRowIdx(rowIdx);
-    const titleColIdx = visibleColIds.indexOf('title');
-    if (titleColIdx >= 0) {
-      setEditingCell({ rowIdx, colIdx: titleColIdx, value: 'New Activity' });
-    }
-  }, [activityRows, visibleColIds]);
-
-  // ── Color-by resolution ────────────────────────────────────────────────────
-
-  const getRowAccentColor = useCallback(
-    (activity: ApiActivity): string | null => {
-      if (colorBy === 'activity') return resolveColorHex(activity.color ?? null);
-      if (colorBy === 'member') {
-        const firstId = (activity.assignedMemberIds ?? [])[0];
-        if (!firstId) return null;
-        const m = memberById.get(firstId);
-        return resolveColorHex(m?.color ?? null);
-      }
-      if (colorBy === 'status') {
-        if (!activity.statusId) return null;
-        const s = statusById.get(activity.statusId);
-        return resolveColorHex(s?.color ?? null);
-      }
-      return null;
-    },
-    [colorBy, memberById, statusById],
-  );
-
-  // ── Picker state — all rendered as portals to escape table overflow ──────
-
-  const [statusPickerFor, setStatusPickerFor] = useState<string | null>(null);
-  const [statusPickerPos, setStatusPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeStatusPicker = useCallback(() => {
-    setStatusPickerFor(null);
-    setStatusPickerPos(null);
-  }, []);
-
-  const [assigneePickerFor, setAssigneePickerFor] = useState<string | null>(null);
-  const [assigneePickerPos, setAssigneePickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeAssigneePicker = useCallback(() => {
-    setAssigneePickerFor(null);
-    setAssigneePickerPos(null);
-  }, []);
-
-  const [tagPickerFor, setTagPickerFor] = useState<string | null>(null);
-  const [tagPickerPos, setTagPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeTagPicker = useCallback(() => {
-    setTagPickerFor(null);
-    setTagPickerPos(null);
-  }, []);
-
-  const [parentPickerFor, setParentPickerFor] = useState<string | null>(null);
-  const [parentPickerPos, setParentPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeParentPicker = useCallback(() => {
-    setParentPickerFor(null);
-    setParentPickerPos(null);
-  }, []);
-
-  const [identityPickerFor, setIdentityPickerFor] = useState<string | null>(null);
-  const [identityPickerPos, setIdentityPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const identityPickerRef = useRef<HTMLDivElement>(null);
-  const closeIdentityPicker = useCallback(() => {
-    setIdentityPickerFor(null);
-    setIdentityPickerPos(null);
-  }, []);
-
-  // Click-outside closes the identity picker
-  useEffect(() => {
-    if (!identityPickerFor) return;
-    function handler(e: MouseEvent) {
-      if (identityPickerRef.current && !identityPickerRef.current.contains(e.target as Node)) {
-        closeIdentityPicker();
-      }
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [identityPickerFor, closeIdentityPicker]);
-
-  // Multi-select state for row checkboxes
-  const [selectedActivityIds, setSelectedActivityIds] = useState<Set<string>>(new Set());
-  const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
-
-  // Holds the ID of a newly created activity that should enter title-edit mode
-  const pendingEditActivityId = useRef<string | null>(null);
-  // Guards against re-firing triggerNewRow on re-renders
-  const prevTriggerNewRow = useRef<number>(0);
-
-  // ── Multi-select delete ────────────────────────────────────────────────────
-
-  const handleDeleteSelected = useCallback(() => {
-    for (const id of Array.from(selectedActivityIds)) {
-      deleteAct.mutate(id);
-    }
-    setSelectedActivityIds(new Set());
-  }, [selectedActivityIds, deleteAct]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── DnD column reorder ─────────────────────────────────────────────────────
-
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
-
-  function handleDragEnd(event: DragEndEvent) {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    setColumnOrder(prev => {
-      const oldIdx = prev.indexOf(String(active.id));
-      const newIdx = prev.indexOf(String(over.id));
-      if (oldIdx === -1 || newIdx === -1) return prev;
-      // Pinned columns can't be reordered past each other
-      const pinnedIds = ['colorBar', 'identity', 'title'];
-      if (pinnedIds.includes(String(active.id)) || pinnedIds.includes(String(over.id))) return prev;
-      const next = arrayMove(prev, oldIdx, newIdx);
-      if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
-      return next;
-    });
-  }
-
-  // ── Render ─────────────────────────────────────────────────────────────────
-
-  const rowH = 40; // always comfortable
-
-  const visibleHeaders = table.getHeaderGroups()[0]?.headers ?? [];
-
-  // Build a map from colId → left offset for sticky pinning
-  const pinnedLeft = useMemo(() => {
-    let left = 0;
-    const offsets: Record<string, number> = {};
-    for (const h of visibleHeaders) {
-      if (h.column.getIsPinned() === 'left') {
-        offsets[h.id] = left;
-        left += h.getSize();
-      }
-    }
-    return offsets;
-  }, [visibleHeaders]);
-
-  const tableWidth = visibleHeaders.reduce((acc, h) => acc + h.getSize(), 0);
-
-  // Status picker activity (for the portal)
-  const statusPickerActivity = statusPickerFor ? activityById.get(statusPickerFor) : null;
-
-  return (
-    <div
-      ref={containerRef}
-      tabIndex={0}
-      onKeyDown={handleKeyDown}
-      style={{
-        flex: 1,
-        overflow: 'auto',
-        outline: 'none',
-        background: 'var(--background)',
-        position: 'relative',
-      }}
-      onClick={e => {
-        if ((e.target as HTMLElement) === containerRef.current) {
-          setSelectedRowIdx(null);
-          setEditingCell(null);
-          onSelectActivity?.(null);
-        }
-      }}
-    >
-      {/* Selection action bar — appears above the table when rows are checked */}
-      {selectedActivityIds.size > 0 && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            padding: '0 12px',
-            height: 36,
-            background: 'var(--card)',
-            borderBottom: '1px solid var(--border)',
-            flexShrink: 0,
-          }}
-        >
-          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
-            {selectedActivityIds.size} selected
-          </span>
-          <button
-            onClick={handleDeleteSelected}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 4,
-              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
-              background: 'var(--destructive)', color: 'var(--destructive-foreground)',
-              border: 'none', borderRadius: 4, fontFamily: 'var(--font-sans)',
-            }}
-          >
-            <Trash2 size={12} />
-            Delete
-          </button>
-          <button
-            onClick={() => setSelectedActivityIds(new Set())}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 4,
-              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
-              background: 'none', color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
-            }}
-          >
-            Cancel
-          </button>
-        </div>
-      )}
-
-      {/* DndContext must be outside <table> — its accessibility <div> is invalid inside <thead>. */}
-      <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
-      <table
-        style={{
-          width: tableWidth,
-          minWidth: '100%',
-          borderCollapse: 'separate',
-          borderSpacing: 0,
-          tableLayout: 'fixed',
-        }}
-      >
-        {/* Column sizing */}
-        <colgroup>
-          {visibleHeaders.map(h => (
-            <col key={h.id} style={{ width: h.getSize() }} />
-          ))}
-        </colgroup>
-
-        {/* Header */}
-        <thead>
-          <SortableContext
-            items={visibleHeaders.map(h => h.id)}
-            strategy={horizontalListSortingStrategy}
-          >
-            <tr style={{ height: 36 }}>
-              {visibleHeaders.map(header => {
-                  const colId = header.id;
-                  const isPinned = header.column.getIsPinned() === 'left';
-                  const sortState = sorting[0];
-                  const sortDir = sortState?.id === colId ? (sortState.desc ? 'desc' : 'asc') : false;
-                  const meta = COL_CATALOG.find(c => c.id === colId);
-
-                  if (colId === 'colorBar') {
-                    const allChecked = activityRows.length > 0 &&
-                      activityRows.every(r => selectedActivityIds.has(r.activity.id));
-                    const someChecked = !allChecked &&
-                      activityRows.some(r => selectedActivityIds.has(r.activity.id));
-                    return (
-                      <th
-                        key={colId}
-                        style={{
-                          width: 24,
-                          position: 'sticky',
-                          left: pinnedLeft[colId] ?? 0,
-                          top: 0,
-                          zIndex: 20,
-                          background: 'var(--card)',
-                          borderBottom: '2px solid var(--border)',
-                          padding: 0,
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'stretch', height: '100%' }}>
-                          <div style={{ width: 4, flexShrink: 0 }} />
-                          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                            <input
-                              type="checkbox"
-                              checked={allChecked}
-                              ref={el => { if (el) el.indeterminate = someChecked; }}
-                              onChange={() => {
-                                if (allChecked || someChecked) {
-                                  setSelectedActivityIds(new Set());
-                                } else {
-                                  setSelectedActivityIds(new Set(activityRows.map(r => r.activity.id)));
-                                }
-                              }}
-                              style={{ cursor: 'pointer', width: 13, height: 13 }}
-                              title="Select all"
-                            />
-                          </div>
-                        </div>
-                      </th>
-                    );
-                  }
-
-                  return (
-                    <SortableColHeader
-                      key={colId}
-                      colId={colId}
-                      style={{
-                        width: header.getSize(),
-                        left: isPinned ? pinnedLeft[colId] : undefined,
-                        position: 'sticky',
-                        zIndex: isPinned ? 20 : 10,
-                        boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
-                      }}
-                      sortDir={meta?.editType !== 'none' ? sortDir : false}
-                      onSort={meta?.editType !== 'none' ? () => {
-                        setSorting(prev => {
-                          if (prev[0]?.id !== colId) return [{ id: colId, desc: false }];
-                          if (!prev[0].desc) return [{ id: colId, desc: true }];
-                          return [];
-                        });
-                      } : undefined}
-                      resizeHandler={header.getResizeHandler() as unknown as (e: React.MouseEvent | React.TouchEvent) => void}
-                      isResizing={header.column.getIsResizing()}
-                    >
-                      {header.column.columnDef.header as string}
-                    </SortableColHeader>
-                  );
-                })}
-              </tr>
-            </SortableContext>
-        </thead>
-
-        {/* Body */}
-        <tbody>
-          {displayRows.length === 0 && (
-            <tr>
-              <td
-                colSpan={visibleHeaders.length}
-                style={{
-                  textAlign: 'center',
-                  padding: '48px 0',
-                  color: 'var(--muted-foreground)',
-                  fontSize: 13,
-                }}
-              >
-                No activities to show.
-              </td>
-            </tr>
-          )}
-
-          {displayRows.map((row, displayIdx) => {
-            // ── Group header row ─────────────────────────────────────────────
-            if (row.kind === 'group') {
-              const collapsed = collapsedGroups.has(row.key);
-              return (
-                <tr key={`group-${row.key}`}>
-                  <td
-                    colSpan={visibleHeaders.length}
-                    style={{
-                      padding: '4px 8px',
-                      background: 'var(--muted)',
-                      borderBottom: '1px solid var(--border)',
-                      borderTop: displayIdx > 0 ? '1px solid var(--border)' : undefined,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      color: 'var(--muted-foreground)',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.05em',
-                      cursor: 'pointer',
-                      userSelect: 'none',
-                    }}
-                    onClick={() => toggleGroup(row.key)}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-                      {row.label}
-                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
-                    </div>
-                  </td>
-                </tr>
-              );
-            }
-
-            // ── Activity row ─────────────────────────────────────────────────
-            const { activity, depth, hasChildren, groupKey } = row;
-            const actRowIdx = activityRows.indexOf(row);
-            const isSelected = actRowIdx === selectedRowIdx;
-            const isDetailOpen = activity.id === selectedActivityId;
-            const accentColor = getRowAccentColor(activity);
-
-            const isMatch = debouncedQuery && matchedIds.includes(activity.id);
-            const isActiveMatch = activity.id === activeMatchId;
-            const isDimmed = debouncedQuery && matchedIds.length > 0 && !isMatch;
-
-            const rowStyle: React.CSSProperties = {
-              height: rowH,
-              opacity: isDimmed ? 0.3 : 1,
-              background: isDetailOpen
-                ? 'var(--muted)'
-                : isSelected
-                ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
-                : 'transparent',
-              cursor: 'default',
-              outline: isActiveMatch
-                ? '2px solid #f59e0b'
-                : isMatch
-                ? '1px solid rgba(245,158,11,0.6)'
-                : undefined,
-              transition: 'background 0.1s ease, opacity 0.15s ease',
-            };
-
-            return (
-              <tr
-                key={activity.id}
-                ref={isActiveMatch ? el => { (activeRowRef as React.MutableRefObject<HTMLTableRowElement | null>).current = el } : undefined}
-                style={rowStyle}
-                onMouseEnter={() => setHoveredRowId(activity.id)}
-                onMouseLeave={() => setHoveredRowId(null)}
-                onClick={e => {
-                  e.stopPropagation();
-                  setSelectedRowIdx(actRowIdx);
-                  onSelectActivity?.(activity.id);
-                  // intentionally no onSelectApiActivity — edits happen inline
-                }}
-              >
-                {visibleHeaders.map((header, colIdx) => {
-                  const colId = header.id;
-                  const isPinned = header.column.getIsPinned() === 'left';
-                  const isCellSelected = isSelected && colIdx === selectedColIdx;
-                  const isEditing = editingCell?.rowIdx === actRowIdx && editingCell.colIdx === colIdx;
-                  const meta = COL_CATALOG.find(c => c.id === colId)!;
-
-                  const cellStyle: React.CSSProperties = {
-                    width: header.getSize(),
-                    maxWidth: header.getSize(),
-                    padding: '0 8px',
-                    borderBottom: '1px solid var(--border)',
-                    fontSize: 12,
-                    color: 'var(--foreground)',
-                    overflow: 'hidden',
-                    whiteSpace: 'nowrap',
-                    textOverflow: 'ellipsis',
-                    position: isPinned ? 'sticky' : undefined,
-                    left: isPinned ? pinnedLeft[colId] : undefined,
-                    zIndex: isPinned ? 5 : undefined,
-                    background: isPinned
-                      ? (isDetailOpen ? 'var(--muted)' : isSelected ? 'color-mix(in srgb, var(--primary) 8%, var(--background))' : 'var(--background)')
-                      : undefined,
-                    boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
-                    outline: isCellSelected && !isEditing ? '2px solid var(--primary)' : undefined,
-                    outlineOffset: '-2px',
-                    verticalAlign: 'middle',
-                    cursor: (meta.editType === 'text' || meta.editType === 'date' || meta.editType === 'number')
-                      ? 'text'
-                      : (meta.editType !== 'none' ? 'pointer' : 'default'),
-                  };
-
-                  // ── Cell content ──────────────────────────────────────────
-
-                  // Editing mode — inline input
-                  if (isEditing && meta.editType !== 'none' && meta.editType !== 'status') {
-                    return (
-                      <td key={colId} style={{ ...cellStyle, padding: 0, overflow: 'visible' }}>
-                        <input
-                          ref={editInputRef}
-                          type={meta.editType === 'date' ? 'date' : meta.editType === 'number' ? 'number' : 'text'}
-                          min={meta.editType === 'number' ? 0 : undefined}
-                          max={meta.editType === 'number' ? 100 : undefined}
-                          value={editingCell.value}
-                          onChange={e => setEditingCell(prev => prev ? { ...prev, value: e.target.value } : prev)}
-                          onKeyDown={e => {
-                            e.stopPropagation();
-                            if (e.key === 'Escape') { cancelEdit(); e.preventDefault(); }
-                            else if (e.key === 'Enter') { commitAndMove('down'); e.preventDefault(); }
-                            else if (e.key === 'Tab') { commitAndMove(e.shiftKey ? 'left' : 'right'); e.preventDefault(); }
-                          }}
-                          onBlur={() => {
-                            commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
-                            setEditingCell(null);
-                          }}
-                          style={{
-                            width: '100%',
-                            height: rowH,
-                            padding: '0 8px',
-                            background: 'var(--background)',
-                            border: 'none',
-                            outline: '2px solid var(--primary)',
-                            outlineOffset: '-2px',
-                            fontSize: 12,
-                            color: 'var(--foreground)',
-                            fontFamily: 'var(--font-sans)',
-                          }}
-                          onClick={e => e.stopPropagation()}
-                        />
-                      </td>
-                    );
-                  }
-
-                  // Color bar + row checkbox — 32px pinned cell
-                  if (colId === 'colorBar') {
-                    const isRowChecked = selectedActivityIds.has(activity.id);
-                    const showCb = isRowChecked || selectedActivityIds.size > 0 || hoveredRowId === activity.id;
-                    return (
-                      <td
-                        key={colId}
-                        style={{
-                          width: 24,
-                          maxWidth: 24,
-                          padding: 0,
-                          borderBottom: '1px solid var(--border)',
-                          position: 'sticky',
-                          left: pinnedLeft[colId] ?? 0,
-                          zIndex: 5,
-                          background: accentColor
-                            ?? (isDetailOpen
-                              ? 'var(--muted)'
-                              : isSelected
-                              ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
-                              : 'var(--background)'),
-                          cursor: 'default',
-                        }}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedActivityIds(prev => {
-                            const next = new Set(prev);
-                            if (next.has(activity.id)) next.delete(activity.id);
-                            else next.add(activity.id);
-                            return next;
-                          });
-                        }}
-                      >
-                        <div style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          height: rowH,
-                          opacity: showCb ? 1 : 0,
-                          transition: 'opacity 0.1s',
-                        }}>
-                          <input
-                            type="checkbox"
-                            checked={isRowChecked}
-                            onChange={() => {}}
-                            onClick={e => e.stopPropagation()}
-                            style={{ cursor: 'pointer', width: 13, height: 13, pointerEvents: 'none' }}
-                          />
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Identity cell — shows badge; click opens identity picker portal
-                  if (colId === 'identity') {
-                    return (
-                      <td
-                        key={colId}
-                        style={{ ...cellStyle, cursor: 'pointer' }}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          if (identityPickerFor === activity.id) {
-                            closeIdentityPicker();
-                          } else {
-                            closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeParentPicker();
-                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                            setIdentityPickerFor(activity.id);
-                            setIdentityPickerPos(popoverPos(rect, 240, 320));
-                          }
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                          <Badge
-                            identity={{
-                              color: resolveColorHex(activity.color ?? null) ?? '#288C9B',
-                              icon: activity.icon ?? '__name_2__',
-                            }}
-                            name={activity.title}
-                            shape="square"
-                            size={28}
-                          />
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Status cell — click to open picker (portal, escapes scroll overflow)
-                  if (colId === 'status') {
-                    const status = activity.statusId ? statusById.get(activity.statusId) : null;
-                    return (
-                      <td
-                        key={colId}
-                        style={{ ...cellStyle, cursor: 'pointer' }}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          if (statusPickerFor === activity.id) {
-                            closeStatusPicker();
-                          } else {
-                            closeAssigneePicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
-                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                            setStatusPickerFor(activity.id);
-                            setStatusPickerPos(popoverPos(rect, 160, 220));
-                          }
-                        }}
-                      >
-                        {status ? (
-                          <span
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: 5,
-                              padding: '2px 8px',
-                              borderRadius: 4,
-                              fontSize: 11,
-                              fontWeight: 500,
-                              background: `color-mix(in srgb, ${resolveColorHex(status.color ?? null) ?? '#888'} 15%, transparent)`,
-                              color: resolveColorHex(status.color ?? null) ?? 'var(--foreground)',
-                              border: `1px solid ${resolveColorHex(status.color ?? null) ?? '#888'}40`,
-                            }}
-                          >
-                            <span
-                              style={{
-                                width: 7,
-                                height: 7,
-                                borderRadius: '50%',
-                                background: resolveColorHex(status.color ?? null) ?? '#888',
-                                flexShrink: 0,
-                              }}
-                            />
-                            {status.name}
-                          </span>
-                        ) : (
-                          <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                        )}
-                      </td>
-                    );
-                  }
-
-                  // Assignees cell — overlapping badges; click opens picker
-                  if (colId === 'assignees') {
-                    const ids = activity.assignedMemberIds ?? [];
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (assigneePickerFor === activity.id) {
-                          closeAssigneePicker();
-                        } else {
-                          closeStatusPicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
-                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          setAssigneePickerFor(activity.id);
-                          setAssigneePickerPos(popoverPos(rect, 180, 240));
-                        }
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
-                          {ids.slice(0, 4).map((mid, i) => {
-                            const m = memberById.get(mid);
-                            if (!m) return null;
-                            return (
-                              <div key={mid} style={{ marginLeft: i === 0 ? 0 : -6 }} title={m.displayName}>
-                                <Badge
-                                  identity={{ color: resolveColorHex(m.color ?? null) ?? '#288C9B', icon: m.icon ?? '__name_2__' }}
-                                  name={m.displayName}
-                                  shape="circle"
-                                  size={22}
-                                />
-                              </div>
-                            );
-                          })}
-                          {ids.length > 4 && (
-                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>+{ids.length - 4}</span>
-                          )}
-                          {ids.length === 0 && (
-                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                          )}
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Tags cell — click opens tag picker
-                  if (colId === 'tags') {
-                    const tagList = (activity.tagIds ?? [])
-                      .map(tid => tags.find(t => t.id === tid))
-                      .filter(Boolean) as Tag[];
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (tagPickerFor === activity.id) {
-                          closeTagPicker();
-                        } else {
-                          closeStatusPicker(); closeAssigneePicker(); closeParentPicker(); closeIdentityPicker();
-                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          setTagPickerFor(activity.id);
-                          setTagPickerPos(popoverPos(rect, 220, 300));
-                        }
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden', flexWrap: 'nowrap' }}>
-                          {tagList.slice(0, 3).map(t => (
-                            <span
-                              key={t.id}
-                              style={{
-                                padding: '1px 6px',
-                                borderRadius: 4,
-                                fontSize: 10,
-                                background: resolveColorHex(t.color ?? null)
-                                  ? `color-mix(in srgb, ${resolveColorHex(t.color ?? null)} 18%, transparent)`
-                                  : 'var(--muted)',
-                                color: resolveColorHex(t.color ?? null) ?? 'var(--foreground)',
-                                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}40`,
-                                whiteSpace: 'nowrap',
-                              }}
-                            >
-                              {t.name}
-                            </span>
-                          ))}
-                          {tagList.length > 3 && (
-                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tagList.length - 3}</span>
-                          )}
-                          {tagList.length === 0 && (
-                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                          )}
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Progress cell
-                  if (colId === 'progress') {
-                    const pct = activity.percentComplete ?? 0;
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          enterEdit(actRowIdx, colIdx);
-                        }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <div
-                            style={{
-                              flex: 1,
-                              height: 4,
-                              background: 'var(--border)',
-                              borderRadius: 2,
-                              overflow: 'hidden',
-                            }}
-                          >
-                            <div
-                              style={{
-                                height: '100%',
-                                width: `${pct}%`,
-                                background: 'var(--primary)',
-                                borderRadius: 2,
-                                transition: 'width 0.2s',
-                              }}
-                            />
-                          </div>
-                          <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flexShrink: 0 }}>
-                            {pct}%
-                          </span>
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Parent cell — click opens parent picker
-                  if (colId === 'parent') {
-                    const parent = activity.parentActivityId ? activityById.get(activity.parentActivityId) : null;
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (parentPickerFor === activity.id) {
-                          closeParentPicker();
-                        } else {
-                          closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeIdentityPicker();
-                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          setParentPickerFor(activity.id);
-                          setParentPickerPos(popoverPos(rect, 220, 280));
-                        }
-                      }}>
-                        <span style={{ color: parent ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
-                          {parent ? parent.title : '—'}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Duration cell
-                  if (colId === 'duration') {
-                    return (
-                      <td key={colId} style={cellStyle}>
-                        <span style={{ color: 'var(--muted-foreground)' }}>
-                          {formatDuration(activity.startAt, activity.endAt)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Date cells — single click to edit
-                  if (colId === 'startAt' || colId === 'endAt') {
-                    const iso = colId === 'startAt' ? activity.startAt : activity.endAt;
-                    return (
-                      <td
-                        key={colId}
-                        style={cellStyle}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          enterEdit(actRowIdx, colIdx);
-                        }}
-                      >
-                        <span style={{ color: iso ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
-                          {formatDate(iso)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Created/Updated cells
-                  if (colId === 'createdAt' || colId === 'updatedAt') {
-                    const iso = colId === 'createdAt' ? activity.createdAt : activity.updatedAt;
-                    return (
-                      <td key={colId} style={cellStyle}>
-                        <span style={{ color: 'var(--muted-foreground)' }}>
-                          {formatDate(iso)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Text cells (title, description, location, url, notes)
-                  let textVal = '';
-                  if (colId === 'title') textVal = activity.title;
-                  else if (colId === 'description') textVal = activity.description ?? '';
-                  else if (colId === 'location') textVal = activity.location ?? '';
-                  else if (colId === 'url') textVal = activity.url ?? '';
-                  else if (colId === 'notes') textVal = (activity as ApiActivity & { notes?: string | null }).notes ?? '';
-
-                  return (
-                    <td
-                      key={colId}
-                      style={{ ...cellStyle, fontWeight: colId === 'title' ? 500 : 400 }}
-                      onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (meta.editable && meta.editType === 'text') enterEdit(actRowIdx, colIdx);
-                      }}
-                    >
-                      {colId === 'title' && groupBy === 'parent' ? (
-                        // Parent-group mode: show indent + collapse toggle
-                        <span style={{ display: 'flex', alignItems: 'center', gap: 4, paddingLeft: depth * 16 }}>
-                          {hasChildren ? (
-                            <span
-                              onClick={e => { e.stopPropagation(); toggleGroup(groupKey); }}
-                              style={{ cursor: 'pointer', flexShrink: 0, color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center' }}
-                            >
-                              {collapsedGroups.has(groupKey) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-                            </span>
-                          ) : depth > 0 ? (
-                            <span style={{ width: 13, flexShrink: 0 }} />
-                          ) : null}
-                          <span title={textVal} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                            {textVal || '—'}
-                          </span>
-                        </span>
-                      ) : (
-                        <span
-                          title={textVal}
-                          style={{
-                            display: 'block',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                            color: textVal ? 'var(--foreground)' : 'var(--muted-foreground)',
-                          }}
-                        >
-                          {textVal || '—'}
-                        </span>
-                      )}
-                    </td>
-                  );
-                })}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      </DndContext>
-
-      {/* Status picker portal */}
-      {statusPickerFor && statusPickerPos && statusPickerActivity &&
-        createPortal(
-          <StatusPicker
-            value={statusPickerActivity.statusId}
-            statuses={timelineStatuses}
-            onChange={statusId => {
-              update.mutate({ activityId: statusPickerFor, patch: { statusId } });
-              closeStatusPicker();
-            }}
-            onClose={closeStatusPicker}
-            positionStyle={{ position: 'fixed', top: statusPickerPos.top, left: statusPickerPos.left }}
-          />,
-          document.body,
-        )
-      }
-
-      {/* Assignee picker portal */}
-      {assigneePickerFor && assigneePickerPos &&
-        createPortal(
-          <AssigneePicker
-            members={members}
-            selectedIds={activityById.get(assigneePickerFor)?.assignedMemberIds ?? []}
-            onToggle={memberId => {
-              const activity = activityById.get(assigneePickerFor);
-              if (!activity) return;
-              const current = activity.assignedMemberIds ?? [];
-              const next = current.includes(memberId)
-                ? current.filter(id => id !== memberId)
-                : [...current, memberId];
-              update.mutate({ activityId: assigneePickerFor, patch: { assignedMemberIds: next } });
-            }}
-            onClose={closeAssigneePicker}
-            positionStyle={{ position: 'fixed', top: assigneePickerPos.top, left: assigneePickerPos.left }}
-          />,
-          document.body,
-        )
-      }
-
-      {/* Tag picker portal */}
-      {tagPickerFor && tagPickerPos &&
-        createPortal(
-          <TagPicker
-            teamId={teamId}
-            tags={tags}
-            selectedTagIds={(activityById.get(tagPickerFor)?.tagIds as string[] | undefined) ?? []}
-            onChange={ids => {
-              update.mutate({ activityId: tagPickerFor, patch: { tagIds: ids } as Partial<ApiActivity> });
-            }}
-            onClose={closeTagPicker}
-            positionStyle={{ position: 'fixed', top: tagPickerPos.top, left: tagPickerPos.left }}
-          />,
-          document.body,
-        )
-      }
-
-      {/* Parent picker portal */}
-      {parentPickerFor && parentPickerPos &&
-        createPortal(
-          <ParentPicker
-            activities={rawActivities.filter(a => a.id !== parentPickerFor)}
-            value={activityById.get(parentPickerFor)?.parentActivityId}
-            onChange={id => {
-              update.mutate({ activityId: parentPickerFor, patch: { parentActivityId: id } as Partial<ApiActivity> });
-              closeParentPicker();
-            }}
-            onClose={closeParentPicker}
-            positionStyle={{ position: 'fixed', top: parentPickerPos.top, left: parentPickerPos.left }}
-          />,
-          document.body,
-        )
-      }
-
-      {/* Identity picker portal */}
-      {identityPickerFor && identityPickerPos && (() => {
-        const identityActivity = activityById.get(identityPickerFor);
-        if (!identityActivity) return null;
-        return createPortal(
-          <div
-            ref={identityPickerRef}
-            style={{
-              position: 'fixed',
-              top: identityPickerPos.top,
-              left: identityPickerPos.left,
-              zIndex: 9999,
-              boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
-              borderRadius: 10,
-              border: '1px solid var(--border)',
-              overflow: 'hidden',
-            }}
-          >
-            <IdentityPicker
-              identity={{
-                color: resolveColorHex(identityActivity.color ?? null) ?? '#288C9B',
-                icon: identityActivity.icon ?? '__name_2__',
-              }}
-              name={identityActivity.title}
-              shape="square"
-              onChange={(next: Identity) => {
-                update.mutate({ activityId: identityPickerFor, patch: { color: next.color, icon: next.icon } });
-              }}
-            />
-          </div>,
-          document.body,
-        );
-      })()}
     </div>
   );
 }
@@ -28638,808 +27183,6 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
-## File: packages/api/internal/api/user_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-)
-
-// handleUpdateProfile handles PATCH /users/me. Updates display_name, color,
-// and icon for the authenticated user. Color/icon changes propagate to all
-// team_members rows that have not been explicitly overridden.
-func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	var body struct {
-		DisplayName *string `json:"displayName"`
-		Color       *string `json:"color"`
-		Icon        *string `json:"icon"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
-		return
-	}
-
-	// Apply changes only for fields that were provided.
-	displayName := user.DisplayName
-	if body.DisplayName != nil {
-		displayName = strings.TrimSpace(*body.DisplayName)
-		if displayName == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "displayName cannot be empty")
-			return
-		}
-	}
-
-	color := user.Color
-	if body.Color != nil {
-		color = body.Color
-	}
-	icon := user.Icon
-	if body.Icon != nil {
-		icon = body.Icon
-	}
-
-	if err := s.users.UpdateProfile(user.ID, displayName, color, icon); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
-		return
-	}
-
-	user.DisplayName = displayName
-	user.Color = color
-	user.Icon = icon
-	writeJSON(w, http.StatusOK, user)
-}
-
-// handleGetMyStats handles GET /users/me/stats. Returns aggregated activity and
-// timeline counts across all of the authenticated user's team memberships.
-func (s *Server) handleGetMyStats(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	stats, err := s.teams.GetUserStats(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get stats")
-		return
-	}
-	writeJSON(w, http.StatusOK, stats)
-}
-
-// handleChangePassword handles PUT /users/me/password. Requires the caller
-// to supply the current password before setting a new one.
-func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	var body struct {
-		CurrentPassword string `json:"currentPassword"`
-		NewPassword     string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if body.CurrentPassword == "" || body.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "currentPassword and newPassword are required")
-		return
-	}
-	if !isValidPassword(body.NewPassword) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "new password must be at least 8 characters")
-		return
-	}
-
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	// Verify the current password before allowing the change.
-	if err := auth.CheckPassword(user.PasswordHash, body.CurrentPassword); err != nil {
-		writeError(w, http.StatusUnauthorized, "WRONG_PASSWORD", "current password is incorrect")
-		return
-	}
-
-	hash, err := auth.HashPassword(body.NewPassword)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	if err := s.users.UpdatePassword(user.ID, hash); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// handleListAdminUsers handles GET /admin/users. Returns all users with team
-// membership counts. Supports ?orphaned=true to filter to zero-membership users.
-// Superadmin-only.
-func (s *Server) handleListAdminUsers(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	orphanedOnly := r.URL.Query().Get("orphaned") == "true"
-	rows, err := s.users.ListAll(orphanedOnly)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"users": rows})
-}
-
-// handlePromoteUser sets is_superadmin=true on a user. Superadmin-only.
-// Participants (no user account) cannot be promoted.
-func (s *Server) handlePromoteUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-
-	if err := s.users.SetSuperadmin(target.ID, true); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-
-	target.IsSuperadmin = true
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleArchiveUser inactivates a user account. Superadmin-only.
-// Archived users cannot log in; their data is preserved.
-func (s *Server) handleArchiveUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_ARCHIVE", "cannot archive your own account")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-
-	now := time.Now()
-	if err := s.users.SetArchived(target.ID, &now); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-
-	target.ArchivedAt = &now
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleUnarchiveUser reactivates an inactivated user account. Superadmin-only.
-func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-
-	if err := s.users.SetArchived(target.ID, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-
-	target.ArchivedAt = nil
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleRevokeUser atomically revokes all access for a user. Superadmin-only.
-// Self-revoke is blocked to prevent a superadmin from locking themselves out.
-func (s *Server) handleRevokeUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_REVOKE", "cannot revoke your own account")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
-		return
-	}
-
-	result, err := s.users.RevokeUser(target.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
-// handleDeleteUser hard-deletes a user. Superadmin-only. Only permitted when
-// the user has no active activity assignments and belongs to a single team.
-func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_DELETE", "cannot delete your own account")
-		return
-	}
-
-	if _, err := s.users.GetByID(userID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-
-	teamCount, err := s.teams.CountTeamsForUser(userID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	if teamCount > 1 {
-		writeError(w, http.StatusConflict, "MULTI_TEAM", "user belongs to multiple teams; remove them from each team first")
-		return
-	}
-
-	if err := s.users.Delete(userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
-## File: packages/api/internal/db/team_repo.go
-````go
-package db
-
-import (
-	"errors"
-	"fmt"
-	"strings"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ErrDuplicateName is returned by TeamRepo.Create when the generated slug
-// collides with an existing team's slug (UNIQUE constraint on teams.slug).
-var ErrDuplicateName = errors.New("team name already taken")
-
-// TeamRepo is the persistence layer for Team records and their membership
-// join table.
-type TeamRepo struct {
-	db *sqlx.DB
-}
-
-// NewTeamRepo returns a TeamRepo backed by db.
-func NewTeamRepo(db *sqlx.DB) *TeamRepo {
-	return &TeamRepo{db: db}
-}
-
-// Create inserts a new Team row. Returns ErrDuplicateName if the slug is
-// already taken.
-func (r *TeamRepo) Create(team *models.Team) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO teams (id, name, slug, description, notes, color, icon, created_at, updated_at)
-		VALUES (:id, :name, :slug, :description, :notes, :color, :icon, :created_at, :updated_at)
-	`, team)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return ErrDuplicateName
-		}
-		return fmt.Errorf("creating team: %w", err)
-	}
-	return nil
-}
-
-// Update writes mutable team fields (name, slug, description, notes, color,
-// icon, updated_at). It does not touch archived_at or created_at.
-func (r *TeamRepo) Update(team *models.Team) error {
-	_, err := r.db.NamedExec(`
-		UPDATE teams
-		SET name = :name, slug = :slug, description = :description, notes = :notes,
-		    color = :color, icon = :icon, updated_at = :updated_at
-		WHERE id = :id
-	`, team)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return ErrDuplicateName
-		}
-		return fmt.Errorf("updating team: %w", err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears the archived_at timestamp on a team.
-func (r *TeamRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(`UPDATE teams SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now(), id)
-	if err != nil {
-		return fmt.Errorf("setting team archived: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Team by primary key.
-func (r *TeamRepo) GetByID(id string) (*models.Team, error) {
-	var t models.Team
-	err := r.db.Get(&t, `SELECT * FROM teams WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting team: %w", err)
-	}
-	return &t, nil
-}
-
-// AddMember inserts a team_members row. m.ID must be pre-populated by the caller.
-func (r *TeamRepo) AddMember(m *models.TeamMember) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at)
-		VALUES (:id, :team_id, :user_id, :display_name, :role, :color, :icon, :joined_at)
-	`, m)
-	if err != nil {
-		return fmt.Errorf("adding team member: %w", err)
-	}
-	return nil
-}
-
-// GetMember returns the team_members row for a given (team, user) pair.
-func (r *TeamRepo) GetMember(teamID, userID string) (*models.TeamMember, error) {
-	var m models.TeamMember
-	err := r.db.Get(&m, `
-		SELECT * FROM team_members WHERE team_id = ? AND user_id = ?
-	`, teamID, userID)
-	if err != nil {
-		return nil, fmt.Errorf("getting team member: %w", err)
-	}
-	return &m, nil
-}
-
-// ListMembers returns active (non-archived) members of a team, including
-// login-less Participants. A LEFT JOIN handles Participants who have no users
-// row; COALESCE prefers the per-team display_name override, then falls back to users.
-func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, error) {
-	return r.listMembers(teamID, false)
-}
-
-// ListMembersAll returns all members of a team, including inactivated members.
-func (r *TeamRepo) ListMembersAll(teamID string) ([]*models.TeamMemberWithUser, error) {
-	return r.listMembers(teamID, true)
-}
-
-func (r *TeamRepo) listMembers(teamID string, includeArchived bool) ([]*models.TeamMemberWithUser, error) {
-	var members []*models.TeamMemberWithUser
-	query := `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.team_id = ?`
-	if !includeArchived {
-		query += ` AND tm.archived_at IS NULL`
-	}
-	query += ` ORDER BY tm.joined_at ASC`
-	if err := r.db.Select(&members, query, teamID); err != nil {
-		return nil, fmt.Errorf("listing team members: %w", err)
-	}
-	return members, nil
-}
-
-// ListByUserID returns all teams the given user belongs to, ordered by
-// creation date ascending. When includeArchived is false (the default),
-// archived teams are excluded.
-func (r *TeamRepo) ListByUserID(userID string, includeArchived bool) ([]*models.Team, error) {
-	teams := make([]*models.Team, 0)
-	query := `
-		SELECT t.* FROM teams t
-		JOIN team_members tm ON tm.team_id = t.id
-		WHERE tm.user_id = ?`
-	if !includeArchived {
-		query += ` AND t.archived_at IS NULL`
-	}
-	query += ` ORDER BY t.created_at ASC`
-	if err := r.db.Select(&teams, query, userID); err != nil {
-		return nil, fmt.Errorf("listing teams for user: %w", err)
-	}
-	return teams, nil
-}
-
-// ListAll returns every team in the system, optionally including archived ones.
-// Used by superadmin callers who need visibility across all teams.
-func (r *TeamRepo) ListAll(includeArchived bool) ([]*models.Team, error) {
-	teams := make([]*models.Team, 0)
-	query := `SELECT * FROM teams`
-	if !includeArchived {
-		query += ` WHERE archived_at IS NULL`
-	}
-	query += ` ORDER BY created_at ASC`
-	if err := r.db.Select(&teams, query); err != nil {
-		return nil, fmt.Errorf("listing all teams: %w", err)
-	}
-	return teams, nil
-}
-
-// Count returns the total number of teams.
-func (r *TeamRepo) Count() (int, error) {
-	var count int
-	err := r.db.Get(&count, `SELECT COUNT(*) FROM teams`)
-	if err != nil {
-		return 0, fmt.Errorf("counting teams: %w", err)
-	}
-	return count, nil
-}
-
-// GetMemberByID fetches a team_members row by its primary key. Unlike
-// GetMember (which looks up by team+userID pair), this is the canonical
-// lookup used by member-scoped routes that receive a memberId path param.
-func (r *TeamRepo) GetMemberByID(memberID string) (*models.TeamMemberWithUser, error) {
-	var m models.TeamMemberWithUser
-	err := r.db.Get(&m, `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.id = ?
-	`, memberID)
-	if err != nil {
-		return nil, fmt.Errorf("getting team member by id: %w", err)
-	}
-	return &m, nil
-}
-
-// UpdateMember applies mutable identity and role fields to a team_members row.
-// Only non-nil arguments are written; nil fields retain their current values.
-func (r *TeamRepo) UpdateMember(memberID string, displayName, color, icon, role *string) error {
-	// Fetch current values so we can apply the partial update.
-	type row struct {
-		DisplayName *string `db:"display_name"`
-		Color       *string `db:"color"`
-		Icon        *string `db:"icon"`
-		Role        string  `db:"role"`
-	}
-	var cur row
-	if err := r.db.Get(&cur, `SELECT display_name, color, icon, role FROM team_members WHERE id = ?`, memberID); err != nil {
-		return fmt.Errorf("fetching member for update: %w", err)
-	}
-	if displayName != nil {
-		cur.DisplayName = displayName
-	}
-	if color != nil {
-		cur.Color = color
-	}
-	if icon != nil {
-		cur.Icon = icon
-	}
-	if role != nil {
-		cur.Role = *role
-	}
-	_, err := r.db.Exec(`
-		UPDATE team_members SET display_name = ?, color = ?, icon = ?, role = ? WHERE id = ?
-	`, cur.DisplayName, cur.Color, cur.Icon, cur.Role, memberID)
-	if err != nil {
-		return fmt.Errorf("updating team member: %w", err)
-	}
-	return nil
-}
-
-// DeleteMember removes a team_members row. The caller is responsible for
-// verifying that the member is not the last admin before calling this, and
-// must delete the member's timeline_access rows first (RESTRICT FK).
-func (r *TeamRepo) DeleteMember(memberID string) error {
-	_, err := r.db.Exec(`DELETE FROM team_members WHERE id = ?`, memberID)
-	if err != nil {
-		return fmt.Errorf("deleting team member: %w", err)
-	}
-	return nil
-}
-
-// CountMemberAssignments returns how many activity_assignments rows reference
-// this team member. Callers use this count to block hard-delete when history exists.
-func (r *TeamRepo) CountMemberAssignments(memberID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?
-	`, memberID)
-	if err != nil {
-		return 0, fmt.Errorf("counting member assignments: %w", err)
-	}
-	return count, nil
-}
-
-// DeleteMemberTimelineAccess removes all timeline_access entries for a member.
-// Must be called before DeleteMember; the RESTRICT FK on
-// timeline_access.team_member_id blocks the team_members deletion otherwise.
-func (r *TeamRepo) DeleteMemberTimelineAccess(memberID string) error {
-	_, err := r.db.Exec(`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID)
-	if err != nil {
-		return fmt.Errorf("deleting member timeline access: %w", err)
-	}
-	return nil
-}
-
-// SetMemberArchived sets or clears archived_at on a team_members row.
-func (r *TeamRepo) SetMemberArchived(memberID string, at *time.Time) error {
-	_, err := r.db.Exec(`UPDATE team_members SET archived_at = ? WHERE id = ?`, at, memberID)
-	if err != nil {
-		return fmt.Errorf("setting member archived: %w", err)
-	}
-	return nil
-}
-
-// CountAdmins counts non-archived admin members of a team. Used to enforce
-// the "cannot remove last admin" constraint.
-func (r *TeamRepo) CountAdmins(teamID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM team_members
-		WHERE team_id = ? AND role = 'admin' AND archived_at IS NULL
-	`, teamID)
-	if err != nil {
-		return 0, fmt.Errorf("counting admins: %w", err)
-	}
-	return count, nil
-}
-
-// CountTeamsForUser returns how many teams a user belongs to. Used to enforce
-// the "single team" constraint for hard deletion.
-func (r *TeamRepo) CountTeamsForUser(userID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM team_members WHERE user_id = ? AND archived_at IS NULL
-	`, userID)
-	if err != nil {
-		return 0, fmt.Errorf("counting user teams: %w", err)
-	}
-	return count, nil
-}
-
-// GetMemberStats computes activity and timeline counts for a team member.
-func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) {
-	now := time.Now()
-	var stats models.MemberStats
-
-	// Timeline counts via timeline_access.
-	if err := r.db.Get(&stats.ActiveTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		WHERE ta.team_member_id = ? AND t.archived_at IS NULL
-	`, memberID); err != nil {
-		return nil, fmt.Errorf("counting active timelines: %w", err)
-	}
-	if err := r.db.Get(&stats.ArchivedTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		WHERE ta.team_member_id = ? AND t.archived_at IS NOT NULL
-	`, memberID); err != nil {
-		return nil, fmt.Errorf("counting archived timelines: %w", err)
-	}
-
-	// Activity counts from activity_assignments.
-	rows, err := r.db.Query(`
-		SELECT
-			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                                     THEN 1 ELSE 0 END), 0) AS archived,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                                     THEN 1 ELSE 0 END), 0) AS past_due,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ?                   THEN 1 ELSE 0 END), 0) AS running,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                                     THEN 1 ELSE 0 END), 0) AS upcoming
-		FROM activity_assignments aa
-		JOIN activities a ON a.id = aa.activity_id
-		WHERE aa.team_member_id = ?
-	`, now, now, now, now, memberID)
-	if err != nil {
-		return nil, fmt.Errorf("computing activity stats: %w", err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
-			return nil, fmt.Errorf("scanning activity stats: %w", err)
-		}
-	}
-
-	return &stats, nil
-}
-
-// GetUserStats aggregates activity and timeline counts across all of a user's
-// team memberships. Used by GET /users/me/stats for the profile page.
-func (r *TeamRepo) GetUserStats(userID string) (*models.MemberStats, error) {
-	now := time.Now()
-	var stats models.MemberStats
-
-	if err := r.db.Get(&stats.ActiveTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		JOIN team_members tm ON tm.id = ta.team_member_id
-		WHERE tm.user_id = ? AND t.archived_at IS NULL
-	`, userID); err != nil {
-		return nil, fmt.Errorf("counting active timelines: %w", err)
-	}
-	if err := r.db.Get(&stats.ArchivedTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		JOIN team_members tm ON tm.id = ta.team_member_id
-		WHERE tm.user_id = ? AND t.archived_at IS NOT NULL
-	`, userID); err != nil {
-		return nil, fmt.Errorf("counting archived timelines: %w", err)
-	}
-
-	rows, err := r.db.Query(`
-		SELECT
-			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                   THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                   THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                   THEN 1 ELSE 0 END), 0)
-		FROM activity_assignments aa
-		JOIN activities a ON a.id = aa.activity_id
-		JOIN team_members tm ON tm.id = aa.team_member_id
-		WHERE tm.user_id = ?
-	`, now, now, now, now, userID)
-	if err != nil {
-		return nil, fmt.Errorf("computing activity stats: %w", err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
-			return nil, fmt.Errorf("scanning activity stats: %w", err)
-		}
-	}
-
-	return &stats, nil
-}
-
-// GetMemberAllTeams returns all team memberships for a user (across all teams).
-// Used to populate the "Teams" section of the Member Edit Modal.
-func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUser, error) {
-	var members []*models.TeamMemberWithUser
-	err := r.db.Select(&members, `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.user_id = ?
-		ORDER BY tm.joined_at ASC
-	`, userID)
-	if err != nil {
-		return nil, fmt.Errorf("getting member all teams: %w", err)
-	}
-	return members, nil
-}
-
-// SetInviteLinkToken sets the reusable invite link token on a team. Passing
-// nil clears it (revoking the link).
-func (r *TeamRepo) SetInviteLinkToken(teamID string, token *string) error {
-	_, err := r.db.Exec(
-		`UPDATE teams SET invite_link_token = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		token, teamID,
-	)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return fmt.Errorf("invite link token collision: %w", err)
-		}
-		return fmt.Errorf("setting invite link token: %w", err)
-	}
-	return nil
-}
-
-// GetByInviteLinkToken looks up a team by its invite_link_token. Returns
-// sql.ErrNoRows (wrapped) when no matching team is found.
-func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
-	var t models.Team
-	err := r.db.Get(&t, `
-		SELECT * FROM teams WHERE invite_link_token = ? AND archived_at IS NULL
-	`, token)
-	if err != nil {
-		return nil, fmt.Errorf("getting team by invite link: %w", err)
-	}
-	return &t, nil
-}
-````
-
 ## File: packages/web/src/components/gantt/GanttToolbar.tsx
 ````typescript
 /**
@@ -29657,120 +27400,2282 @@ export default function GanttToolbar({
 }
 ````
 
-## File: packages/web/src/components/layout/TopBar.tsx
+## File: packages/web/src/components/list/ListView.tsx
 ````typescript
 /**
- * Top toolbar above the active view. Left side: global app navigation
- * (view switcher) and global object actions (Share). Right side: global
- * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
- * then whatever the parent injects into `rightSlot` (typically the profile menu).
+ * ListView — inline-editable, curated table view of the active timeline's
+ * activities.
  *
- * View-specific controls (date nav, zoom) intentionally live elsewhere —
- * a context-sensitive sub-toolbar hosts them.
+ * Uses TanStack Table v8 for column management (visibility, order, sizing,
+ * pinning, sorting). Row rendering is manual to support group-by headers
+ * interleaved between activity rows and to give full control over
+ * keyboard selection/edit behavior.
+ *
+ * Integrates with FilterContext and FindContext so the same filter and find
+ * query that drives the Gantt view also drives this view.
  */
 
-import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
-import FilterDropdown from '@/components/filters/FilterDropdown';
-import FindBar from '@/components/layout/FindBar';
-import { Badge } from '@/components/identity/Badge';
+import { createPortal } from 'react-dom';
+import {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  KeyboardEvent,
+} from 'react';
+import {
+  useReactTable,
+  getCoreRowModel,
+  getSortedRowModel,
+  type ColumnDef,
+  type SortingState,
+  type ColumnOrderState,
+  type VisibilityState,
+  type ColumnSizingState,
+  type ColumnPinningState,
+} from '@tanstack/react-table';
+import {
+  DndContext,
+  type DragEndEvent,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  horizontalListSortingStrategy,
+  useSortable,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { ChevronRight, ChevronDown, GripVertical, Search, Trash2 } from 'lucide-react';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity, useCreateActivity, useDeleteActivity } from '@/hooks/useTeamActivities';
+import { usePreferenceMap, useUpsertPreference, usePreferences } from '@/hooks/usePreferences';
+import { useFilter } from '@/contexts/FilterContext';
 import { useFind } from '@/contexts/FindContext';
-import { cn } from '@/lib/utils';
+import { applyActiveFilter } from '@/lib/presetFilters';
+import { matchEvents } from '@/lib/findMatcher';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import { Badge } from '@/components/identity/Badge';
+import { IdentityPicker } from '@/components/identity/IdentityPicker';
 import type { Identity } from '@/components/identity/identity-constants';
-import { DEFAULT_TIMELINE_IDENTITY } from '@/components/identity/identity-constants';
+import TagInput from '@/components/TagInput';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+import type { ListGroupBy, ListSortBy, ListColorBy, ColumnConfig } from './ListToolbar';
 
-export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
 
-interface Props {
-  view: ViewMode;
-  teamId?: string;
-  timelineName?: string;
-  timelineIdentity?: Identity;
-  onViewChange: (view: ViewMode) => void;
-  onOpenFilterManager: () => void;
-  rightSlot?: React.ReactNode;
+// ── Column catalog ─────────────────────────────────────────────────────────────
+
+interface ColMeta {
+  id: string;
+  label: string;
+  defaultVisible: boolean;
+  defaultWidth: number;
+  editable: boolean;
+  editType: 'text' | 'date' | 'status' | 'number' | 'identity' | 'assignees' | 'tags' | 'parent' | 'none';
+  /** Exclude from the columns toggle menu (e.g. fixed structural columns). */
+  noMenu?: boolean;
 }
 
-const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
-  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
-  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
-  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
-  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
+const COL_CATALOG: ColMeta[] = [
+  { id: 'colorBar',    label: '',             defaultVisible: true,  defaultWidth: 18,  editable: false, editType: 'none', noMenu: true },
+  { id: 'identity',    label: '',             defaultVisible: true,  defaultWidth: 52,  editable: true,  editType: 'identity' },
+  { id: 'title',       label: 'Title',        defaultVisible: true,  defaultWidth: 280, editable: true,  editType: 'text' },
+  { id: 'startAt',     label: 'Start',        defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
+  { id: 'endAt',       label: 'End',          defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
+  { id: 'duration',    label: 'Duration',     defaultVisible: false, defaultWidth: 90,  editable: false, editType: 'none' },
+  { id: 'status',      label: 'Status',       defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'status' },
+  { id: 'assignees',   label: 'Assigned To',  defaultVisible: true,  defaultWidth: 140, editable: true,  editType: 'assignees' },
+  { id: 'tags',        label: 'Tags',         defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'tags' },
+  { id: 'progress',    label: 'Progress',     defaultVisible: false, defaultWidth: 90,  editable: true,  editType: 'number' },
+  { id: 'parent',      label: 'Parent',       defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'parent' },
+  { id: 'description', label: 'Description',  defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
+  { id: 'location',    label: 'Location',     defaultVisible: false, defaultWidth: 130, editable: true,  editType: 'text' },
+  { id: 'url',         label: 'URL',          defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'text' },
+  { id: 'notes',       label: 'Notes',        defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
+  { id: 'createdAt',   label: 'Created',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
+  { id: 'updatedAt',   label: 'Updated',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
 ];
 
-export default function TopBar({
-  view,
-  teamId,
-  timelineName,
-  timelineIdentity,
-  onViewChange,
-  onOpenFilterManager,
-  rightSlot,
-}: Props) {
-  const { findBarOpen, setFindBarOpen } = useFind();
+const DEFAULT_COLUMN_ORDER = COL_CATALOG.map(c => c.id);
+const DEFAULT_VISIBILITY: VisibilityState = Object.fromEntries(
+  COL_CATALOG.map(c => [c.id, c.defaultVisible]),
+);
+const DEFAULT_WIDTHS: ColumnSizingState = Object.fromEntries(
+  COL_CATALOG.map(c => [c.id, c.defaultWidth]),
+);
+
+// ── Props ──────────────────────────────────────────────────────────────────────
+
+interface Props {
+  teamId: string;
+  timelineId: string;
+  groupBy: ListGroupBy;
+  sortBy: ListSortBy;
+  colorBy: ListColorBy;
+  density?: string; // kept for compat; ignored — always comfortable
+  timelineStatuses?: Status[];
+  savedFilters?: SavedFilter[];
+  tags?: Tag[];
+  onColumnsChange?: (configs: ColumnConfig[]) => void;
+  /** When set, the component applies the toggle and clears it on the next render. */
+  pendingColumnToggle?: { colId: string; visible: boolean; seq: number } | null;
+  onSelectActivity?: (id: string | null) => void;
+  onSelectApiActivity?: (a: ApiActivity | null) => void;
+  selectedActivityId?: string | null;
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Increment to trigger inline creation of a new activity row. */
+  triggerNewRow?: number;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+function formatDate(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
+  if (!startAt || !endAt) return '—';
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+  if (days < 0) return '—';
+  if (days === 0) return '1 day';
+  return `${days + 1} days`;
+}
+
+function toDateInput(iso: string | null | undefined): string {
+  if (!iso) return '';
+  return iso.slice(0, 10);
+}
+
+// ── Draggable column header ────────────────────────────────────────────────────
+
+function SortableColHeader({ colId, children, style, onSort, sortDir, resizeHandler, isResizing }: {
+  colId: string;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+  onSort?: () => void;
+  sortDir?: 'asc' | 'desc' | false;
+  resizeHandler?: (e: React.MouseEvent | React.TouchEvent) => void;
+  isResizing?: boolean;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: colId });
 
   return (
-    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
-      {/* Left zone: view switcher */}
-      <div className="flex items-center justify-start shrink-0">
-        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
-          {VIEWS.map(v => (
-            <button
-              key={v.id}
-              onClick={() => onViewChange(v.id)}
-              className={cn(
-                'flex items-center justify-center gap-[5px]',
-                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
-                'border-none cursor-pointer',
-                view === v.id
-                  ? 'bg-card text-foreground shadow-sm'
-                  : 'bg-transparent text-muted-foreground',
-              )}
-            >
-              {v.icon}
-              {v.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Center zone: timeline identity badge + name */}
-      <div className="flex-1 min-w-0 flex items-center justify-center gap-1.5 px-3">
-        <Badge
-          identity={timelineIdentity ?? DEFAULT_TIMELINE_IDENTITY}
-          name={timelineName ?? ''}
-          shape="square"
-          size={18}
-          className="shrink-0"
-        />
+    <th
+      ref={setNodeRef}
+      style={{
+        ...style,
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.5 : 1,
+        position: 'sticky',
+        top: 0,
+        background: 'var(--card)',
+        borderBottom: '2px solid var(--border)',
+        userSelect: 'none',
+        whiteSpace: 'nowrap',
+        textOverflow: 'ellipsis',
+        cursor: onSort ? 'pointer' : 'default',
+        fontWeight: 600,
+        fontSize: 11,
+        color: 'var(--muted-foreground)',
+        padding: 0,
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
+        textAlign: 'left',
+        overflow: 'visible', // needed for resize handle
+      }}
+      onClick={onSort}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 8px', overflow: 'hidden' }}>
+        {/* drag handle */}
         <span
-          title={timelineName}
-          className="text-xs font-medium text-muted-foreground truncate select-none"
+          {...attributes}
+          {...listeners}
+          style={{ cursor: 'grab', color: 'var(--muted-foreground)', opacity: 0.4, flexShrink: 0, paddingRight: 2 }}
+          onClick={e => e.stopPropagation()}
+          title="Drag to reorder"
         >
-          {timelineName}
+          <GripVertical size={12} />
         </span>
+        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{children}</span>
+        {sortDir === 'asc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▲</span>}
+        {sortDir === 'desc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▼</span>}
       </div>
+      {/* Resize handle — absolutely positioned on right edge */}
+      {resizeHandler && (
+        <div
+          onMouseDown={resizeHandler}
+          onTouchStart={resizeHandler}
+          onClick={e => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            height: '100%',
+            width: 4,
+            cursor: 'col-resize',
+            background: isResizing ? 'var(--primary)' : 'transparent',
+            zIndex: 1,
+          }}
+          onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'var(--border)'; }}
+          onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+        />
+      )}
+    </th>
+  );
+}
 
-      {/* Right zone: Find bar / trigger, Filter, profile slot */}
-      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
-        {findBarOpen ? (
-          <FindBar />
-        ) : (
-          <button
-            onClick={() => setFindBarOpen(true)}
-            title="Find in view (Ctrl+F)"
-            className={cn(
-              'flex items-center justify-center w-7 h-7',
-              'border border-border rounded-md bg-card',
-              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
-              'transition-colors shrink-0',
-            )}
-          >
-            <Search size={13} strokeWidth={1.8} />
-          </button>
-        )}
-        <FilterDropdown teamId={teamId} onOpenManager={onOpenFilterManager} />
-        {rightSlot}
+// ── Status pill popover ────────────────────────────────────────────────────────
+
+function StatusPicker({
+  value,
+  statuses,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  value: string | null | undefined;
+  statuses: Status[];
+  onChange: (id: string | null) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 160,
+        padding: '6px 0',
+      }}
+    >
+      <div
+        onClick={() => { onChange(null); onClose(); }}
+        style={{
+          padding: '6px 12px',
+          cursor: 'pointer',
+          fontSize: 12,
+          color: 'var(--muted-foreground)',
+        }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+      >
+        No status
       </div>
+      {statuses.map(s => (
+        <div
+          key={s.id}
+          onClick={() => { onChange(s.id); onClose(); }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 12px',
+            cursor: 'pointer',
+            fontSize: 12,
+            color: 'var(--foreground)',
+            background: value === s.id ? 'var(--muted)' : 'transparent',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = value === s.id ? 'var(--muted)' : 'transparent')}
+        >
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: '50%',
+              background: resolveColorHex(s.color ?? null) ?? '#888',
+              flexShrink: 0,
+            }}
+          />
+          {s.name}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Assignee picker popover ────────────────────────────────────────────────────
+
+function AssigneePicker({
+  members,
+  selectedIds,
+  onToggle,
+  onClose,
+  positionStyle,
+}: {
+  members: Member[];
+  selectedIds: string[];
+  onToggle: (id: string) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 180,
+        padding: '6px 0',
+      }}
+    >
+      {members.length === 0 && (
+        <div style={{ padding: '6px 12px', fontSize: 12, color: 'var(--muted-foreground)' }}>
+          No team members
+        </div>
+      )}
+      {members.map(m => {
+        const assigned = selectedIds.includes(m.id);
+        return (
+          <div
+            key={m.id}
+            onClick={() => onToggle(m.id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '5px 12px', cursor: 'pointer', fontSize: 12,
+              background: assigned ? 'var(--muted)' : 'transparent',
+              color: 'var(--foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = assigned ? 'var(--muted)' : 'transparent')}
+          >
+            <Badge
+              identity={{ color: m.color, icon: '__name_2__' }}
+              name={m.name}
+              shape="circle"
+              size={20}
+            />
+            <span style={{ flex: 1 }}>{m.name}</span>
+            {assigned && (
+              <span style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: m.color, flexShrink: 0, display: 'inline-block',
+              }} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Tag picker popover ─────────────────────────────────────────────────────────
+
+function TagPicker({
+  teamId,
+  tags,
+  selectedTagIds,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  teamId: string;
+  tags: Tag[];
+  selectedTagIds: string[];
+  onChange: (ids: string[]) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 220,
+        padding: 8,
+      }}
+    >
+      <TagInput teamId={teamId} tags={tags} selectedTagIds={selectedTagIds} onChange={onChange} />
+    </div>
+  );
+}
+
+// ── Parent activity picker popover ─────────────────────────────────────────────
+
+function ParentPicker({
+  activities,
+  value,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  activities: ApiActivity[];
+  value: string | null | undefined;
+  onChange: (id: string | null) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const [query, setQuery] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  const filtered = activities.filter(a =>
+    a.title.toLowerCase().includes(query.trim().toLowerCase()),
+  );
+
+  function choose(id: string | null) {
+    onChange(id);
+    onClose();
+  }
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 220,
+        overflow: 'hidden',
+      }}
+    >
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '6px 8px', borderBottom: '1px solid var(--border)',
+      }}>
+        <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="Search activities…"
+          style={{
+            flex: 1, border: 'none', outline: 'none', background: 'none',
+            fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
+          }}
+        />
+      </div>
+      <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+        <div
+          onClick={() => choose(null)}
+          style={{
+            padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
+            fontStyle: 'italic', cursor: 'pointer',
+            borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        >
+          — None —
+        </div>
+        {filtered.map(a => (
+          <div
+            key={a.id}
+            onClick={() => choose(a.id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '6px 10px', fontSize: 12, cursor: 'pointer',
+              background: a.id === value ? 'var(--muted)' : 'transparent',
+              fontWeight: a.id === value ? 600 : 400,
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
+          >
+            <Badge
+              identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }}
+              name={a.title}
+              size={16}
+            />
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {a.title}
+            </span>
+          </div>
+        ))}
+        {filtered.length === 0 && (
+          <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+            No matching activities
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/** Position a popover below a cell, flipping above if there isn't enough space below. */
+function popoverPos(rect: DOMRect, w: number, h: number): { top: number; left: number } {
+  const spaceBelow = window.innerHeight - rect.bottom - 2;
+  const top = spaceBelow >= h
+    ? rect.bottom + 2
+    : Math.max(4, rect.top - h - 2);
+  return {
+    top,
+    left: Math.min(rect.left, window.innerWidth - w - 8),
+  };
+}
+
+// ── Sort helpers ───────────────────────────────────────────────────────────────
+
+function sortByToColId(s: ListSortBy): string {
+  switch (s) {
+    case 'startDate': return 'startAt';
+    case 'endDate':   return 'endAt';
+    case 'title':     return 'title';
+    case 'status':    return 'status';
+    case 'progress':  return 'progress';
+  }
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
+
+export default function ListView({
+  teamId,
+  timelineId,
+  groupBy,
+  sortBy,
+  colorBy,
+  timelineStatuses = [],
+  savedFilters = [],
+  tags = [],
+  onColumnsChange,
+  pendingColumnToggle,
+  onSelectActivity,
+  selectedActivityId,
+  onMembersLoaded,
+  triggerNewRow,
+}: Props) {
+  const { activeFilter } = useFilter();
+  const { debouncedQuery, registerMatches, matchedIds, activeMatchId } = useFind();
+
+  // ── Data fetching ──────────────────────────────────────────────────────────
+  const { data: rawActivities = [] } = useTimelineActivities(teamId, timelineId);
+  const { data: rawMembers = [] } = useTeamMembers(teamId);
+  const update = useUpdateActivity(timelineId);
+  const create = useCreateActivity(teamId, timelineId);
+  const deleteAct = useDeleteActivity(timelineId);
+
+  useEffect(() => {
+    if (rawMembers.length > 0 && onMembersLoaded) {
+      onMembersLoaded(rawMembers.map(m => ({
+        id: m.id,
+        name: m.displayName,
+        initials: m.displayName.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase(),
+        color: resolveColorHex(m.color ?? null) ?? '#888',
+      })));
+    }
+  }, [rawMembers, onMembersLoaded]);
+
+  function initialsFrom(name: string): string {
+    return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
+  }
+
+  const members: Member[] = useMemo(
+    () => rawMembers.map(m => ({
+      id: m.id,
+      name: m.displayName,
+      initials: initialsFrom(m.displayName),
+      color: resolveColorHex(m.color ?? null) ?? '#888',
+    })),
+    [rawMembers],
+  );
+
+  // ── Preference persistence ────────────────────────────────────────────────
+  const { isSuccess: prefsSettled } = usePreferences(timelineId);
+  const prefMap = usePreferenceMap(timelineId);
+  const upsert = useUpsertPreference();
+  const prefsApplied = useRef(false);
+
+  // Column state (managed by TanStack Table)
+  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(DEFAULT_VISIBILITY);
+  const [columnOrder, setColumnOrder] = useState<ColumnOrderState>(DEFAULT_COLUMN_ORDER);
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(DEFAULT_WIDTHS);
+  const [sorting, setSorting] = useState<SortingState>(() => [{ id: sortByToColId(sortBy), desc: false }]);
+
+  // Sync sort column when the toolbar's Sort By control changes
+  useEffect(() => {
+    setSorting([{ id: sortByToColId(sortBy), desc: false }]);
+  }, [sortBy]);
+
+  // Apply saved column prefs once after they load
+  useEffect(() => {
+    if (!prefsSettled || prefsApplied.current) return;
+    prefsApplied.current = true;
+    const raw = prefMap['list_columns'];
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const config = raw as { order?: string[]; hidden?: string[]; widths?: Record<string, number> };
+      if (Array.isArray(config.order) && config.order.length > 0) {
+        const saved = config.order as string[];
+        const allIds = COL_CATALOG.map(c => c.id);
+        const newCols = allIds.filter(id => !saved.includes(id));
+        setColumnOrder([...saved, ...newCols]);
+      }
+      if (Array.isArray(config.hidden)) {
+        const vis: VisibilityState = { ...DEFAULT_VISIBILITY };
+        for (const id of config.hidden as string[]) {
+          if (id in vis) vis[id] = false;
+        }
+        setColumnVisibility(vis);
+      }
+      if (config.widths && typeof config.widths === 'object') {
+        setColumnSizing(prev => ({ ...prev, ...config.widths }));
+      }
+    }
+  }, [prefsSettled, prefMap]);
+
+  // Persist column config on change (debounced via a ref guard)
+  const saveCols = useCallback(
+    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
+      if (!timelineId) return;
+      const hidden = Object.entries(vis).filter(([, v]) => !v).map(([k]) => k);
+      const config = { order, hidden, widths: sizing };
+      upsert.mutate({ key: 'list_columns', value: JSON.stringify(config), timelineId });
+    },
+    [timelineId, upsert.mutate], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncedSaveCols = useCallback(
+    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => saveCols(vis, order, sizing), 400);
+    },
+    [saveCols],
+  );
+
+  const handleVisibilityChange = useCallback(
+    (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
+      setColumnVisibility(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
+        return next;
+      });
+    },
+    [columnOrder, columnSizing, debouncedSaveCols],
+  );
+
+  const handleOrderChange = useCallback(
+    (updater: ColumnOrderState | ((prev: ColumnOrderState) => ColumnOrderState)) => {
+      setColumnOrder(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
+        return next;
+      });
+    },
+    [columnVisibility, columnSizing, debouncedSaveCols],
+  );
+
+  const handleSizingChange = useCallback(
+    (updater: ColumnSizingState | ((prev: ColumnSizingState) => ColumnSizingState)) => {
+      setColumnSizing(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(columnVisibility, columnOrder, next);
+        return next;
+      });
+    },
+    [columnVisibility, columnOrder, debouncedSaveCols],
+  );
+
+  // ── TanStack Table ─────────────────────────────────────────────────────────
+
+  const columnDefs = useMemo<ColumnDef<ApiActivity>[]>(
+    () =>
+      COL_CATALOG.map(meta => ({
+        id: meta.id,
+        header: meta.label,
+        size: DEFAULT_WIDTHS[meta.id] ?? 120,
+        // colorBar is a fixed-width structural column — lock it so TanStack's
+        // min-size enforcement never stretches it beyond its visual purpose.
+        minSize: meta.id === 'colorBar' ? 18 : 40,
+        maxSize: meta.id === 'colorBar' ? 18 : 800,
+        enableResizing: meta.id !== 'colorBar',
+        enableSorting: meta.editType !== 'none' || meta.id === 'duration',
+      })),
+    [],
+  );
+
+  const table = useReactTable({
+    data: rawActivities,
+    columns: columnDefs,
+    state: {
+      columnVisibility,
+      columnOrder,
+      columnSizing,
+      columnPinning: { left: ['colorBar', 'identity', 'title'] } as ColumnPinningState,
+      sorting,
+    },
+    onSortingChange: setSorting,
+    onColumnVisibilityChange: handleVisibilityChange,
+    onColumnOrderChange: handleOrderChange,
+    onColumnSizingChange: handleSizingChange,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    columnResizeMode: 'onChange',
+  });
+
+  // Apply external column toggle from the toolbar (via DashboardPage)
+  const lastAppliedSeq = useRef<number | null>(null);
+  useEffect(() => {
+    if (!pendingColumnToggle) return;
+    if (pendingColumnToggle.seq === lastAppliedSeq.current) return;
+    lastAppliedSeq.current = pendingColumnToggle.seq;
+    setColumnVisibility(prev => {
+      const next = { ...prev, [pendingColumnToggle.colId]: pendingColumnToggle.visible };
+      if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
+      return next;
+    });
+  }, [pendingColumnToggle, columnOrder, columnSizing, debouncedSaveCols]);
+
+  // Expose ALL column configs (visible + hidden) to toolbar via callback.
+  // Uses a ref-based equality check to avoid calling onColumnsChange (which
+  // typically calls setListColumns in DashboardPage) with a new array reference
+  // every render — that would create an infinite setState→re-render loop.
+  const lastColConfigsRef = useRef<ColumnConfig[] | null>(null);
+  useEffect(() => {
+    if (!onColumnsChange) return;
+    const configs: ColumnConfig[] = table.getAllLeafColumns()
+      .filter(col => !COL_CATALOG.find(c => c.id === col.id)?.noMenu)
+      .map(col => ({
+        id: col.id,
+        label: COL_CATALOG.find(c => c.id === col.id)?.label ?? col.id,
+        visible: col.getIsVisible(),
+      }));
+    const prev = lastColConfigsRef.current;
+    const changed = !prev || prev.length !== configs.length ||
+      prev.some((c, i) => c.id !== configs[i].id || c.visible !== configs[i].visible || c.label !== configs[i].label);
+    if (changed) {
+      lastColConfigsRef.current = configs;
+      onColumnsChange(configs);
+    }
+  }); // runs every render so order/visibility changes propagate immediately
+
+  // ── Filter + sort ──────────────────────────────────────────────────────────
+
+  const memberIdsByUserId = useMemo<Map<string, string[]>>(() => {
+    const map = new Map<string, string[]>();
+    for (const m of rawMembers) {
+      if (!m.userId) continue;
+      const list = map.get(m.userId) ?? [];
+      list.push(m.id);
+      map.set(m.userId, list);
+    }
+    return map;
+  }, [rawMembers]);
+
+  const closedStatusIds = useMemo(
+    () => new Set(timelineStatuses.filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  const filteredActivities = useMemo(
+    () =>
+      applyActiveFilter(rawActivities, activeFilter, memberIdsByUserId, {
+        closedStatusIds,
+        savedFilters,
+        statuses: statusesByTimeline,
+        tags,
+      }),
+    [rawActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
+  );
+
+  // Apply TanStack sorting
+  const sortedActivities = useMemo(() => {
+    const acts = [...filteredActivities];
+    const col = sorting[0];
+    if (!col) {
+      return acts.sort((a, b) => {
+        if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '');
+        if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '');
+        if (sortBy === 'title') return a.title.localeCompare(b.title);
+        if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '');
+        if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0);
+        return 0;
+      });
+    }
+    return acts.sort((a, b) => {
+      let av: string | number = '';
+      let bv: string | number = '';
+      switch (col.id) {
+        case 'title': av = a.title; bv = b.title; break;
+        case 'startAt': av = a.startAt ?? ''; bv = b.startAt ?? ''; break;
+        case 'endAt': av = a.endAt ?? ''; bv = b.endAt ?? ''; break;
+        case 'status': av = a.statusId ?? ''; bv = b.statusId ?? ''; break;
+        case 'progress': av = a.percentComplete ?? 0; bv = b.percentComplete ?? 0; break;
+        default: av = a.title; bv = b.title;
+      }
+      const cmp = typeof av === 'number' ? av - (bv as number) : (av as string).localeCompare(bv as string);
+      return col.desc ? -cmp : cmp;
+    });
+  }, [filteredActivities, sorting, sortBy]);
+
+  // ── Group-by ───────────────────────────────────────────────────────────────
+
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const toggleGroup = useCallback((key: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const memberById = useMemo<Map<string, TeamMemberWithUser>>(
+    () => new Map(rawMembers.map(m => [m.id, m])),
+    [rawMembers],
+  );
+  const statusById = useMemo<Map<string, Status>>(
+    () => new Map(timelineStatuses.map(s => [s.id, s])),
+    [timelineStatuses],
+  );
+  const activityById = useMemo<Map<string, ApiActivity>>(
+    () => new Map(rawActivities.map(a => [a.id, a])),
+    [rawActivities],
+  );
+
+  type DisplayRow =
+    | { kind: 'group'; key: string; label: string; count: number }
+    | { kind: 'activity'; activity: ApiActivity; depth: number; hasChildren: boolean; groupKey: string };
+
+  const displayRows = useMemo<DisplayRow[]>(() => {
+    const emptyRow = (a: ApiActivity): DisplayRow => ({
+      kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '',
+    });
+
+    if (groupBy === 'none') {
+      return sortedActivities.map(emptyRow);
+    }
+
+    if (groupBy === 'member') {
+      const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
+      for (const activity of sortedActivities) {
+        const ids = activity.assignedMemberIds ?? [];
+        const key = ids.length === 0 ? '__unassigned__' : ids[0];
+        const label = ids.length === 0 ? 'Unassigned' : (memberById.get(ids[0])?.displayName ?? 'Unknown');
+        const group = groups.get(key) ?? { label, activities: [] };
+        group.activities.push(activity);
+        groups.set(key, group);
+      }
+      const rows: DisplayRow[] = [];
+      for (const [key, { label, activities }] of groups) {
+        rows.push({ kind: 'group', key, label, count: activities.length });
+        if (!collapsedGroups.has(key)) {
+          for (const a of activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: key });
+        }
+      }
+      return rows;
+    }
+
+    if (groupBy === 'status') {
+      const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
+      for (const activity of sortedActivities) {
+        const key = activity.statusId ?? '__no_status__';
+        const label = activity.statusId ? (statusById.get(activity.statusId)?.name ?? 'Unknown') : 'No status';
+        const group = groups.get(key) ?? { label, activities: [] };
+        group.activities.push(activity);
+        groups.set(key, group);
+      }
+      // Emit statuses in order, then no-status
+      const rows: DisplayRow[] = [];
+      for (const s of timelineStatuses) {
+        const group = groups.get(s.id);
+        if (!group?.activities.length) continue;
+        rows.push({ kind: 'group', key: s.id, label: s.name, count: group.activities.length });
+        if (!collapsedGroups.has(s.id)) {
+          for (const a of group.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: s.id });
+        }
+      }
+      const noStatus = groups.get('__no_status__');
+      if (noStatus?.activities.length) {
+        rows.push({ kind: 'group', key: '__no_status__', label: 'No status', count: noStatus.activities.length });
+        if (!collapsedGroups.has('__no_status__')) {
+          for (const a of noStatus.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '__no_status__' });
+        }
+      }
+      return rows;
+    }
+
+    if (groupBy === 'parent') {
+      // Build tree like Gantt: parent activity rows are collapsible, children are indented
+      const byId = new Map(sortedActivities.map(a => [a.id, a]));
+      const childrenByParent = new Map<string, ApiActivity[]>();
+      const roots: ApiActivity[] = [];
+
+      for (const a of sortedActivities) {
+        if (a.parentActivityId && byId.has(a.parentActivityId)) {
+          const list = childrenByParent.get(a.parentActivityId) ?? [];
+          list.push(a);
+          childrenByParent.set(a.parentActivityId, list);
+        } else {
+          roots.push(a);
+        }
+      }
+
+      const rows: DisplayRow[] = [];
+      const seen = new Set<string>();
+      const hidden = new Set<string>();
+
+      const markHidden = (a: ApiActivity) => {
+        if (hidden.has(a.id)) return;
+        hidden.add(a.id);
+        for (const k of childrenByParent.get(a.id) ?? []) markHidden(k);
+      };
+
+      const visit = (a: ApiActivity, depth: number) => {
+        if (seen.has(a.id)) return;
+        seen.add(a.id);
+        const kids = childrenByParent.get(a.id) ?? [];
+        const hasChildren = kids.length > 0;
+        const isCollapsed = collapsedGroups.has(a.id);
+        rows.push({ kind: 'activity', activity: a, depth, hasChildren, groupKey: a.id });
+        if (!hasChildren) return;
+        if (isCollapsed) for (const k of kids) markHidden(k);
+        else for (const k of kids) visit(k, depth + 1);
+      };
+
+      for (const r of roots) visit(r, 0);
+      for (const a of sortedActivities) {
+        if (!seen.has(a.id) && !hidden.has(a.id)) visit(a, 0);
+      }
+      return rows;
+    }
+
+    return sortedActivities.map(emptyRow);
+  }, [sortedActivities, groupBy, memberById, statusById, activityById, timelineStatuses, collapsedGroups]);
+
+  // Flat list of activity rows (for keyboard navigation indices)
+  const activityRows = useMemo(
+    () => displayRows.filter((r): r is Extract<DisplayRow, { kind: 'activity' }> => r.kind === 'activity'),
+    [displayRows],
+  );
+
+  // ── Find integration ───────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!debouncedQuery) {
+      registerMatches([], new Map());
+      return;
+    }
+    const results = matchEvents(debouncedQuery, filteredActivities, members, rawActivities);
+    const ids = results.map(r => r.activityId);
+    const reasons = new Map(results.map(r => [r.activityId, r.reasons]));
+    registerMatches(ids, reasons);
+  }, [debouncedQuery, filteredActivities, members, rawActivities, registerMatches]);
+
+  // Auto-scroll to active match
+  const activeRowRef = useRef<HTMLTableRowElement | null>(null);
+  useEffect(() => {
+    if (activeMatchId && activeRowRef.current) {
+      activeRowRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [activeMatchId]);
+
+  // ── Selection & editing state ──────────────────────────────────────────────
+
+  const [selectedRowIdx, setSelectedRowIdx] = useState<number | null>(null);
+  const [selectedColIdx, setSelectedColIdx] = useState<number>(0);
+  const [editingCell, setEditingCell] = useState<{
+    rowIdx: number;
+    colIdx: number;
+    value: string;
+  } | null>(null);
+  const editInputRef = useRef<HTMLInputElement | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // When a new activity is selected externally, sync row idx
+  useEffect(() => {
+    if (!selectedActivityId) { setSelectedRowIdx(null); return; }
+    const idx = activityRows.findIndex(r => r.activity.id === selectedActivityId);
+    if (idx >= 0) setSelectedRowIdx(idx);
+  }, [selectedActivityId, activityRows]);
+
+  // useLayoutEffect fires synchronously after DOM commit so the focus is set
+  // before any paint — no window in which another element can steal focus.
+  useLayoutEffect(() => {
+    if (!editingCell || !editInputRef.current) return;
+    const inp = editInputRef.current;
+    inp.focus();
+    inp.scrollIntoView({ block: 'nearest' });
+    const colId = visibleColIds[editingCell.colIdx];
+    const meta = COL_CATALOG.find(c => c.id === colId);
+    if (meta?.editType === 'date') {
+      // showPicker() opens the calendar immediately. Deferred so the browser
+      // has processed the focus event first. Only one date input is ever in
+      // the DOM at a time (single-cell editing), so no range-picker pairing.
+      setTimeout(() => {
+        try { (inp as HTMLInputElement & { showPicker?(): void }).showPicker?.(); } catch { /* not all browsers */ }
+      }, 0);
+    } else {
+      inp.select();
+    }
+  }, [editingCell]); // visibleColIds intentionally excluded — always current in this render cycle
+
+  // Visible column ids, in the SAME order the cells are rendered.
+  //
+  // Cells render from `table.getHeaderGroups()`, which moves pinned-left
+  // columns (colorBar, identity, title) to the front. `getVisibleLeafColumns()`
+  // does NOT apply pinning — it follows raw `columnOrder`. When a persisted
+  // `columnOrder` doesn't place the pinned columns first (e.g. a saved order
+  // from before `colorBar`/`identity` existed appends them at the end), the two
+  // orderings diverge and every colIdx→colId lookup (enterEdit, commitEdit,
+  // showPicker, keyboard nav) targets the wrong column. Deriving from the
+  // header groups keeps colIdx aligned with what the user actually clicked.
+  const visibleColIds = useMemo(
+    () => (table.getHeaderGroups()[0]?.headers ?? []).map(h => h.id),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [columnOrder, columnVisibility],
+  );
+
+  const commitEdit = useCallback(
+    (rowIdx: number, colId: string, value: string) => {
+      const row = activityRows[rowIdx];
+      if (!row) return;
+      const a = row.activity;
+
+      const patch: Partial<ApiActivity> & { notes?: string | null } = {};
+      if (colId === 'title' && value.trim() !== '') patch.title = value.trim();
+      else if (colId === 'startAt') patch.startAt = value ? `${value}T00:00:00Z` : undefined;
+      else if (colId === 'endAt') patch.endAt = value ? `${value}T00:00:00Z` : undefined;
+      else if (colId === 'description') patch.description = value || undefined;
+      else if (colId === 'location') patch.location = value || undefined;
+      else if (colId === 'url') patch.url = value || undefined;
+      else if (colId === 'notes') patch.notes = value || undefined;
+      else if (colId === 'progress') {
+        const n = parseInt(value, 10);
+        if (!isNaN(n) && n >= 0 && n <= 100) patch.percentComplete = n;
+      }
+
+      if (Object.keys(patch).length > 0) {
+        update.mutate({ activityId: a.id, patch });
+      }
+    },
+    [activityRows, update],
+  );
+
+  const enterEdit = useCallback((rowIdx: number, colIdx: number) => {
+    const row = activityRows[rowIdx];
+    if (!row) return;
+    const colId = visibleColIds[colIdx];
+    const meta = COL_CATALOG.find(c => c.id === colId);
+    if (!meta?.editable || meta.editType === 'status') return;
+    const a = row.activity;
+    let val = '';
+    if (colId === 'title') val = a.title;
+    else if (colId === 'startAt') val = toDateInput(a.startAt);
+    else if (colId === 'endAt') val = toDateInput(a.endAt);
+    else if (colId === 'description') val = a.description ?? '';
+    else if (colId === 'location') val = a.location ?? '';
+    else if (colId === 'url') val = a.url ?? '';
+    else if (colId === 'notes') val = (a as ApiActivity & { notes?: string | null }).notes ?? '';
+    else if (colId === 'progress') val = String(a.percentComplete ?? 0);
+    setEditingCell({ rowIdx, colIdx, value: val });
+  }, [activityRows, visibleColIds]);
+
+  const cancelEdit = useCallback(() => setEditingCell(null), []);
+
+  const commitAndMove = useCallback(
+    (dir: 'down' | 'right' | 'left') => {
+      if (!editingCell) return;
+      commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
+      setEditingCell(null);
+
+      if (dir === 'down') {
+        const nextRow = Math.min(editingCell.rowIdx + 1, activityRows.length - 1);
+        setSelectedRowIdx(nextRow);
+      } else if (dir === 'right') {
+        let nextColIdx = editingCell.colIdx + 1;
+        let nextRowIdx = editingCell.rowIdx;
+        if (nextColIdx >= visibleColIds.length) {
+          if (editingCell.rowIdx < activityRows.length - 1) {
+            nextColIdx = 0;
+            nextRowIdx = editingCell.rowIdx + 1;
+          } else {
+            nextColIdx = visibleColIds.length - 1; // clamp at last cell of last row
+          }
+        }
+        setSelectedColIdx(nextColIdx);
+        setSelectedRowIdx(nextRowIdx);
+        const colId = visibleColIds[nextColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
+          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
+          meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isText) enterEdit(nextRowIdx, nextColIdx);
+      } else if (dir === 'left') {
+        let prevColIdx = editingCell.colIdx - 1;
+        let prevRowIdx = editingCell.rowIdx;
+        if (prevColIdx < 0) {
+          if (editingCell.rowIdx > 0) {
+            prevColIdx = visibleColIds.length - 1;
+            prevRowIdx = editingCell.rowIdx - 1;
+          } else {
+            prevColIdx = 0; // clamp at first cell of first row
+          }
+        }
+        setSelectedColIdx(prevColIdx);
+        setSelectedRowIdx(prevRowIdx);
+        const colId = visibleColIds[prevColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
+          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
+          meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isText) enterEdit(prevRowIdx, prevColIdx);
+      }
+    },
+    [editingCell, commitEdit, visibleColIds, activityRows.length, enterEdit],
+  );
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLDivElement>) => {
+      if (editingCell) {
+        // Edit mode key handling is in the input's own onKeyDown
+        return;
+      }
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        if (activityRows.length === 0) return;
+        if (selectedRowIdx === null) {
+          setSelectedRowIdx(0);
+          setSelectedColIdx(0);
+          return;
+        }
+        if (e.shiftKey) {
+          let prevCol = selectedColIdx - 1;
+          let prevRow = selectedRowIdx;
+          if (prevCol < 0) {
+            if (selectedRowIdx > 0) {
+              prevCol = visibleColIds.length - 1;
+              prevRow = selectedRowIdx - 1;
+            } else {
+              prevCol = 0; // clamp at first cell of first row
+            }
+          }
+          setSelectedColIdx(prevCol);
+          setSelectedRowIdx(prevRow);
+        } else {
+          let nextCol = selectedColIdx + 1;
+          let nextRow = selectedRowIdx;
+          if (nextCol >= visibleColIds.length) {
+            if (selectedRowIdx < activityRows.length - 1) {
+              nextCol = 0;
+              nextRow = selectedRowIdx + 1;
+            } else {
+              nextCol = visibleColIds.length - 1; // clamp at last cell of last row
+            }
+          }
+          setSelectedColIdx(nextCol);
+          setSelectedRowIdx(nextRow);
+        }
+        return;
+      }
+
+      if (selectedRowIdx === null) {
+        if (e.key === 'ArrowDown') { setSelectedRowIdx(0); e.preventDefault(); }
+        return;
+      }
+
+      if (e.key === 'ArrowDown') {
+        setSelectedRowIdx(r => Math.min((r ?? 0) + 1, activityRows.length - 1));
+        e.preventDefault();
+      } else if (e.key === 'ArrowUp') {
+        setSelectedRowIdx(r => Math.max((r ?? 0) - 1, 0));
+        e.preventDefault();
+      } else if (e.key === 'ArrowRight') {
+        setSelectedColIdx(c => Math.min(c + 1, visibleColIds.length - 1));
+        e.preventDefault();
+      } else if (e.key === 'ArrowLeft') {
+        setSelectedColIdx(c => Math.max(c - 1, 0));
+        e.preventDefault();
+      } else if (e.key === 'Enter' || e.key === 'F2') {
+        const colId = visibleColIds[selectedColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
+          meta.editType !== 'status' && meta.editType !== 'identity' &&
+          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isTextEditable) enterEdit(selectedRowIdx, selectedColIdx);
+        e.preventDefault();
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+        const colId = visibleColIds[selectedColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
+          meta.editType !== 'status' && meta.editType !== 'identity' &&
+          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isTextEditable) setEditingCell({ rowIdx: selectedRowIdx, colIdx: selectedColIdx, value: e.key });
+      }
+    },
+    [editingCell, selectedRowIdx, selectedColIdx, activityRows, visibleColIds, enterEdit],
+  );
+
+  // When triggerNewRow increments, create a new "New Activity" row and queue title edit
+  useEffect(() => {
+    if (!triggerNewRow || triggerNewRow === prevTriggerNewRow.current) return;
+    prevTriggerNewRow.current = triggerNewRow;
+    const today = new Date().toISOString().slice(0, 10);
+    create.mutate(
+      { title: 'New Activity', startAt: `${today}T00:00:00Z`, endAt: `${today}T00:00:00Z` },
+      { onSuccess: (created) => { pendingEditActivityId.current = created.id; } },
+    );
+  }, [triggerNewRow]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // After a new activity appears in activityRows, enter title-edit mode on it
+  useEffect(() => {
+    if (!pendingEditActivityId.current) return;
+    const rowIdx = activityRows.findIndex(r => r.activity.id === pendingEditActivityId.current);
+    if (rowIdx < 0) return;
+    pendingEditActivityId.current = null;
+    setSelectedRowIdx(rowIdx);
+    const titleColIdx = visibleColIds.indexOf('title');
+    if (titleColIdx >= 0) {
+      setEditingCell({ rowIdx, colIdx: titleColIdx, value: 'New Activity' });
+    }
+  }, [activityRows, visibleColIds]);
+
+  // ── Color-by resolution ────────────────────────────────────────────────────
+
+  const getRowAccentColor = useCallback(
+    (activity: ApiActivity): string | null => {
+      if (colorBy === 'activity') return resolveColorHex(activity.color ?? null);
+      if (colorBy === 'member') {
+        const firstId = (activity.assignedMemberIds ?? [])[0];
+        if (!firstId) return null;
+        const m = memberById.get(firstId);
+        return resolveColorHex(m?.color ?? null);
+      }
+      if (colorBy === 'status') {
+        if (!activity.statusId) return null;
+        const s = statusById.get(activity.statusId);
+        return resolveColorHex(s?.color ?? null);
+      }
+      return null;
+    },
+    [colorBy, memberById, statusById],
+  );
+
+  // ── Picker state — all rendered as portals to escape table overflow ──────
+
+  const [statusPickerFor, setStatusPickerFor] = useState<string | null>(null);
+  const [statusPickerPos, setStatusPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeStatusPicker = useCallback(() => {
+    setStatusPickerFor(null);
+    setStatusPickerPos(null);
+  }, []);
+
+  const [assigneePickerFor, setAssigneePickerFor] = useState<string | null>(null);
+  const [assigneePickerPos, setAssigneePickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeAssigneePicker = useCallback(() => {
+    setAssigneePickerFor(null);
+    setAssigneePickerPos(null);
+  }, []);
+
+  const [tagPickerFor, setTagPickerFor] = useState<string | null>(null);
+  const [tagPickerPos, setTagPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeTagPicker = useCallback(() => {
+    setTagPickerFor(null);
+    setTagPickerPos(null);
+  }, []);
+
+  const [parentPickerFor, setParentPickerFor] = useState<string | null>(null);
+  const [parentPickerPos, setParentPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeParentPicker = useCallback(() => {
+    setParentPickerFor(null);
+    setParentPickerPos(null);
+  }, []);
+
+  const [identityPickerFor, setIdentityPickerFor] = useState<string | null>(null);
+  const [identityPickerPos, setIdentityPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const identityPickerRef = useRef<HTMLDivElement>(null);
+  const closeIdentityPicker = useCallback(() => {
+    setIdentityPickerFor(null);
+    setIdentityPickerPos(null);
+  }, []);
+
+  // Click-outside closes the identity picker
+  useEffect(() => {
+    if (!identityPickerFor) return;
+    function handler(e: MouseEvent) {
+      if (identityPickerRef.current && !identityPickerRef.current.contains(e.target as Node)) {
+        closeIdentityPicker();
+      }
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [identityPickerFor, closeIdentityPicker]);
+
+  // Multi-select state for row checkboxes
+  const [selectedActivityIds, setSelectedActivityIds] = useState<Set<string>>(new Set());
+  const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
+
+  // Holds the ID of a newly created activity that should enter title-edit mode
+  const pendingEditActivityId = useRef<string | null>(null);
+  // Guards against re-firing triggerNewRow on re-renders
+  const prevTriggerNewRow = useRef<number>(0);
+
+  // ── Multi-select delete ────────────────────────────────────────────────────
+
+  const handleDeleteSelected = useCallback(() => {
+    for (const id of Array.from(selectedActivityIds)) {
+      deleteAct.mutate(id);
+    }
+    setSelectedActivityIds(new Set());
+  }, [selectedActivityIds, deleteAct]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── DnD column reorder ─────────────────────────────────────────────────────
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setColumnOrder(prev => {
+      const oldIdx = prev.indexOf(String(active.id));
+      const newIdx = prev.indexOf(String(over.id));
+      if (oldIdx === -1 || newIdx === -1) return prev;
+      // Pinned columns can't be reordered past each other
+      const pinnedIds = ['colorBar', 'identity', 'title'];
+      if (pinnedIds.includes(String(active.id)) || pinnedIds.includes(String(over.id))) return prev;
+      const next = arrayMove(prev, oldIdx, newIdx);
+      if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
+      return next;
+    });
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
+  const rowH = 48; // always comfortable
+
+  const visibleHeaders = table.getHeaderGroups()[0]?.headers ?? [];
+
+  // Build a map from colId → left offset for sticky pinning
+  const pinnedLeft = useMemo(() => {
+    let left = 0;
+    const offsets: Record<string, number> = {};
+    for (const h of visibleHeaders) {
+      if (h.column.getIsPinned() === 'left') {
+        offsets[h.id] = left;
+        left += h.getSize();
+      }
+    }
+    return offsets;
+  }, [visibleHeaders]);
+
+  const tableWidth = visibleHeaders.reduce((acc, h) => acc + h.getSize(), 0);
+
+  // Status picker activity (for the portal)
+  const statusPickerActivity = statusPickerFor ? activityById.get(statusPickerFor) : null;
+
+  return (
+    <div
+      ref={containerRef}
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      style={{
+        flex: 1,
+        overflow: 'auto',
+        outline: 'none',
+        background: 'var(--background)',
+        position: 'relative',
+      }}
+      onClick={e => {
+        if ((e.target as HTMLElement) === containerRef.current) {
+          setSelectedRowIdx(null);
+          setEditingCell(null);
+          onSelectActivity?.(null);
+        }
+      }}
+    >
+      {/* Selection action bar — appears above the table when rows are checked */}
+      {selectedActivityIds.size > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '0 12px',
+            height: 36,
+            background: 'var(--card)',
+            borderBottom: '1px solid var(--border)',
+            flexShrink: 0,
+            position: 'sticky',
+            top: 0,
+            zIndex: 10,
+          }}
+        >
+          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
+            {selectedActivityIds.size} selected
+          </span>
+          <button
+            onClick={handleDeleteSelected}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
+              background: 'var(--destructive)', color: 'var(--destructive-foreground)',
+              border: 'none', borderRadius: 4, fontFamily: 'var(--font-sans)',
+            }}
+          >
+            <Trash2 size={12} />
+            Delete
+          </button>
+          <button
+            onClick={() => setSelectedActivityIds(new Set())}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
+              background: 'none', color: 'var(--foreground)',
+              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* DndContext must be outside <table> — its accessibility <div> is invalid inside <thead>. */}
+      <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+      <table
+        style={{
+          width: tableWidth,
+          minWidth: '100%',
+          borderCollapse: 'separate',
+          borderSpacing: 0,
+          tableLayout: 'fixed',
+        }}
+      >
+        {/* Column sizing */}
+        <colgroup>
+          {visibleHeaders.map(h => (
+            <col key={h.id} style={{ width: h.getSize() }} />
+          ))}
+        </colgroup>
+
+        {/* Header */}
+        <thead>
+          <SortableContext
+            items={visibleHeaders.map(h => h.id)}
+            strategy={horizontalListSortingStrategy}
+          >
+            <tr style={{ height: 36 }}>
+              {visibleHeaders.map(header => {
+                  const colId = header.id;
+                  const isPinned = header.column.getIsPinned() === 'left';
+                  const sortState = sorting[0];
+                  const sortDir = sortState?.id === colId ? (sortState.desc ? 'desc' : 'asc') : false;
+                  const meta = COL_CATALOG.find(c => c.id === colId);
+
+                  if (colId === 'colorBar') {
+                    const allChecked = activityRows.length > 0 &&
+                      activityRows.every(r => selectedActivityIds.has(r.activity.id));
+                    const someChecked = !allChecked &&
+                      activityRows.some(r => selectedActivityIds.has(r.activity.id));
+                    return (
+                      <th
+                        key={colId}
+                        style={{
+                          width: 18,
+                          position: 'sticky',
+                          left: pinnedLeft[colId] ?? 0,
+                          top: 0,
+                          zIndex: 4, // below TopBar's stacking context (z-index:10) so dropdowns show above headers
+                          background: 'var(--card)',
+                          borderBottom: '2px solid var(--border)',
+                          padding: 0,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'stretch', height: '100%' }}>
+                          <div style={{ width: 4, flexShrink: 0 }} />
+                          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <input
+                              type="checkbox"
+                              checked={allChecked}
+                              ref={el => { if (el) el.indeterminate = someChecked; }}
+                              onChange={() => {
+                                if (allChecked || someChecked) {
+                                  setSelectedActivityIds(new Set());
+                                } else {
+                                  setSelectedActivityIds(new Set(activityRows.map(r => r.activity.id)));
+                                }
+                              }}
+                              style={{ cursor: 'pointer', width: 13, height: 13 }}
+                              title="Select all"
+                            />
+                          </div>
+                        </div>
+                      </th>
+                    );
+                  }
+
+                  return (
+                    <SortableColHeader
+                      key={colId}
+                      colId={colId}
+                      style={{
+                        width: header.getSize(),
+                        left: isPinned ? pinnedLeft[colId] : undefined,
+                        position: 'sticky',
+                        zIndex: isPinned ? 4 : 3, // below TopBar's z-index:10 stacking context
+                        boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
+                      }}
+                      sortDir={meta?.editType !== 'none' ? sortDir : false}
+                      onSort={meta?.editType !== 'none' ? () => {
+                        setSorting(prev => {
+                          if (prev[0]?.id !== colId) return [{ id: colId, desc: false }];
+                          if (!prev[0].desc) return [{ id: colId, desc: true }];
+                          return [];
+                        });
+                      } : undefined}
+                      resizeHandler={colId !== 'identity' ? (header.getResizeHandler() as unknown as (e: React.MouseEvent | React.TouchEvent) => void) : undefined}
+                      isResizing={header.column.getIsResizing()}
+                    >
+                      {header.column.columnDef.header as string}
+                    </SortableColHeader>
+                  );
+                })}
+              </tr>
+            </SortableContext>
+        </thead>
+
+        {/* Body */}
+        <tbody>
+          {displayRows.length === 0 && (
+            <tr>
+              <td
+                colSpan={visibleHeaders.length}
+                style={{
+                  textAlign: 'center',
+                  padding: '48px 0',
+                  color: 'var(--muted-foreground)',
+                  fontSize: 13,
+                }}
+              >
+                No activities to show.
+              </td>
+            </tr>
+          )}
+
+          {displayRows.map((row, displayIdx) => {
+            // ── Group header row ─────────────────────────────────────────────
+            if (row.kind === 'group') {
+              const collapsed = collapsedGroups.has(row.key);
+              return (
+                <tr key={`group-${row.key}`}>
+                  <td
+                    colSpan={visibleHeaders.length}
+                    style={{
+                      padding: '4px 8px',
+                      background: 'var(--muted)',
+                      borderBottom: '1px solid var(--border)',
+                      borderTop: displayIdx > 0 ? '1px solid var(--border)' : undefined,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: 'var(--muted-foreground)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.05em',
+                      cursor: 'pointer',
+                      userSelect: 'none',
+                    }}
+                    onClick={() => toggleGroup(row.key)}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      {row.label}
+                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            }
+
+            // ── Activity row ─────────────────────────────────────────────────
+            const { activity, depth, hasChildren, groupKey } = row;
+            const actRowIdx = activityRows.indexOf(row);
+            const isSelected = actRowIdx === selectedRowIdx;
+            const isDetailOpen = activity.id === selectedActivityId;
+            const accentColor = getRowAccentColor(activity);
+
+            const isMatch = debouncedQuery && matchedIds.includes(activity.id);
+            const isActiveMatch = activity.id === activeMatchId;
+            const isDimmed = debouncedQuery && matchedIds.length > 0 && !isMatch;
+
+            const rowStyle: React.CSSProperties = {
+              height: rowH,
+              opacity: isDimmed ? 0.3 : 1,
+              background: isDetailOpen
+                ? 'var(--muted)'
+                : isSelected
+                ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
+                : 'transparent',
+              cursor: 'default',
+              outline: isActiveMatch
+                ? '2px solid #f59e0b'
+                : isMatch
+                ? '1px solid rgba(245,158,11,0.6)'
+                : undefined,
+              transition: 'background 0.1s ease, opacity 0.15s ease',
+            };
+
+            return (
+              <tr
+                key={activity.id}
+                ref={isActiveMatch ? el => { (activeRowRef as React.MutableRefObject<HTMLTableRowElement | null>).current = el } : undefined}
+                style={rowStyle}
+                onMouseEnter={() => setHoveredRowId(activity.id)}
+                onMouseLeave={() => setHoveredRowId(null)}
+                onClick={e => {
+                  e.stopPropagation();
+                  setSelectedRowIdx(actRowIdx);
+                  onSelectActivity?.(activity.id);
+                  // intentionally no onSelectApiActivity — edits happen inline
+                }}
+              >
+                {visibleHeaders.map((header, colIdx) => {
+                  const colId = header.id;
+                  const isPinned = header.column.getIsPinned() === 'left';
+                  const isCellSelected = isSelected && colIdx === selectedColIdx;
+                  const isEditing = editingCell?.rowIdx === actRowIdx && editingCell.colIdx === colIdx;
+                  const meta = COL_CATALOG.find(c => c.id === colId)!;
+
+                  const cellStyle: React.CSSProperties = {
+                    width: header.getSize(),
+                    maxWidth: header.getSize(),
+                    padding: '0 8px',
+                    borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
+                    fontSize: 12,
+                    color: 'var(--foreground)',
+                    overflow: 'hidden',
+                    whiteSpace: 'nowrap',
+                    textOverflow: 'ellipsis',
+                    position: isPinned ? 'sticky' : undefined,
+                    left: isPinned ? pinnedLeft[colId] : undefined,
+                    zIndex: isPinned ? 2 : undefined,
+                    background: isPinned
+                      ? (isDetailOpen ? 'var(--muted)' : isSelected ? 'color-mix(in srgb, var(--primary) 8%, var(--background))' : 'var(--background)')
+                      : undefined,
+                    boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
+                    outline: isCellSelected && !isEditing ? '2px solid var(--primary)' : undefined,
+                    outlineOffset: '-2px',
+                    verticalAlign: 'middle',
+                    cursor: (meta.editType === 'text' || meta.editType === 'date' || meta.editType === 'number')
+                      ? 'text'
+                      : (meta.editType !== 'none' ? 'pointer' : 'default'),
+                  };
+
+                  // ── Cell content ──────────────────────────────────────────
+
+                  // Editing mode — inline input
+                  if (isEditing && meta.editType !== 'none' && meta.editType !== 'status') {
+                    return (
+                      <td key={colId} style={{ ...cellStyle, padding: 0, overflow: 'visible' }}>
+                        <input
+                          ref={editInputRef}
+                          type={meta.editType === 'date' ? 'date' : meta.editType === 'number' ? 'number' : 'text'}
+                          min={meta.editType === 'number' ? 0 : undefined}
+                          max={meta.editType === 'number' ? 100 : undefined}
+                          value={editingCell.value}
+                          onChange={e => setEditingCell(prev => prev ? { ...prev, value: e.target.value } : prev)}
+                          onKeyDown={e => {
+                            e.stopPropagation();
+                            if (e.key === 'Escape') { cancelEdit(); e.preventDefault(); }
+                            else if (e.key === 'Enter') { commitAndMove('down'); e.preventDefault(); }
+                            else if (e.key === 'Tab') { commitAndMove(e.shiftKey ? 'left' : 'right'); e.preventDefault(); }
+                          }}
+                          onBlur={() => {
+                            commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
+                            setEditingCell(null);
+                          }}
+                          style={{
+                            width: '100%',
+                            height: rowH,
+                            padding: '0 8px',
+                            background: 'var(--background)',
+                            border: 'none',
+                            outline: '2px solid var(--primary)',
+                            outlineOffset: '-2px',
+                            fontSize: 12,
+                            color: 'var(--foreground)',
+                            fontFamily: 'var(--font-sans)',
+                          }}
+                          onClick={e => e.stopPropagation()}
+                        />
+                      </td>
+                    );
+                  }
+
+                  // Color bar + row checkbox — 32px pinned cell
+                  if (colId === 'colorBar') {
+                    const isRowChecked = selectedActivityIds.has(activity.id);
+                    const showCb = isRowChecked || selectedActivityIds.size > 0 || hoveredRowId === activity.id;
+                    return (
+                      <td
+                        key={colId}
+                        style={{
+                          width: 18,
+                          maxWidth: 18,
+                          padding: 0,
+                          borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
+                          position: 'sticky',
+                          left: pinnedLeft[colId] ?? 0,
+                          zIndex: 2, // pinned body cell — below header z-index (4)
+                          background: isDetailOpen
+                              ? 'var(--muted)'
+                              : isSelected
+                              ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
+                              : 'var(--background)',
+                          cursor: 'default',
+                        }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedActivityIds(prev => {
+                            const next = new Set(prev);
+                            if (next.has(activity.id)) next.delete(activity.id);
+                            else next.add(activity.id);
+                            return next;
+                          });
+                        }}
+                      >
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          height: rowH,
+                          opacity: showCb ? 1 : 0,
+                          transition: 'opacity 0.1s',
+                        }}>
+                          <input
+                            type="checkbox"
+                            checked={isRowChecked}
+                            onChange={() => {}}
+                            onClick={e => e.stopPropagation()}
+                            style={{ cursor: 'pointer', width: 13, height: 13, pointerEvents: 'none' }}
+                          />
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Identity cell — shows badge; click opens identity picker portal
+                  if (colId === 'identity') {
+                    return (
+                      <td
+                        key={colId}
+                        style={{ ...cellStyle, cursor: 'pointer' }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          if (identityPickerFor === activity.id) {
+                            closeIdentityPicker();
+                          } else {
+                            closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeParentPicker();
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setIdentityPickerFor(activity.id);
+                            setIdentityPickerPos(popoverPos(rect, 240, 320));
+                          }
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          <Badge
+                            identity={{
+                              color: getRowAccentColor(activity) ?? resolveColorHex(activity.color ?? null) ?? '#288C9B',
+                              icon: activity.icon ?? '__name_2__',
+                            }}
+                            name={activity.title}
+                            shape="square"
+                            size={28}
+                          />
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Status cell — click to open picker (portal, escapes scroll overflow)
+                  if (colId === 'status') {
+                    const status = activity.statusId ? statusById.get(activity.statusId) : null;
+                    return (
+                      <td
+                        key={colId}
+                        style={{ ...cellStyle, cursor: 'pointer' }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          if (statusPickerFor === activity.id) {
+                            closeStatusPicker();
+                          } else {
+                            closeAssigneePicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setStatusPickerFor(activity.id);
+                            setStatusPickerPos(popoverPos(rect, 160, 220));
+                          }
+                        }}
+                      >
+                        {status ? (
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 5,
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              fontSize: 11,
+                              fontWeight: 500,
+                              background: `color-mix(in srgb, ${resolveColorHex(status.color ?? null) ?? '#888'} 15%, transparent)`,
+                              color: resolveColorHex(status.color ?? null) ?? 'var(--foreground)',
+                              border: `1px solid ${resolveColorHex(status.color ?? null) ?? '#888'}40`,
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: 7,
+                                height: 7,
+                                borderRadius: '50%',
+                                background: resolveColorHex(status.color ?? null) ?? '#888',
+                                flexShrink: 0,
+                              }}
+                            />
+                            {status.name}
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                        )}
+                      </td>
+                    );
+                  }
+
+                  // Assignees cell — overlapping badges; click opens picker
+                  if (colId === 'assignees') {
+                    const ids = activity.assignedMemberIds ?? [];
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (assigneePickerFor === activity.id) {
+                          closeAssigneePicker();
+                        } else {
+                          closeStatusPicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setAssigneePickerFor(activity.id);
+                          setAssigneePickerPos(popoverPos(rect, 180, 240));
+                        }
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
+                          {ids.slice(0, 4).map((mid, i) => {
+                            const m = memberById.get(mid);
+                            if (!m) return null;
+                            return (
+                              <div key={mid} style={{ marginLeft: i === 0 ? 0 : -6 }} title={m.displayName}>
+                                <Badge
+                                  identity={{ color: resolveColorHex(m.color ?? null) ?? '#288C9B', icon: m.icon ?? '__name_2__' }}
+                                  name={m.displayName}
+                                  shape="circle"
+                                  size={22}
+                                />
+                              </div>
+                            );
+                          })}
+                          {ids.length > 4 && (
+                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>+{ids.length - 4}</span>
+                          )}
+                          {ids.length === 0 && (
+                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                          )}
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Tags cell — click opens tag picker
+                  if (colId === 'tags') {
+                    const tagList = (activity.tagIds ?? [])
+                      .map(tid => tags.find(t => t.id === tid))
+                      .filter(Boolean) as Tag[];
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (tagPickerFor === activity.id) {
+                          closeTagPicker();
+                        } else {
+                          closeStatusPicker(); closeAssigneePicker(); closeParentPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setTagPickerFor(activity.id);
+                          setTagPickerPos(popoverPos(rect, 220, 300));
+                        }
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden', flexWrap: 'nowrap' }}>
+                          {tagList.slice(0, 3).map(t => (
+                            <span
+                              key={t.id}
+                              style={{
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                fontSize: 10,
+                                background: resolveColorHex(t.color ?? null)
+                                  ? `color-mix(in srgb, ${resolveColorHex(t.color ?? null)} 18%, transparent)`
+                                  : 'var(--muted)',
+                                color: resolveColorHex(t.color ?? null) ?? 'var(--foreground)',
+                                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}40`,
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {t.name}
+                            </span>
+                          ))}
+                          {tagList.length > 3 && (
+                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tagList.length - 3}</span>
+                          )}
+                          {tagList.length === 0 && (
+                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                          )}
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Progress cell
+                  if (colId === 'progress') {
+                    const pct = activity.percentComplete ?? 0;
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          enterEdit(actRowIdx, colIdx);
+                        }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <div
+                            style={{
+                              flex: 1,
+                              height: 4,
+                              background: 'var(--border)',
+                              borderRadius: 2,
+                              overflow: 'hidden',
+                            }}
+                          >
+                            <div
+                              style={{
+                                height: '100%',
+                                width: `${pct}%`,
+                                background: 'var(--primary)',
+                                borderRadius: 2,
+                                transition: 'width 0.2s',
+                              }}
+                            />
+                          </div>
+                          <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flexShrink: 0 }}>
+                            {pct}%
+                          </span>
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Parent cell — click opens parent picker
+                  if (colId === 'parent') {
+                    const parent = activity.parentActivityId ? activityById.get(activity.parentActivityId) : null;
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (parentPickerFor === activity.id) {
+                          closeParentPicker();
+                        } else {
+                          closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setParentPickerFor(activity.id);
+                          setParentPickerPos(popoverPos(rect, 220, 280));
+                        }
+                      }}>
+                        <span style={{ color: parent ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
+                          {parent ? parent.title : '—'}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Duration cell
+                  if (colId === 'duration') {
+                    return (
+                      <td key={colId} style={cellStyle}>
+                        <span style={{ color: 'var(--muted-foreground)' }}>
+                          {formatDuration(activity.startAt, activity.endAt)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Date cells — single click to edit
+                  if (colId === 'startAt' || colId === 'endAt') {
+                    const iso = colId === 'startAt' ? activity.startAt : activity.endAt;
+                    return (
+                      <td
+                        key={colId}
+                        style={cellStyle}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          enterEdit(actRowIdx, colIdx);
+                        }}
+                      >
+                        <span style={{ color: iso ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
+                          {formatDate(iso)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Created/Updated cells
+                  if (colId === 'createdAt' || colId === 'updatedAt') {
+                    const iso = colId === 'createdAt' ? activity.createdAt : activity.updatedAt;
+                    return (
+                      <td key={colId} style={cellStyle}>
+                        <span style={{ color: 'var(--muted-foreground)' }}>
+                          {formatDate(iso)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Text cells (title, description, location, url, notes)
+                  let textVal = '';
+                  if (colId === 'title') textVal = activity.title;
+                  else if (colId === 'description') textVal = activity.description ?? '';
+                  else if (colId === 'location') textVal = activity.location ?? '';
+                  else if (colId === 'url') textVal = activity.url ?? '';
+                  else if (colId === 'notes') textVal = (activity as ApiActivity & { notes?: string | null }).notes ?? '';
+
+                  return (
+                    <td
+                      key={colId}
+                      style={{ ...cellStyle, fontWeight: colId === 'title' ? 500 : 400 }}
+                      onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (meta.editable && meta.editType === 'text') enterEdit(actRowIdx, colIdx);
+                      }}
+                    >
+                      {colId === 'title' && groupBy === 'parent' ? (
+                        // Parent-group mode: show indent + collapse toggle
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 4, paddingLeft: depth * 16 }}>
+                          {hasChildren ? (
+                            <span
+                              onClick={e => { e.stopPropagation(); toggleGroup(groupKey); }}
+                              style={{ cursor: 'pointer', flexShrink: 0, color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center' }}
+                            >
+                              {collapsedGroups.has(groupKey) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                            </span>
+                          ) : depth > 0 ? (
+                            <span style={{ width: 13, flexShrink: 0 }} />
+                          ) : null}
+                          <span title={textVal} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                            {textVal || '—'}
+                          </span>
+                        </span>
+                      ) : (
+                        <span
+                          title={textVal}
+                          style={{
+                            display: 'block',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            color: textVal ? 'var(--foreground)' : 'var(--muted-foreground)',
+                          }}
+                        >
+                          {textVal || '—'}
+                        </span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      </DndContext>
+
+      {/* Status picker portal */}
+      {statusPickerFor && statusPickerPos && statusPickerActivity &&
+        createPortal(
+          <StatusPicker
+            value={statusPickerActivity.statusId}
+            statuses={timelineStatuses}
+            onChange={statusId => {
+              update.mutate({ activityId: statusPickerFor, patch: { statusId } });
+              closeStatusPicker();
+            }}
+            onClose={closeStatusPicker}
+            positionStyle={{ position: 'fixed', top: statusPickerPos.top, left: statusPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Assignee picker portal */}
+      {assigneePickerFor && assigneePickerPos &&
+        createPortal(
+          <AssigneePicker
+            members={members}
+            selectedIds={activityById.get(assigneePickerFor)?.assignedMemberIds ?? []}
+            onToggle={memberId => {
+              const activity = activityById.get(assigneePickerFor);
+              if (!activity) return;
+              const current = activity.assignedMemberIds ?? [];
+              const next = current.includes(memberId)
+                ? current.filter(id => id !== memberId)
+                : [...current, memberId];
+              update.mutate({ activityId: assigneePickerFor, patch: { assignedMemberIds: next } });
+            }}
+            onClose={closeAssigneePicker}
+            positionStyle={{ position: 'fixed', top: assigneePickerPos.top, left: assigneePickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Tag picker portal */}
+      {tagPickerFor && tagPickerPos &&
+        createPortal(
+          <TagPicker
+            teamId={teamId}
+            tags={tags}
+            selectedTagIds={(activityById.get(tagPickerFor)?.tagIds as string[] | undefined) ?? []}
+            onChange={ids => {
+              update.mutate({ activityId: tagPickerFor, patch: { tagIds: ids } as Partial<ApiActivity> });
+            }}
+            onClose={closeTagPicker}
+            positionStyle={{ position: 'fixed', top: tagPickerPos.top, left: tagPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Parent picker portal */}
+      {parentPickerFor && parentPickerPos &&
+        createPortal(
+          <ParentPicker
+            activities={rawActivities.filter(a => a.id !== parentPickerFor)}
+            value={activityById.get(parentPickerFor)?.parentActivityId}
+            onChange={id => {
+              update.mutate({ activityId: parentPickerFor, patch: { parentActivityId: id } as Partial<ApiActivity> });
+              closeParentPicker();
+            }}
+            onClose={closeParentPicker}
+            positionStyle={{ position: 'fixed', top: parentPickerPos.top, left: parentPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Identity picker portal */}
+      {identityPickerFor && identityPickerPos && (() => {
+        const identityActivity = activityById.get(identityPickerFor);
+        if (!identityActivity) return null;
+        return createPortal(
+          <div
+            ref={identityPickerRef}
+            style={{
+              position: 'fixed',
+              top: identityPickerPos.top,
+              left: identityPickerPos.left,
+              zIndex: 9999,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+              borderRadius: 10,
+              border: '1px solid var(--border)',
+              overflow: 'hidden',
+            }}
+          >
+            <IdentityPicker
+              identity={{
+                color: resolveColorHex(identityActivity.color ?? null) ?? '#288C9B',
+                icon: identityActivity.icon ?? '__name_2__',
+              }}
+              name={identityActivity.title}
+              shape="square"
+              onChange={(next: Identity) => {
+                update.mutate({ activityId: identityPickerFor, patch: { color: next.color, icon: next.icon } });
+              }}
+            />
+          </div>,
+          document.body,
+        );
+      })()}
     </div>
   );
 }
@@ -30047,6 +29952,425 @@ describe("filter kind 'saved'", () => {
     expect(result).toHaveLength(2)
   })
 })
+````
+
+## File: packages/web/src/pages/LoginPage.tsx
+````typescript
+import { useState } from 'react'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
+import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError } from '@/lib/api'
+import DarkModeToggle from '@/components/DarkModeToggle'
+import { usePublicSettings } from '@/hooks/usePublicSettings'
+
+// ── Floating-label input ─────────────────────────────────────────────────────
+
+interface FloatInputProps {
+  id: string
+  label: string
+  type: string
+  value: string
+  autoComplete: string
+  error?: string | null
+  onChange: (v: string) => void
+  onKeyDown?: (e: React.KeyboardEvent) => void
+  rightSlot?: React.ReactNode
+}
+
+function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
+  const [focused, setFocused] = useState(false)
+  const floated = focused || value.length > 0
+
+  const borderColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#288C9B'
+    : 'hsl(210 15% 24%)'
+
+  const boxShadow = error
+    ? '0 0 0 3px rgba(231,76,60,0.15)'
+    : focused
+    ? '0 0 0 3px rgba(40,140,155,0.18)'
+    : 'none'
+
+  const labelColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#5BC0DE'
+    : 'hsl(210 15% 65%)'
+
+  return (
+    <div>
+      <div style={{
+        position: 'relative',
+        borderRadius: 8,
+        border: `1px solid ${borderColor}`,
+        background: 'hsl(210 15% 17%)',
+        transition: 'border-color 180ms ease, box-shadow 180ms ease',
+        boxShadow,
+      }}>
+        {/* Floating label */}
+        <label
+          htmlFor={id}
+          style={{
+            position: 'absolute',
+            left: 14,
+            top: floated ? 8 : '50%',
+            transform: floated ? 'none' : 'translateY(-50%)',
+            fontSize: floated ? 11 : 14,
+            letterSpacing: floated ? '0.06em' : 0,
+            textTransform: floated ? 'uppercase' : 'none',
+            fontWeight: 600,
+            color: labelColor,
+            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          {label}
+        </label>
+
+        <input
+          id={id}
+          type={type}
+          autoComplete={autoComplete}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onKeyDown={onKeyDown}
+          style={{
+            width: '100%',
+            padding: '22px 42px 8px 14px',
+            background: 'transparent',
+            border: 'none',
+            outline: 'none',
+            fontSize: 15,
+            color: 'hsl(210 17% 93%)',
+            fontFamily: 'inherit',
+            lineHeight: 1.4,
+            boxSizing: 'border-box',
+          }}
+        />
+
+        {rightSlot && (
+          <div style={{
+            position: 'absolute',
+            right: 12,
+            top: '50%',
+            transform: 'translateY(-50%)',
+          }}>
+            {rightSlot}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
+      )}
+    </div>
+  )
+}
+
+// ── Spinner ──────────────────────────────────────────────────────────────────
+
+function Spinner() {
+  return (
+    <Loader2
+      size={16}
+      strokeWidth={2.5}
+      color="rgba(255,255,255,0.8)"
+      style={{ animation: 'spin 0.8s linear infinite' }}
+    />
+  )
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
+
+export default function LoginPage() {
+  const { login } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+  const { data: branding } = usePublicSettings()
+  const instanceName = branding?.instanceName || 'draba'
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [success, setSuccess] = useState(false)
+
+  function validateAndSubmit() {
+    let valid = true
+    setServerError(null)
+
+    if (!email.trim()) {
+      setEmailError('Email is required')
+      valid = false
+    } else if (!/\S+@\S+\.\S+/.test(email)) {
+      setEmailError('Enter a valid email')
+      valid = false
+    } else {
+      setEmailError(null)
+    }
+
+    if (!password) {
+      setPasswordError('Password is required')
+      valid = false
+    } else if (password.length < 6) {
+      setPasswordError('Password must be at least 6 characters')
+      valid = false
+    } else {
+      setPasswordError(null)
+    }
+
+    if (!valid) return
+    doLogin()
+  }
+
+  async function doLogin() {
+    setLoading(true)
+    try {
+      await login(email, password)
+      setSuccess(true)
+      // Brief success flash then navigate
+      setTimeout(() => navigate(from, { replace: true }), 600)
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError(err.message)
+      } else {
+        setServerError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    validateAndSubmit()
+  }
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--background)',
+      padding: '24px',
+      position: 'relative',
+    }}>
+      {/* Teal radial glow behind card */}
+      <div style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
+        pointerEvents: 'none',
+      }} />
+
+      {/* Dark mode toggle */}
+      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Card */}
+      <div style={{
+        width: '100%',
+        maxWidth: 860,
+        minHeight: 520,
+        borderRadius: 16,
+        overflow: 'hidden',
+        display: 'flex',
+        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
+        position: 'relative',
+        zIndex: 1,
+      }}>
+
+        {/* ── Left panel — brand ─────────────────────────────────────── */}
+        <div style={{
+          width: '38%',
+          flexShrink: 0,
+          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 4,
+          padding: '48px 32px',
+          position: 'relative',
+          overflow: 'hidden',
+        }}>
+          {/* Decorative circles */}
+          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
+          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
+
+          {/* Logo — 2× the handoff's 88px */}
+          <img
+            src="/icon-color.svg"
+            alt="draba"
+            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginBottom: '-62px' }}
+          />
+
+          <div style={{ position: 'relative', textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+              {instanceName}
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
+              Team coordination,<br />simplified.
+            </div>
+          </div>
+        </div>
+
+        {/* ── Right panel — form ─────────────────────────────────────── */}
+        <div style={{
+          flex: 1,
+          background: 'var(--card)',
+          padding: '52px 48px',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+        }}>
+          {success ? (
+            /* Success state */
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: '50%',
+                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 20px',
+              }}>
+                <Check size={24} color="#288C9B" strokeWidth={2.5} />
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
+                You're signed in
+              </div>
+              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
+                Redirecting to your timeline…
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} noValidate>
+              {/* Heading */}
+              <div style={{ marginBottom: 28 }}>
+                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
+                  Sign in
+                </h1>
+                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
+                  Welcome back — sign in to your account.
+                </p>
+              </div>
+
+              {/* Fields */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
+                <FloatInput
+                  id="email"
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  error={emailError}
+                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
+                />
+
+                <FloatInput
+                  id="password"
+                  label="Password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  error={passwordError}
+                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
+                  rightSlot={
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(s => !s)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
+                    >
+                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
+                    </button>
+                  }
+                />
+              </div>
+
+              {/* Forgot password */}
+              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
+                <Link
+                  to="/forgot-password"
+                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Forgot password?
+                </Link>
+              </div>
+
+              {/* Server error */}
+              {serverError && (
+                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
+              )}
+
+              {/* Sign in button */}
+              <button
+                type="submit"
+                disabled={loading}
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  borderRadius: 8,
+                  border: 'none',
+                  background: loading
+                    ? 'hsl(188 40% 35%)'
+                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
+                  color: '#fff',
+                  fontSize: 15,
+                  fontWeight: 700,
+                  letterSpacing: '0.01em',
+                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  fontFamily: 'inherit',
+                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
+                }}
+                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
+                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
+                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
+              >
+                {loading && <Spinner />}
+                {loading ? 'Signing in…' : 'Sign in'}
+              </button>
+
+              {/* Register link */}
+              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
+                Have an invite?{' '}
+                <Link
+                  to="/register"
+                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Create an account
+                </Link>
+              </p>
+            </form>
+          )}
+        </div>
+      </div>
+
+      {/* Keyframe for spinner */}
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </div>
+  )
+}
 ````
 
 ## File: packages/api/internal/api/saved_filter_handler.go
@@ -32154,6 +32478,556 @@ export default function ActivityCreatePanel({
 }
 ````
 
+## File: packages/web/src/components/layout/TopBar.tsx
+````typescript
+/**
+ * Top toolbar above the active view. Left side: global app navigation
+ * (view switcher) and global object actions (Share). Right side: global
+ * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
+ * then whatever the parent injects into `rightSlot` (typically the profile menu).
+ *
+ * View-specific controls (date nav, zoom) intentionally live elsewhere —
+ * a context-sensitive sub-toolbar hosts them.
+ */
+
+import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
+import FilterDropdown from '@/components/filters/FilterDropdown';
+import FindBar from '@/components/layout/FindBar';
+import { Badge } from '@/components/identity/Badge';
+import { useFind } from '@/contexts/FindContext';
+import { cn } from '@/lib/utils';
+import type { Identity } from '@/components/identity/identity-constants';
+import { DEFAULT_TIMELINE_IDENTITY } from '@/components/identity/identity-constants';
+
+export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
+
+interface Props {
+  view: ViewMode;
+  teamId?: string;
+  timelineName?: string;
+  timelineIdentity?: Identity;
+  onViewChange: (view: ViewMode) => void;
+  onOpenFilterManager: () => void;
+  rightSlot?: React.ReactNode;
+}
+
+const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
+  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
+  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
+  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
+  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
+];
+
+export default function TopBar({
+  view,
+  teamId,
+  timelineName,
+  timelineIdentity,
+  onViewChange,
+  onOpenFilterManager,
+  rightSlot,
+}: Props) {
+  const { findBarOpen, setFindBarOpen } = useFind();
+
+  return (
+    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-40">
+      {/* Left zone: view switcher */}
+      <div className="flex items-center justify-start shrink-0">
+        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
+          {VIEWS.map(v => (
+            <button
+              key={v.id}
+              onClick={() => onViewChange(v.id)}
+              className={cn(
+                'flex items-center justify-center gap-[5px]',
+                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
+                'border-none cursor-pointer',
+                view === v.id
+                  ? 'bg-card text-foreground shadow-sm'
+                  : 'bg-transparent text-muted-foreground',
+              )}
+            >
+              {v.icon}
+              {v.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Center zone: timeline identity badge + name */}
+      <div className="flex-1 min-w-0 flex items-center justify-center gap-1.5 px-3">
+        <Badge
+          identity={timelineIdentity ?? DEFAULT_TIMELINE_IDENTITY}
+          name={timelineName ?? ''}
+          shape="square"
+          size={18}
+          className="shrink-0"
+        />
+        <span
+          title={timelineName}
+          className="text-xs font-medium text-muted-foreground truncate select-none"
+        >
+          {timelineName}
+        </span>
+      </div>
+
+      {/* Right zone: Find bar / trigger, Filter, profile slot */}
+      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
+        {findBarOpen ? (
+          <FindBar />
+        ) : (
+          <button
+            onClick={() => setFindBarOpen(true)}
+            title="Find in view (Ctrl+F)"
+            className={cn(
+              'flex items-center justify-center w-7 h-7',
+              'border border-border rounded-md bg-card',
+              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
+              'transition-colors shrink-0',
+            )}
+          >
+            <Search size={13} strokeWidth={1.8} />
+          </button>
+        )}
+        <FilterDropdown teamId={teamId} onOpenManager={onOpenFilterManager} />
+        {rightSlot}
+      </div>
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/MemberModal.tsx
+````typescript
+/**
+ * MemberModal — view and edit a team member's profile, identity, and role.
+ *
+ * Shows computed stats (timelines, activities by date status) and exposes
+ * superadmin actions (promote, inactivate, delete) when the viewer is a
+ * superadmin. Password reset is present but shows "SMTP not configured"
+ * until Phase 14.
+ */
+
+import { useState } from 'react'
+import { createPortal } from 'react-dom'
+import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users, ShieldOff } from 'lucide-react'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
+import { Badge } from '@/components/identity/Badge'
+import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
+import { useAuth } from '@/contexts/AuthContext'
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import type { components } from '@draba/shared'
+
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+interface Props {
+  teamId: string
+  memberId: string
+  /** Whether the current viewer is a team admin. */
+  isAdmin: boolean
+  /** Whether the current viewer is a superadmin. */
+  isSuperadmin: boolean
+  onClose: () => void
+}
+
+// ── Small shared styles ───────────────────────────────────────────────────────
+
+const chipStyle = (color: string): React.CSSProperties => ({
+  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+  padding: '10px 16px', borderRadius: 8, flex: 1,
+  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
+  background: `${color}0a`, textAlign: 'center', minWidth: 0,
+})
+
+const cancelBtn: React.CSSProperties = {
+  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
+  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+
+export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
+  const { user: currentUser } = useAuth()
+  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
+  const updateMember = useUpdateMember(teamId)
+  const promoteUser = usePromoteUser()
+  const archiveUser = useArchiveUser()
+  const unarchiveUser = useUnarchiveUser()
+  const deleteUser = useDeleteUser()
+  const revokeUser = useRevokeUser()
+
+  const [identity, setIdentity] = useState<Identity | null>(null)
+  const [displayName, setDisplayName] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | 'revoke' | null>(null)
+  const [revokeResult, setRevokeResult] = useState<{ membershipsInactivated: number; membershipsRemoved: number } | null>(null)
+
+  if (isLoading || isError || !detail) {
+    return createPortal(
+      <div
+        onClick={e => { if (e.target === e.currentTarget) onClose() }}
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+      >
+        <div style={{ width: 560, height: 300, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
+          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+            <X size={18} />
+          </button>
+          {isError ? (
+            <>
+              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
+              <button onClick={onClose} style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>Dismiss</button>
+            </>
+          ) : (
+            <span style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</span>
+          )}
+        </div>
+      </div>,
+      document.body,
+    )
+  }
+
+  const effectiveIdentity: Identity = identity ?? {
+    color: detail.color ?? '#1A97A2',
+    icon: detail.icon ?? '__name_words__',
+  }
+  const effectiveName = displayName ?? detail.displayName
+
+  const isParticipant = !detail.userId
+  const isInactivated = Boolean(detail.archivedAt)
+  const stats = detail.stats
+  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
+
+  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending || revokeUser.isPending
+
+  // detail is guaranteed non-null here (early return above handles loading/undefined).
+  // Non-null assertions in callbacks are safe because they only fire when the
+  // rendered modal is interactive, which requires detail to be loaded.
+  function handleSave() {
+    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
+    if (displayName !== null) patch.displayName = displayName
+    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
+    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
+  }
+
+  function handlePromote() {
+    if (!detail!.userId) return
+    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
+  }
+
+  function handleInactivate() {
+    if (!detail!.userId) return
+    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+  }
+
+  function handleReactivate() {
+    if (!detail!.userId) return
+    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
+  }
+
+  function handleRevoke() {
+    if (!detail!.userId) return
+    revokeUser.mutate(detail!.userId, {
+      onSuccess: (result) => {
+        setConfirm(null)
+        setRevokeResult({ membershipsInactivated: result.membershipsInactivated, membershipsRemoved: result.membershipsRemoved })
+        // Close the modal after a short delay so the user can see the summary.
+        setTimeout(onClose, 2000)
+      },
+    })
+  }
+
+  function handleDelete() {
+    if (!detail!.userId) return
+    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+  }
+
+  const memberColor = effectiveIdentity.color
+
+  return createPortal(
+    <div
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+    >
+      <div style={{ width: 560, maxHeight: '90vh', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+        {/* Confirm overlays */}
+        {confirm === 'promote' && (
+          <ConfirmDialog
+            variant="indigo"
+            icon={<Shield size={22} color="#6366F1" />}
+            title="Promote to Super Admin?"
+            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
+            confirmLabel="Promote"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handlePromote}
+          />
+        )}
+        {confirm === 'inactivate' && (
+          <ConfirmDialog
+            variant="amber"
+            icon={<Archive size={22} color="#F59E0B" />}
+            title={`Inactivate ${effectiveName}?`}
+            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
+            confirmLabel="Inactivate"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleInactivate}
+          />
+        )}
+        {confirm === 'delete' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<Trash2 size={22} color="#EF4444" />}
+            title={`Delete ${effectiveName}?`}
+            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
+            confirmLabel="Delete permanently"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleDelete}
+          />
+        )}
+        {confirm === 'revoke' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<ShieldOff size={22} color="#EF4444" />}
+            title={`Revoke all access for ${effectiveName}?`}
+            body="This will: (1) deactivate the account — the user cannot log in anywhere; (2) inactivate all team memberships that have activity history; (3) permanently remove memberships with no activity history. Activity data is always preserved."
+            confirmLabel="Revoke all access"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleRevoke}
+          />
+        )}
+
+        {confirm === null && (
+          <>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              <div style={{ flexShrink: 0 }}>
+                <IdentityWidget
+                  identity={effectiveIdentity}
+                  name={effectiveName}
+                  shape="circle"
+                  onChange={setIdentity}
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
+                  {isParticipant ? 'Participant' : 'Team Member'}
+                  {isInactivated && ' · Inactive'}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  {(isAdmin || currentUser?.id === detail.userId) ? (
+                    <InlineEditableTitle
+                      value={displayName ?? detail.displayName}
+                      onChange={setDisplayName}
+                    />
+                  ) : (
+                    <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{effectiveName}</span>
+                  )}
+                  {isParticipant && (
+                    <span style={{ fontSize: 11, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
+                  )}
+                </div>
+              </div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex', flexShrink: 0 }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Scrollable body */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+
+              {/* Email */}
+              {!isParticipant && (
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
+                  <div style={{ fontSize: 13, color: 'var(--muted-foreground)', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {detail.email}
+                  </div>
+                </div>
+              )}
+
+              {/* Timeline stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Timelines
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Active</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Activity stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Activities
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Past due</span>
+                  </div>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Running</span>
+                  </div>
+                  <div style={chipStyle('#3B82F6')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Upcoming</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Teams list */}
+              {detail.teams.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Teams ({detail.teams.length})
+                  </label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {detail.teams.map((tm: TeamMemberWithUser) => (
+                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--muted)', borderRadius: 7 }}>
+                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
+                        <span style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{tm.teamId}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : 'var(--muted-foreground)', background: tm.role === 'admin' ? 'rgba(26,151,162,0.12)' : 'var(--muted)', border: `1px solid ${tm.role === 'admin' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`, borderRadius: 99, padding: '1px 8px' }}>
+                          {tm.role}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Joined date */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: 'var(--muted)', borderRadius: 6, fontSize: 12, color: 'var(--muted-foreground)' }}>
+                  <Clock size={12} />
+                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
+                </div>
+              </div>
+
+              {/* Account section — non-participant only */}
+              {!isParticipant && isAdmin && (
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
+                  <button
+                    style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'var(--font-sans)' }}
+                    title="SMTP is not configured"
+                    disabled
+                  >
+                    Reset password — SMTP not configured
+                  </button>
+                </div>
+              )}
+
+              {/* Superadmin actions */}
+              {isSuperadmin && !isParticipant && (
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
+                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Super Admin Actions
+                  </label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {!isInactivated && (
+                      <button
+                        onClick={() => setConfirm('promote')}
+                        style={{ fontSize: 12, color: '#6366F1', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Shield size={13} />
+                        Promote to Super Admin
+                      </button>
+                    )}
+                    {isInactivated ? (
+                      <button
+                        onClick={handleReactivate}
+                        disabled={busy}
+                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', opacity: busy ? 0.6 : 1 }}
+                      >
+                        Reactivate account
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setConfirm('inactivate')}
+                        style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Archive size={13} />
+                        Inactivate
+                      </button>
+                    )}
+                    {detail.deletable && (
+                      <button
+                        onClick={() => setConfirm('delete')}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Trash2 size={13} />
+                        Delete
+                      </button>
+                    )}
+                    {/* Hidden once the account itself is deactivated — membership-level
+                        inactivation alone still leaves the account active on other teams */}
+                    {!detail.userArchivedAt && (
+                      <button
+                        onClick={() => setConfirm('revoke')}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <ShieldOff size={13} />
+                        Revoke all access
+                      </button>
+                    )}
+                  </div>
+                  {activeActivityCount > 0 && (
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 8 }}>
+                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
+                    </div>
+                  )}
+                  {revokeResult && (
+                    <div style={{ fontSize: 12, color: 'var(--foreground)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
+                      Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+              <button onClick={onClose} style={cancelBtn}>Cancel</button>
+              {(isAdmin || currentUser?.id === detail.userId) && (
+                <button
+                  onClick={handleSave}
+                  disabled={busy}
+                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'var(--font-sans)' }}
+                >
+                  {busy ? 'Saving…' : 'Save changes'}
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
 ## File: packages/web/src/components/StatusTemplatesTab.tsx
 ````typescript
 /**
@@ -32552,425 +33426,6 @@ export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props
           </button>
         )
       )}
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/LoginPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useLocation, Link } from 'react-router-dom'
-import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import DarkModeToggle from '@/components/DarkModeToggle'
-import { usePublicSettings } from '@/hooks/usePublicSettings'
-
-// ── Floating-label input ─────────────────────────────────────────────────────
-
-interface FloatInputProps {
-  id: string
-  label: string
-  type: string
-  value: string
-  autoComplete: string
-  error?: string | null
-  onChange: (v: string) => void
-  onKeyDown?: (e: React.KeyboardEvent) => void
-  rightSlot?: React.ReactNode
-}
-
-function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
-  const [focused, setFocused] = useState(false)
-  const floated = focused || value.length > 0
-
-  const borderColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#288C9B'
-    : 'hsl(210 15% 24%)'
-
-  const boxShadow = error
-    ? '0 0 0 3px rgba(231,76,60,0.15)'
-    : focused
-    ? '0 0 0 3px rgba(40,140,155,0.18)'
-    : 'none'
-
-  const labelColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#5BC0DE'
-    : 'hsl(210 15% 65%)'
-
-  return (
-    <div>
-      <div style={{
-        position: 'relative',
-        borderRadius: 8,
-        border: `1px solid ${borderColor}`,
-        background: 'hsl(210 15% 17%)',
-        transition: 'border-color 180ms ease, box-shadow 180ms ease',
-        boxShadow,
-      }}>
-        {/* Floating label */}
-        <label
-          htmlFor={id}
-          style={{
-            position: 'absolute',
-            left: 14,
-            top: floated ? 8 : '50%',
-            transform: floated ? 'none' : 'translateY(-50%)',
-            fontSize: floated ? 11 : 14,
-            letterSpacing: floated ? '0.06em' : 0,
-            textTransform: floated ? 'uppercase' : 'none',
-            fontWeight: 600,
-            color: labelColor,
-            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
-            pointerEvents: 'none',
-            userSelect: 'none',
-          }}
-        >
-          {label}
-        </label>
-
-        <input
-          id={id}
-          type={type}
-          autoComplete={autoComplete}
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onKeyDown={onKeyDown}
-          style={{
-            width: '100%',
-            padding: '22px 42px 8px 14px',
-            background: 'transparent',
-            border: 'none',
-            outline: 'none',
-            fontSize: 15,
-            color: 'hsl(210 17% 93%)',
-            fontFamily: 'inherit',
-            lineHeight: 1.4,
-            boxSizing: 'border-box',
-          }}
-        />
-
-        {rightSlot && (
-          <div style={{
-            position: 'absolute',
-            right: 12,
-            top: '50%',
-            transform: 'translateY(-50%)',
-          }}>
-            {rightSlot}
-          </div>
-        )}
-      </div>
-
-      {error && (
-        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
-      )}
-    </div>
-  )
-}
-
-// ── Spinner ──────────────────────────────────────────────────────────────────
-
-function Spinner() {
-  return (
-    <Loader2
-      size={16}
-      strokeWidth={2.5}
-      color="rgba(255,255,255,0.8)"
-      style={{ animation: 'spin 0.8s linear infinite' }}
-    />
-  )
-}
-
-// ── Main page ────────────────────────────────────────────────────────────────
-
-export default function LoginPage() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
-  const { data: branding } = usePublicSettings()
-  const instanceName = branding?.instanceName || 'draba'
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [emailError, setEmailError] = useState<string | null>(null)
-  const [passwordError, setPasswordError] = useState<string | null>(null)
-  const [serverError, setServerError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [success, setSuccess] = useState(false)
-
-  function validateAndSubmit() {
-    let valid = true
-    setServerError(null)
-
-    if (!email.trim()) {
-      setEmailError('Email is required')
-      valid = false
-    } else if (!/\S+@\S+\.\S+/.test(email)) {
-      setEmailError('Enter a valid email')
-      valid = false
-    } else {
-      setEmailError(null)
-    }
-
-    if (!password) {
-      setPasswordError('Password is required')
-      valid = false
-    } else if (password.length < 6) {
-      setPasswordError('Password must be at least 6 characters')
-      valid = false
-    } else {
-      setPasswordError(null)
-    }
-
-    if (!valid) return
-    doLogin()
-  }
-
-  async function doLogin() {
-    setLoading(true)
-    try {
-      await login(email, password)
-      setSuccess(true)
-      // Brief success flash then navigate
-      setTimeout(() => navigate(from, { replace: true }), 600)
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setServerError(err.message)
-      } else {
-        setServerError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    validateAndSubmit()
-  }
-
-  return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--background)',
-      padding: '24px',
-      position: 'relative',
-    }}>
-      {/* Teal radial glow behind card */}
-      <div style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
-        pointerEvents: 'none',
-      }} />
-
-      {/* Dark mode toggle */}
-      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Card */}
-      <div style={{
-        width: '100%',
-        maxWidth: 860,
-        minHeight: 520,
-        borderRadius: 16,
-        overflow: 'hidden',
-        display: 'flex',
-        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
-        position: 'relative',
-        zIndex: 1,
-      }}>
-
-        {/* ── Left panel — brand ─────────────────────────────────────── */}
-        <div style={{
-          width: '38%',
-          flexShrink: 0,
-          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 4,
-          padding: '48px 32px',
-          position: 'relative',
-          overflow: 'hidden',
-        }}>
-          {/* Decorative circles */}
-          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
-          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
-
-          {/* Logo — 2× the handoff's 88px */}
-          <img
-            src="/icon-color.svg"
-            alt="draba"
-            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginBottom: '-62px' }}
-          />
-
-          <div style={{ position: 'relative', textAlign: 'center' }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
-              {instanceName}
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
-              Team coordination,<br />simplified.
-            </div>
-          </div>
-        </div>
-
-        {/* ── Right panel — form ─────────────────────────────────────── */}
-        <div style={{
-          flex: 1,
-          background: 'var(--card)',
-          padding: '52px 48px',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'center',
-        }}>
-          {success ? (
-            /* Success state */
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
-              <div style={{
-                width: 56, height: 56, borderRadius: '50%',
-                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                margin: '0 auto 20px',
-              }}>
-                <Check size={24} color="#288C9B" strokeWidth={2.5} />
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
-                You're signed in
-              </div>
-              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
-                Redirecting to your timeline…
-              </div>
-            </div>
-          ) : (
-            <form onSubmit={handleSubmit} noValidate>
-              {/* Heading */}
-              <div style={{ marginBottom: 28 }}>
-                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
-                  Sign in
-                </h1>
-                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
-                  Welcome back — sign in to your account.
-                </p>
-              </div>
-
-              {/* Fields */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
-                <FloatInput
-                  id="email"
-                  label="Email"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  error={emailError}
-                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
-                />
-
-                <FloatInput
-                  id="password"
-                  label="Password"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  value={password}
-                  error={passwordError}
-                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
-                  rightSlot={
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(s => !s)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
-                    >
-                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
-                    </button>
-                  }
-                />
-              </div>
-
-              {/* Forgot password */}
-              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
-                <Link
-                  to="/forgot-password"
-                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Forgot password?
-                </Link>
-              </div>
-
-              {/* Server error */}
-              {serverError && (
-                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
-              )}
-
-              {/* Sign in button */}
-              <button
-                type="submit"
-                disabled={loading}
-                style={{
-                  width: '100%',
-                  padding: '14px',
-                  borderRadius: 8,
-                  border: 'none',
-                  background: loading
-                    ? 'hsl(188 40% 35%)'
-                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
-                  color: '#fff',
-                  fontSize: 15,
-                  fontWeight: 700,
-                  letterSpacing: '0.01em',
-                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 8,
-                  fontFamily: 'inherit',
-                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
-                }}
-                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
-                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
-                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
-              >
-                {loading && <Spinner />}
-                {loading ? 'Signing in…' : 'Sign in'}
-              </button>
-
-              {/* Register link */}
-              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
-                Have an invite?{' '}
-                <Link
-                  to="/register"
-                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Create an account
-                </Link>
-              </p>
-            </form>
-          )}
-        </div>
-      </div>
-
-      {/* Keyframe for spinner */}
-      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   )
 }
@@ -33431,437 +33886,6 @@ func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Re
 	}
 
 	writeJSON(w, http.StatusOK, timeline)
-}
-````
-
-## File: packages/web/src/components/MemberModal.tsx
-````typescript
-/**
- * MemberModal — view and edit a team member's profile, identity, and role.
- *
- * Shows computed stats (timelines, activities by date status) and exposes
- * superadmin actions (promote, inactivate, delete) when the viewer is a
- * superadmin. Password reset is present but shows "SMTP not configured"
- * until Phase 14.
- */
-
-import { useState } from 'react'
-import { createPortal } from 'react-dom'
-import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users, ShieldOff } from 'lucide-react'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import type { Identity } from '@/components/identity/identity-constants'
-import { Badge } from '@/components/identity/Badge'
-import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
-import { useAuth } from '@/contexts/AuthContext'
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-import type { components } from '@draba/shared'
-
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-interface Props {
-  teamId: string
-  memberId: string
-  /** Whether the current viewer is a team admin. */
-  isAdmin: boolean
-  /** Whether the current viewer is a superadmin. */
-  isSuperadmin: boolean
-  onClose: () => void
-}
-
-// ── Small shared styles ───────────────────────────────────────────────────────
-
-const chipStyle = (color: string): React.CSSProperties => ({
-  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-  padding: '10px 16px', borderRadius: 8, flex: 1,
-  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
-  background: `${color}0a`, textAlign: 'center', minWidth: 0,
-})
-
-const cancelBtn: React.CSSProperties = {
-  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
-  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
-
-export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
-  const { user: currentUser } = useAuth()
-  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
-  const updateMember = useUpdateMember(teamId)
-  const promoteUser = usePromoteUser()
-  const archiveUser = useArchiveUser()
-  const unarchiveUser = useUnarchiveUser()
-  const deleteUser = useDeleteUser()
-  const revokeUser = useRevokeUser()
-
-  const [identity, setIdentity] = useState<Identity | null>(null)
-  const [displayName, setDisplayName] = useState<string | null>(null)
-  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | 'revoke' | null>(null)
-  const [revokeResult, setRevokeResult] = useState<{ membershipsInactivated: number; membershipsRemoved: number } | null>(null)
-
-  if (isLoading || isError || !detail) {
-    return createPortal(
-      <div
-        onClick={e => { if (e.target === e.currentTarget) onClose() }}
-        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-      >
-        <div style={{ width: 560, height: 300, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
-          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-            <X size={18} />
-          </button>
-          {isError ? (
-            <>
-              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
-              <button onClick={onClose} style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>Dismiss</button>
-            </>
-          ) : (
-            <span style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</span>
-          )}
-        </div>
-      </div>,
-      document.body,
-    )
-  }
-
-  const effectiveIdentity: Identity = identity ?? {
-    color: detail.color ?? '#1A97A2',
-    icon: detail.icon ?? '__name_words__',
-  }
-  const effectiveName = displayName ?? detail.displayName
-
-  const isParticipant = !detail.userId
-  const isInactivated = Boolean(detail.archivedAt)
-  const stats = detail.stats
-  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
-
-  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending || revokeUser.isPending
-
-  // detail is guaranteed non-null here (early return above handles loading/undefined).
-  // Non-null assertions in callbacks are safe because they only fire when the
-  // rendered modal is interactive, which requires detail to be loaded.
-  function handleSave() {
-    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
-    if (displayName !== null) patch.displayName = displayName
-    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
-    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
-  }
-
-  function handlePromote() {
-    if (!detail!.userId) return
-    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
-  }
-
-  function handleInactivate() {
-    if (!detail!.userId) return
-    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  function handleReactivate() {
-    if (!detail!.userId) return
-    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
-  }
-
-  function handleRevoke() {
-    if (!detail!.userId) return
-    revokeUser.mutate(detail!.userId, {
-      onSuccess: (result) => {
-        setConfirm(null)
-        setRevokeResult({ membershipsInactivated: result.membershipsInactivated, membershipsRemoved: result.membershipsRemoved })
-        // Close the modal after a short delay so the user can see the summary.
-        setTimeout(onClose, 2000)
-      },
-    })
-  }
-
-  function handleDelete() {
-    if (!detail!.userId) return
-    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  const memberColor = effectiveIdentity.color
-
-  return createPortal(
-    <div
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-    >
-      <div style={{ width: 560, maxHeight: '90vh', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-        {/* Confirm overlays */}
-        {confirm === 'promote' && (
-          <ConfirmDialog
-            variant="indigo"
-            icon={<Shield size={22} color="#6366F1" />}
-            title="Promote to Super Admin?"
-            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
-            confirmLabel="Promote"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handlePromote}
-          />
-        )}
-        {confirm === 'inactivate' && (
-          <ConfirmDialog
-            variant="amber"
-            icon={<Archive size={22} color="#F59E0B" />}
-            title={`Inactivate ${effectiveName}?`}
-            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
-            confirmLabel="Inactivate"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleInactivate}
-          />
-        )}
-        {confirm === 'delete' && (
-          <ConfirmDialog
-            variant="red"
-            icon={<Trash2 size={22} color="#EF4444" />}
-            title={`Delete ${effectiveName}?`}
-            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
-            confirmLabel="Delete permanently"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleDelete}
-          />
-        )}
-        {confirm === 'revoke' && (
-          <ConfirmDialog
-            variant="red"
-            icon={<ShieldOff size={22} color="#EF4444" />}
-            title={`Revoke all access for ${effectiveName}?`}
-            body="This will: (1) deactivate the account — the user cannot log in anywhere; (2) inactivate all team memberships that have activity history; (3) permanently remove memberships with no activity history. Activity data is always preserved."
-            confirmLabel="Revoke all access"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleRevoke}
-          />
-        )}
-
-        {confirm === null && (
-          <>
-            {/* Header */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-              <div style={{ flexShrink: 0 }}>
-                <IdentityWidget
-                  identity={effectiveIdentity}
-                  name={effectiveName}
-                  shape="circle"
-                  onChange={setIdentity}
-                />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
-                  {isParticipant ? 'Participant' : 'Team Member'}
-                  {isInactivated && ' · Inactive'}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  {(isAdmin || currentUser?.id === detail.userId) ? (
-                    <InlineEditableTitle
-                      value={displayName ?? detail.displayName}
-                      onChange={setDisplayName}
-                    />
-                  ) : (
-                    <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{effectiveName}</span>
-                  )}
-                  {isParticipant && (
-                    <span style={{ fontSize: 11, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
-                  )}
-                </div>
-              </div>
-              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex', flexShrink: 0 }}>
-                <X size={18} />
-              </button>
-            </div>
-
-            {/* Scrollable body */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-
-              {/* Email */}
-              {!isParticipant && (
-                <div style={{ marginBottom: 20 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
-                  <div style={{ fontSize: 13, color: 'var(--muted-foreground)', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {detail.email}
-                  </div>
-                </div>
-              )}
-
-              {/* Timeline stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Timelines
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Active</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Activity stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Activities
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Past due</span>
-                  </div>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Running</span>
-                  </div>
-                  <div style={chipStyle('#3B82F6')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Upcoming</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Teams list */}
-              {detail.teams.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Teams ({detail.teams.length})
-                  </label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    {detail.teams.map((tm: TeamMemberWithUser) => (
-                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--muted)', borderRadius: 7 }}>
-                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
-                        <span style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{tm.teamId}</span>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : 'var(--muted-foreground)', background: tm.role === 'admin' ? 'rgba(26,151,162,0.12)' : 'var(--muted)', border: `1px solid ${tm.role === 'admin' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`, borderRadius: 99, padding: '1px 8px' }}>
-                          {tm.role}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Joined date */}
-              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: 'var(--muted)', borderRadius: 6, fontSize: 12, color: 'var(--muted-foreground)' }}>
-                  <Clock size={12} />
-                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
-                </div>
-              </div>
-
-              {/* Account section — non-participant only */}
-              {!isParticipant && isAdmin && (
-                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
-                  <button
-                    style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'var(--font-sans)' }}
-                    title="SMTP is not configured"
-                    disabled
-                  >
-                    Reset password — SMTP not configured
-                  </button>
-                </div>
-              )}
-
-              {/* Superadmin actions */}
-              {isSuperadmin && !isParticipant && (
-                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
-                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Super Admin Actions
-                  </label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                    {!isInactivated && (
-                      <button
-                        onClick={() => setConfirm('promote')}
-                        style={{ fontSize: 12, color: '#6366F1', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Shield size={13} />
-                        Promote to Super Admin
-                      </button>
-                    )}
-                    {isInactivated ? (
-                      <button
-                        onClick={handleReactivate}
-                        disabled={busy}
-                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', opacity: busy ? 0.6 : 1 }}
-                      >
-                        Reactivate account
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setConfirm('inactivate')}
-                        style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Archive size={13} />
-                        Inactivate
-                      </button>
-                    )}
-                    {detail.deletable && (
-                      <button
-                        onClick={() => setConfirm('delete')}
-                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Trash2 size={13} />
-                        Delete
-                      </button>
-                    )}
-                    {/* Hidden once the account itself is deactivated — membership-level
-                        inactivation alone still leaves the account active on other teams */}
-                    {!detail.userArchivedAt && (
-                      <button
-                        onClick={() => setConfirm('revoke')}
-                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <ShieldOff size={13} />
-                        Revoke all access
-                      </button>
-                    )}
-                  </div>
-                  {activeActivityCount > 0 && (
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 8 }}>
-                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
-                    </div>
-                  )}
-                  {revokeResult && (
-                    <div style={{ fontSize: 12, color: 'var(--foreground)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
-                      Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Footer */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-              <button onClick={onClose} style={cancelBtn}>Cancel</button>
-              {(isAdmin || currentUser?.id === detail.userId) && (
-                <button
-                  onClick={handleSave}
-                  disabled={busy}
-                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'var(--font-sans)' }}
-                >
-                  {busy ? 'Saving…' : 'Save changes'}
-                </button>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-    </div>,
-    document.body,
-  )
 }
 ````
 
@@ -35706,6 +35730,289 @@ function ManageFiltersRow({ onClick }: { onClick: () => void }) {
       Manage filters
     </button>
   )
+}
+````
+
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
 }
 ````
 
@@ -37751,289 +38058,6 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 		Payload: map[string]string{"id": activityID},
 	})
 	w.WriteHeader(http.StatusNoContent)
-}
-````
-
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
 }
 ````
 
