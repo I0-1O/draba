@@ -8153,6 +8153,67 @@ CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
     ON password_reset_tokens (user_id);
 ````
 
+## File: packages/api/internal/db/migrations/011_fk_restrict.sql
+````sql
+-- Phase 10.1.4: enforce ON DELETE RESTRICT on team_member_id FKs.
+--
+-- activity_assignments and timeline_access were created in migration 003 with
+-- ON DELETE CASCADE on team_member_id. Cascade silently destroys historical
+-- assignment data when a team_members row is deleted. This migration rebuilds
+-- both tables with ON DELETE RESTRICT so that the database itself rejects any
+-- attempt to delete a team_members row that still has child rows in either
+-- table. The application-level guard in DELETE /teams/:id/members/:memberId
+-- counts activity_assignments first and returns 409 MEMBER_HAS_ASSIGNMENTS,
+-- which is the primary user-facing protection; RESTRICT is belt-and-suspenders.
+--
+-- timeline_access rows are not historical data (they are access-control entries)
+-- so the DELETE endpoint deletes them before removing the team_members row,
+-- satisfying the RESTRICT constraint for clean removals.
+--
+-- SQLite does not support ALTER TABLE … DROP CONSTRAINT, so a full
+-- table rebuild is required to change FK actions.
+
+-- 1. Stash activity_assignments data.
+CREATE TABLE tmp_activity_assignments (
+    activity_id    TEXT NOT NULL,
+    team_member_id TEXT NOT NULL
+);
+INSERT INTO tmp_activity_assignments (activity_id, team_member_id)
+    SELECT activity_id, team_member_id FROM activity_assignments;
+DROP TABLE activity_assignments;
+
+-- 2. Recreate activity_assignments with RESTRICT on team_member_id.
+CREATE TABLE activity_assignments (
+    activity_id    TEXT NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+    team_member_id TEXT NOT NULL REFERENCES team_members(id) ON DELETE RESTRICT,
+    PRIMARY KEY (activity_id, team_member_id)
+);
+INSERT INTO activity_assignments (activity_id, team_member_id)
+    SELECT activity_id, team_member_id FROM tmp_activity_assignments;
+DROP TABLE tmp_activity_assignments;
+
+-- 3. Stash timeline_access data.
+CREATE TABLE tmp_timeline_access (
+    timeline_id    TEXT NOT NULL,
+    team_member_id TEXT NOT NULL,
+    role           TEXT NOT NULL
+);
+INSERT INTO tmp_timeline_access (timeline_id, team_member_id, role)
+    SELECT timeline_id, team_member_id, role FROM timeline_access;
+DROP TABLE timeline_access;
+
+-- 4. Recreate timeline_access with RESTRICT on team_member_id.
+CREATE TABLE timeline_access (
+    timeline_id    TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+    team_member_id TEXT NOT NULL REFERENCES team_members(id) ON DELETE RESTRICT,
+    role           TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
+    PRIMARY KEY (timeline_id, team_member_id)
+);
+INSERT INTO timeline_access (timeline_id, team_member_id, role)
+    SELECT timeline_id, team_member_id, role FROM tmp_timeline_access;
+DROP TABLE tmp_timeline_access;
+````
+
 ## File: packages/api/internal/db/api_token_repo.go
 ````go
 package db
@@ -8695,6 +8756,323 @@ func (r *UserPreferenceRepo) Upsert(p *models.UserPreference) error {
 		return fmt.Errorf("upserting user preference: %w", err)
 	}
 	return nil
+}
+````
+
+## File: packages/api/internal/db/user_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// UserRepo is the persistence layer for User records.
+type UserRepo struct {
+	db *sqlx.DB
+}
+
+// NewUserRepo returns a UserRepo backed by db.
+func NewUserRepo(db *sqlx.DB) *UserRepo {
+	return &UserRepo{db: db}
+}
+
+// Create inserts u. Returns an error if the email already exists
+// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
+func (r *UserRepo) Create(u *models.User) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
+		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
+	`, u)
+	if err != nil {
+		return fmt.Errorf("creating user: %w", err)
+	}
+	return nil
+}
+
+// GetByEmail looks up a user by exact email match. Callers are expected to
+// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
+// when no row matches.
+func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by email: %w", err)
+	}
+	return &u, nil
+}
+
+// GetByID looks up a user by primary key.
+func (r *UserRepo) GetByID(id string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by id: %w", err)
+	}
+	return &u, nil
+}
+
+// UpdatePasswordByEmail replaces the password hash for the user with the
+// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
+func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
+	res, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
+		passwordHash, email,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("updating password: no user with email %q", email)
+	}
+	return nil
+}
+
+// Count returns the total number of users. Used by the registration flow
+// to detect first-user bootstrap and to enforce tier user limits.
+func (r *UserRepo) Count() (int, error) {
+	var count int
+	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
+	if err != nil {
+		return 0, fmt.Errorf("counting users: %w", err)
+	}
+	return count, nil
+}
+
+// SearchByNameOrEmail returns up to 20 users whose display_name or email
+// contains the query (case-insensitive). Archived users are excluded.
+func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
+	var users []*models.User
+	like := "%" + q + "%"
+	err := r.db.Select(&users, `
+		SELECT * FROM users
+		WHERE archived_at IS NULL
+		  AND (display_name LIKE ? OR email LIKE ?)
+		ORDER BY display_name ASC
+		LIMIT 20
+	`, like, like)
+	if err != nil {
+		return nil, fmt.Errorf("searching users: %w", err)
+	}
+	return users, nil
+}
+
+// SetSuperadmin sets or clears the is_superadmin flag on a user.
+func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		isSuperadmin, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting superadmin: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
+func (r *UserRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		at, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting user archived: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a user row. The caller must verify the user is deletable
+// (no active activities, single team membership) before calling this.
+func (r *UserRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting user: %w", err)
+	}
+	return nil
+}
+
+// UpdateProfile sets display_name, color, and icon on a user. When color or
+// icon changes, the new value is propagated to all team_members rows for the
+// user where the member's value currently matches the user's old value or is NULL
+// (i.e. has not been explicitly overridden by a team admin).
+func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
+	// Fetch old values for propagation comparison.
+	var old models.User
+	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("fetching user for profile update: %w", err)
+	}
+
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning profile update transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Exec(
+		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		displayName, color, icon, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating user profile: %w", err)
+	}
+
+	// Propagate color if changed: update team_members rows where color matches
+	// the old value or is NULL (not explicitly overridden).
+	if !ptrEqual(old.Color, color) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
+			color, id, old.Color,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating color to team_members: %w", err)
+		}
+	}
+
+	if !ptrEqual(old.Icon, icon) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
+			icon, id, old.Icon,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating icon to team_members: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing profile update: %w", err)
+	}
+	return nil
+}
+
+// UpdatePassword sets the password_hash on a user.
+func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		passwordHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	return nil
+}
+
+// ListAll returns all users with their active team membership count.
+// When orphanedOnly is true, only users with zero active memberships are returned.
+func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
+	q := `
+		SELECT u.*,
+		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
+		FROM users u
+		ORDER BY u.display_name ASC
+	`
+	if orphanedOnly {
+		q = `
+			SELECT u.*,
+			       0 AS team_count
+			FROM users u
+			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
+			ORDER BY u.display_name ASC
+		`
+	}
+	var rows []*models.AdminUserRow
+	if err := r.db.Select(&rows, q); err != nil {
+		return nil, fmt.Errorf("listing admin users: %w", err)
+	}
+	return rows, nil
+}
+
+// RevokeUser atomically revokes all access for a user:
+//  1. Sets users.archived_at (blocks login everywhere).
+//  2. For each team_members row for the user:
+//     – if assignment count is 0: deletes timeline_access then the row.
+//     – otherwise: sets team_members.archived_at (inactivates without data loss).
+//
+// Returns a summary of the actions taken. The caller must ensure the user
+// exists and is not a participant before calling.
+func (r *UserRepo) RevokeUser(userID string) (*models.RevokeUserResult, error) {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return nil, fmt.Errorf("beginning revoke transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now()
+
+	// Step 1: deactivate the account.
+	if _, err := tx.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		now, userID,
+	); err != nil {
+		return nil, fmt.Errorf("deactivating user account: %w", err)
+	}
+
+	// Step 2: collect all team_members rows for the user.
+	var memberIDs []string
+	if err := tx.Select(&memberIDs,
+		`SELECT id FROM team_members WHERE user_id = ?`, userID,
+	); err != nil {
+		return nil, fmt.Errorf("listing memberships: %w", err)
+	}
+
+	result := &models.RevokeUserResult{AccountDeactivated: true}
+
+	for _, memberID := range memberIDs {
+		var assignCount int
+		if err := tx.Get(&assignCount,
+			`SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?`, memberID,
+		); err != nil {
+			return nil, fmt.Errorf("counting assignments for member %s: %w", memberID, err)
+		}
+
+		if assignCount == 0 {
+			// No history — delete timeline_access then the member row.
+			if _, err := tx.Exec(
+				`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("deleting timeline access for member %s: %w", memberID, err)
+			}
+			if _, err := tx.Exec(
+				`DELETE FROM team_members WHERE id = ?`, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("deleting member %s: %w", memberID, err)
+			}
+			result.MembershipsRemoved++
+		} else {
+			// Has activity history — inactivate without deleting.
+			if _, err := tx.Exec(
+				`UPDATE team_members SET archived_at = ? WHERE id = ?`, now, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("inactivating member %s: %w", memberID, err)
+			}
+			result.MembershipsInactivated++
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing revoke transaction: %w", err)
+	}
+	return result, nil
+}
+
+// ptrEqual reports whether two string pointers point to equal values,
+// treating nil and a pointer to "" as distinct.
+func ptrEqual(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 ````
 
@@ -11501,6 +11879,316 @@ export function useFind(): FindContextValue {
   const ctx = useContext(FindContext)
   if (!ctx) throw new Error('useFind must be used inside FindProvider')
   return ctx
+}
+````
+
+## File: packages/web/src/hooks/useMemberManagement.ts
+````typescript
+/**
+ * TanStack Query hooks for member management, invites, and superadmin actions.
+ *
+ * Separated from useTeamActivities.ts because member CRUD is a distinct
+ * concern and this file would otherwise become unwieldy.
+ */
+
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+type MemberDetail = components['schemas']['MemberDetail']
+type Invite = components['schemas']['Invite']
+type InviteLink = components['schemas']['InviteLink']
+type User = components['schemas']['User']
+type RevokeUserResult = components['schemas']['RevokeUserResult']
+
+// ── Query keys ─────────────────────────────────────────────────────────────
+
+export const memberKeys = {
+  member: (teamId: string, memberId: string) => ['teams', teamId, 'members', memberId] as const,
+  invites: (teamId: string) => ['teams', teamId, 'invites'] as const,
+  inviteLink: (teamId: string) => ['teams', teamId, 'invite-link'] as const,
+  userSearch: (q: string) => ['users', 'search', q] as const,
+}
+
+// ── Member detail ───────────────────────────────────────────────────────────
+
+/** Fetches a single team member with computed stats. */
+export function useMemberDetail(teamId: string, memberId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: memberKeys.member(teamId, memberId),
+    queryFn: () => authFetch<MemberDetail>(`/teams/${teamId}/members/${memberId}`),
+    enabled: Boolean(teamId) && Boolean(memberId),
+  })
+}
+
+// ── Member mutations ────────────────────────────────────────────────────────
+
+interface UpdateMemberInput {
+  displayName?: string | null
+  color?: string | null
+  icon?: string | null
+  role?: 'admin' | 'member'
+}
+
+/** PATCHes a team member's display name, identity, or role. */
+export function useUpdateMember(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ memberId, patch }: { memberId: string; patch: UpdateMemberInput }) =>
+      authFetch<TeamMemberWithUser>(`/teams/${teamId}/members/${memberId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
+    },
+  })
+}
+
+/** Adds an existing registered user to a team by their userId. */
+export function useAddMember(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ userId, role }: { userId: string; role?: 'admin' | 'member' }) =>
+      authFetch<TeamMemberWithUser>(`/teams/${teamId}/members`, {
+        method: 'POST',
+        body: JSON.stringify({ userId, role: role ?? 'member' }),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
+    },
+  })
+}
+
+/** Removes a team member row. */
+export function useDeleteMember(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<void>(`/teams/${teamId}/members/${memberId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
+    },
+  })
+}
+
+/** Inactivates a team member. */
+export function useArchiveMember(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<TeamMemberWithUser>(`/teams/${teamId}/members/${memberId}/archive`, {
+        method: 'POST',
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
+    },
+  })
+}
+
+/** Reactivates an inactivated team member. */
+export function useUnarchiveMember(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<TeamMemberWithUser>(`/teams/${teamId}/members/${memberId}/unarchive`, {
+        method: 'POST',
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
+    },
+  })
+}
+
+/** Creates a login-less participant. */
+export function useCreateParticipant(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ name, color, icon }: { name: string; color?: string | null; icon?: string | null }) =>
+      authFetch<TeamMemberWithUser>(`/teams/${teamId}/participants`, {
+        method: 'POST',
+        body: JSON.stringify({ name, color, icon }),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
+    },
+  })
+}
+
+// ── Invites ─────────────────────────────────────────────────────────────────
+
+/** Lists pending invites for a team. */
+export function useTeamInvites(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: memberKeys.invites(teamId),
+    // Normalize null → [] so callers can safely use .length / .map
+    queryFn: async () => (await authFetch<Invite[] | null>(`/teams/${teamId}/invites`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Revokes a pending invite. */
+export function useRevokeInvite(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (inviteId: string) =>
+      authFetch<void>(`/teams/${teamId}/invites/${inviteId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: memberKeys.invites(teamId) })
+    },
+  })
+}
+
+// ── Invite link ─────────────────────────────────────────────────────────────
+
+/** Gets the current reusable invite link token. */
+export function useTeamInviteLink(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: memberKeys.inviteLink(teamId),
+    queryFn: () => authFetch<InviteLink>(`/teams/${teamId}/invite-link`),
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Generates or regenerates the reusable invite link. */
+export function useCreateInviteLink(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: () =>
+      authFetch<InviteLink>(`/teams/${teamId}/invite-link`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: memberKeys.inviteLink(teamId) })
+    },
+  })
+}
+
+/** Revokes the reusable invite link. */
+export function useRevokeInviteLink(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: () =>
+      authFetch<void>(`/teams/${teamId}/invite-link`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: memberKeys.inviteLink(teamId) })
+    },
+  })
+}
+
+// ── User search ─────────────────────────────────────────────────────────────
+
+/** Searches users by name or email. Query must be ≥2 chars. */
+export function useUserSearch(q: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: memberKeys.userSearch(q),
+    queryFn: async () => (await authFetch<User[] | null>(`/users/search?q=${encodeURIComponent(q)}`)) ?? [],
+    enabled: q.length >= 2,
+  })
+}
+
+// ── Superadmin actions ──────────────────────────────────────────────────────
+
+/** Promotes a user to superadmin. */
+export function usePromoteUser() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (userId: string) =>
+      authFetch<User>(`/users/${userId}/promote`, { method: 'POST' }),
+  })
+}
+
+/** Inactivates a user account. */
+export function useArchiveUser() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (userId: string) =>
+      authFetch<User>(`/users/${userId}/archive`, { method: 'POST' }),
+  })
+}
+
+/** Reactivates an inactivated user account. */
+export function useUnarchiveUser() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (userId: string) =>
+      authFetch<User>(`/users/${userId}/unarchive`, { method: 'POST' }),
+  })
+}
+
+/** Hard-deletes a user. Only succeeds when the user is deletable. */
+export function useDeleteUser() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useMutation({
+    mutationFn: (userId: string) =>
+      authFetch<void>(`/users/${userId}`, { method: 'DELETE' }),
+  })
+}
+
+/**
+ * Atomically revokes all access for a user (superadmin only).
+ * Deactivates the account, inactivates memberships with assignments, and
+ * removes memberships with zero assignments.
+ */
+export function useRevokeUser() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (userId: string) =>
+      authFetch<RevokeUserResult>(`/users/${userId}/revoke`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
 }
 ````
 
@@ -16581,65 +17269,351 @@ type PatchStatusTemplateItemJSONBody struct {
 }
 ````
 
-## File: packages/api/internal/db/migrations/011_fk_restrict.sql
-````sql
--- Phase 10.1.4: enforce ON DELETE RESTRICT on team_member_id FKs.
---
--- activity_assignments and timeline_access were created in migration 003 with
--- ON DELETE CASCADE on team_member_id. Cascade silently destroys historical
--- assignment data when a team_members row is deleted. This migration rebuilds
--- both tables with ON DELETE RESTRICT so that the database itself rejects any
--- attempt to delete a team_members row that still has child rows in either
--- table. The application-level guard in DELETE /teams/:id/members/:memberId
--- counts activity_assignments first and returns 409 MEMBER_HAS_ASSIGNMENTS,
--- which is the primary user-facing protection; RESTRICT is belt-and-suspenders.
---
--- timeline_access rows are not historical data (they are access-control entries)
--- so the DELETE endpoint deletes them before removing the team_members row,
--- satisfying the RESTRICT constraint for clean removals.
---
--- SQLite does not support ALTER TABLE … DROP CONSTRAINT, so a full
--- table rebuild is required to change FK actions.
+## File: packages/api/internal/api/user_handler.go
+````go
+package api
 
--- 1. Stash activity_assignments data.
-CREATE TABLE tmp_activity_assignments (
-    activity_id    TEXT NOT NULL,
-    team_member_id TEXT NOT NULL
-);
-INSERT INTO tmp_activity_assignments (activity_id, team_member_id)
-    SELECT activity_id, team_member_id FROM activity_assignments;
-DROP TABLE activity_assignments;
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
 
--- 2. Recreate activity_assignments with RESTRICT on team_member_id.
-CREATE TABLE activity_assignments (
-    activity_id    TEXT NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
-    team_member_id TEXT NOT NULL REFERENCES team_members(id) ON DELETE RESTRICT,
-    PRIMARY KEY (activity_id, team_member_id)
-);
-INSERT INTO activity_assignments (activity_id, team_member_id)
-    SELECT activity_id, team_member_id FROM tmp_activity_assignments;
-DROP TABLE tmp_activity_assignments;
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+)
 
--- 3. Stash timeline_access data.
-CREATE TABLE tmp_timeline_access (
-    timeline_id    TEXT NOT NULL,
-    team_member_id TEXT NOT NULL,
-    role           TEXT NOT NULL
-);
-INSERT INTO tmp_timeline_access (timeline_id, team_member_id, role)
-    SELECT timeline_id, team_member_id, role FROM timeline_access;
-DROP TABLE timeline_access;
+// handleUpdateProfile handles PATCH /users/me. Updates display_name, color,
+// and icon for the authenticated user. Color/icon changes propagate to all
+// team_members rows that have not been explicitly overridden.
+func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
 
--- 4. Recreate timeline_access with RESTRICT on team_member_id.
-CREATE TABLE timeline_access (
-    timeline_id    TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
-    team_member_id TEXT NOT NULL REFERENCES team_members(id) ON DELETE RESTRICT,
-    role           TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
-    PRIMARY KEY (timeline_id, team_member_id)
-);
-INSERT INTO timeline_access (timeline_id, team_member_id, role)
-    SELECT timeline_id, team_member_id, role FROM tmp_timeline_access;
-DROP TABLE tmp_timeline_access;
+	var body struct {
+		DisplayName *string `json:"displayName"`
+		Color       *string `json:"color"`
+		Icon        *string `json:"icon"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	// Apply changes only for fields that were provided.
+	displayName := user.DisplayName
+	if body.DisplayName != nil {
+		displayName = strings.TrimSpace(*body.DisplayName)
+		if displayName == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "displayName cannot be empty")
+			return
+		}
+	}
+
+	color := user.Color
+	if body.Color != nil {
+		color = body.Color
+	}
+	icon := user.Icon
+	if body.Icon != nil {
+		icon = body.Icon
+	}
+
+	if err := s.users.UpdateProfile(user.ID, displayName, color, icon); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	user.DisplayName = displayName
+	user.Color = color
+	user.Icon = icon
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleGetMyStats handles GET /users/me/stats. Returns aggregated activity and
+// timeline counts across all of the authenticated user's team memberships.
+func (s *Server) handleGetMyStats(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	stats, err := s.teams.GetUserStats(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleChangePassword handles PUT /users/me/password. Requires the caller
+// to supply the current password before setting a new one.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var body struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.CurrentPassword == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "currentPassword and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "new password must be at least 8 characters")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	// Verify the current password before allowing the change.
+	if err := auth.CheckPassword(user.PasswordHash, body.CurrentPassword); err != nil {
+		writeError(w, http.StatusUnauthorized, "WRONG_PASSWORD", "current password is incorrect")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(user.ID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleListAdminUsers handles GET /admin/users. Returns all users with team
+// membership counts. Supports ?orphaned=true to filter to zero-membership users.
+// Superadmin-only.
+func (s *Server) handleListAdminUsers(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	orphanedOnly := r.URL.Query().Get("orphaned") == "true"
+	rows, err := s.users.ListAll(orphanedOnly)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"users": rows})
+}
+
+// handlePromoteUser sets is_superadmin=true on a user. Superadmin-only.
+// Participants (no user account) cannot be promoted.
+func (s *Server) handlePromoteUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+
+	if err := s.users.SetSuperadmin(target.ID, true); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+
+	target.IsSuperadmin = true
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleArchiveUser inactivates a user account. Superadmin-only.
+// Archived users cannot log in; their data is preserved.
+func (s *Server) handleArchiveUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_ARCHIVE", "cannot archive your own account")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+
+	now := time.Now()
+	if err := s.users.SetArchived(target.ID, &now); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+
+	target.ArchivedAt = &now
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleUnarchiveUser reactivates an inactivated user account. Superadmin-only.
+func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+
+	if err := s.users.SetArchived(target.ID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+
+	target.ArchivedAt = nil
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleRevokeUser atomically revokes all access for a user. Superadmin-only.
+// Self-revoke is blocked to prevent a superadmin from locking themselves out.
+func (s *Server) handleRevokeUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_REVOKE", "cannot revoke your own account")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+
+	result, err := s.users.RevokeUser(target.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleDeleteUser hard-deletes a user. Superadmin-only. Only permitted when
+// the user has no active activity assignments and belongs to a single team.
+func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_DELETE", "cannot delete your own account")
+		return
+	}
+
+	if _, err := s.users.GetByID(userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+
+	teamCount, err := s.teams.CountTeamsForUser(userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	if teamCount > 1 {
+		writeError(w, http.StatusConflict, "MULTI_TEAM", "user belongs to multiple teams; remove them from each team first")
+		return
+	}
+
+	if err := s.users.Delete(userID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
 ````
 
 ## File: packages/api/internal/db/migrations/012_status_templates.sql
@@ -16797,12 +17771,14 @@ CREATE TABLE activity_tags (
 ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0;
 ````
 
-## File: packages/api/internal/db/user_repo.go
+## File: packages/api/internal/db/team_repo.go
 ````go
 package db
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -16810,307 +17786,443 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
-// UserRepo is the persistence layer for User records.
-type UserRepo struct {
+// ErrDuplicateName is returned by TeamRepo.Create when the generated slug
+// collides with an existing team's slug (UNIQUE constraint on teams.slug).
+var ErrDuplicateName = errors.New("team name already taken")
+
+// TeamRepo is the persistence layer for Team records and their membership
+// join table.
+type TeamRepo struct {
 	db *sqlx.DB
 }
 
-// NewUserRepo returns a UserRepo backed by db.
-func NewUserRepo(db *sqlx.DB) *UserRepo {
-	return &UserRepo{db: db}
+// NewTeamRepo returns a TeamRepo backed by db.
+func NewTeamRepo(db *sqlx.DB) *TeamRepo {
+	return &TeamRepo{db: db}
 }
 
-// Create inserts u. Returns an error if the email already exists
-// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
-func (r *UserRepo) Create(u *models.User) error {
+// Create inserts a new Team row. Returns ErrDuplicateName if the slug is
+// already taken.
+func (r *TeamRepo) Create(team *models.Team) error {
 	_, err := r.db.NamedExec(`
-		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
-		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
-	`, u)
+		INSERT INTO teams (id, name, slug, description, notes, color, icon, created_at, updated_at)
+		VALUES (:id, :name, :slug, :description, :notes, :color, :icon, :created_at, :updated_at)
+	`, team)
 	if err != nil {
-		return fmt.Errorf("creating user: %w", err)
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateName
+		}
+		return fmt.Errorf("creating team: %w", err)
 	}
 	return nil
 }
 
-// GetByEmail looks up a user by exact email match. Callers are expected to
-// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
-// when no row matches.
-func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
+// Update writes mutable team fields (name, slug, description, notes, color,
+// icon, updated_at). It does not touch archived_at or created_at.
+func (r *TeamRepo) Update(team *models.Team) error {
+	_, err := r.db.NamedExec(`
+		UPDATE teams
+		SET name = :name, slug = :slug, description = :description, notes = :notes,
+		    color = :color, icon = :icon, updated_at = :updated_at
+		WHERE id = :id
+	`, team)
 	if err != nil {
-		return nil, fmt.Errorf("getting user by email: %w", err)
-	}
-	return &u, nil
-}
-
-// GetByID looks up a user by primary key.
-func (r *UserRepo) GetByID(id string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by id: %w", err)
-	}
-	return &u, nil
-}
-
-// UpdatePasswordByEmail replaces the password hash for the user with the
-// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
-func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
-	res, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
-		passwordHash, email,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	if n == 0 {
-		return fmt.Errorf("updating password: no user with email %q", email)
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateName
+		}
+		return fmt.Errorf("updating team: %w", err)
 	}
 	return nil
 }
 
-// Count returns the total number of users. Used by the registration flow
-// to detect first-user bootstrap and to enforce tier user limits.
-func (r *UserRepo) Count() (int, error) {
+// SetArchived sets or clears the archived_at timestamp on a team.
+func (r *TeamRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(`UPDATE teams SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now(), id)
+	if err != nil {
+		return fmt.Errorf("setting team archived: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Team by primary key.
+func (r *TeamRepo) GetByID(id string) (*models.Team, error) {
+	var t models.Team
+	err := r.db.Get(&t, `SELECT * FROM teams WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting team: %w", err)
+	}
+	return &t, nil
+}
+
+// AddMember inserts a team_members row. m.ID must be pre-populated by the caller.
+func (r *TeamRepo) AddMember(m *models.TeamMember) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at)
+		VALUES (:id, :team_id, :user_id, :display_name, :role, :color, :icon, :joined_at)
+	`, m)
+	if err != nil {
+		return fmt.Errorf("adding team member: %w", err)
+	}
+	return nil
+}
+
+// GetMember returns the team_members row for a given (team, user) pair.
+func (r *TeamRepo) GetMember(teamID, userID string) (*models.TeamMember, error) {
+	var m models.TeamMember
+	err := r.db.Get(&m, `
+		SELECT * FROM team_members WHERE team_id = ? AND user_id = ?
+	`, teamID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("getting team member: %w", err)
+	}
+	return &m, nil
+}
+
+// ListMembers returns active (non-archived) members of a team, including
+// login-less Participants. A LEFT JOIN handles Participants who have no users
+// row; COALESCE prefers the per-team display_name override, then falls back to users.
+func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, error) {
+	return r.listMembers(teamID, false)
+}
+
+// ListMembersAll returns all members of a team, including inactivated members.
+func (r *TeamRepo) ListMembersAll(teamID string) ([]*models.TeamMemberWithUser, error) {
+	return r.listMembers(teamID, true)
+}
+
+func (r *TeamRepo) listMembers(teamID string, includeArchived bool) ([]*models.TeamMemberWithUser, error) {
+	var members []*models.TeamMemberWithUser
+	query := `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.team_id = ?`
+	if !includeArchived {
+		query += ` AND tm.archived_at IS NULL`
+	}
+	query += ` ORDER BY tm.joined_at ASC`
+	if err := r.db.Select(&members, query, teamID); err != nil {
+		return nil, fmt.Errorf("listing team members: %w", err)
+	}
+	return members, nil
+}
+
+// ListByUserID returns all teams the given user belongs to, ordered by
+// creation date ascending. When includeArchived is false (the default),
+// archived teams are excluded.
+func (r *TeamRepo) ListByUserID(userID string, includeArchived bool) ([]*models.Team, error) {
+	teams := make([]*models.Team, 0)
+	query := `
+		SELECT t.* FROM teams t
+		JOIN team_members tm ON tm.team_id = t.id
+		WHERE tm.user_id = ?`
+	if !includeArchived {
+		query += ` AND t.archived_at IS NULL`
+	}
+	query += ` ORDER BY t.created_at ASC`
+	if err := r.db.Select(&teams, query, userID); err != nil {
+		return nil, fmt.Errorf("listing teams for user: %w", err)
+	}
+	return teams, nil
+}
+
+// ListAll returns every team in the system, optionally including archived ones.
+// Used by superadmin callers who need visibility across all teams.
+func (r *TeamRepo) ListAll(includeArchived bool) ([]*models.Team, error) {
+	teams := make([]*models.Team, 0)
+	query := `SELECT * FROM teams`
+	if !includeArchived {
+		query += ` WHERE archived_at IS NULL`
+	}
+	query += ` ORDER BY created_at ASC`
+	if err := r.db.Select(&teams, query); err != nil {
+		return nil, fmt.Errorf("listing all teams: %w", err)
+	}
+	return teams, nil
+}
+
+// Count returns the total number of teams.
+func (r *TeamRepo) Count() (int, error) {
 	var count int
-	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
+	err := r.db.Get(&count, `SELECT COUNT(*) FROM teams`)
 	if err != nil {
-		return 0, fmt.Errorf("counting users: %w", err)
+		return 0, fmt.Errorf("counting teams: %w", err)
 	}
 	return count, nil
 }
 
-// SearchByNameOrEmail returns up to 20 users whose display_name or email
-// contains the query (case-insensitive). Archived users are excluded.
-func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
-	var users []*models.User
-	like := "%" + q + "%"
-	err := r.db.Select(&users, `
-		SELECT * FROM users
-		WHERE archived_at IS NULL
-		  AND (display_name LIKE ? OR email LIKE ?)
-		ORDER BY display_name ASC
-		LIMIT 20
-	`, like, like)
+// GetMemberByID fetches a team_members row by its primary key. Unlike
+// GetMember (which looks up by team+userID pair), this is the canonical
+// lookup used by member-scoped routes that receive a memberId path param.
+func (r *TeamRepo) GetMemberByID(memberID string) (*models.TeamMemberWithUser, error) {
+	var m models.TeamMemberWithUser
+	err := r.db.Get(&m, `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.id = ?
+	`, memberID)
 	if err != nil {
-		return nil, fmt.Errorf("searching users: %w", err)
+		return nil, fmt.Errorf("getting team member by id: %w", err)
 	}
-	return users, nil
+	return &m, nil
 }
 
-// SetSuperadmin sets or clears the is_superadmin flag on a user.
-func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		isSuperadmin, id,
-	)
+// UpdateMember applies mutable identity and role fields to a team_members row.
+// Only non-nil arguments are written; nil fields retain their current values.
+func (r *TeamRepo) UpdateMember(memberID string, displayName, color, icon, role *string) error {
+	// Fetch current values so we can apply the partial update.
+	type row struct {
+		DisplayName *string `db:"display_name"`
+		Color       *string `db:"color"`
+		Icon        *string `db:"icon"`
+		Role        string  `db:"role"`
+	}
+	var cur row
+	if err := r.db.Get(&cur, `SELECT display_name, color, icon, role FROM team_members WHERE id = ?`, memberID); err != nil {
+		return fmt.Errorf("fetching member for update: %w", err)
+	}
+	if displayName != nil {
+		cur.DisplayName = displayName
+	}
+	if color != nil {
+		cur.Color = color
+	}
+	if icon != nil {
+		cur.Icon = icon
+	}
+	if role != nil {
+		cur.Role = *role
+	}
+	_, err := r.db.Exec(`
+		UPDATE team_members SET display_name = ?, color = ?, icon = ?, role = ? WHERE id = ?
+	`, cur.DisplayName, cur.Color, cur.Icon, cur.Role, memberID)
 	if err != nil {
-		return fmt.Errorf("setting superadmin: %w", err)
+		return fmt.Errorf("updating team member: %w", err)
 	}
 	return nil
 }
 
-// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
-func (r *UserRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		at, id,
-	)
+// DeleteMember removes a team_members row. The caller is responsible for
+// verifying that the member is not the last admin before calling this, and
+// must delete the member's timeline_access rows first (RESTRICT FK).
+func (r *TeamRepo) DeleteMember(memberID string) error {
+	_, err := r.db.Exec(`DELETE FROM team_members WHERE id = ?`, memberID)
 	if err != nil {
-		return fmt.Errorf("setting user archived: %w", err)
+		return fmt.Errorf("deleting team member: %w", err)
 	}
 	return nil
 }
 
-// Delete hard-deletes a user row. The caller must verify the user is deletable
-// (no active activities, single team membership) before calling this.
-func (r *UserRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+// CountMemberAssignments returns how many activity_assignments rows reference
+// this team member. Callers use this count to block hard-delete when history exists.
+func (r *TeamRepo) CountMemberAssignments(memberID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?
+	`, memberID)
 	if err != nil {
-		return fmt.Errorf("deleting user: %w", err)
+		return 0, fmt.Errorf("counting member assignments: %w", err)
+	}
+	return count, nil
+}
+
+// DeleteMemberTimelineAccess removes all timeline_access entries for a member.
+// Must be called before DeleteMember; the RESTRICT FK on
+// timeline_access.team_member_id blocks the team_members deletion otherwise.
+func (r *TeamRepo) DeleteMemberTimelineAccess(memberID string) error {
+	_, err := r.db.Exec(`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID)
+	if err != nil {
+		return fmt.Errorf("deleting member timeline access: %w", err)
 	}
 	return nil
 }
 
-// UpdateProfile sets display_name, color, and icon on a user. When color or
-// icon changes, the new value is propagated to all team_members rows for the
-// user where the member's value currently matches the user's old value or is NULL
-// (i.e. has not been explicitly overridden by a team admin).
-func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
-	// Fetch old values for propagation comparison.
-	var old models.User
-	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("fetching user for profile update: %w", err)
-	}
-
-	tx, err := r.db.Beginx()
+// SetMemberArchived sets or clears archived_at on a team_members row.
+func (r *TeamRepo) SetMemberArchived(memberID string, at *time.Time) error {
+	_, err := r.db.Exec(`UPDATE team_members SET archived_at = ? WHERE id = ?`, at, memberID)
 	if err != nil {
-		return fmt.Errorf("beginning profile update transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	_, err = tx.Exec(
-		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		displayName, color, icon, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating user profile: %w", err)
-	}
-
-	// Propagate color if changed: update team_members rows where color matches
-	// the old value or is NULL (not explicitly overridden).
-	if !ptrEqual(old.Color, color) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
-			color, id, old.Color,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating color to team_members: %w", err)
-		}
-	}
-
-	if !ptrEqual(old.Icon, icon) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
-			icon, id, old.Icon,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating icon to team_members: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing profile update: %w", err)
+		return fmt.Errorf("setting member archived: %w", err)
 	}
 	return nil
 }
 
-// UpdatePassword sets the password_hash on a user.
-func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		passwordHash, id,
-	)
+// CountAdmins counts non-archived admin members of a team. Used to enforce
+// the "cannot remove last admin" constraint.
+func (r *TeamRepo) CountAdmins(teamID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM team_members
+		WHERE team_id = ? AND role = 'admin' AND archived_at IS NULL
+	`, teamID)
 	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
+		return 0, fmt.Errorf("counting admins: %w", err)
 	}
-	return nil
+	return count, nil
 }
 
-// ListAll returns all users with their active team membership count.
-// When orphanedOnly is true, only users with zero active memberships are returned.
-func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
-	q := `
-		SELECT u.*,
-		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
-		FROM users u
-		ORDER BY u.display_name ASC
-	`
-	if orphanedOnly {
-		q = `
-			SELECT u.*,
-			       0 AS team_count
-			FROM users u
-			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
-			ORDER BY u.display_name ASC
-		`
+// CountTeamsForUser returns how many teams a user belongs to. Used to enforce
+// the "single team" constraint for hard deletion.
+func (r *TeamRepo) CountTeamsForUser(userID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM team_members WHERE user_id = ? AND archived_at IS NULL
+	`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("counting user teams: %w", err)
 	}
-	var rows []*models.AdminUserRow
-	if err := r.db.Select(&rows, q); err != nil {
-		return nil, fmt.Errorf("listing admin users: %w", err)
-	}
-	return rows, nil
+	return count, nil
 }
 
-// RevokeUser atomically revokes all access for a user:
-//  1. Sets users.archived_at (blocks login everywhere).
-//  2. For each team_members row for the user:
-//     – if assignment count is 0: deletes timeline_access then the row.
-//     – otherwise: sets team_members.archived_at (inactivates without data loss).
-//
-// Returns a summary of the actions taken. The caller must ensure the user
-// exists and is not a participant before calling.
-func (r *UserRepo) RevokeUser(userID string) (*models.RevokeUserResult, error) {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return nil, fmt.Errorf("beginning revoke transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
+// GetMemberStats computes activity and timeline counts for a team member.
+func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) {
 	now := time.Now()
+	var stats models.MemberStats
 
-	// Step 1: deactivate the account.
-	if _, err := tx.Exec(
-		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		now, userID,
-	); err != nil {
-		return nil, fmt.Errorf("deactivating user account: %w", err)
+	// Timeline counts via timeline_access.
+	if err := r.db.Get(&stats.ActiveTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		WHERE ta.team_member_id = ? AND t.archived_at IS NULL
+	`, memberID); err != nil {
+		return nil, fmt.Errorf("counting active timelines: %w", err)
+	}
+	if err := r.db.Get(&stats.ArchivedTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		WHERE ta.team_member_id = ? AND t.archived_at IS NOT NULL
+	`, memberID); err != nil {
+		return nil, fmt.Errorf("counting archived timelines: %w", err)
 	}
 
-	// Step 2: collect all team_members rows for the user.
-	var memberIDs []string
-	if err := tx.Select(&memberIDs,
-		`SELECT id FROM team_members WHERE user_id = ?`, userID,
-	); err != nil {
-		return nil, fmt.Errorf("listing memberships: %w", err)
+	// Activity counts from activity_assignments.
+	rows, err := r.db.Query(`
+		SELECT
+			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                                     THEN 1 ELSE 0 END), 0) AS archived,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                                     THEN 1 ELSE 0 END), 0) AS past_due,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ?                   THEN 1 ELSE 0 END), 0) AS running,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                                     THEN 1 ELSE 0 END), 0) AS upcoming
+		FROM activity_assignments aa
+		JOIN activities a ON a.id = aa.activity_id
+		WHERE aa.team_member_id = ?
+	`, now, now, now, now, memberID)
+	if err != nil {
+		return nil, fmt.Errorf("computing activity stats: %w", err)
 	}
-
-	result := &models.RevokeUserResult{AccountDeactivated: true}
-
-	for _, memberID := range memberIDs {
-		var assignCount int
-		if err := tx.Get(&assignCount,
-			`SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?`, memberID,
-		); err != nil {
-			return nil, fmt.Errorf("counting assignments for member %s: %w", memberID, err)
-		}
-
-		if assignCount == 0 {
-			// No history — delete timeline_access then the member row.
-			if _, err := tx.Exec(
-				`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("deleting timeline access for member %s: %w", memberID, err)
-			}
-			if _, err := tx.Exec(
-				`DELETE FROM team_members WHERE id = ?`, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("deleting member %s: %w", memberID, err)
-			}
-			result.MembershipsRemoved++
-		} else {
-			// Has activity history — inactivate without deleting.
-			if _, err := tx.Exec(
-				`UPDATE team_members SET archived_at = ? WHERE id = ?`, now, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("inactivating member %s: %w", memberID, err)
-			}
-			result.MembershipsInactivated++
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
+			return nil, fmt.Errorf("scanning activity stats: %w", err)
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("committing revoke transaction: %w", err)
-	}
-	return result, nil
+	return &stats, nil
 }
 
-// ptrEqual reports whether two string pointers point to equal values,
-// treating nil and a pointer to "" as distinct.
-func ptrEqual(a, b *string) bool {
-	if a == nil && b == nil {
-		return true
+// GetUserStats aggregates activity and timeline counts across all of a user's
+// team memberships. Used by GET /users/me/stats for the profile page.
+func (r *TeamRepo) GetUserStats(userID string) (*models.MemberStats, error) {
+	now := time.Now()
+	var stats models.MemberStats
+
+	if err := r.db.Get(&stats.ActiveTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting active timelines: %w", err)
 	}
-	if a == nil || b == nil {
-		return false
+	if err := r.db.Get(&stats.ArchivedTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NOT NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting archived timelines: %w", err)
 	}
-	return *a == *b
+
+	rows, err := r.db.Query(`
+		SELECT
+			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ? THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                   THEN 1 ELSE 0 END), 0)
+		FROM activity_assignments aa
+		JOIN activities a ON a.id = aa.activity_id
+		JOIN team_members tm ON tm.id = aa.team_member_id
+		WHERE tm.user_id = ?
+	`, now, now, now, now, userID)
+	if err != nil {
+		return nil, fmt.Errorf("computing activity stats: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
+			return nil, fmt.Errorf("scanning activity stats: %w", err)
+		}
+	}
+
+	return &stats, nil
+}
+
+// GetMemberAllTeams returns all team memberships for a user (across all teams).
+// Used to populate the "Teams" section of the Member Edit Modal.
+func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUser, error) {
+	var members []*models.TeamMemberWithUser
+	err := r.db.Select(&members, `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.user_id = ?
+		ORDER BY tm.joined_at ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("getting member all teams: %w", err)
+	}
+	return members, nil
+}
+
+// SetInviteLinkToken sets the reusable invite link token on a team. Passing
+// nil clears it (revoking the link).
+func (r *TeamRepo) SetInviteLinkToken(teamID string, token *string) error {
+	_, err := r.db.Exec(
+		`UPDATE teams SET invite_link_token = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		token, teamID,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return fmt.Errorf("invite link token collision: %w", err)
+		}
+		return fmt.Errorf("setting invite link token: %w", err)
+	}
+	return nil
+}
+
+// GetByInviteLinkToken looks up a team by its invite_link_token. Returns
+// sql.ErrNoRows (wrapped) when no matching team is found.
+func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
+	var t models.Team
+	err := r.db.Get(&t, `
+		SELECT * FROM teams WHERE invite_link_token = ? AND archived_at IS NULL
+	`, token)
+	if err != nil {
+		return nil, fmt.Errorf("getting team by invite link: %w", err)
+	}
+	return &t, nil
 }
 ````
 
@@ -18410,316 +19522,6 @@ describe('formatDate', () => {
 })
 ````
 
-## File: packages/web/src/hooks/useMemberManagement.ts
-````typescript
-/**
- * TanStack Query hooks for member management, invites, and superadmin actions.
- *
- * Separated from useTeamActivities.ts because member CRUD is a distinct
- * concern and this file would otherwise become unwieldy.
- */
-
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-type MemberDetail = components['schemas']['MemberDetail']
-type Invite = components['schemas']['Invite']
-type InviteLink = components['schemas']['InviteLink']
-type User = components['schemas']['User']
-type RevokeUserResult = components['schemas']['RevokeUserResult']
-
-// ── Query keys ─────────────────────────────────────────────────────────────
-
-export const memberKeys = {
-  member: (teamId: string, memberId: string) => ['teams', teamId, 'members', memberId] as const,
-  invites: (teamId: string) => ['teams', teamId, 'invites'] as const,
-  inviteLink: (teamId: string) => ['teams', teamId, 'invite-link'] as const,
-  userSearch: (q: string) => ['users', 'search', q] as const,
-}
-
-// ── Member detail ───────────────────────────────────────────────────────────
-
-/** Fetches a single team member with computed stats. */
-export function useMemberDetail(teamId: string, memberId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: memberKeys.member(teamId, memberId),
-    queryFn: () => authFetch<MemberDetail>(`/teams/${teamId}/members/${memberId}`),
-    enabled: Boolean(teamId) && Boolean(memberId),
-  })
-}
-
-// ── Member mutations ────────────────────────────────────────────────────────
-
-interface UpdateMemberInput {
-  displayName?: string | null
-  color?: string | null
-  icon?: string | null
-  role?: 'admin' | 'member'
-}
-
-/** PATCHes a team member's display name, identity, or role. */
-export function useUpdateMember(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ memberId, patch }: { memberId: string; patch: UpdateMemberInput }) =>
-      authFetch<TeamMemberWithUser>(`/teams/${teamId}/members/${memberId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
-    },
-  })
-}
-
-/** Adds an existing registered user to a team by their userId. */
-export function useAddMember(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ userId, role }: { userId: string; role?: 'admin' | 'member' }) =>
-      authFetch<TeamMemberWithUser>(`/teams/${teamId}/members`, {
-        method: 'POST',
-        body: JSON.stringify({ userId, role: role ?? 'member' }),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
-    },
-  })
-}
-
-/** Removes a team member row. */
-export function useDeleteMember(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (memberId: string) =>
-      authFetch<void>(`/teams/${teamId}/members/${memberId}`, { method: 'DELETE' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
-    },
-  })
-}
-
-/** Inactivates a team member. */
-export function useArchiveMember(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (memberId: string) =>
-      authFetch<TeamMemberWithUser>(`/teams/${teamId}/members/${memberId}/archive`, {
-        method: 'POST',
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
-    },
-  })
-}
-
-/** Reactivates an inactivated team member. */
-export function useUnarchiveMember(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (memberId: string) =>
-      authFetch<TeamMemberWithUser>(`/teams/${teamId}/members/${memberId}/unarchive`, {
-        method: 'POST',
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
-    },
-  })
-}
-
-/** Creates a login-less participant. */
-export function useCreateParticipant(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ name, color, icon }: { name: string; color?: string | null; icon?: string | null }) =>
-      authFetch<TeamMemberWithUser>(`/teams/${teamId}/participants`, {
-        method: 'POST',
-        body: JSON.stringify({ name, color, icon }),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'members'] })
-    },
-  })
-}
-
-// ── Invites ─────────────────────────────────────────────────────────────────
-
-/** Lists pending invites for a team. */
-export function useTeamInvites(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: memberKeys.invites(teamId),
-    // Normalize null → [] so callers can safely use .length / .map
-    queryFn: async () => (await authFetch<Invite[] | null>(`/teams/${teamId}/invites`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Revokes a pending invite. */
-export function useRevokeInvite(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (inviteId: string) =>
-      authFetch<void>(`/teams/${teamId}/invites/${inviteId}`, { method: 'DELETE' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: memberKeys.invites(teamId) })
-    },
-  })
-}
-
-// ── Invite link ─────────────────────────────────────────────────────────────
-
-/** Gets the current reusable invite link token. */
-export function useTeamInviteLink(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: memberKeys.inviteLink(teamId),
-    queryFn: () => authFetch<InviteLink>(`/teams/${teamId}/invite-link`),
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Generates or regenerates the reusable invite link. */
-export function useCreateInviteLink(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: () =>
-      authFetch<InviteLink>(`/teams/${teamId}/invite-link`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: memberKeys.inviteLink(teamId) })
-    },
-  })
-}
-
-/** Revokes the reusable invite link. */
-export function useRevokeInviteLink(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: () =>
-      authFetch<void>(`/teams/${teamId}/invite-link`, { method: 'DELETE' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: memberKeys.inviteLink(teamId) })
-    },
-  })
-}
-
-// ── User search ─────────────────────────────────────────────────────────────
-
-/** Searches users by name or email. Query must be ≥2 chars. */
-export function useUserSearch(q: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: memberKeys.userSearch(q),
-    queryFn: async () => (await authFetch<User[] | null>(`/users/search?q=${encodeURIComponent(q)}`)) ?? [],
-    enabled: q.length >= 2,
-  })
-}
-
-// ── Superadmin actions ──────────────────────────────────────────────────────
-
-/** Promotes a user to superadmin. */
-export function usePromoteUser() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (userId: string) =>
-      authFetch<User>(`/users/${userId}/promote`, { method: 'POST' }),
-  })
-}
-
-/** Inactivates a user account. */
-export function useArchiveUser() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (userId: string) =>
-      authFetch<User>(`/users/${userId}/archive`, { method: 'POST' }),
-  })
-}
-
-/** Reactivates an inactivated user account. */
-export function useUnarchiveUser() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (userId: string) =>
-      authFetch<User>(`/users/${userId}/unarchive`, { method: 'POST' }),
-  })
-}
-
-/** Hard-deletes a user. Only succeeds when the user is deletable. */
-export function useDeleteUser() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useMutation({
-    mutationFn: (userId: string) =>
-      authFetch<void>(`/users/${userId}`, { method: 'DELETE' }),
-  })
-}
-
-/**
- * Atomically revokes all access for a user (superadmin only).
- * Deactivates the account, inactivates memberships with assignments, and
- * removes memberships with zero assignments.
- */
-export function useRevokeUser() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (userId: string) =>
-      authFetch<RevokeUserResult>(`/users/${userId}/revoke`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-````
-
 ## File: packages/web/src/hooks/usePreferences.ts
 ````typescript
 /**
@@ -19211,6 +20013,152 @@ describe('ApiError', () => {
     expect(err.code).toBe('NOT_FOUND')
   })
 })
+````
+
+## File: packages/web/src/lib/api.ts
+````typescript
+/**
+ * Thin fetch wrapper over the draba REST API.
+ *
+ * Token lifecycle:
+ *   - Access token: kept in memory via the AuthContext; passed as Authorization header.
+ *   - Refresh token: persisted in localStorage under REFRESH_TOKEN_KEY.
+ *     On a 401, the client attempts one silent refresh then retries the original request.
+ *     Concurrent 401s share a single refresh call (mutex via in-flight promise).
+ *     If refresh also fails, the registered logout handler is called and the user
+ *     is redirected to /login.
+ *
+ * All callers receive typed JSON or throw an ApiError.
+ */
+
+import type { components } from '@draba/shared'
+
+export type ApiErrorBody = components['schemas']['ApiError']
+
+// Empty string = same-origin relative URLs, which is correct when the SPA is
+// embedded in the Go binary. Set VITE_API_URL for local dev against a
+// separate API server (e.g. VITE_API_URL=http://localhost:8080).
+export const API_BASE =
+  (import.meta.env.VITE_API_URL as string | undefined) ?? ''
+
+export const REFRESH_TOKEN_KEY = 'draba_refresh_token'
+
+/** Thrown for any non-2xx response. */
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+    /** Extra fields from the error response body (e.g. assignmentCount on 409). */
+    public readonly data?: Record<string, unknown>,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+/** Reads the stored refresh token from localStorage. */
+export function getStoredRefreshToken(): string | null {
+  return localStorage.getItem(REFRESH_TOKEN_KEY)
+}
+
+/** Persists the refresh token to localStorage. */
+export function storeRefreshToken(token: string): void {
+  localStorage.setItem(REFRESH_TOKEN_KEY, token)
+}
+
+/** Removes the refresh token from localStorage (on logout). */
+export function clearStoredRefreshToken(): void {
+  localStorage.removeItem(REFRESH_TOKEN_KEY)
+}
+
+async function parseError(res: Response): Promise<ApiError> {
+  try {
+    const body = (await res.json()) as ApiErrorBody & Record<string, unknown>
+    const { error, ...rest } = body
+    const data = Object.keys(rest).length > 0 ? (rest as Record<string, unknown>) : undefined
+    return new ApiError(res.status, error.code, error.message, data)
+  } catch {
+    return new ApiError(res.status, 'UNKNOWN', res.statusText)
+  }
+}
+
+/** Low-level fetch that injects the access token and throws ApiError on non-2xx. */
+export async function apiFetch<T>(
+  path: string,
+  init: RequestInit & { accessToken?: string } = {},
+): Promise<T> {
+  const { accessToken, ...rest } = init
+  const headers = new Headers(rest.headers)
+  headers.set('Content-Type', 'application/json')
+  if (accessToken) {
+    headers.set('Authorization', `Bearer ${accessToken}`)
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
+
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+
+  // 204 No Content — return undefined cast as T
+  if (res.status === 204) {
+    return undefined as unknown as T
+  }
+
+  return res.json() as Promise<T>
+}
+
+// ── Silent refresh ───────────────────────────────────────────────────────────
+
+/**
+ * Registered by AuthProvider on mount. Returns the new access token, or null
+ * if the refresh token is expired/invalid (AuthProvider also handles logout
+ * and redirect in that case).
+ */
+let _silentRefresh: (() => Promise<string | null>) | null = null
+
+/** Mutex: if a refresh is already in flight, share it instead of firing a new one. */
+let _refreshInFlight: Promise<string | null> | null = null
+
+/** Called by AuthProvider to register the silent-refresh callback. */
+export function configureSilentRefresh(fn: (() => Promise<string | null>) | null): void {
+  _silentRefresh = fn
+}
+
+async function doSilentRefresh(): Promise<string | null> {
+  if (!_silentRefresh) return null
+  // Reuse an in-flight refresh instead of firing multiple simultaneous calls.
+  if (!_refreshInFlight) {
+    _refreshInFlight = _silentRefresh().finally(() => {
+      _refreshInFlight = null
+    })
+  }
+  return _refreshInFlight
+}
+
+/**
+ * Higher-level wrapper that supplies the access token from a getter function.
+ * On a 401, attempts one silent refresh and retries. If the refresh also fails,
+ * the registered silentRefresh callback handles logout and redirect.
+ *
+ * Used by TanStack Query hooks so they never capture a stale token closure.
+ */
+export function createAuthFetch(getToken: () => string | null) {
+  return async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+    try {
+      return await apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
+        const newToken = await doSilentRefresh()
+        if (!newToken) throw err
+        // Retry with the freshly-issued token.
+        return apiFetch<T>(path, { ...init, accessToken: newToken })
+      }
+      throw err
+    }
+  }
+}
 ````
 
 ## File: packages/web/src/lib/filterColors.ts
@@ -21767,353 +22715,6 @@ type GrantTimelineAccessJSONBody struct {
 }
 ````
 
-## File: packages/api/internal/api/user_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-)
-
-// handleUpdateProfile handles PATCH /users/me. Updates display_name, color,
-// and icon for the authenticated user. Color/icon changes propagate to all
-// team_members rows that have not been explicitly overridden.
-func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	var body struct {
-		DisplayName *string `json:"displayName"`
-		Color       *string `json:"color"`
-		Icon        *string `json:"icon"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
-		return
-	}
-
-	// Apply changes only for fields that were provided.
-	displayName := user.DisplayName
-	if body.DisplayName != nil {
-		displayName = strings.TrimSpace(*body.DisplayName)
-		if displayName == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "displayName cannot be empty")
-			return
-		}
-	}
-
-	color := user.Color
-	if body.Color != nil {
-		color = body.Color
-	}
-	icon := user.Icon
-	if body.Icon != nil {
-		icon = body.Icon
-	}
-
-	if err := s.users.UpdateProfile(user.ID, displayName, color, icon); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
-		return
-	}
-
-	user.DisplayName = displayName
-	user.Color = color
-	user.Icon = icon
-	writeJSON(w, http.StatusOK, user)
-}
-
-// handleGetMyStats handles GET /users/me/stats. Returns aggregated activity and
-// timeline counts across all of the authenticated user's team memberships.
-func (s *Server) handleGetMyStats(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	stats, err := s.teams.GetUserStats(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get stats")
-		return
-	}
-	writeJSON(w, http.StatusOK, stats)
-}
-
-// handleChangePassword handles PUT /users/me/password. Requires the caller
-// to supply the current password before setting a new one.
-func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	var body struct {
-		CurrentPassword string `json:"currentPassword"`
-		NewPassword     string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if body.CurrentPassword == "" || body.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "currentPassword and newPassword are required")
-		return
-	}
-	if !isValidPassword(body.NewPassword) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "new password must be at least 8 characters")
-		return
-	}
-
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	// Verify the current password before allowing the change.
-	if err := auth.CheckPassword(user.PasswordHash, body.CurrentPassword); err != nil {
-		writeError(w, http.StatusUnauthorized, "WRONG_PASSWORD", "current password is incorrect")
-		return
-	}
-
-	hash, err := auth.HashPassword(body.NewPassword)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	if err := s.users.UpdatePassword(user.ID, hash); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// handleListAdminUsers handles GET /admin/users. Returns all users with team
-// membership counts. Supports ?orphaned=true to filter to zero-membership users.
-// Superadmin-only.
-func (s *Server) handleListAdminUsers(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	orphanedOnly := r.URL.Query().Get("orphaned") == "true"
-	rows, err := s.users.ListAll(orphanedOnly)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"users": rows})
-}
-
-// handlePromoteUser sets is_superadmin=true on a user. Superadmin-only.
-// Participants (no user account) cannot be promoted.
-func (s *Server) handlePromoteUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-
-	if err := s.users.SetSuperadmin(target.ID, true); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-
-	target.IsSuperadmin = true
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleArchiveUser inactivates a user account. Superadmin-only.
-// Archived users cannot log in; their data is preserved.
-func (s *Server) handleArchiveUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_ARCHIVE", "cannot archive your own account")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-
-	now := time.Now()
-	if err := s.users.SetArchived(target.ID, &now); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-
-	target.ArchivedAt = &now
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleUnarchiveUser reactivates an inactivated user account. Superadmin-only.
-func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-
-	if err := s.users.SetArchived(target.ID, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-
-	target.ArchivedAt = nil
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleRevokeUser atomically revokes all access for a user. Superadmin-only.
-// Self-revoke is blocked to prevent a superadmin from locking themselves out.
-func (s *Server) handleRevokeUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_REVOKE", "cannot revoke your own account")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
-		return
-	}
-
-	result, err := s.users.RevokeUser(target.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
-// handleDeleteUser hard-deletes a user. Superadmin-only. Only permitted when
-// the user has no active activity assignments and belongs to a single team.
-func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_DELETE", "cannot delete your own account")
-		return
-	}
-
-	if _, err := s.users.GetByID(userID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-
-	teamCount, err := s.teams.CountTeamsForUser(userID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	if teamCount > 1 {
-		writeError(w, http.StatusConflict, "MULTI_TEAM", "user belongs to multiple teams; remove them from each team first")
-		return
-	}
-
-	if err := s.users.Delete(userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
 ## File: packages/api/internal/db/migrations/015_normalize_activities.sql
 ````sql
 -- Backfill any activities that lack a timeline_id by assigning them to the
@@ -22382,461 +22983,6 @@ func (r *TagRepo) ValidateTeamOwnership(teamID string, tagIDs []string) error {
 		return ErrTagOwnership
 	}
 	return nil
-}
-````
-
-## File: packages/api/internal/db/team_repo.go
-````go
-package db
-
-import (
-	"errors"
-	"fmt"
-	"strings"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ErrDuplicateName is returned by TeamRepo.Create when the generated slug
-// collides with an existing team's slug (UNIQUE constraint on teams.slug).
-var ErrDuplicateName = errors.New("team name already taken")
-
-// TeamRepo is the persistence layer for Team records and their membership
-// join table.
-type TeamRepo struct {
-	db *sqlx.DB
-}
-
-// NewTeamRepo returns a TeamRepo backed by db.
-func NewTeamRepo(db *sqlx.DB) *TeamRepo {
-	return &TeamRepo{db: db}
-}
-
-// Create inserts a new Team row. Returns ErrDuplicateName if the slug is
-// already taken.
-func (r *TeamRepo) Create(team *models.Team) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO teams (id, name, slug, description, notes, color, icon, created_at, updated_at)
-		VALUES (:id, :name, :slug, :description, :notes, :color, :icon, :created_at, :updated_at)
-	`, team)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return ErrDuplicateName
-		}
-		return fmt.Errorf("creating team: %w", err)
-	}
-	return nil
-}
-
-// Update writes mutable team fields (name, slug, description, notes, color,
-// icon, updated_at). It does not touch archived_at or created_at.
-func (r *TeamRepo) Update(team *models.Team) error {
-	_, err := r.db.NamedExec(`
-		UPDATE teams
-		SET name = :name, slug = :slug, description = :description, notes = :notes,
-		    color = :color, icon = :icon, updated_at = :updated_at
-		WHERE id = :id
-	`, team)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return ErrDuplicateName
-		}
-		return fmt.Errorf("updating team: %w", err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears the archived_at timestamp on a team.
-func (r *TeamRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(`UPDATE teams SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now(), id)
-	if err != nil {
-		return fmt.Errorf("setting team archived: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Team by primary key.
-func (r *TeamRepo) GetByID(id string) (*models.Team, error) {
-	var t models.Team
-	err := r.db.Get(&t, `SELECT * FROM teams WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting team: %w", err)
-	}
-	return &t, nil
-}
-
-// AddMember inserts a team_members row. m.ID must be pre-populated by the caller.
-func (r *TeamRepo) AddMember(m *models.TeamMember) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at)
-		VALUES (:id, :team_id, :user_id, :display_name, :role, :color, :icon, :joined_at)
-	`, m)
-	if err != nil {
-		return fmt.Errorf("adding team member: %w", err)
-	}
-	return nil
-}
-
-// GetMember returns the team_members row for a given (team, user) pair.
-func (r *TeamRepo) GetMember(teamID, userID string) (*models.TeamMember, error) {
-	var m models.TeamMember
-	err := r.db.Get(&m, `
-		SELECT * FROM team_members WHERE team_id = ? AND user_id = ?
-	`, teamID, userID)
-	if err != nil {
-		return nil, fmt.Errorf("getting team member: %w", err)
-	}
-	return &m, nil
-}
-
-// ListMembers returns active (non-archived) members of a team, including
-// login-less Participants. A LEFT JOIN handles Participants who have no users
-// row; COALESCE prefers the per-team display_name override, then falls back to users.
-func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, error) {
-	return r.listMembers(teamID, false)
-}
-
-// ListMembersAll returns all members of a team, including inactivated members.
-func (r *TeamRepo) ListMembersAll(teamID string) ([]*models.TeamMemberWithUser, error) {
-	return r.listMembers(teamID, true)
-}
-
-func (r *TeamRepo) listMembers(teamID string, includeArchived bool) ([]*models.TeamMemberWithUser, error) {
-	var members []*models.TeamMemberWithUser
-	query := `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.team_id = ?`
-	if !includeArchived {
-		query += ` AND tm.archived_at IS NULL`
-	}
-	query += ` ORDER BY tm.joined_at ASC`
-	if err := r.db.Select(&members, query, teamID); err != nil {
-		return nil, fmt.Errorf("listing team members: %w", err)
-	}
-	return members, nil
-}
-
-// ListByUserID returns all teams the given user belongs to, ordered by
-// creation date ascending. When includeArchived is false (the default),
-// archived teams are excluded.
-func (r *TeamRepo) ListByUserID(userID string, includeArchived bool) ([]*models.Team, error) {
-	teams := make([]*models.Team, 0)
-	query := `
-		SELECT t.* FROM teams t
-		JOIN team_members tm ON tm.team_id = t.id
-		WHERE tm.user_id = ?`
-	if !includeArchived {
-		query += ` AND t.archived_at IS NULL`
-	}
-	query += ` ORDER BY t.created_at ASC`
-	if err := r.db.Select(&teams, query, userID); err != nil {
-		return nil, fmt.Errorf("listing teams for user: %w", err)
-	}
-	return teams, nil
-}
-
-// ListAll returns every team in the system, optionally including archived ones.
-// Used by superadmin callers who need visibility across all teams.
-func (r *TeamRepo) ListAll(includeArchived bool) ([]*models.Team, error) {
-	teams := make([]*models.Team, 0)
-	query := `SELECT * FROM teams`
-	if !includeArchived {
-		query += ` WHERE archived_at IS NULL`
-	}
-	query += ` ORDER BY created_at ASC`
-	if err := r.db.Select(&teams, query); err != nil {
-		return nil, fmt.Errorf("listing all teams: %w", err)
-	}
-	return teams, nil
-}
-
-// Count returns the total number of teams.
-func (r *TeamRepo) Count() (int, error) {
-	var count int
-	err := r.db.Get(&count, `SELECT COUNT(*) FROM teams`)
-	if err != nil {
-		return 0, fmt.Errorf("counting teams: %w", err)
-	}
-	return count, nil
-}
-
-// GetMemberByID fetches a team_members row by its primary key. Unlike
-// GetMember (which looks up by team+userID pair), this is the canonical
-// lookup used by member-scoped routes that receive a memberId path param.
-func (r *TeamRepo) GetMemberByID(memberID string) (*models.TeamMemberWithUser, error) {
-	var m models.TeamMemberWithUser
-	err := r.db.Get(&m, `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.id = ?
-	`, memberID)
-	if err != nil {
-		return nil, fmt.Errorf("getting team member by id: %w", err)
-	}
-	return &m, nil
-}
-
-// UpdateMember applies mutable identity and role fields to a team_members row.
-// Only non-nil arguments are written; nil fields retain their current values.
-func (r *TeamRepo) UpdateMember(memberID string, displayName, color, icon, role *string) error {
-	// Fetch current values so we can apply the partial update.
-	type row struct {
-		DisplayName *string `db:"display_name"`
-		Color       *string `db:"color"`
-		Icon        *string `db:"icon"`
-		Role        string  `db:"role"`
-	}
-	var cur row
-	if err := r.db.Get(&cur, `SELECT display_name, color, icon, role FROM team_members WHERE id = ?`, memberID); err != nil {
-		return fmt.Errorf("fetching member for update: %w", err)
-	}
-	if displayName != nil {
-		cur.DisplayName = displayName
-	}
-	if color != nil {
-		cur.Color = color
-	}
-	if icon != nil {
-		cur.Icon = icon
-	}
-	if role != nil {
-		cur.Role = *role
-	}
-	_, err := r.db.Exec(`
-		UPDATE team_members SET display_name = ?, color = ?, icon = ?, role = ? WHERE id = ?
-	`, cur.DisplayName, cur.Color, cur.Icon, cur.Role, memberID)
-	if err != nil {
-		return fmt.Errorf("updating team member: %w", err)
-	}
-	return nil
-}
-
-// DeleteMember removes a team_members row. The caller is responsible for
-// verifying that the member is not the last admin before calling this, and
-// must delete the member's timeline_access rows first (RESTRICT FK).
-func (r *TeamRepo) DeleteMember(memberID string) error {
-	_, err := r.db.Exec(`DELETE FROM team_members WHERE id = ?`, memberID)
-	if err != nil {
-		return fmt.Errorf("deleting team member: %w", err)
-	}
-	return nil
-}
-
-// CountMemberAssignments returns how many activity_assignments rows reference
-// this team member. Callers use this count to block hard-delete when history exists.
-func (r *TeamRepo) CountMemberAssignments(memberID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?
-	`, memberID)
-	if err != nil {
-		return 0, fmt.Errorf("counting member assignments: %w", err)
-	}
-	return count, nil
-}
-
-// DeleteMemberTimelineAccess removes all timeline_access entries for a member.
-// Must be called before DeleteMember; the RESTRICT FK on
-// timeline_access.team_member_id blocks the team_members deletion otherwise.
-func (r *TeamRepo) DeleteMemberTimelineAccess(memberID string) error {
-	_, err := r.db.Exec(`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID)
-	if err != nil {
-		return fmt.Errorf("deleting member timeline access: %w", err)
-	}
-	return nil
-}
-
-// SetMemberArchived sets or clears archived_at on a team_members row.
-func (r *TeamRepo) SetMemberArchived(memberID string, at *time.Time) error {
-	_, err := r.db.Exec(`UPDATE team_members SET archived_at = ? WHERE id = ?`, at, memberID)
-	if err != nil {
-		return fmt.Errorf("setting member archived: %w", err)
-	}
-	return nil
-}
-
-// CountAdmins counts non-archived admin members of a team. Used to enforce
-// the "cannot remove last admin" constraint.
-func (r *TeamRepo) CountAdmins(teamID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM team_members
-		WHERE team_id = ? AND role = 'admin' AND archived_at IS NULL
-	`, teamID)
-	if err != nil {
-		return 0, fmt.Errorf("counting admins: %w", err)
-	}
-	return count, nil
-}
-
-// CountTeamsForUser returns how many teams a user belongs to. Used to enforce
-// the "single team" constraint for hard deletion.
-func (r *TeamRepo) CountTeamsForUser(userID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM team_members WHERE user_id = ? AND archived_at IS NULL
-	`, userID)
-	if err != nil {
-		return 0, fmt.Errorf("counting user teams: %w", err)
-	}
-	return count, nil
-}
-
-// GetMemberStats computes activity and timeline counts for a team member.
-func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) {
-	now := time.Now()
-	var stats models.MemberStats
-
-	// Timeline counts via timeline_access.
-	if err := r.db.Get(&stats.ActiveTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		WHERE ta.team_member_id = ? AND t.archived_at IS NULL
-	`, memberID); err != nil {
-		return nil, fmt.Errorf("counting active timelines: %w", err)
-	}
-	if err := r.db.Get(&stats.ArchivedTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		WHERE ta.team_member_id = ? AND t.archived_at IS NOT NULL
-	`, memberID); err != nil {
-		return nil, fmt.Errorf("counting archived timelines: %w", err)
-	}
-
-	// Activity counts from activity_assignments.
-	rows, err := r.db.Query(`
-		SELECT
-			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                                     THEN 1 ELSE 0 END), 0) AS archived,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                                     THEN 1 ELSE 0 END), 0) AS past_due,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ?                   THEN 1 ELSE 0 END), 0) AS running,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                                     THEN 1 ELSE 0 END), 0) AS upcoming
-		FROM activity_assignments aa
-		JOIN activities a ON a.id = aa.activity_id
-		WHERE aa.team_member_id = ?
-	`, now, now, now, now, memberID)
-	if err != nil {
-		return nil, fmt.Errorf("computing activity stats: %w", err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
-			return nil, fmt.Errorf("scanning activity stats: %w", err)
-		}
-	}
-
-	return &stats, nil
-}
-
-// GetUserStats aggregates activity and timeline counts across all of a user's
-// team memberships. Used by GET /users/me/stats for the profile page.
-func (r *TeamRepo) GetUserStats(userID string) (*models.MemberStats, error) {
-	now := time.Now()
-	var stats models.MemberStats
-
-	if err := r.db.Get(&stats.ActiveTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		JOIN team_members tm ON tm.id = ta.team_member_id
-		WHERE tm.user_id = ? AND t.archived_at IS NULL
-	`, userID); err != nil {
-		return nil, fmt.Errorf("counting active timelines: %w", err)
-	}
-	if err := r.db.Get(&stats.ArchivedTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		JOIN team_members tm ON tm.id = ta.team_member_id
-		WHERE tm.user_id = ? AND t.archived_at IS NOT NULL
-	`, userID); err != nil {
-		return nil, fmt.Errorf("counting archived timelines: %w", err)
-	}
-
-	rows, err := r.db.Query(`
-		SELECT
-			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                   THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                   THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                   THEN 1 ELSE 0 END), 0)
-		FROM activity_assignments aa
-		JOIN activities a ON a.id = aa.activity_id
-		JOIN team_members tm ON tm.id = aa.team_member_id
-		WHERE tm.user_id = ?
-	`, now, now, now, now, userID)
-	if err != nil {
-		return nil, fmt.Errorf("computing activity stats: %w", err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
-			return nil, fmt.Errorf("scanning activity stats: %w", err)
-		}
-	}
-
-	return &stats, nil
-}
-
-// GetMemberAllTeams returns all team memberships for a user (across all teams).
-// Used to populate the "Teams" section of the Member Edit Modal.
-func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUser, error) {
-	var members []*models.TeamMemberWithUser
-	err := r.db.Select(&members, `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.user_id = ?
-		ORDER BY tm.joined_at ASC
-	`, userID)
-	if err != nil {
-		return nil, fmt.Errorf("getting member all teams: %w", err)
-	}
-	return members, nil
-}
-
-// SetInviteLinkToken sets the reusable invite link token on a team. Passing
-// nil clears it (revoking the link).
-func (r *TeamRepo) SetInviteLinkToken(teamID string, token *string) error {
-	_, err := r.db.Exec(
-		`UPDATE teams SET invite_link_token = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		token, teamID,
-	)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return fmt.Errorf("invite link token collision: %w", err)
-		}
-		return fmt.Errorf("setting invite link token: %w", err)
-	}
-	return nil
-}
-
-// GetByInviteLinkToken looks up a team by its invite_link_token. Returns
-// sql.ErrNoRows (wrapped) when no matching team is found.
-func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
-	var t models.Team
-	err := r.db.Get(&t, `
-		SELECT * FROM teams WHERE invite_link_token = ? AND archived_at IS NULL
-	`, token)
-	if err != nil {
-		return nil, fmt.Errorf("getting team by invite link: %w", err)
-	}
-	return &t, nil
 }
 ````
 
@@ -25886,152 +26032,6 @@ export function useDeleteTimelineStatus(teamId: string, timelineId: string) {
 }
 ````
 
-## File: packages/web/src/lib/api.ts
-````typescript
-/**
- * Thin fetch wrapper over the draba REST API.
- *
- * Token lifecycle:
- *   - Access token: kept in memory via the AuthContext; passed as Authorization header.
- *   - Refresh token: persisted in localStorage under REFRESH_TOKEN_KEY.
- *     On a 401, the client attempts one silent refresh then retries the original request.
- *     Concurrent 401s share a single refresh call (mutex via in-flight promise).
- *     If refresh also fails, the registered logout handler is called and the user
- *     is redirected to /login.
- *
- * All callers receive typed JSON or throw an ApiError.
- */
-
-import type { components } from '@draba/shared'
-
-export type ApiErrorBody = components['schemas']['ApiError']
-
-// Empty string = same-origin relative URLs, which is correct when the SPA is
-// embedded in the Go binary. Set VITE_API_URL for local dev against a
-// separate API server (e.g. VITE_API_URL=http://localhost:8080).
-export const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined) ?? ''
-
-export const REFRESH_TOKEN_KEY = 'draba_refresh_token'
-
-/** Thrown for any non-2xx response. */
-export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-    /** Extra fields from the error response body (e.g. assignmentCount on 409). */
-    public readonly data?: Record<string, unknown>,
-  ) {
-    super(message)
-    this.name = 'ApiError'
-  }
-}
-
-/** Reads the stored refresh token from localStorage. */
-export function getStoredRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_TOKEN_KEY)
-}
-
-/** Persists the refresh token to localStorage. */
-export function storeRefreshToken(token: string): void {
-  localStorage.setItem(REFRESH_TOKEN_KEY, token)
-}
-
-/** Removes the refresh token from localStorage (on logout). */
-export function clearStoredRefreshToken(): void {
-  localStorage.removeItem(REFRESH_TOKEN_KEY)
-}
-
-async function parseError(res: Response): Promise<ApiError> {
-  try {
-    const body = (await res.json()) as ApiErrorBody & Record<string, unknown>
-    const { error, ...rest } = body
-    const data = Object.keys(rest).length > 0 ? (rest as Record<string, unknown>) : undefined
-    return new ApiError(res.status, error.code, error.message, data)
-  } catch {
-    return new ApiError(res.status, 'UNKNOWN', res.statusText)
-  }
-}
-
-/** Low-level fetch that injects the access token and throws ApiError on non-2xx. */
-export async function apiFetch<T>(
-  path: string,
-  init: RequestInit & { accessToken?: string } = {},
-): Promise<T> {
-  const { accessToken, ...rest } = init
-  const headers = new Headers(rest.headers)
-  headers.set('Content-Type', 'application/json')
-  if (accessToken) {
-    headers.set('Authorization', `Bearer ${accessToken}`)
-  }
-
-  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
-
-  if (!res.ok) {
-    throw await parseError(res)
-  }
-
-  // 204 No Content — return undefined cast as T
-  if (res.status === 204) {
-    return undefined as unknown as T
-  }
-
-  return res.json() as Promise<T>
-}
-
-// ── Silent refresh ───────────────────────────────────────────────────────────
-
-/**
- * Registered by AuthProvider on mount. Returns the new access token, or null
- * if the refresh token is expired/invalid (AuthProvider also handles logout
- * and redirect in that case).
- */
-let _silentRefresh: (() => Promise<string | null>) | null = null
-
-/** Mutex: if a refresh is already in flight, share it instead of firing a new one. */
-let _refreshInFlight: Promise<string | null> | null = null
-
-/** Called by AuthProvider to register the silent-refresh callback. */
-export function configureSilentRefresh(fn: (() => Promise<string | null>) | null): void {
-  _silentRefresh = fn
-}
-
-async function doSilentRefresh(): Promise<string | null> {
-  if (!_silentRefresh) return null
-  // Reuse an in-flight refresh instead of firing multiple simultaneous calls.
-  if (!_refreshInFlight) {
-    _refreshInFlight = _silentRefresh().finally(() => {
-      _refreshInFlight = null
-    })
-  }
-  return _refreshInFlight
-}
-
-/**
- * Higher-level wrapper that supplies the access token from a getter function.
- * On a 401, attempts one silent refresh and retries. If the refresh also fails,
- * the registered silentRefresh callback handles logout and redirect.
- *
- * Used by TanStack Query hooks so they never capture a stale token closure.
- */
-export function createAuthFetch(getToken: () => string | null) {
-  return async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-    try {
-      return await apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
-        const newToken = await doSilentRefresh()
-        if (!newToken) throw err
-        // Retry with the freshly-issued token.
-        return apiFetch<T>(path, { ...init, accessToken: newToken })
-      }
-      throw err
-    }
-  }
-}
-````
-
 ## File: packages/web/src/lib/presetFilters.ts
 ````typescript
 /**
@@ -27640,682 +27640,6 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
-## File: packages/web/src/components/gantt/GanttToolbar.tsx
-````typescript
-/**
- * GanttToolbar — the thin sub-toolbar that sits between the top bar and
- * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
- * export stub.
- */
-
-import { Download, Share2, Plus, Minus } from 'lucide-react';
-import type { TimeGranularity } from './granularity';
-import { cn } from '@/lib/utils';
-
-export type { TimeGranularity } from './granularity';
-export type GroupBy = 'none' | 'member' | 'parent' | 'status';
-export type SortBy = 'startDate' | 'endDate' | 'title';
-export type ColorBy = 'activity' | 'member' | 'status';
-
-interface Props {
-  groupBy: GroupBy;
-  onGroupByChange: (g: GroupBy) => void;
-  sortBy: SortBy;
-  onSortByChange: (s: SortBy) => void;
-  granularity: TimeGranularity | 'auto';
-  onGranularityChange: (g: TimeGranularity | 'auto') => void;
-  colorBy: ColorBy;
-  onColorByChange: (c: ColorBy) => void;
-  onExport: () => void;
-  onShare?: () => void;
-}
-
-const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
-const divider = 'w-px h-4 bg-border shrink-0';
-const label   = 'text-[11px] text-muted-foreground shrink-0';
-const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-export default function GanttToolbar({
-  groupBy,
-  onGroupByChange,
-  sortBy,
-  onSortByChange,
-  granularity,
-  onGranularityChange,
-  colorBy,
-  onColorByChange,
-  onExport,
-  onShare,
-}: Props) {
-  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
-  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
-  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
-    ? granularityMap.indexOf(granularity as never)
-    : 0;
-  const currentLabel = granularityLabels[currentIndex];
-
-  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = parseInt(e.target.value, 10);
-    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
-  };
-
-  return (
-    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
-      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
-      <style>{`
-        .gantt-zoom-slider {
-          -webkit-appearance: none;
-          appearance: none;
-          background: transparent;
-        }
-        .gantt-zoom-slider::-webkit-slider-thumb {
-          -webkit-appearance: none;
-          appearance: none;
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          margin-top: -4px;
-        }
-        .gantt-zoom-slider::-moz-range-thumb {
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          border: none;
-        }
-        .gantt-zoom-slider::-webkit-slider-runnable-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-        .gantt-zoom-slider::-moz-range-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-      `}</style>
-
-      {/* Zoom (granularity) */}
-      <div className="flex items-center gap-1.5 h-[26px]">
-        <button
-          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 0}
-          title="Zoom out"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Minus size={14} />
-        </button>
-
-        <div className="relative w-20 h-[26px] flex items-center">
-          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
-            {[0, 1, 2, 3, 4, 5].map(i => (
-              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
-            ))}
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="5"
-            step="1"
-            value={currentIndex}
-            onChange={handleSliderChange}
-            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
-            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          />
-        </div>
-
-        <button
-          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 5}
-          title="Zoom in"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Plus size={14} />
-        </button>
-
-        <div
-          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          className={cn(
-            'flex items-center justify-center w-[22px] h-[22px]',
-            'bg-card border border-border rounded-sm text-xs font-mono select-none',
-            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
-          )}
-        >
-          {currentLabel}
-        </div>
-      </div>
-
-      <div className={divider} />
-
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as GroupBy)}
-      >
-        <option value="none">None</option>
-        <option value="member">Member</option>
-        <option value="parent">Parent activity</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Sort by */}
-      <span className={label}>Sort by</span>
-      <select
-        className={select}
-        value={sortBy}
-        onChange={e => onSortByChange(e.target.value as SortBy)}
-      >
-        <option value="startDate">Start date</option>
-        <option value="endDate">End date</option>
-        <option value="title">Title A–Z</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className="flex-1" />
-
-      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
-        <Download size={13} strokeWidth={1.8} />
-        Export
-      </button>
-
-      <button className={ctrlBtn} onClick={onShare} title="Share">
-        <Share2 size={13} strokeWidth={1.8} />
-        Share
-      </button>
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/lib/presetFilters.test.ts
-````typescript
-/**
- * presetFilters.test.ts — unit tests for applyActiveFilter.
- *
- * Covers each preset, the member filter kind, and saved filter delegation.
- */
-
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
-import { applyActiveFilter } from './presetFilters'
-import type { ActiveFilter } from '@/contexts/FilterContext'
-import type { components } from '@draba/shared'
-
-type Activity = components['schemas']['Activity']
-type SavedFilter = components['schemas']['SavedFilter']
-type Status = components['schemas']['Status']
-type Tag = components['schemas']['Tag']
-
-// ── Fixtures ──────────────────────────────────────────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function makeActivity(overrides: Record<string, any> = {}): Activity {
-  return {
-    id: 'act-1',
-    title: 'Default',
-    timelineId: 'tl-1',
-    startAt: '2026-06-01T00:00:00Z',
-    endAt: '2026-06-30T00:00:00Z',
-    allDay: false,
-    statusId: null,
-    tagIds: [],
-    assignedMemberIds: [],
-    percentComplete: null,
-    parentActivityId: null,
-    color: null,
-    icon: null,
-    description: null,
-    notes: null,
-    location: null,
-    url: null,
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T00:00:00Z',
-    archivedAt: null,
-    createdBy: 'user-1',
-    ...overrides,
-  } as Activity
-}
-
-function makeStatus(id: string, name: string, isClosed = false): Status {
-  return { id, name, color: '#3B82F6', icon: null, isClosed, position: 0, timelineId: 'tl-1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
-}
-
-function makeTag(id: string, name: string): Tag {
-  return { id, name, color: null, teamId: 'team-1', createdAt: '2026-01-01T00:00:00Z', createdBy: 'user-1' }
-}
-
-// Fake the current date to a known value for date-relative tests
-const FAKE_NOW = new Date('2026-06-01T00:00:00Z').getTime()
-beforeAll(() => {
-  vi.spyOn(Date, 'now').mockReturnValue(FAKE_NOW)
-})
-afterAll(() => {
-  vi.restoreAllMocks()
-})
-
-const closedStatusId = 'status-closed'
-const openStatusId = 'status-open'
-const otherMemberId = 'member-other'
-
-const baseCtx = {
-  closedStatusIds: new Set([closedStatusId]),
-  savedFilters: [] as SavedFilter[],
-  statuses: new Map<string, Status[]>([['tl-1', [makeStatus(openStatusId, 'Open'), makeStatus(closedStatusId, 'Done', true)]]]),
-  tags: [makeTag('tag-1', 'urgent')] as Tag[],
-}
-
-const emptyMemberIds = new Map<string, string[]>()
-
-// ── all preset ────────────────────────────────────────────────────────────────
-
-describe("preset 'all'", () => {
-  it('returns all activities unchanged', () => {
-    const activities = [makeActivity({ id: '1' }), makeActivity({ id: '2' })]
-    const filter: ActiveFilter = { kind: 'preset', id: 'all' }
-    expect(applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)).toHaveLength(2)
-  })
-})
-
-// ── open preset ───────────────────────────────────────────────────────────────
-
-describe("preset 'open'", () => {
-  it('removes activities with a closed status', () => {
-    const activities = [
-      makeActivity({ id: 'a', statusId: openStatusId }),
-      makeActivity({ id: 'b', statusId: closedStatusId }),
-      makeActivity({ id: 'c', statusId: null }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'open' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['a', 'c'])
-  })
-})
-
-// ── upcoming preset ───────────────────────────────────────────────────────────
-
-describe("preset 'upcoming'", () => {
-  // FAKE_NOW = 2026-06-01. 7 days = until 2026-06-08.
-  it('includes activities starting within 7 days', () => {
-    const activities = [
-      makeActivity({ id: 'soon', startAt: '2026-06-05T00:00:00Z', endAt: '2026-06-06T00:00:00Z' }),  // within 7d
-      makeActivity({ id: 'far',  startAt: '2026-07-01T00:00:00Z', endAt: '2026-07-15T00:00:00Z' }),  // beyond 7d
-      makeActivity({ id: 'past', startAt: '2026-05-01T00:00:00Z', endAt: '2026-05-10T00:00:00Z' }),  // in past
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toContain('soon')
-    expect(result.map(a => a.id)).not.toContain('far')
-    expect(result.map(a => a.id)).not.toContain('past')
-  })
-
-  it('includes activities ending within 7 days (even if already started)', () => {
-    const activities = [
-      makeActivity({ id: 'ending-soon', endAt: '2026-06-04T00:00:00Z', startAt: '2026-05-01T00:00:00Z' }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result[0].id).toBe('ending-soon')
-  })
-})
-
-// ── overdue preset ────────────────────────────────────────────────────────────
-
-describe("preset 'overdue'", () => {
-  it('returns past-due activities that are not closed', () => {
-    const activities = [
-      makeActivity({ id: 'overdue',    endAt: '2026-05-01T00:00:00Z', statusId: openStatusId }),
-      makeActivity({ id: 'closed-old', endAt: '2026-05-01T00:00:00Z', statusId: closedStatusId }),
-      makeActivity({ id: 'future',     endAt: '2026-07-01T00:00:00Z', statusId: openStatusId }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'overdue' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['overdue'])
-  })
-})
-
-// ── noassign preset ───────────────────────────────────────────────────────────
-
-describe("preset 'noassign'", () => {
-  it('returns only activities with no assignees', () => {
-    const activities = [
-      makeActivity({ id: 'assigned', assignedMemberIds: [otherMemberId] }),
-      makeActivity({ id: 'free',     assignedMemberIds: [] }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'noassign' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['free'])
-  })
-})
-
-// ── member filter kind ────────────────────────────────────────────────────────
-
-describe("filter kind 'member'", () => {
-  it('filters by the resolved member IDs for the userId', () => {
-    const activities = [
-      makeActivity({ id: 'a', assignedMemberIds: ['mbr-alice-1'] }),
-      makeActivity({ id: 'b', assignedMemberIds: ['mbr-bob'] }),
-    ]
-    const memberIds = new Map([['user-alice', ['mbr-alice-1', 'mbr-alice-2']]])
-    const filter: ActiveFilter = { kind: 'member', userId: 'user-alice' }
-    const result = applyActiveFilter(activities, filter, memberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['a'])
-  })
-
-  it('returns empty when user has no member IDs', () => {
-    const activities = [makeActivity()]
-    const filter: ActiveFilter = { kind: 'member', userId: 'unknown-user' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result).toHaveLength(0)
-  })
-})
-
-// ── saved filter kind ─────────────────────────────────────────────────────────
-
-describe("filter kind 'saved'", () => {
-  it('evaluates a saved filter definition against activities', () => {
-    const savedFilter: SavedFilter = {
-      id: 'sf-1',
-      teamId: 'team-1',
-      userId: 'user-1',
-      name: 'Urgent bugs',
-      isTeamFilter: false,
-      definition: JSON.stringify({
-        logic: 'and',
-        conditions: [{ field: 'title', op: 'contains', value: 'urgent' }],
-      }),
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }
-    const activities = [
-      makeActivity({ id: 'a', title: 'Fix urgent bug' }),
-      makeActivity({ id: 'b', title: 'Refactor component' }),
-    ]
-    const ctx = { ...baseCtx, savedFilters: [savedFilter] }
-    const filter: ActiveFilter = { kind: 'saved', id: 'sf-1' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
-    expect(result.map(a => a.id)).toEqual(['a'])
-  })
-
-  it('returns all activities when saved filter is not found', () => {
-    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
-    const filter: ActiveFilter = { kind: 'saved', id: 'nonexistent' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result).toHaveLength(2)
-  })
-
-  it('returns all activities when saved filter definition is invalid JSON', () => {
-    const badFilter: SavedFilter = {
-      id: 'sf-bad',
-      teamId: 'team-1',
-      userId: 'user-1',
-      name: 'Broken',
-      isTeamFilter: false,
-      definition: 'NOT VALID JSON }{',
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }
-    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
-    const ctx = { ...baseCtx, savedFilters: [badFilter] }
-    const filter: ActiveFilter = { kind: 'saved', id: 'sf-bad' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
-    expect(result).toHaveLength(2)
-  })
-})
-````
-
-## File: packages/api/internal/api/saved_filter_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleListSavedFilters handles GET /teams/{id}/saved_filters. Returns
-// only filters owned by the calling user within the given team.
-func (s *Server) handleListSavedFilters(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	filters, err := s.savedFilters.ListByTeamUser(teamID, claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
-		return
-	}
-	writeJSON(w, http.StatusOK, filters)
-}
-
-// handleListAllTeamSavedFilters handles GET /teams/{id}/saved_filters/all.
-// Returns every saved filter in the team (private + team). Admin-only.
-func (s *Server) handleListAllTeamSavedFilters(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	member, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can list all team filters")
-		return
-	}
-
-	filters, err := s.savedFilters.ListAllByTeam(teamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
-		return
-	}
-	writeJSON(w, http.StatusOK, filters)
-}
-
-// handleCreateSavedFilter handles POST /teams/{id}/saved_filters. The
-// authenticated user must be a member of the team and becomes the owner.
-// Setting isTeamFilter=true at creation time requires admin role.
-func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	member, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return
-	}
-
-	var req CreateSavedFilterJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-	if !json.Valid([]byte(req.Definition)) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
-		return
-	}
-
-	isTeamFilter := false
-	if req.IsTeamFilter != nil && *req.IsTeamFilter {
-		if member.Role != "admin" {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can create team filters")
-			return
-		}
-		isTeamFilter = true
-	}
-
-	now := time.Now()
-	filter := &models.SavedFilter{
-		ID:           newID(),
-		TeamID:       teamID,
-		UserID:       claims.UserID,
-		Name:         req.Name,
-		Definition:   req.Definition,
-		IsTeamFilter: isTeamFilter,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.savedFilters.Create(filter); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create saved filter")
-		return
-	}
-	writeJSON(w, http.StatusCreated, filter)
-}
-
-// handleUpdateSavedFilter handles PATCH /saved_filters/{id}. Owners may
-// update name and definition. Setting isTeamFilter=true is admin-only;
-// admins may also update filters they don't own when the filter is already
-// a team filter.
-func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request) {
-	filterID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	filter, err := s.savedFilters.GetByID(filterID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
-		return
-	}
-
-	var req UpdateSavedFilterJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Determine whether the caller is a team admin for permission checks.
-	isAdmin := false
-	if adminMember, ok := s.requireTeamMember(w, r, filter.TeamID); ok {
-		isAdmin = adminMember.Role == "admin"
-	} else {
-		return
-	}
-
-	isOwner := filter.UserID == claims.UserID
-
-	// Name and definition can be updated by the owner or by a team admin, but
-	// only after the filter has been promoted. This prevents admins from silently
-	// editing a member's private filter before they decide to share it — promotion
-	// is the explicit consent step.
-	wantsNameOrDef := req.Name != nil || req.Definition != nil
-	if wantsNameOrDef && !isOwner {
-		if !isAdmin || !filter.IsTeamFilter {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
-			return
-		}
-	}
-
-	if req.Name != nil {
-		if *req.Name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
-			return
-		}
-		filter.Name = *req.Name
-	}
-	if req.Definition != nil {
-		if !json.Valid([]byte(*req.Definition)) {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
-			return
-		}
-		filter.Definition = *req.Definition
-	}
-	// Only admins may promote or demote isTeamFilter — setting it back to false
-	// is just as impactful as promoting, since it silently removes the filter
-	// from all members' views.
-	if req.IsTeamFilter != nil {
-		if !isAdmin {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can change team filter status")
-			return
-		}
-		filter.IsTeamFilter = *req.IsTeamFilter
-	}
-	filter.UpdatedAt = time.Now()
-
-	if err := s.savedFilters.Update(filter); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
-		return
-	}
-	writeJSON(w, http.StatusOK, filter)
-}
-
-// handleDeleteSavedFilter handles DELETE /saved_filters/{id}. The owner may
-// always delete their own filter. Team admins may additionally delete any
-// team filter (is_team_filter = true) even if they aren't the owner.
-func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request) {
-	filterID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	filter, err := s.savedFilters.GetByID(filterID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
-		return
-	}
-
-	// Check membership to determine admin status.
-	adminMember, ok := s.requireTeamMember(w, r, filter.TeamID)
-	if !ok {
-		return
-	}
-	isAdmin := adminMember.Role == "admin"
-
-	// Owner can always delete; admin can delete team filters they don't own.
-	if filter.UserID != claims.UserID && !(isAdmin && filter.IsTeamFilter) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
-		return
-	}
-
-	if err := s.savedFilters.Delete(filterID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
 ## File: packages/api/internal/api/team_handler.go
 ````go
 package api
@@ -29219,6 +28543,1113 @@ func flatten[T any](s []*T) []T {
 }
 ````
 
+## File: packages/web/src/components/gantt/GanttToolbar.tsx
+````typescript
+/**
+ * GanttToolbar — the thin sub-toolbar that sits between the top bar and
+ * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
+ * export stub.
+ */
+
+import { Download, Share2, Plus, Minus } from 'lucide-react';
+import type { TimeGranularity } from './granularity';
+import { cn } from '@/lib/utils';
+
+export type { TimeGranularity } from './granularity';
+export type GroupBy = 'none' | 'member' | 'parent' | 'status';
+export type SortBy = 'startDate' | 'endDate' | 'title';
+export type ColorBy = 'activity' | 'member' | 'status';
+
+interface Props {
+  groupBy: GroupBy;
+  onGroupByChange: (g: GroupBy) => void;
+  sortBy: SortBy;
+  onSortByChange: (s: SortBy) => void;
+  granularity: TimeGranularity | 'auto';
+  onGranularityChange: (g: TimeGranularity | 'auto') => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  onExport: () => void;
+  onShare?: () => void;
+}
+
+const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label   = 'text-[11px] text-muted-foreground shrink-0';
+const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+export default function GanttToolbar({
+  groupBy,
+  onGroupByChange,
+  sortBy,
+  onSortByChange,
+  granularity,
+  onGranularityChange,
+  colorBy,
+  onColorByChange,
+  onExport,
+  onShare,
+}: Props) {
+  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
+  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
+  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
+    ? granularityMap.indexOf(granularity as never)
+    : 0;
+  const currentLabel = granularityLabels[currentIndex];
+
+  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseInt(e.target.value, 10);
+    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
+  };
+
+  return (
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
+      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
+      <style>{`
+        .gantt-zoom-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          background: transparent;
+        }
+        .gantt-zoom-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          margin-top: -4px;
+        }
+        .gantt-zoom-slider::-moz-range-thumb {
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          border: none;
+        }
+        .gantt-zoom-slider::-webkit-slider-runnable-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+        .gantt-zoom-slider::-moz-range-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+      `}</style>
+
+      {/* Zoom (granularity) */}
+      <div className="flex items-center gap-1.5 h-[26px]">
+        <button
+          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 0}
+          title="Zoom out"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Minus size={14} />
+        </button>
+
+        <div className="relative w-20 h-[26px] flex items-center">
+          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
+            {[0, 1, 2, 3, 4, 5].map(i => (
+              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
+            ))}
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="5"
+            step="1"
+            value={currentIndex}
+            onChange={handleSliderChange}
+            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
+            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          />
+        </div>
+
+        <button
+          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 5}
+          title="Zoom in"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Plus size={14} />
+        </button>
+
+        <div
+          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          className={cn(
+            'flex items-center justify-center w-[22px] h-[22px]',
+            'bg-card border border-border rounded-sm text-xs font-mono select-none',
+            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
+          )}
+        >
+          {currentLabel}
+        </div>
+      </div>
+
+      <div className={divider} />
+
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as GroupBy)}
+      >
+        <option value="none">None</option>
+        <option value="member">Member</option>
+        <option value="parent">Parent activity</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Sort by */}
+      <span className={label}>Sort by</span>
+      <select
+        className={select}
+        value={sortBy}
+        onChange={e => onSortByChange(e.target.value as SortBy)}
+      >
+        <option value="startDate">Start date</option>
+        <option value="endDate">End date</option>
+        <option value="title">Title A–Z</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className="flex-1" />
+
+      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
+        <Download size={13} strokeWidth={1.8} />
+        Export
+      </button>
+
+      <button className={ctrlBtn} onClick={onShare} title="Share">
+        <Share2 size={13} strokeWidth={1.8} />
+        Share
+      </button>
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/MemberModal.tsx
+````typescript
+/**
+ * MemberModal — view and edit a team member's profile, identity, and role.
+ *
+ * Shows computed stats (timelines, activities by date status) and exposes
+ * superadmin actions (promote, inactivate, delete) when the viewer is a
+ * superadmin. Password reset is present but shows "SMTP not configured"
+ * until Phase 14.
+ */
+
+import { useState } from 'react'
+import { createPortal } from 'react-dom'
+import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users, ShieldOff } from 'lucide-react'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
+import { Badge } from '@/components/identity/Badge'
+import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
+import { useAuth } from '@/contexts/AuthContext'
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import type { components } from '@draba/shared'
+
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+interface Props {
+  teamId: string
+  memberId: string
+  /** Whether the current viewer is a team admin. */
+  isAdmin: boolean
+  /** Whether the current viewer is a superadmin. */
+  isSuperadmin: boolean
+  onClose: () => void
+}
+
+// ── Small shared styles ───────────────────────────────────────────────────────
+
+const chipStyle = (color: string): React.CSSProperties => ({
+  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+  padding: '10px 16px', borderRadius: 8, flex: 1,
+  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
+  background: `${color}0a`, textAlign: 'center', minWidth: 0,
+})
+
+const cancelBtn: React.CSSProperties = {
+  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
+  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+
+export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
+  const { user: currentUser } = useAuth()
+  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
+  const updateMember = useUpdateMember(teamId)
+  const promoteUser = usePromoteUser()
+  const archiveUser = useArchiveUser()
+  const unarchiveUser = useUnarchiveUser()
+  const deleteUser = useDeleteUser()
+  const revokeUser = useRevokeUser()
+
+  const [identity, setIdentity] = useState<Identity | null>(null)
+  const [displayName, setDisplayName] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | 'revoke' | null>(null)
+  const [revokeResult, setRevokeResult] = useState<{ membershipsInactivated: number; membershipsRemoved: number } | null>(null)
+
+  if (isLoading || isError || !detail) {
+    return createPortal(
+      <div
+        onClick={e => { if (e.target === e.currentTarget) onClose() }}
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+      >
+        <div style={{ width: 560, height: 300, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
+          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+            <X size={18} />
+          </button>
+          {isError ? (
+            <>
+              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
+              <button onClick={onClose} style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>Dismiss</button>
+            </>
+          ) : (
+            <span style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</span>
+          )}
+        </div>
+      </div>,
+      document.body,
+    )
+  }
+
+  const effectiveIdentity: Identity = identity ?? {
+    color: detail.color ?? '#1A97A2',
+    icon: detail.icon ?? '__name_words__',
+  }
+  const effectiveName = displayName ?? detail.displayName
+
+  const isParticipant = !detail.userId
+  const isInactivated = Boolean(detail.archivedAt)
+  const stats = detail.stats
+  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
+
+  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending || revokeUser.isPending
+
+  // detail is guaranteed non-null here (early return above handles loading/undefined).
+  // Non-null assertions in callbacks are safe because they only fire when the
+  // rendered modal is interactive, which requires detail to be loaded.
+  function handleSave() {
+    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
+    if (displayName !== null) patch.displayName = displayName
+    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
+    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
+  }
+
+  function handlePromote() {
+    if (!detail!.userId) return
+    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
+  }
+
+  function handleInactivate() {
+    if (!detail!.userId) return
+    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+  }
+
+  function handleReactivate() {
+    if (!detail!.userId) return
+    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
+  }
+
+  function handleRevoke() {
+    if (!detail!.userId) return
+    revokeUser.mutate(detail!.userId, {
+      onSuccess: (result) => {
+        setConfirm(null)
+        setRevokeResult({ membershipsInactivated: result.membershipsInactivated, membershipsRemoved: result.membershipsRemoved })
+        // Close the modal after a short delay so the user can see the summary.
+        setTimeout(onClose, 2000)
+      },
+    })
+  }
+
+  function handleDelete() {
+    if (!detail!.userId) return
+    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+  }
+
+  const memberColor = effectiveIdentity.color
+
+  return createPortal(
+    <div
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+    >
+      <div style={{ width: 560, maxHeight: '90vh', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+        {/* Confirm overlays */}
+        {confirm === 'promote' && (
+          <ConfirmDialog
+            variant="indigo"
+            icon={<Shield size={22} color="#6366F1" />}
+            title="Promote to Super Admin?"
+            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
+            confirmLabel="Promote"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handlePromote}
+          />
+        )}
+        {confirm === 'inactivate' && (
+          <ConfirmDialog
+            variant="amber"
+            icon={<Archive size={22} color="#F59E0B" />}
+            title={`Inactivate ${effectiveName}?`}
+            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
+            confirmLabel="Inactivate"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleInactivate}
+          />
+        )}
+        {confirm === 'delete' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<Trash2 size={22} color="#EF4444" />}
+            title={`Delete ${effectiveName}?`}
+            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
+            confirmLabel="Delete permanently"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleDelete}
+          />
+        )}
+        {confirm === 'revoke' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<ShieldOff size={22} color="#EF4444" />}
+            title={`Revoke all access for ${effectiveName}?`}
+            body="This will: (1) deactivate the account — the user cannot log in anywhere; (2) inactivate all team memberships that have activity history; (3) permanently remove memberships with no activity history. Activity data is always preserved."
+            confirmLabel="Revoke all access"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleRevoke}
+          />
+        )}
+
+        {confirm === null && (
+          <>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              <div style={{ flexShrink: 0 }}>
+                <IdentityWidget
+                  identity={effectiveIdentity}
+                  name={effectiveName}
+                  shape="circle"
+                  onChange={setIdentity}
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
+                  {isParticipant ? 'Participant' : 'Team Member'}
+                  {isInactivated && ' · Inactive'}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  {(isAdmin || currentUser?.id === detail.userId) ? (
+                    <InlineEditableTitle
+                      value={displayName ?? detail.displayName}
+                      onChange={setDisplayName}
+                    />
+                  ) : (
+                    <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{effectiveName}</span>
+                  )}
+                  {isParticipant && (
+                    <span style={{ fontSize: 11, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
+                  )}
+                </div>
+              </div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex', flexShrink: 0 }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Scrollable body */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+
+              {/* Email */}
+              {!isParticipant && (
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
+                  <div style={{ fontSize: 13, color: 'var(--muted-foreground)', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {detail.email}
+                  </div>
+                </div>
+              )}
+
+              {/* Timeline stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Timelines
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Active</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Activity stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Activities
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Past due</span>
+                  </div>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Running</span>
+                  </div>
+                  <div style={chipStyle('#3B82F6')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Upcoming</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Teams list */}
+              {detail.teams.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Teams ({detail.teams.length})
+                  </label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {detail.teams.map((tm: TeamMemberWithUser) => (
+                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--muted)', borderRadius: 7 }}>
+                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
+                        <span style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{tm.teamId}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : 'var(--muted-foreground)', background: tm.role === 'admin' ? 'rgba(26,151,162,0.12)' : 'var(--muted)', border: `1px solid ${tm.role === 'admin' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`, borderRadius: 99, padding: '1px 8px' }}>
+                          {tm.role}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Joined date */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: 'var(--muted)', borderRadius: 6, fontSize: 12, color: 'var(--muted-foreground)' }}>
+                  <Clock size={12} />
+                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
+                </div>
+              </div>
+
+              {/* Account section — non-participant only */}
+              {!isParticipant && isAdmin && (
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
+                  <button
+                    style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'var(--font-sans)' }}
+                    title="SMTP is not configured"
+                    disabled
+                  >
+                    Reset password — SMTP not configured
+                  </button>
+                </div>
+              )}
+
+              {/* Superadmin actions */}
+              {isSuperadmin && !isParticipant && (
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
+                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Super Admin Actions
+                  </label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {!isInactivated && (
+                      <button
+                        onClick={() => setConfirm('promote')}
+                        style={{ fontSize: 12, color: '#6366F1', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Shield size={13} />
+                        Promote to Super Admin
+                      </button>
+                    )}
+                    {isInactivated ? (
+                      <button
+                        onClick={handleReactivate}
+                        disabled={busy}
+                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', opacity: busy ? 0.6 : 1 }}
+                      >
+                        Reactivate account
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setConfirm('inactivate')}
+                        style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Archive size={13} />
+                        Inactivate
+                      </button>
+                    )}
+                    {detail.deletable && (
+                      <button
+                        onClick={() => setConfirm('delete')}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Trash2 size={13} />
+                        Delete
+                      </button>
+                    )}
+                    {/* Hidden once the account itself is deactivated — membership-level
+                        inactivation alone still leaves the account active on other teams */}
+                    {!detail.userArchivedAt && (
+                      <button
+                        onClick={() => setConfirm('revoke')}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <ShieldOff size={13} />
+                        Revoke all access
+                      </button>
+                    )}
+                  </div>
+                  {activeActivityCount > 0 && (
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 8 }}>
+                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
+                    </div>
+                  )}
+                  {revokeResult && (
+                    <div style={{ fontSize: 12, color: 'var(--foreground)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
+                      Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+              <button onClick={onClose} style={cancelBtn}>Cancel</button>
+              {(isAdmin || currentUser?.id === detail.userId) && (
+                <button
+                  onClick={handleSave}
+                  disabled={busy}
+                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'var(--font-sans)' }}
+                >
+                  {busy ? 'Saving…' : 'Save changes'}
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
+## File: packages/web/src/lib/presetFilters.test.ts
+````typescript
+/**
+ * presetFilters.test.ts — unit tests for applyActiveFilter.
+ *
+ * Covers each preset, the member filter kind, and saved filter delegation.
+ */
+
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { applyActiveFilter } from './presetFilters'
+import type { ActiveFilter } from '@/contexts/FilterContext'
+import type { components } from '@draba/shared'
+
+type Activity = components['schemas']['Activity']
+type SavedFilter = components['schemas']['SavedFilter']
+type Status = components['schemas']['Status']
+type Tag = components['schemas']['Tag']
+
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function makeActivity(overrides: Record<string, any> = {}): Activity {
+  return {
+    id: 'act-1',
+    title: 'Default',
+    timelineId: 'tl-1',
+    startAt: '2026-06-01T00:00:00Z',
+    endAt: '2026-06-30T00:00:00Z',
+    allDay: false,
+    statusId: null,
+    tagIds: [],
+    assignedMemberIds: [],
+    percentComplete: null,
+    parentActivityId: null,
+    color: null,
+    icon: null,
+    description: null,
+    notes: null,
+    location: null,
+    url: null,
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    archivedAt: null,
+    createdBy: 'user-1',
+    ...overrides,
+  } as Activity
+}
+
+function makeStatus(id: string, name: string, isClosed = false): Status {
+  return { id, name, color: '#3B82F6', icon: null, isClosed, position: 0, timelineId: 'tl-1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
+}
+
+function makeTag(id: string, name: string): Tag {
+  return { id, name, color: null, teamId: 'team-1', createdAt: '2026-01-01T00:00:00Z', createdBy: 'user-1' }
+}
+
+// Fake the current date to a known value for date-relative tests
+const FAKE_NOW = new Date('2026-06-01T00:00:00Z').getTime()
+beforeAll(() => {
+  vi.spyOn(Date, 'now').mockReturnValue(FAKE_NOW)
+})
+afterAll(() => {
+  vi.restoreAllMocks()
+})
+
+const closedStatusId = 'status-closed'
+const openStatusId = 'status-open'
+const otherMemberId = 'member-other'
+
+const baseCtx = {
+  closedStatusIds: new Set([closedStatusId]),
+  savedFilters: [] as SavedFilter[],
+  statuses: new Map<string, Status[]>([['tl-1', [makeStatus(openStatusId, 'Open'), makeStatus(closedStatusId, 'Done', true)]]]),
+  tags: [makeTag('tag-1', 'urgent')] as Tag[],
+}
+
+const emptyMemberIds = new Map<string, string[]>()
+
+// ── all preset ────────────────────────────────────────────────────────────────
+
+describe("preset 'all'", () => {
+  it('returns all activities unchanged', () => {
+    const activities = [makeActivity({ id: '1' }), makeActivity({ id: '2' })]
+    const filter: ActiveFilter = { kind: 'preset', id: 'all' }
+    expect(applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)).toHaveLength(2)
+  })
+})
+
+// ── open preset ───────────────────────────────────────────────────────────────
+
+describe("preset 'open'", () => {
+  it('removes activities with a closed status', () => {
+    const activities = [
+      makeActivity({ id: 'a', statusId: openStatusId }),
+      makeActivity({ id: 'b', statusId: closedStatusId }),
+      makeActivity({ id: 'c', statusId: null }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'open' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['a', 'c'])
+  })
+})
+
+// ── upcoming preset ───────────────────────────────────────────────────────────
+
+describe("preset 'upcoming'", () => {
+  // FAKE_NOW = 2026-06-01. 7 days = until 2026-06-08.
+  it('includes activities starting within 7 days', () => {
+    const activities = [
+      makeActivity({ id: 'soon', startAt: '2026-06-05T00:00:00Z', endAt: '2026-06-06T00:00:00Z' }),  // within 7d
+      makeActivity({ id: 'far',  startAt: '2026-07-01T00:00:00Z', endAt: '2026-07-15T00:00:00Z' }),  // beyond 7d
+      makeActivity({ id: 'past', startAt: '2026-05-01T00:00:00Z', endAt: '2026-05-10T00:00:00Z' }),  // in past
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toContain('soon')
+    expect(result.map(a => a.id)).not.toContain('far')
+    expect(result.map(a => a.id)).not.toContain('past')
+  })
+
+  it('includes activities ending within 7 days (even if already started)', () => {
+    const activities = [
+      makeActivity({ id: 'ending-soon', endAt: '2026-06-04T00:00:00Z', startAt: '2026-05-01T00:00:00Z' }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result[0].id).toBe('ending-soon')
+  })
+})
+
+// ── overdue preset ────────────────────────────────────────────────────────────
+
+describe("preset 'overdue'", () => {
+  it('returns past-due activities that are not closed', () => {
+    const activities = [
+      makeActivity({ id: 'overdue',    endAt: '2026-05-01T00:00:00Z', statusId: openStatusId }),
+      makeActivity({ id: 'closed-old', endAt: '2026-05-01T00:00:00Z', statusId: closedStatusId }),
+      makeActivity({ id: 'future',     endAt: '2026-07-01T00:00:00Z', statusId: openStatusId }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'overdue' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['overdue'])
+  })
+})
+
+// ── noassign preset ───────────────────────────────────────────────────────────
+
+describe("preset 'noassign'", () => {
+  it('returns only activities with no assignees', () => {
+    const activities = [
+      makeActivity({ id: 'assigned', assignedMemberIds: [otherMemberId] }),
+      makeActivity({ id: 'free',     assignedMemberIds: [] }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'noassign' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['free'])
+  })
+})
+
+// ── member filter kind ────────────────────────────────────────────────────────
+
+describe("filter kind 'member'", () => {
+  it('filters by the resolved member IDs for the userId', () => {
+    const activities = [
+      makeActivity({ id: 'a', assignedMemberIds: ['mbr-alice-1'] }),
+      makeActivity({ id: 'b', assignedMemberIds: ['mbr-bob'] }),
+    ]
+    const memberIds = new Map([['user-alice', ['mbr-alice-1', 'mbr-alice-2']]])
+    const filter: ActiveFilter = { kind: 'member', userId: 'user-alice' }
+    const result = applyActiveFilter(activities, filter, memberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['a'])
+  })
+
+  it('returns empty when user has no member IDs', () => {
+    const activities = [makeActivity()]
+    const filter: ActiveFilter = { kind: 'member', userId: 'unknown-user' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result).toHaveLength(0)
+  })
+})
+
+// ── saved filter kind ─────────────────────────────────────────────────────────
+
+describe("filter kind 'saved'", () => {
+  it('evaluates a saved filter definition against activities', () => {
+    const savedFilter: SavedFilter = {
+      id: 'sf-1',
+      teamId: 'team-1',
+      userId: 'user-1',
+      name: 'Urgent bugs',
+      isTeamFilter: false,
+      definition: JSON.stringify({
+        logic: 'and',
+        conditions: [{ field: 'title', op: 'contains', value: 'urgent' }],
+      }),
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }
+    const activities = [
+      makeActivity({ id: 'a', title: 'Fix urgent bug' }),
+      makeActivity({ id: 'b', title: 'Refactor component' }),
+    ]
+    const ctx = { ...baseCtx, savedFilters: [savedFilter] }
+    const filter: ActiveFilter = { kind: 'saved', id: 'sf-1' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
+    expect(result.map(a => a.id)).toEqual(['a'])
+  })
+
+  it('returns all activities when saved filter is not found', () => {
+    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
+    const filter: ActiveFilter = { kind: 'saved', id: 'nonexistent' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result).toHaveLength(2)
+  })
+
+  it('returns all activities when saved filter definition is invalid JSON', () => {
+    const badFilter: SavedFilter = {
+      id: 'sf-bad',
+      teamId: 'team-1',
+      userId: 'user-1',
+      name: 'Broken',
+      isTeamFilter: false,
+      definition: 'NOT VALID JSON }{',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }
+    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
+    const ctx = { ...baseCtx, savedFilters: [badFilter] }
+    const filter: ActiveFilter = { kind: 'saved', id: 'sf-bad' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
+    expect(result).toHaveLength(2)
+  })
+})
+````
+
+## File: packages/api/internal/api/saved_filter_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleListSavedFilters handles GET /teams/{id}/saved_filters. Returns
+// only filters owned by the calling user within the given team.
+func (s *Server) handleListSavedFilters(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	filters, err := s.savedFilters.ListByTeamUser(teamID, claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
+		return
+	}
+	writeJSON(w, http.StatusOK, filters)
+}
+
+// handleListAllTeamSavedFilters handles GET /teams/{id}/saved_filters/all.
+// Returns every saved filter in the team (private + team). Admin-only.
+func (s *Server) handleListAllTeamSavedFilters(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can list all team filters")
+		return
+	}
+
+	filters, err := s.savedFilters.ListAllByTeam(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
+		return
+	}
+	writeJSON(w, http.StatusOK, filters)
+}
+
+// handleCreateSavedFilter handles POST /teams/{id}/saved_filters. The
+// authenticated user must be a member of the team and becomes the owner.
+// Setting isTeamFilter=true at creation time requires admin role.
+func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+
+	var req CreateSavedFilterJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if !json.Valid([]byte(req.Definition)) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
+		return
+	}
+
+	isTeamFilter := false
+	if req.IsTeamFilter != nil && *req.IsTeamFilter {
+		if member.Role != "admin" {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can create team filters")
+			return
+		}
+		isTeamFilter = true
+	}
+
+	now := time.Now()
+	filter := &models.SavedFilter{
+		ID:           newID(),
+		TeamID:       teamID,
+		UserID:       claims.UserID,
+		Name:         req.Name,
+		Definition:   req.Definition,
+		IsTeamFilter: isTeamFilter,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.savedFilters.Create(filter); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create saved filter")
+		return
+	}
+	writeJSON(w, http.StatusCreated, filter)
+}
+
+// handleUpdateSavedFilter handles PATCH /saved_filters/{id}. Owners may
+// update name and definition. Setting isTeamFilter=true is admin-only;
+// admins may also update filters they don't own when the filter is already
+// a team filter.
+func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request) {
+	filterID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	filter, err := s.savedFilters.GetByID(filterID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
+		return
+	}
+
+	var req UpdateSavedFilterJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Determine whether the caller is a team admin for permission checks.
+	isAdmin := false
+	if adminMember, ok := s.requireTeamMember(w, r, filter.TeamID); ok {
+		isAdmin = adminMember.Role == "admin"
+	} else {
+		return
+	}
+
+	isOwner := filter.UserID == claims.UserID
+
+	// Name and definition can be updated by the owner or by a team admin, but
+	// only after the filter has been promoted. This prevents admins from silently
+	// editing a member's private filter before they decide to share it — promotion
+	// is the explicit consent step.
+	wantsNameOrDef := req.Name != nil || req.Definition != nil
+	if wantsNameOrDef && !isOwner {
+		if !isAdmin || !filter.IsTeamFilter {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
+			return
+		}
+	}
+
+	if req.Name != nil {
+		if *req.Name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
+			return
+		}
+		filter.Name = *req.Name
+	}
+	if req.Definition != nil {
+		if !json.Valid([]byte(*req.Definition)) {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
+			return
+		}
+		filter.Definition = *req.Definition
+	}
+	// Only admins may promote or demote isTeamFilter — setting it back to false
+	// is just as impactful as promoting, since it silently removes the filter
+	// from all members' views.
+	if req.IsTeamFilter != nil {
+		if !isAdmin {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can change team filter status")
+			return
+		}
+		filter.IsTeamFilter = *req.IsTeamFilter
+	}
+	filter.UpdatedAt = time.Now()
+
+	if err := s.savedFilters.Update(filter); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
+		return
+	}
+	writeJSON(w, http.StatusOK, filter)
+}
+
+// handleDeleteSavedFilter handles DELETE /saved_filters/{id}. The owner may
+// always delete their own filter. Team admins may additionally delete any
+// team filter (is_team_filter = true) even if they aren't the owner.
+func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request) {
+	filterID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	filter, err := s.savedFilters.GetByID(filterID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
+		return
+	}
+
+	// Check membership to determine admin status.
+	adminMember, ok := s.requireTeamMember(w, r, filter.TeamID)
+	if !ok {
+		return
+	}
+	isAdmin := adminMember.Role == "admin"
+
+	// Owner can always delete; admin can delete team filters they don't own.
+	if filter.UserID != claims.UserID && !(isAdmin && filter.IsTeamFilter) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
+		return
+	}
+
+	if err := s.savedFilters.Delete(filterID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/api/internal/db/status_repo.go
 ````go
 // Package db — StatusRepo manages status templates, template items,
@@ -30026,437 +30457,6 @@ export default function TopBar({
 }
 ````
 
-## File: packages/web/src/components/MemberModal.tsx
-````typescript
-/**
- * MemberModal — view and edit a team member's profile, identity, and role.
- *
- * Shows computed stats (timelines, activities by date status) and exposes
- * superadmin actions (promote, inactivate, delete) when the viewer is a
- * superadmin. Password reset is present but shows "SMTP not configured"
- * until Phase 14.
- */
-
-import { useState } from 'react'
-import { createPortal } from 'react-dom'
-import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users, ShieldOff } from 'lucide-react'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import type { Identity } from '@/components/identity/identity-constants'
-import { Badge } from '@/components/identity/Badge'
-import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
-import { useAuth } from '@/contexts/AuthContext'
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-import type { components } from '@draba/shared'
-
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-interface Props {
-  teamId: string
-  memberId: string
-  /** Whether the current viewer is a team admin. */
-  isAdmin: boolean
-  /** Whether the current viewer is a superadmin. */
-  isSuperadmin: boolean
-  onClose: () => void
-}
-
-// ── Small shared styles ───────────────────────────────────────────────────────
-
-const chipStyle = (color: string): React.CSSProperties => ({
-  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-  padding: '10px 16px', borderRadius: 8, flex: 1,
-  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
-  background: `${color}0a`, textAlign: 'center', minWidth: 0,
-})
-
-const cancelBtn: React.CSSProperties = {
-  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
-  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
-
-export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
-  const { user: currentUser } = useAuth()
-  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
-  const updateMember = useUpdateMember(teamId)
-  const promoteUser = usePromoteUser()
-  const archiveUser = useArchiveUser()
-  const unarchiveUser = useUnarchiveUser()
-  const deleteUser = useDeleteUser()
-  const revokeUser = useRevokeUser()
-
-  const [identity, setIdentity] = useState<Identity | null>(null)
-  const [displayName, setDisplayName] = useState<string | null>(null)
-  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | 'revoke' | null>(null)
-  const [revokeResult, setRevokeResult] = useState<{ membershipsInactivated: number; membershipsRemoved: number } | null>(null)
-
-  if (isLoading || isError || !detail) {
-    return createPortal(
-      <div
-        onClick={e => { if (e.target === e.currentTarget) onClose() }}
-        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-      >
-        <div style={{ width: 560, height: 300, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
-          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-            <X size={18} />
-          </button>
-          {isError ? (
-            <>
-              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
-              <button onClick={onClose} style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>Dismiss</button>
-            </>
-          ) : (
-            <span style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</span>
-          )}
-        </div>
-      </div>,
-      document.body,
-    )
-  }
-
-  const effectiveIdentity: Identity = identity ?? {
-    color: detail.color ?? '#1A97A2',
-    icon: detail.icon ?? '__name_words__',
-  }
-  const effectiveName = displayName ?? detail.displayName
-
-  const isParticipant = !detail.userId
-  const isInactivated = Boolean(detail.archivedAt)
-  const stats = detail.stats
-  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
-
-  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending || revokeUser.isPending
-
-  // detail is guaranteed non-null here (early return above handles loading/undefined).
-  // Non-null assertions in callbacks are safe because they only fire when the
-  // rendered modal is interactive, which requires detail to be loaded.
-  function handleSave() {
-    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
-    if (displayName !== null) patch.displayName = displayName
-    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
-    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
-  }
-
-  function handlePromote() {
-    if (!detail!.userId) return
-    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
-  }
-
-  function handleInactivate() {
-    if (!detail!.userId) return
-    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  function handleReactivate() {
-    if (!detail!.userId) return
-    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
-  }
-
-  function handleRevoke() {
-    if (!detail!.userId) return
-    revokeUser.mutate(detail!.userId, {
-      onSuccess: (result) => {
-        setConfirm(null)
-        setRevokeResult({ membershipsInactivated: result.membershipsInactivated, membershipsRemoved: result.membershipsRemoved })
-        // Close the modal after a short delay so the user can see the summary.
-        setTimeout(onClose, 2000)
-      },
-    })
-  }
-
-  function handleDelete() {
-    if (!detail!.userId) return
-    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  const memberColor = effectiveIdentity.color
-
-  return createPortal(
-    <div
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-    >
-      <div style={{ width: 560, maxHeight: '90vh', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-        {/* Confirm overlays */}
-        {confirm === 'promote' && (
-          <ConfirmDialog
-            variant="indigo"
-            icon={<Shield size={22} color="#6366F1" />}
-            title="Promote to Super Admin?"
-            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
-            confirmLabel="Promote"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handlePromote}
-          />
-        )}
-        {confirm === 'inactivate' && (
-          <ConfirmDialog
-            variant="amber"
-            icon={<Archive size={22} color="#F59E0B" />}
-            title={`Inactivate ${effectiveName}?`}
-            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
-            confirmLabel="Inactivate"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleInactivate}
-          />
-        )}
-        {confirm === 'delete' && (
-          <ConfirmDialog
-            variant="red"
-            icon={<Trash2 size={22} color="#EF4444" />}
-            title={`Delete ${effectiveName}?`}
-            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
-            confirmLabel="Delete permanently"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleDelete}
-          />
-        )}
-        {confirm === 'revoke' && (
-          <ConfirmDialog
-            variant="red"
-            icon={<ShieldOff size={22} color="#EF4444" />}
-            title={`Revoke all access for ${effectiveName}?`}
-            body="This will: (1) deactivate the account — the user cannot log in anywhere; (2) inactivate all team memberships that have activity history; (3) permanently remove memberships with no activity history. Activity data is always preserved."
-            confirmLabel="Revoke all access"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleRevoke}
-          />
-        )}
-
-        {confirm === null && (
-          <>
-            {/* Header */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-              <div style={{ flexShrink: 0 }}>
-                <IdentityWidget
-                  identity={effectiveIdentity}
-                  name={effectiveName}
-                  shape="circle"
-                  onChange={setIdentity}
-                />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
-                  {isParticipant ? 'Participant' : 'Team Member'}
-                  {isInactivated && ' · Inactive'}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  {(isAdmin || currentUser?.id === detail.userId) ? (
-                    <InlineEditableTitle
-                      value={displayName ?? detail.displayName}
-                      onChange={setDisplayName}
-                    />
-                  ) : (
-                    <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{effectiveName}</span>
-                  )}
-                  {isParticipant && (
-                    <span style={{ fontSize: 11, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
-                  )}
-                </div>
-              </div>
-              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex', flexShrink: 0 }}>
-                <X size={18} />
-              </button>
-            </div>
-
-            {/* Scrollable body */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-
-              {/* Email */}
-              {!isParticipant && (
-                <div style={{ marginBottom: 20 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
-                  <div style={{ fontSize: 13, color: 'var(--muted-foreground)', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {detail.email}
-                  </div>
-                </div>
-              )}
-
-              {/* Timeline stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Timelines
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Active</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Activity stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Activities
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Past due</span>
-                  </div>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Running</span>
-                  </div>
-                  <div style={chipStyle('#3B82F6')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Upcoming</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Teams list */}
-              {detail.teams.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Teams ({detail.teams.length})
-                  </label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    {detail.teams.map((tm: TeamMemberWithUser) => (
-                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--muted)', borderRadius: 7 }}>
-                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
-                        <span style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{tm.teamId}</span>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : 'var(--muted-foreground)', background: tm.role === 'admin' ? 'rgba(26,151,162,0.12)' : 'var(--muted)', border: `1px solid ${tm.role === 'admin' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`, borderRadius: 99, padding: '1px 8px' }}>
-                          {tm.role}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Joined date */}
-              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: 'var(--muted)', borderRadius: 6, fontSize: 12, color: 'var(--muted-foreground)' }}>
-                  <Clock size={12} />
-                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
-                </div>
-              </div>
-
-              {/* Account section — non-participant only */}
-              {!isParticipant && isAdmin && (
-                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
-                  <button
-                    style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'var(--font-sans)' }}
-                    title="SMTP is not configured"
-                    disabled
-                  >
-                    Reset password — SMTP not configured
-                  </button>
-                </div>
-              )}
-
-              {/* Superadmin actions */}
-              {isSuperadmin && !isParticipant && (
-                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
-                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Super Admin Actions
-                  </label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                    {!isInactivated && (
-                      <button
-                        onClick={() => setConfirm('promote')}
-                        style={{ fontSize: 12, color: '#6366F1', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Shield size={13} />
-                        Promote to Super Admin
-                      </button>
-                    )}
-                    {isInactivated ? (
-                      <button
-                        onClick={handleReactivate}
-                        disabled={busy}
-                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', opacity: busy ? 0.6 : 1 }}
-                      >
-                        Reactivate account
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setConfirm('inactivate')}
-                        style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Archive size={13} />
-                        Inactivate
-                      </button>
-                    )}
-                    {detail.deletable && (
-                      <button
-                        onClick={() => setConfirm('delete')}
-                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Trash2 size={13} />
-                        Delete
-                      </button>
-                    )}
-                    {/* Hidden once the account itself is deactivated — membership-level
-                        inactivation alone still leaves the account active on other teams */}
-                    {!detail.userArchivedAt && (
-                      <button
-                        onClick={() => setConfirm('revoke')}
-                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <ShieldOff size={13} />
-                        Revoke all access
-                      </button>
-                    )}
-                  </div>
-                  {activeActivityCount > 0 && (
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 8 }}>
-                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
-                    </div>
-                  )}
-                  {revokeResult && (
-                    <div style={{ fontSize: 12, color: 'var(--foreground)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
-                      Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Footer */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-              <button onClick={onClose} style={cancelBtn}>Cancel</button>
-              {(isAdmin || currentUser?.id === detail.userId) && (
-                <button
-                  onClick={handleSave}
-                  disabled={busy}
-                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'var(--font-sans)' }}
-                >
-                  {busy ? 'Saving…' : 'Save changes'}
-                </button>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-    </div>,
-    document.body,
-  )
-}
-````
-
 ## File: packages/web/src/components/StatusTemplatesTab.tsx
 ````typescript
 /**
@@ -30857,6 +30857,752 @@ export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props
       )}
     </div>
   )
+}
+````
+
+## File: packages/web/src/components/TeamModal.tsx
+````typescript
+/**
+ * TeamModal — create / edit a team in a portal-rendered modal.
+ *
+ * The Members tab is fully functional after Phase 10.1.2. The Settings tab
+ * handles team identity and metadata. Identity and name live in the modal
+ * header so they remain visible while the user scrolls the tab body.
+ */
+
+import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { X, Archive, Mail, Link2, Copy, Check, Plus, Minus, RefreshCw, UserMinus, RotateCcw } from 'lucide-react';
+import { ApiError } from '@/lib/api';
+import { IdentityWidget } from '@/components/identity/IdentityWidget';
+import { Badge } from '@/components/identity/Badge';
+import type { Identity } from '@/components/identity/identity-constants';
+import { IDENTITY_COLORS } from '@/components/identity/identity-constants';
+import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities';
+import StatusTemplatesTab from '@/components/StatusTemplatesTab';
+import { useAuth } from '@/contexts/AuthContext';
+import {
+  useTeamInvites, useRevokeInvite,
+  useTeamInviteLink, useCreateInviteLink, useRevokeInviteLink,
+  useAddMember, useDeleteMember, useArchiveMember, useUnarchiveMember,
+  useCreateParticipant, useUpdateMember, useUserSearch,
+} from '@/hooks/useMemberManagement';
+import RoleDropdown, { type MemberRole } from '@/components/RoleDropdown';
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle';
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
+import type { components } from '@draba/shared';
+
+type Team = components['schemas']['Team'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+interface Props {
+  mode: 'new' | 'edit';
+  team?: Team;
+  onClose: () => void;
+  /** Called with the newly created team immediately after server confirmation. */
+  onTeamCreated?: (team: Team) => void;
+  /** Whether the current user is a team admin. */
+  isAdmin?: boolean;
+}
+
+type Tab = 'settings' | 'members' | 'statuses';
+
+const DEFAULT_COLOR = IDENTITY_COLORS[0].hex;
+const DEFAULT_ICON = '__name_1__';
+
+function resolveIdentity(team?: Team): Identity {
+  return {
+    color: team?.color ?? DEFAULT_COLOR,
+    icon: team?.icon ?? DEFAULT_ICON,
+  };
+}
+
+// ── Shared button styles ────────────────────────────────────────────────────
+
+const cancelBtnStyle: React.CSSProperties = {
+  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
+  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
+};
+
+const inputStyle: React.CSSProperties = {
+  background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 7,
+  padding: '8px 12px', color: 'var(--foreground)', fontSize: 13,
+  width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-sans)',
+};
+
+const labelStyle: React.CSSProperties = {
+  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px',
+  textTransform: 'uppercase', marginBottom: 6, display: 'block',
+};
+
+const archiveBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
+  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
+  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+};
+
+const restoreBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
+  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
+  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+};
+
+// ── Main component ──────────────────────────────────────────────────────────
+
+export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin = true }: Props) {
+  const { user } = useAuth()
+  const currentUserId = (user as { id?: string } | null)?.id ?? ''
+  const [tab, setTab] = useState<Tab>('settings');
+  const [teamSaved, setTeamSaved] = useState(mode === 'edit');
+  const [showBanner, setShowBanner] = useState(false);
+  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
+  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [identity, setIdentity] = useState<Identity>(resolveIdentity(team));
+  const [name, setName] = useState(team?.name ?? '');
+  const [description, setDescription] = useState(team?.description ?? '');
+  const [notes, setNotes] = useState(team?.notes ?? '');
+
+  const [savedTeamId, setSavedTeamId] = useState(team?.id ?? '');
+
+  const createTeam = useCreateTeam();
+  const updateTeam = useUpdateTeam();
+  const archiveTeam = useArchiveTeam();
+  const unarchiveTeam = useUnarchiveTeam();
+
+  // Members tab state — only loaded when the team exists.
+  const activeTeamId = savedTeamId || team?.id || '';
+  const { data: members = [] } = useTeamMembers(activeTeamId);
+  const { data: invites = [] } = useTeamInvites(activeTeamId);
+  const { data: inviteLink } = useTeamInviteLink(activeTeamId);
+  const addMember = useAddMember(activeTeamId);
+  const deleteMember = useDeleteMember(activeTeamId);
+  const archiveMember = useArchiveMember(activeTeamId);
+  const unarchiveMember = useUnarchiveMember(activeTeamId);
+  const createParticipant = useCreateParticipant(activeTeamId);
+  const updateMember = useUpdateMember(activeTeamId);
+  const revokeInvite = useRevokeInvite(activeTeamId);
+  const createInviteLink = useCreateInviteLink(activeTeamId);
+  const revokeInviteLink = useRevokeInviteLink(activeTeamId);
+
+  const [searchQ, setSearchQ] = useState('');
+  const [showParticipantForm, setShowParticipantForm] = useState(false);
+  // Maps memberId → assignmentCount when a 409 MEMBER_HAS_ASSIGNMENTS is returned.
+  const [removeErrors, setRemoveErrors] = useState<Record<string, number>>({});
+  const [participantName, setParticipantName] = useState('');
+  const [participantIdentity, setParticipantIdentity] = useState<Identity>({ color: IDENTITY_COLORS[3].hex, icon: '__name_1__' });
+  const [copyLinkLabel, setCopyLinkLabel] = useState<'copy' | 'copied'>('copy');
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const { data: searchResults = [] } = useUserSearch(searchQ);
+
+  const isArchived = Boolean(team?.archivedAt);
+  const busy = createTeam.isPending || updateTeam.isPending || archiveTeam.isPending || unarchiveTeam.isPending;
+
+  useEffect(() => {
+    return () => { if (bannerTimer.current) clearTimeout(bannerTimer.current); };
+  }, []);
+
+  // Stale 409 errors belong to a specific member row; clear them when the
+  // search changes because the member list may reorder or filter differently.
+  useEffect(() => {
+    setRemoveErrors({});
+  }, [searchQ]);
+
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
+  function handleSave() {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    const patch = {
+      name: trimmed,
+      description: description.trim() || null,
+      notes: notes.trim() || null,
+      color: identity.color,
+      icon: identity.icon,
+    };
+
+    if (mode === 'new' && !teamSaved) {
+      createTeam.mutate(patch, {
+        onSuccess: (created) => {
+          setSavedTeamId(created.id);
+          setTeamSaved(true);
+          setShowBanner(true);
+          onTeamCreated?.(created);
+          bannerTimer.current = setTimeout(() => setShowBanner(false), 3000);
+        },
+      });
+    } else {
+      const tid = savedTeamId || team?.id;
+      if (!tid) return;
+      updateTeam.mutate({ teamId: tid, patch }, { onSuccess: () => { /* noop */ } });
+    }
+  }
+
+  function handleArchive() {
+    const tid = savedTeamId || team?.id;
+    if (!tid) return;
+    archiveTeam.mutate(tid, { onSuccess: onClose });
+  }
+
+  function handleRestore() {
+    const tid = savedTeamId || team?.id;
+    if (!tid) return;
+    unarchiveTeam.mutate(tid, { onSuccess: onClose });
+  }
+
+  const teamColor = identity.color;
+  const isNew = mode === 'new';
+  const primaryLabel = teamSaved ? 'Save changes' : 'Create team';
+  const membersLocked = !teamSaved;
+
+  return createPortal(
+    <div
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 1000,
+      }}
+    >
+      <div
+        style={{
+          width: 580, maxHeight: '90vh', background: 'var(--card)',
+          border: '1px solid var(--border)', borderRadius: 14,
+          boxShadow: '0 24px 64px rgba(0,0,0,.6)',
+          display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        }}
+      >
+        {/* Header — identity widget + editable name */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          padding: '16px 20px', borderBottom: '1px solid var(--border)',
+        }}>
+          <IdentityWidget identity={identity} name={name} shape="square" onChange={setIdentity} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
+              {isNew ? 'New Team' : 'Edit Team'}
+            </div>
+            <InlineEditableTitle
+              value={name}
+              onChange={setName}
+              placeholder="Team name…"
+              autoFocus={mode === 'new'}
+              onKeyDown={e => { if (e.key === 'Escape') onClose(); }}
+            />
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Saved banner */}
+        {showBanner && (
+          <div style={{
+            padding: '8px 20px',
+            background: `${teamColor}18`,
+            borderBottom: `1px solid ${teamColor}44`,
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+            <span style={{ fontSize: 14, color: teamColor }}>✓</span>
+            <span style={{ fontSize: 12, color: teamColor }}>Team created — you can now add members.</span>
+          </div>
+        )}
+
+        {/* Tab bar */}
+        <div style={{ display: 'flex', padding: '0 20px', borderBottom: '1px solid var(--border)' }}>
+          {(['settings', 'members', 'statuses'] as Tab[]).map(t => {
+            const isActive = tab === t;
+            const locked = (t === 'members' || t === 'statuses') && membersLocked;
+            return (
+              <div key={t} style={{ position: 'relative' }}>
+                <button
+                  onClick={() => !locked && setTab(t)}
+                  title={locked ? 'Save the team first to add members' : undefined}
+                  style={{
+                    padding: '10px 14px', fontSize: 13, fontWeight: 500, background: 'none', border: 'none',
+                    borderBottom: `2px solid ${isActive ? teamColor : 'transparent'}`,
+                    color: isActive ? 'var(--foreground)' : 'var(--muted-foreground)',
+                    cursor: locked ? 'not-allowed' : 'pointer',
+                    opacity: locked ? 0.45 : 1,
+                    marginBottom: -1, fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    textTransform: 'capitalize',
+                  }}
+                >
+                  {t === 'statuses' ? 'Status Templates' : t}
+                  {t === 'members' && teamSaved && (
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'var(--muted)', borderRadius: 99, padding: '1px 6px' }}>
+                      {members.length}
+                    </span>
+                  )}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {showArchiveConfirm ? (
+            <ConfirmDialog
+              variant="amber"
+              icon={<Archive size={22} color="#F59E0B" />}
+              title={`Archive "${name || 'this team'}"?`}
+              body="The team will be hidden from active views. All timelines and activities will be preserved and the team can be restored from the Archived section at any time."
+              confirmLabel="Archive"
+              busy={archiveTeam.isPending}
+              onCancel={() => setShowArchiveConfirm(false)}
+              onConfirm={handleArchive}
+            />
+          ) : tab === 'settings' ? (
+            <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
+              {/* Description */}
+              <div>
+                <label style={labelStyle}>Description</label>
+                <input
+                  autoFocus={mode === 'edit'}
+                  value={description}
+                  onChange={e => setDescription(e.target.value)}
+                  placeholder="Short description of this team…"
+                  style={inputStyle}
+                />
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label style={labelStyle}>Notes</label>
+                <textarea
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  placeholder="Internal notes, context, links…"
+                  rows={4}
+                  style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5 }}
+                />
+              </div>
+
+              {createTeam.isError && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
+                  Something went wrong — refer to logs for details.
+                </div>
+              )}
+              {updateTeam.isError && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
+                  Something went wrong — refer to logs for details.
+                </div>
+              )}
+            </div>
+          ) : tab === 'statuses' ? (
+            <StatusTemplatesTab
+              teamId={activeTeamId}
+              isAdmin={isAdmin}
+              teamColor={teamColor}
+            />
+          ) : (
+            // Members tab
+            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+              {/* Search / add input */}
+              {isAdmin && (
+                <div>
+                  <label style={labelStyle}>Add member or invite by email</label>
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      value={searchQ}
+                      onChange={e => setSearchQ(e.target.value)}
+                      placeholder="Search by name or email…"
+                      style={{ ...inputStyle, paddingRight: 36 }}
+                    />
+                    {searchQ && (
+                      <button
+                        onClick={() => setSearchQ('')}
+                        style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex', padding: 2 }}
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Search results */}
+                  {searchQ.length >= 2 && (
+                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
+                      {searchResults.length === 0 ? (
+                        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No users found for "{searchQ}"</span>
+                          <button
+                            onClick={() => {
+                              // Trigger email invite
+                              const email = searchQ.includes('@') ? searchQ : null;
+                              if (!email) return;
+                              fetch(`/teams/${activeTeamId}/invites`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('accessToken') ?? ''}` },
+                                body: JSON.stringify({ email }),
+                              }).then(() => setSearchQ(''));
+                            }}
+                            style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                          >
+                            <Mail size={11} style={{ display: 'inline', marginRight: 4 }} />
+                            Invite
+                          </button>
+                        </div>
+                      ) : (
+                        searchResults.map(u => {
+                          const alreadyMember = members.some(m => m.userId === u.id);
+                          return (
+                            <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: '1px solid var(--border)' }}>
+                              <Badge identity={{ color: '#8b949e', icon: '__name_1__' }} name={u.displayName} shape="circle" size={22} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13, color: 'var(--foreground)' }}>{u.displayName}</div>
+                                <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{u.email}</div>
+                              </div>
+                              {alreadyMember ? (
+                                <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>Already added</span>
+                              ) : (
+                                <button
+                                  onClick={() => addMember.mutate({ userId: u.id }, { onSuccess: () => setSearchQ('') })}
+                                  style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4 }}
+                                >
+                                  <Plus size={11} />
+                                  Add
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Participant creation form */}
+              {isAdmin && (
+                <div>
+                  {!showParticipantForm ? (
+                    <button
+                      onClick={() => setShowParticipantForm(true)}
+                      style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                    >
+                      <Plus size={12} />
+                      Add participant (no login)
+                    </button>
+                  ) : (
+                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, padding: 14 }}>
+                      <label style={labelStyle}>New participant</label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <IdentityWidget
+                          identity={participantIdentity}
+                          name={participantName}
+                          shape="circle"
+                          onChange={setParticipantIdentity}
+                        />
+                        <input
+                          value={participantName}
+                          onChange={e => setParticipantName(e.target.value)}
+                          placeholder="Display name (required)…"
+                          style={{ ...inputStyle, flex: 1 }}
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => {
+                            if (!participantName.trim()) return;
+                            createParticipant.mutate({
+                              name: participantName.trim(),
+                              color: participantIdentity.color,
+                              icon: participantIdentity.icon,
+                            }, {
+                              onSuccess: () => { setParticipantName(''); setShowParticipantForm(false); },
+                            });
+                          }}
+                          disabled={!participantName.trim() || createParticipant.isPending}
+                          style={{ background: '#F59E0B', color: '#000', fontWeight: 600, fontSize: 12, padding: '7px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0, opacity: !participantName.trim() ? 0.5 : 1 }}
+                        >
+                          Create
+                        </button>
+                        <button onClick={() => setShowParticipantForm(false)} style={{ ...cancelBtnStyle, padding: '7px 10px' }}>
+                          <X size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Role-change error banner */}
+              {updateMember.isError && (
+                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 7, padding: '7px 12px' }}>
+                  {(updateMember.error as { message?: string })?.message ?? 'Could not update role.'}
+                </div>
+              )}
+
+              {/* Member list */}
+              <div>
+                <label style={labelStyle}>Members ({members.length})</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {members.map((m: TeamMemberWithUser) => {
+                    const isParticipant = !m.userId;
+                    const isInactive = Boolean(m.archivedAt);
+                    const memberRole: MemberRole = isParticipant ? 'participant' : (m.role as MemberRole);
+                    const removeError = removeErrors[m.id];
+                    return (
+                      <div key={m.id}>
+                        <div
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 10,
+                            padding: '7px 10px', borderRadius: 7,
+                            background: isInactive ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)',
+                            opacity: isInactive ? 0.5 : 1,
+                          }}
+                        >
+                          <div style={{ flexShrink: 0, border: isParticipant ? '1.5px dashed var(--muted-foreground)' : 'none', borderRadius: '50%' }}>
+                            <Badge
+                              identity={{ color: m.color ?? '#8b949e', icon: m.icon ?? '__name_words__' }}
+                              name={m.displayName}
+                              shape="circle"
+                              size={24}
+                            />
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ fontSize: 13, color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.displayName}</span>
+                              {isParticipant && <span style={{ fontSize: 10, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '0px 5px', flexShrink: 0 }}>No login</span>}
+                            </div>
+                            {!isParticipant && <div style={{ fontSize: 11, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>}
+                          </div>
+                          {isAdmin && (
+                            <RoleDropdown
+                              value={memberRole}
+                              onChange={role => {
+                                if (isParticipant || role === 'participant') return;
+                                updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
+                              }}
+                              disabled={isParticipant || m.userId === currentUserId}
+                              hideParticipant={!isParticipant}
+                            />
+                          )}
+                          {isAdmin && (
+                            <div style={{ display: 'flex', gap: 4 }}>
+                              {isInactive ? (
+                                <button
+                                  title="Reactivate member"
+                                  onClick={() => unarchiveMember.mutate(m.id)}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
+                                  onMouseEnter={e => (e.currentTarget.style.color = '#1A97A2')}
+                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
+                                >
+                                  <RefreshCw size={13} />
+                                </button>
+                              ) : (
+                                <button
+                                  title="Inactivate member"
+                                  onClick={() => archiveMember.mutate(m.id)}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
+                                  onMouseEnter={e => (e.currentTarget.style.color = '#F59E0B')}
+                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
+                                >
+                                  <UserMinus size={13} />
+                                </button>
+                              )}
+                              <button
+                                title="Remove from team"
+                                onClick={() => {
+                                  setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; });
+                                  deleteMember.mutate(m.id, {
+                                    onError: (err) => {
+                                      if (err instanceof ApiError && err.code === 'MEMBER_HAS_ASSIGNMENTS') {
+                                        const count = (err.data?.assignmentCount as number) ?? 0;
+                                        setRemoveErrors(prev => ({ ...prev, [m.id]: count }));
+                                      }
+                                    },
+                                  });
+                                }}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
+                                onMouseEnter={e => (e.currentTarget.style.color = '#EF4444')}
+                                onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
+                              >
+                                <Minus size={13} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        {removeError !== undefined && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#F59E0B', padding: '4px 10px 4px 44px' }}>
+                            <span>{removeError} assignment{removeError === 1 ? '' : 's'} — can't remove.</span>
+                            <button
+                              onClick={() => {
+                                archiveMember.mutate(m.id, {
+                                  onSuccess: () => setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; }),
+                                });
+                              }}
+                              style={{ fontSize: 12, color: '#F59E0B', background: 'none', border: '1px solid rgba(245,158,11,0.4)', borderRadius: 5, padding: '2px 8px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                            >
+                              Inactivate instead
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Pending invitations */}
+              {isAdmin && invites.length > 0 && (
+                <div>
+                  <label style={labelStyle}>Pending invitations ({invites.length})</label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    {invites.map(inv => (
+                      <div key={inv.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)' }}>
+                        <div style={{ width: 24, height: 24, borderRadius: '50%', border: '1.5px dashed var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          <Mail size={11} color="var(--muted-foreground)" />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.email}</div>
+                          <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
+                            Sent {new Date(inv.createdAt).toLocaleDateString()} · expires {new Date(inv.expiresAt).toLocaleDateString()}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => revokeInvite.mutate(inv.id)}
+                          style={{ fontSize: 11, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Invite link */}
+              {isAdmin && (
+                <div>
+                  <label style={labelStyle}>
+                    <Link2 size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Invite link
+                  </label>
+                  {inviteLink?.token ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <input
+                          readOnly
+                          value={`${window.location.origin}/register?token=${inviteLink.token}`}
+                          style={{ ...inputStyle, color: 'var(--muted-foreground)', flex: 1 }}
+                          onClick={e => (e.target as HTMLInputElement).select()}
+                        />
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(`${window.location.origin}/register?token=${inviteLink.token!}`);
+                            setCopyLinkLabel('copied');
+                            if (copyTimer.current) clearTimeout(copyTimer.current);
+                            copyTimer.current = setTimeout(() => setCopyLinkLabel('copy'), 2000);
+                          }}
+                          style={{
+                            background: copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.12)' : 'var(--muted)',
+                            border: `1px solid ${copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`,
+                            color: copyLinkLabel === 'copied' ? '#1A97A2' : 'var(--muted-foreground)',
+                            borderRadius: 7, padding: '0 14px', cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontFamily: 'var(--font-sans)',
+                            transition: 'all 0.15s', flexShrink: 0,
+                          }}
+                        >
+                          {copyLinkLabel === 'copied' ? <Check size={12} /> : <Copy size={12} />}
+                          {copyLinkLabel === 'copied' ? 'Copied!' : 'Copy link'}
+                        </button>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flex: 1, lineHeight: 1.5 }}>
+                          Anyone with this link can join the team as a member.
+                        </span>
+                        <button
+                          onClick={() => createInviteLink.mutate()}
+                          style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
+                        >
+                          <RefreshCw size={11} /> Regenerate
+                        </button>
+                        <button
+                          onClick={() => revokeInviteLink.mutate()}
+                          style={{ fontSize: 11, color: '#EF4444', background: 'none', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No invite link — generate one to share a reusable join URL.</span>
+                      <button
+                        onClick={() => createInviteLink.mutate()}
+                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
+                      >
+                        Generate
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer — hidden when archive confirm is showing */}
+        {!showArchiveConfirm && (
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '12px 20px', borderTop: '1px solid var(--border)',
+          }}>
+            <div>
+              {mode === 'edit' && (
+                isArchived ? (
+                  <button
+                    onClick={handleRestore}
+                    disabled={busy}
+                    style={{ ...restoreBtnStyle, opacity: busy ? 0.6 : 1 }}
+                  >
+                    <RotateCcw size={13} />
+                    Restore team
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setShowArchiveConfirm(true)}
+                    style={archiveBtnStyle}
+                  >
+                    <Archive size={13} />
+                    Archive
+                  </button>
+                )
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={onClose} style={cancelBtnStyle}>Cancel</button>
+              <button
+                onClick={handleSave}
+                disabled={busy || !name.trim()}
+                style={{
+                  background: teamColor, color: '#fff', fontWeight: 600,
+                  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
+                  border: 'none', opacity: (busy || !name.trim()) ? 0.6 : 1,
+                  fontFamily: 'var(--font-sans)',
+                }}
+              >
+                {busy ? 'Saving…' : primaryLabel}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
 }
 ````
 
@@ -32047,6 +32793,962 @@ function ManageFiltersRow({ onClick }: { onClick: () => void }) {
 }
 ````
 
+## File: packages/web/src/components/TimelineModal.tsx
+````typescript
+/**
+ * TimelineModal — create / edit a timeline.
+ *
+ * Modes:
+ *  - "new":  name, identity, date range, description, notes; template picker seeds statuses
+ *  - "edit": same fields; plus Statuses tab (add/edit/delete live statuses)
+ */
+
+import { useState } from 'react'
+import { X, Plus, Trash2, Check, Archive, RotateCcw } from 'lucide-react'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import {
+  useCreateTimeline,
+  useUpdateTimeline,
+  useDeleteTimeline,
+  useArchiveTimeline,
+} from '@/hooks/useTeamActivities'
+import {
+  useTimelineStatuses,
+  useCreateTimelineStatus,
+  useUpdateTimelineStatus,
+  useDeleteTimelineStatus,
+} from '@/hooks/useStatusTemplates'
+import { useStatusTemplates } from '@/hooks/useStatusTemplates'
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import type { components } from '@draba/shared'
+
+type Timeline = components['schemas']['Timeline']
+type Status = components['schemas']['Status']
+
+// ── Prop types ────────────────────────────────────────────────────────────────
+
+interface Props {
+  mode: 'new' | 'edit'
+  teamId: string
+  timeline?: Timeline
+  canAdmin?: boolean
+  onClose: () => void
+  onCreated?: (timeline: Timeline) => void
+  onUnarchive?: (timelineId: string) => void
+}
+
+type Tab = 'settings' | 'statuses'
+
+// ── Inline styles ─────────────────────────────────────────────────────────────
+
+const OVERLAY: React.CSSProperties = {
+  position: 'fixed', inset: 0,
+  background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(2px)',
+  zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
+}
+
+const PANEL: React.CSSProperties = {
+  background: 'var(--card)', border: '1px solid var(--border)',
+  borderRadius: 12, width: 560, maxWidth: '95vw',
+  maxHeight: '90vh', display: 'flex', flexDirection: 'column',
+  boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+}
+
+const HEADER: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 12,
+  padding: '18px 20px 14px', borderBottom: '1px solid var(--border)',
+  flexShrink: 0,
+}
+
+const TAB_BAR: React.CSSProperties = {
+  display: 'flex', gap: 2, padding: '0 20px',
+  borderBottom: '1px solid var(--border)', flexShrink: 0,
+}
+
+const CONTENT: React.CSSProperties = {
+  flex: 1, overflowY: 'auto', padding: '20px',
+}
+
+const FOOTER: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+  padding: '14px 20px', borderTop: '1px solid var(--border)', flexShrink: 0,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)',
+  textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6,
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%', boxSizing: 'border-box',
+  fontSize: 13, color: 'var(--foreground)',
+  border: '1px solid var(--border)', borderRadius: 6,
+  padding: '7px 10px', background: 'var(--background)',
+  outline: 'none',
+}
+
+const TEXTAREA: React.CSSProperties = {
+  ...INPUT,
+  resize: 'vertical' as const,
+  minHeight: 68,
+  fontFamily: 'var(--font-sans)',
+  lineHeight: 1.5,
+}
+
+const archiveBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
+  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
+  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+}
+
+const restoreBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
+  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
+  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+}
+
+function tabStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: '8px 14px', fontSize: 12, fontWeight: 500,
+    border: 'none', background: 'none', cursor: 'pointer',
+    borderBottom: active ? '2px solid var(--primary)' : '2px solid transparent',
+    color: active ? 'var(--foreground)' : 'var(--muted-foreground)',
+    fontFamily: 'var(--font-sans)',
+  }
+}
+
+// ── Status row (edit mode) ────────────────────────────────────────────────────
+
+interface StatusRowProps {
+  status: Status
+  canDelete: boolean
+  teamId: string
+  timelineId: string
+  allStatuses: Status[]
+}
+
+function StatusRow({ status, canDelete, teamId, timelineId, allStatuses }: StatusRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(status.name)
+  const [identity, setIdentity] = useState<Identity>({ color: status.color, icon: status.icon ?? '' })
+  const [isClosed, setIsClosed] = useState(status.isClosed)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [replacementId, setReplacementId] = useState('')
+  const update = useUpdateTimelineStatus(teamId, timelineId)
+  const del = useDeleteTimelineStatus(teamId, timelineId)
+
+  function save() {
+    update.mutate(
+      { id: status.id, name: name.trim() || status.name, color: identity.color, icon: identity.icon || null, isClosed },
+      { onSuccess: () => setEditing(false) },
+    )
+  }
+
+  function doDelete() {
+    del.mutate(
+      { id: status.id, replacementStatusId: replacementId || undefined },
+      { onSuccess: () => setShowDeleteConfirm(false) },
+    )
+  }
+
+  if (showDeleteConfirm) {
+    const others = allStatuses.filter(s => s.id !== status.id)
+    return (
+      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: 12, marginBottom: 6 }}>
+        <div style={{ fontSize: 12, color: 'var(--foreground)', marginBottom: 8 }}>
+          Delete <strong>{status.name}</strong>? Activities using this status will be reassigned.
+        </div>
+        {others.length > 0 && (
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ ...FIELD_LABEL }}>Move activities to</label>
+            <select
+              value={replacementId}
+              onChange={e => setReplacementId(e.target.value)}
+              style={{ ...INPUT, fontSize: 12 }}
+            >
+              <option value="">— No status —</option>
+              {others.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setShowDeleteConfirm(false)} style={{ fontSize: 12, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 5, background: 'none', cursor: 'pointer', color: 'var(--foreground)' }}>Cancel</button>
+          <button onClick={doDelete} style={{ fontSize: 12, padding: '4px 10px', border: 'none', borderRadius: 5, background: 'var(--destructive)', color: 'white', cursor: 'pointer' }}>Delete</button>
+        </div>
+      </div>
+    )
+  }
+
+  if (editing) {
+    return (
+      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginBottom: 4, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <IdentityWidget
+            identity={{ color: identity.color, icon: identity.icon ?? '' }}
+            name={name || status.name}
+            onChange={setIdentity}
+            shape="square"
+          />
+          <input
+            autoFocus
+            value={name}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
+            style={{ ...INPUT, flex: 1 }}
+          />
+          <button onClick={save} disabled={update.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4 }}>
+            <Check width={14} height={14} />
+          </button>
+          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+            <X width={14} height={14} />
+          </button>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+          <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
+          Closed status (marks this status as completed/done)
+        </label>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
+      <Badge identity={{ color: status.color, icon: status.icon ?? '__none__' }} name={status.name} shape="square" size={18} />
+      <span style={{ fontSize: 13, flex: 1, cursor: 'pointer', color: 'var(--foreground)' }} onClick={() => setEditing(true)}>
+        {status.name}
+      </span>
+      {status.isClosed && (
+        <span style={{ fontSize: 10, padding: '1px 6px', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--muted-foreground)' }}>closed</span>
+      )}
+      <button onClick={() => setEditing(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, opacity: 0.5 }}>
+        ✎
+      </button>
+      {canDelete && (
+        <button onClick={() => setShowDeleteConfirm(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+          <Trash2 width={13} height={13} />
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Add-status form ───────────────────────────────────────────────────────────
+
+interface AddStatusFormProps {
+  teamId: string
+  timelineId: string
+  primaryColor: string
+}
+
+function AddStatusForm({ teamId, timelineId, primaryColor }: AddStatusFormProps) {
+  const [expanding, setExpanding] = useState(false)
+  const [name, setName] = useState('')
+  const [identity, setIdentity] = useState<Identity>({ color: primaryColor, icon: '' })
+  const [isClosed, setIsClosed] = useState(false)
+  const createStatus = useCreateTimelineStatus(teamId, timelineId)
+
+  function handleAdd() {
+    if (!name.trim()) return
+    createStatus.mutate(
+      { name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
+      {
+        onSuccess: () => {
+          setName('')
+          setIdentity({ color: primaryColor, icon: '' })
+          setIsClosed(false)
+          setExpanding(false)
+        },
+      },
+    )
+  }
+
+  function handleCancel() {
+    setExpanding(false)
+    setName('')
+    setIdentity({ color: primaryColor, icon: '' })
+    setIsClosed(false)
+  }
+
+  if (!expanding) {
+    return (
+      <button
+        onClick={() => setExpanding(true)}
+        style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', fontSize: 12, padding: '4px 2px', fontFamily: 'var(--font-sans)' }}
+      >
+        <Plus width={13} height={13} /> Add status
+      </button>
+    )
+  }
+
+  return (
+    <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <IdentityWidget identity={identity} name={name || 'New status'} shape="square" onChange={setIdentity} />
+        <input
+          autoFocus
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') handleCancel() }}
+          placeholder="Status name…"
+          style={{ ...INPUT, flex: 1 }}
+        />
+        <button onClick={handleAdd} disabled={!name.trim() || createStatus.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4, display: 'flex' }}>
+          <Check width={14} height={14} />
+        </button>
+        <button onClick={handleCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+          <X width={14} height={14} />
+        </button>
+      </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+        <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
+        Closed status (marks this status as completed/done)
+      </label>
+    </div>
+  )
+}
+
+// ── Main modal ────────────────────────────────────────────────────────────────
+
+export default function TimelineModal({ mode, teamId, timeline, canAdmin = false, onClose, onCreated, onUnarchive }: Props) {
+  const [activeTab, setActiveTab] = useState<Tab>('settings')
+  const [name, setName] = useState(timeline?.name ?? '')
+  const [description, setDescription] = useState(timeline?.description ?? '')
+  const [notes, setNotes] = useState(timeline?.notes ?? '')
+  const [startDate, setStartDate] = useState(timeline?.startDate ?? '')
+  const [endDate, setEndDate] = useState(timeline?.endDate ?? '')
+  const [identity, setIdentity] = useState<Identity>({ color: timeline?.color ?? '#1A97A2', icon: timeline?.icon ?? '' })
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false)
+
+  const createTimeline = useCreateTimeline(teamId)
+  const updateTimeline = useUpdateTimeline(teamId)
+  const deleteTimeline = useDeleteTimeline(teamId)
+  const archiveTimeline = useArchiveTimeline(teamId)
+
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timeline?.id ?? '')
+  const { data: templates = [] } = useStatusTemplates(teamId)
+
+  const timelineColor = resolveColorHex(identity.color) ?? identity.color ?? '#1A97A2'
+
+  function handleSave() {
+    if (!name.trim()) { setError('Name is required'); return }
+    if (!startDate || !endDate) { setError('Start and end dates are required'); return }
+    if (endDate < startDate) { setError('End date must not be before start date'); return }
+    setSaving(true)
+    setError('')
+
+    if (mode === 'new') {
+      createTimeline.mutate(
+        {
+          name: name.trim(),
+          startDate,
+          endDate,
+          color: identity.color || null,
+          icon: identity.icon || null,
+          description: description.trim() || null,
+          notes: notes.trim() || null,
+          templateId: selectedTemplateId || null,
+        },
+        {
+          onSuccess: (tl) => { setSaving(false); onCreated?.(tl); onClose() },
+          onError: () => { setSaving(false); setError('Failed to create timeline') },
+        },
+      )
+    } else if (timeline) {
+      updateTimeline.mutate(
+        {
+          timelineId: timeline.id,
+          patch: {
+            name: name.trim(),
+            startDate,
+            endDate,
+            color: identity.color || null,
+            icon: identity.icon || null,
+            description: description.trim() || null,
+            notes: notes.trim() || null,
+          },
+        },
+        {
+          onSuccess: () => { setSaving(false); onClose() },
+          onError: () => { setSaving(false); setError('Failed to save timeline') },
+        },
+      )
+    }
+  }
+
+  return (
+    <div style={OVERLAY}>
+      <div style={PANEL} onClick={e => e.stopPropagation()}>
+        {/* Header — identity widget + editable name */}
+        <div style={HEADER}>
+          <IdentityWidget
+            identity={identity}
+            name={name || (mode === 'new' ? 'New timeline' : timeline?.name ?? '')}
+            onChange={setIdentity}
+            shape="square"
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>
+              {mode === 'new' ? 'New Timeline' : 'Edit Timeline'}
+            </div>
+            <InlineEditableTitle
+              value={name}
+              onChange={v => { setName(v); setError('') }}
+              placeholder="Timeline name"
+              autoFocus={mode === 'new'}
+            />
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+            <X width={18} height={18} />
+          </button>
+        </div>
+
+        {/* Tab bar — Statuses tab only in edit mode */}
+        <div style={TAB_BAR}>
+          <button style={tabStyle(activeTab === 'settings')} onClick={() => setActiveTab('settings')}>Settings</button>
+          {mode === 'edit' && (
+            <button style={tabStyle(activeTab === 'statuses')} onClick={() => setActiveTab('statuses')}>
+              Statuses {statuses.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({statuses.length})</span>}
+            </button>
+          )}
+        </div>
+
+        {/* Content */}
+        <div style={CONTENT}>
+          {/* Archive confirmation — replaces tab content */}
+          {showArchiveConfirm && timeline ? (
+            <ConfirmDialog
+              variant="amber"
+              icon={<Archive size={22} color="#F59E0B" />}
+              title="Archive timeline?"
+              body={`${timeline.name} will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.`}
+              confirmLabel="Archive"
+              busy={archiveTimeline.isPending}
+              onCancel={() => setShowArchiveConfirm(false)}
+              onConfirm={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
+            />
+          ) : showDeleteConfirm && timeline ? (
+            <ConfirmDialog
+              variant="red"
+              icon={<Trash2 size={22} color="#EF4444" />}
+              title="Delete timeline?"
+              body={`This permanently deletes ${timeline.name} and all its statuses. Activities are not deleted — they remain in the team.`}
+              confirmLabel="Delete timeline"
+              busy={deleteTimeline.isPending}
+              onCancel={() => setShowDeleteConfirm(false)}
+              onConfirm={() => deleteTimeline.mutate(timeline.id, { onSuccess: onClose })}
+            />
+          ) : activeTab === 'settings' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {/* Date range */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div>
+                  <div style={FIELD_LABEL}>Start date *</div>
+                  <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={INPUT} />
+                </div>
+                <div>
+                  <div style={FIELD_LABEL}>End date *</div>
+                  <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={INPUT} />
+                </div>
+              </div>
+
+              {/* Description */}
+              <div>
+                <div style={FIELD_LABEL}>Description</div>
+                <input
+                  value={description}
+                  onChange={e => setDescription(e.target.value)}
+                  placeholder="Short description of this timeline's purpose…"
+                  style={INPUT}
+                />
+              </div>
+
+              {/* Notes */}
+              <div>
+                <div style={FIELD_LABEL}>Notes</div>
+                <textarea
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  placeholder="Internal notes, links, references…"
+                  style={TEXTAREA}
+                />
+              </div>
+
+              {/* Template picker (create mode only) */}
+              {mode === 'new' && templates.length > 0 && (
+                <div>
+                  <div style={FIELD_LABEL}>Status template</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {templates.map(tpl => {
+                      const isSelected = selectedTemplateId === tpl.id || (!selectedTemplateId && tpl === templates[0])
+                      return (
+                        <div
+                          key={tpl.id}
+                          onClick={() => setSelectedTemplateId(tpl.id)}
+                          style={{
+                            border: `1px solid ${isSelected ? timelineColor + '88' : 'var(--border)'}`,
+                            borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
+                            background: isSelected ? timelineColor + '11' : 'var(--muted)',
+                            transition: 'all 0.1s',
+                          }}
+                        >
+                          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--foreground)' }}>{tpl.name}</div>
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            {tpl.items.map(item => (
+                              <span key={item.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: item.color + '22', border: `1px solid ${item.color}66`, color: item.color }}>
+                                {item.name}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Archived banner */}
+              {mode === 'edit' && timeline?.archivedAt && (
+                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 6, padding: '8px 12px' }}>
+                  This timeline is archived. It is hidden from the active list.
+                </div>
+              )}
+
+              {error && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, padding: '8px 12px' }}>
+                  {error}
+                </div>
+              )}
+            </div>
+          ) : (
+            activeTab === 'statuses' && timeline && (
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
+                  Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
+                </div>
+
+                <div style={{ marginBottom: 4 }}>
+                  {statuses.map(s => (
+                    <StatusRow
+                      key={s.id}
+                      status={s}
+                      canDelete={statuses.length > 1}
+                      teamId={teamId}
+                      timelineId={timeline.id}
+                      allStatuses={statuses}
+                    />
+                  ))}
+                </div>
+
+                <AddStatusForm teamId={teamId} timelineId={timeline.id} primaryColor={timelineColor} />
+              </div>
+            )
+          )}
+        </div>
+
+        {/* Footer — hidden when a confirm dialog is showing */}
+        {!showArchiveConfirm && !showDeleteConfirm && (
+          <div style={FOOTER}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {mode === 'edit' && timeline && canAdmin && !timeline.archivedAt && (
+                <button onClick={() => setShowArchiveConfirm(true)} style={archiveBtnStyle}>
+                  <Archive size={13} />
+                  Archive
+                </button>
+              )}
+              {mode === 'edit' && timeline && canAdmin && timeline.archivedAt && onUnarchive && (
+                <button onClick={() => onUnarchive(timeline.id)} style={restoreBtnStyle}>
+                  <RotateCcw size={13} />
+                  Restore
+                </button>
+              )}
+              {mode === 'edit' && timeline && canAdmin && (
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={onClose}
+                style={{ fontSize: 13, padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', color: 'var(--muted-foreground)' }}
+              >
+                Cancel
+              </button>
+              {activeTab === 'settings' && (
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  style={{ fontSize: 13, fontWeight: 600, padding: '8px 18px', border: 'none', borderRadius: 7, background: timelineColor, color: 'white', cursor: saving ? 'wait' : 'pointer', fontFamily: 'var(--font-sans)' }}
+                >
+                  {saving ? 'Saving…' : mode === 'new' ? 'Create timeline' : 'Save changes'}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/settings': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/statuses': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/tags': { target: apiTarget, changeOrigin: true },
+        '/saved_filters': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
+````
+
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
+````
+
 ## File: packages/web/src/components/list/ListView.tsx
 ````typescript
 /**
@@ -32098,6 +33800,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { ChevronRight, ChevronDown, GripVertical, Search, Trash2, Archive, Check } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useTimelineActivities, useTeamMembers, useUpdateActivity, useCreateActivity, useDeleteActivity, useArchiveActivity } from '@/hooks/useTeamActivities';
 import { usePreferenceMap, useUpsertPreference, usePreferences } from '@/hooks/usePreferences';
 import { useFilter } from '@/contexts/FilterContext';
@@ -32744,6 +34447,7 @@ export default function ListView({
   const { debouncedQuery, registerMatches, matchedIds, activeMatchId } = useFind();
 
   // ── Data fetching ──────────────────────────────────────────────────────────
+  const queryClient = useQueryClient();
   const { data: rawActivities = [] } = useTimelineActivities(teamId, timelineId);
   const { data: rawMembers = [] } = useTeamMembers(teamId);
   const update = useUpdateActivity(timelineId);
@@ -33181,6 +34885,9 @@ export default function ListView({
     value: string;
   } | null>(null);
   const editInputRef = useRef<HTMLInputElement | null>(null);
+  // Tracks which cell is currently open so the layout effect only focuses/selects
+  // on initial open, not on every value change while typing.
+  const editCellKeyRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // When a new activity is selected externally, sync row idx
@@ -33192,9 +34899,26 @@ export default function ListView({
 
   // useLayoutEffect fires synchronously after DOM commit so the focus is set
   // before any paint — no window in which another element can steal focus.
+  // Guard: only focus/select when the *cell* changes (new rowIdx:colIdx), not
+  // when the value changes while the user is typing — otherwise inp.select()
+  // would re-select-all after every keystroke, leaving only the last character.
   useLayoutEffect(() => {
-    if (!editingCell || !editInputRef.current) return;
+    if (!editingCell) {
+      editCellKeyRef.current = null;
+      return;
+    }
+    // Include the row's activity id in the key so that when an optimistic row
+    // (optimistic_…) is swapped for its real record at the same index, React
+    // remounts the <tr> (keyed by activity.id) and destroys the focused input —
+    // the changed id forces us to re-focus the freshly mounted input rather than
+    // skip it as a value-only change.
+    const rowId = activityRows[editingCell.rowIdx]?.activity.id ?? '';
+    const cellKey = `${rowId}:${editingCell.colIdx}`;
+    if (editCellKeyRef.current === cellKey) return; // value-only change — skip
+    editCellKeyRef.current = cellKey;
+
     const inp = editInputRef.current;
+    if (!inp) return;
     inp.focus();
     inp.scrollIntoView({ block: 'nearest' });
     const colId = visibleColIds[editingCell.colIdx];
@@ -33209,7 +34933,7 @@ export default function ListView({
     } else {
       inp.select();
     }
-  }, [editingCell]); // visibleColIds intentionally excluded — always current in this render cycle
+  }, [editingCell, activityRows]); // visibleColIds intentionally excluded — always current in this render cycle
 
   // Visible column ids, in the SAME order the cells are rendered.
   //
@@ -33232,6 +34956,14 @@ export default function ListView({
       const row = activityRows[rowIdx];
       if (!row) return;
       const a = row.activity;
+
+      // Optimistic row not yet confirmed by server — queue title and return.
+      if (a.id.startsWith('optimistic_')) {
+        if (colId === 'title' && value.trim()) {
+          pendingTitleAfterCreate.current = value.trim();
+        }
+        return;
+      }
 
       const patch: Partial<ApiActivity> & { notes?: string | null } = {};
       if (colId === 'title' && value.trim() !== '') patch.title = value.trim();
@@ -33408,18 +35140,69 @@ export default function ListView({
     [editingCell, selectedRowIdx, selectedColIdx, activityRows, visibleColIds, enterEdit],
   );
 
-  // When triggerNewRow increments, create a new "New Activity" row and queue title edit
+  // When triggerNewRow increments, optimistically insert a row and focus the title input
+  // immediately — no network round-trip before the UI responds.
   useEffect(() => {
     if (!triggerNewRow || triggerNewRow === prevTriggerNewRow.current) return;
     prevTriggerNewRow.current = triggerNewRow;
     const today = new Date().toISOString().slice(0, 10);
+    const startAt = `${today}T00:00:00Z`;
+    const now = new Date().toISOString();
+    const tempId = `optimistic_${Date.now()}`;
+    const optimisticActivity: ApiActivity = {
+      id: tempId,
+      timelineId,
+      title: 'New Activity',
+      startAt,
+      endAt: startAt,
+      allDay: false,
+      createdBy: '',
+      createdAt: now,
+      updatedAt: now,
+      description: null,
+      notes: null,
+      icon: null,
+      color: null,
+      statusId: null,
+      parentActivityId: null,
+      percentComplete: null,
+      location: null,
+      url: null,
+      archivedAt: null,
+      assignedMemberIds: [],
+      tagIds: [],
+    };
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => (old ? [...old, optimisticActivity] : [optimisticActivity]),
+    );
+    pendingEditActivityId.current = tempId;
     create.mutate(
-      { title: 'New Activity', startAt: `${today}T00:00:00Z`, endAt: `${today}T00:00:00Z` },
-      { onSuccess: (created) => { pendingEditActivityId.current = created.id; } },
+      { title: 'New Activity', startAt, endAt: startAt, _tempId: tempId },
+      {
+        onSuccess: (created) => {
+          if (pendingTitleAfterCreate.current !== null) {
+            const queued = pendingTitleAfterCreate.current;
+            pendingTitleAfterCreate.current = null;
+            if (queued && queued !== 'New Activity') {
+              update.mutate({ activityId: created.id, patch: { title: queued } });
+            }
+          }
+        },
+        onError: () => {
+          queryClient.setQueriesData<ApiActivity[]>(
+            { queryKey: ['timelines', timelineId, 'activities'] },
+            (old) => (old ? old.filter(a => a.id !== tempId) : []),
+          );
+          // Discard any queued title so it can't leak into the next create.
+          pendingTitleAfterCreate.current = null;
+          setEditingCell(null);
+        },
+      },
     );
   }, [triggerNewRow]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // After a new activity appears in activityRows, enter title-edit mode on it
+  // After an activity (including an optimistic one) appears in activityRows, enter title-edit mode on it.
   useEffect(() => {
     if (!pendingEditActivityId.current) return;
     const rowIdx = activityRows.findIndex(r => r.activity.id === pendingEditActivityId.current);
@@ -33524,10 +35307,12 @@ export default function ListView({
     setContextMenuPos(null);
   }, []);
 
-  // Holds the ID of a newly created activity that should enter title-edit mode
+  // Holds the ID of a newly created activity (or optimistic temp ID) waiting to enter title-edit mode
   const pendingEditActivityId = useRef<string | null>(null);
   // Guards against re-firing triggerNewRow on re-renders
   const prevTriggerNewRow = useRef<number>(0);
+  // Title typed while the row is still optimistic — flushed to the server once the real ID arrives
+  const pendingTitleAfterCreate = useRef<string | null>(null);
 
   // ── Multi-select delete / archive ─────────────────────────────────────────
 
@@ -34499,1708 +36284,6 @@ export default function ListView({
       )}
     </div>
   );
-}
-````
-
-## File: packages/web/src/components/TeamModal.tsx
-````typescript
-/**
- * TeamModal — create / edit a team in a portal-rendered modal.
- *
- * The Members tab is fully functional after Phase 10.1.2. The Settings tab
- * handles team identity and metadata. Identity and name live in the modal
- * header so they remain visible while the user scrolls the tab body.
- */
-
-import { useState, useEffect, useRef } from 'react';
-import { createPortal } from 'react-dom';
-import { X, Archive, Mail, Link2, Copy, Check, Plus, Minus, RefreshCw, UserMinus, RotateCcw } from 'lucide-react';
-import { ApiError } from '@/lib/api';
-import { IdentityWidget } from '@/components/identity/IdentityWidget';
-import { Badge } from '@/components/identity/Badge';
-import type { Identity } from '@/components/identity/identity-constants';
-import { IDENTITY_COLORS } from '@/components/identity/identity-constants';
-import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities';
-import StatusTemplatesTab from '@/components/StatusTemplatesTab';
-import { useAuth } from '@/contexts/AuthContext';
-import {
-  useTeamInvites, useRevokeInvite,
-  useTeamInviteLink, useCreateInviteLink, useRevokeInviteLink,
-  useAddMember, useDeleteMember, useArchiveMember, useUnarchiveMember,
-  useCreateParticipant, useUpdateMember, useUserSearch,
-} from '@/hooks/useMemberManagement';
-import RoleDropdown, { type MemberRole } from '@/components/RoleDropdown';
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle';
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
-import type { components } from '@draba/shared';
-
-type Team = components['schemas']['Team'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-interface Props {
-  mode: 'new' | 'edit';
-  team?: Team;
-  onClose: () => void;
-  /** Called with the newly created team immediately after server confirmation. */
-  onTeamCreated?: (team: Team) => void;
-  /** Whether the current user is a team admin. */
-  isAdmin?: boolean;
-}
-
-type Tab = 'settings' | 'members' | 'statuses';
-
-const DEFAULT_COLOR = IDENTITY_COLORS[0].hex;
-const DEFAULT_ICON = '__name_1__';
-
-function resolveIdentity(team?: Team): Identity {
-  return {
-    color: team?.color ?? DEFAULT_COLOR,
-    icon: team?.icon ?? DEFAULT_ICON,
-  };
-}
-
-// ── Shared button styles ────────────────────────────────────────────────────
-
-const cancelBtnStyle: React.CSSProperties = {
-  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
-  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
-};
-
-const inputStyle: React.CSSProperties = {
-  background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 7,
-  padding: '8px 12px', color: 'var(--foreground)', fontSize: 13,
-  width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-sans)',
-};
-
-const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px',
-  textTransform: 'uppercase', marginBottom: 6, display: 'block',
-};
-
-const archiveBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
-  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
-  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-};
-
-const restoreBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
-  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
-  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-};
-
-// ── Main component ──────────────────────────────────────────────────────────
-
-export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin = true }: Props) {
-  const { user } = useAuth()
-  const currentUserId = (user as { id?: string } | null)?.id ?? ''
-  const [tab, setTab] = useState<Tab>('settings');
-  const [teamSaved, setTeamSaved] = useState(mode === 'edit');
-  const [showBanner, setShowBanner] = useState(false);
-  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
-  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const [identity, setIdentity] = useState<Identity>(resolveIdentity(team));
-  const [name, setName] = useState(team?.name ?? '');
-  const [description, setDescription] = useState(team?.description ?? '');
-  const [notes, setNotes] = useState(team?.notes ?? '');
-
-  const [savedTeamId, setSavedTeamId] = useState(team?.id ?? '');
-
-  const createTeam = useCreateTeam();
-  const updateTeam = useUpdateTeam();
-  const archiveTeam = useArchiveTeam();
-  const unarchiveTeam = useUnarchiveTeam();
-
-  // Members tab state — only loaded when the team exists.
-  const activeTeamId = savedTeamId || team?.id || '';
-  const { data: members = [] } = useTeamMembers(activeTeamId);
-  const { data: invites = [] } = useTeamInvites(activeTeamId);
-  const { data: inviteLink } = useTeamInviteLink(activeTeamId);
-  const addMember = useAddMember(activeTeamId);
-  const deleteMember = useDeleteMember(activeTeamId);
-  const archiveMember = useArchiveMember(activeTeamId);
-  const unarchiveMember = useUnarchiveMember(activeTeamId);
-  const createParticipant = useCreateParticipant(activeTeamId);
-  const updateMember = useUpdateMember(activeTeamId);
-  const revokeInvite = useRevokeInvite(activeTeamId);
-  const createInviteLink = useCreateInviteLink(activeTeamId);
-  const revokeInviteLink = useRevokeInviteLink(activeTeamId);
-
-  const [searchQ, setSearchQ] = useState('');
-  const [showParticipantForm, setShowParticipantForm] = useState(false);
-  // Maps memberId → assignmentCount when a 409 MEMBER_HAS_ASSIGNMENTS is returned.
-  const [removeErrors, setRemoveErrors] = useState<Record<string, number>>({});
-  const [participantName, setParticipantName] = useState('');
-  const [participantIdentity, setParticipantIdentity] = useState<Identity>({ color: IDENTITY_COLORS[3].hex, icon: '__name_1__' });
-  const [copyLinkLabel, setCopyLinkLabel] = useState<'copy' | 'copied'>('copy');
-  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const { data: searchResults = [] } = useUserSearch(searchQ);
-
-  const isArchived = Boolean(team?.archivedAt);
-  const busy = createTeam.isPending || updateTeam.isPending || archiveTeam.isPending || unarchiveTeam.isPending;
-
-  useEffect(() => {
-    return () => { if (bannerTimer.current) clearTimeout(bannerTimer.current); };
-  }, []);
-
-  // Stale 409 errors belong to a specific member row; clear them when the
-  // search changes because the member list may reorder or filter differently.
-  useEffect(() => {
-    setRemoveErrors({});
-  }, [searchQ]);
-
-  useEffect(() => {
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
-    }
-    document.addEventListener('keydown', handleKey);
-    return () => document.removeEventListener('keydown', handleKey);
-  }, [onClose]);
-
-  function handleSave() {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-
-    const patch = {
-      name: trimmed,
-      description: description.trim() || null,
-      notes: notes.trim() || null,
-      color: identity.color,
-      icon: identity.icon,
-    };
-
-    if (mode === 'new' && !teamSaved) {
-      createTeam.mutate(patch, {
-        onSuccess: (created) => {
-          setSavedTeamId(created.id);
-          setTeamSaved(true);
-          setShowBanner(true);
-          onTeamCreated?.(created);
-          bannerTimer.current = setTimeout(() => setShowBanner(false), 3000);
-        },
-      });
-    } else {
-      const tid = savedTeamId || team?.id;
-      if (!tid) return;
-      updateTeam.mutate({ teamId: tid, patch }, { onSuccess: () => { /* noop */ } });
-    }
-  }
-
-  function handleArchive() {
-    const tid = savedTeamId || team?.id;
-    if (!tid) return;
-    archiveTeam.mutate(tid, { onSuccess: onClose });
-  }
-
-  function handleRestore() {
-    const tid = savedTeamId || team?.id;
-    if (!tid) return;
-    unarchiveTeam.mutate(tid, { onSuccess: onClose });
-  }
-
-  const teamColor = identity.color;
-  const isNew = mode === 'new';
-  const primaryLabel = teamSaved ? 'Save changes' : 'Create team';
-  const membersLocked = !teamSaved;
-
-  return createPortal(
-    <div
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        zIndex: 1000,
-      }}
-    >
-      <div
-        style={{
-          width: 580, maxHeight: '90vh', background: 'var(--card)',
-          border: '1px solid var(--border)', borderRadius: 14,
-          boxShadow: '0 24px 64px rgba(0,0,0,.6)',
-          display: 'flex', flexDirection: 'column', overflow: 'hidden',
-        }}
-      >
-        {/* Header — identity widget + editable name */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 12,
-          padding: '16px 20px', borderBottom: '1px solid var(--border)',
-        }}>
-          <IdentityWidget identity={identity} name={name} shape="square" onChange={setIdentity} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
-              {isNew ? 'New Team' : 'Edit Team'}
-            </div>
-            <InlineEditableTitle
-              value={name}
-              onChange={setName}
-              placeholder="Team name…"
-              autoFocus={mode === 'new'}
-              onKeyDown={e => { if (e.key === 'Escape') onClose(); }}
-            />
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-            <X size={18} />
-          </button>
-        </div>
-
-        {/* Saved banner */}
-        {showBanner && (
-          <div style={{
-            padding: '8px 20px',
-            background: `${teamColor}18`,
-            borderBottom: `1px solid ${teamColor}44`,
-            display: 'flex', alignItems: 'center', gap: 8,
-          }}>
-            <span style={{ fontSize: 14, color: teamColor }}>✓</span>
-            <span style={{ fontSize: 12, color: teamColor }}>Team created — you can now add members.</span>
-          </div>
-        )}
-
-        {/* Tab bar */}
-        <div style={{ display: 'flex', padding: '0 20px', borderBottom: '1px solid var(--border)' }}>
-          {(['settings', 'members', 'statuses'] as Tab[]).map(t => {
-            const isActive = tab === t;
-            const locked = (t === 'members' || t === 'statuses') && membersLocked;
-            return (
-              <div key={t} style={{ position: 'relative' }}>
-                <button
-                  onClick={() => !locked && setTab(t)}
-                  title={locked ? 'Save the team first to add members' : undefined}
-                  style={{
-                    padding: '10px 14px', fontSize: 13, fontWeight: 500, background: 'none', border: 'none',
-                    borderBottom: `2px solid ${isActive ? teamColor : 'transparent'}`,
-                    color: isActive ? 'var(--foreground)' : 'var(--muted-foreground)',
-                    cursor: locked ? 'not-allowed' : 'pointer',
-                    opacity: locked ? 0.45 : 1,
-                    marginBottom: -1, fontFamily: 'var(--font-sans)',
-                    display: 'flex', alignItems: 'center', gap: 6,
-                    textTransform: 'capitalize',
-                  }}
-                >
-                  {t === 'statuses' ? 'Status Templates' : t}
-                  {t === 'members' && teamSaved && (
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'var(--muted)', borderRadius: 99, padding: '1px 6px' }}>
-                      {members.length}
-                    </span>
-                  )}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          {showArchiveConfirm ? (
-            <ConfirmDialog
-              variant="amber"
-              icon={<Archive size={22} color="#F59E0B" />}
-              title={`Archive "${name || 'this team'}"?`}
-              body="The team will be hidden from active views. All timelines and activities will be preserved and the team can be restored from the Archived section at any time."
-              confirmLabel="Archive"
-              busy={archiveTeam.isPending}
-              onCancel={() => setShowArchiveConfirm(false)}
-              onConfirm={handleArchive}
-            />
-          ) : tab === 'settings' ? (
-            <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
-              {/* Description */}
-              <div>
-                <label style={labelStyle}>Description</label>
-                <input
-                  autoFocus={mode === 'edit'}
-                  value={description}
-                  onChange={e => setDescription(e.target.value)}
-                  placeholder="Short description of this team…"
-                  style={inputStyle}
-                />
-              </div>
-
-              {/* Notes */}
-              <div>
-                <label style={labelStyle}>Notes</label>
-                <textarea
-                  value={notes}
-                  onChange={e => setNotes(e.target.value)}
-                  placeholder="Internal notes, context, links…"
-                  rows={4}
-                  style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5 }}
-                />
-              </div>
-
-              {createTeam.isError && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
-                  Something went wrong — refer to logs for details.
-                </div>
-              )}
-              {updateTeam.isError && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
-                  Something went wrong — refer to logs for details.
-                </div>
-              )}
-            </div>
-          ) : tab === 'statuses' ? (
-            <StatusTemplatesTab
-              teamId={activeTeamId}
-              isAdmin={isAdmin}
-              teamColor={teamColor}
-            />
-          ) : (
-            // Members tab
-            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-              {/* Search / add input */}
-              {isAdmin && (
-                <div>
-                  <label style={labelStyle}>Add member or invite by email</label>
-                  <div style={{ position: 'relative' }}>
-                    <input
-                      value={searchQ}
-                      onChange={e => setSearchQ(e.target.value)}
-                      placeholder="Search by name or email…"
-                      style={{ ...inputStyle, paddingRight: 36 }}
-                    />
-                    {searchQ && (
-                      <button
-                        onClick={() => setSearchQ('')}
-                        style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex', padding: 2 }}
-                      >
-                        <X size={14} />
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Search results */}
-                  {searchQ.length >= 2 && (
-                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
-                      {searchResults.length === 0 ? (
-                        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No users found for "{searchQ}"</span>
-                          <button
-                            onClick={() => {
-                              // Trigger email invite
-                              const email = searchQ.includes('@') ? searchQ : null;
-                              if (!email) return;
-                              fetch(`/teams/${activeTeamId}/invites`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('accessToken') ?? ''}` },
-                                body: JSON.stringify({ email }),
-                              }).then(() => setSearchQ(''));
-                            }}
-                            style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                          >
-                            <Mail size={11} style={{ display: 'inline', marginRight: 4 }} />
-                            Invite
-                          </button>
-                        </div>
-                      ) : (
-                        searchResults.map(u => {
-                          const alreadyMember = members.some(m => m.userId === u.id);
-                          return (
-                            <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: '1px solid var(--border)' }}>
-                              <Badge identity={{ color: '#8b949e', icon: '__name_1__' }} name={u.displayName} shape="circle" size={22} />
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontSize: 13, color: 'var(--foreground)' }}>{u.displayName}</div>
-                                <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{u.email}</div>
-                              </div>
-                              {alreadyMember ? (
-                                <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>Already added</span>
-                              ) : (
-                                <button
-                                  onClick={() => addMember.mutate({ userId: u.id }, { onSuccess: () => setSearchQ('') })}
-                                  style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4 }}
-                                >
-                                  <Plus size={11} />
-                                  Add
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Participant creation form */}
-              {isAdmin && (
-                <div>
-                  {!showParticipantForm ? (
-                    <button
-                      onClick={() => setShowParticipantForm(true)}
-                      style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                    >
-                      <Plus size={12} />
-                      Add participant (no login)
-                    </button>
-                  ) : (
-                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, padding: 14 }}>
-                      <label style={labelStyle}>New participant</label>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <IdentityWidget
-                          identity={participantIdentity}
-                          name={participantName}
-                          shape="circle"
-                          onChange={setParticipantIdentity}
-                        />
-                        <input
-                          value={participantName}
-                          onChange={e => setParticipantName(e.target.value)}
-                          placeholder="Display name (required)…"
-                          style={{ ...inputStyle, flex: 1 }}
-                          autoFocus
-                        />
-                        <button
-                          onClick={() => {
-                            if (!participantName.trim()) return;
-                            createParticipant.mutate({
-                              name: participantName.trim(),
-                              color: participantIdentity.color,
-                              icon: participantIdentity.icon,
-                            }, {
-                              onSuccess: () => { setParticipantName(''); setShowParticipantForm(false); },
-                            });
-                          }}
-                          disabled={!participantName.trim() || createParticipant.isPending}
-                          style={{ background: '#F59E0B', color: '#000', fontWeight: 600, fontSize: 12, padding: '7px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0, opacity: !participantName.trim() ? 0.5 : 1 }}
-                        >
-                          Create
-                        </button>
-                        <button onClick={() => setShowParticipantForm(false)} style={{ ...cancelBtnStyle, padding: '7px 10px' }}>
-                          <X size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Role-change error banner */}
-              {updateMember.isError && (
-                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 7, padding: '7px 12px' }}>
-                  {(updateMember.error as { message?: string })?.message ?? 'Could not update role.'}
-                </div>
-              )}
-
-              {/* Member list */}
-              <div>
-                <label style={labelStyle}>Members ({members.length})</label>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {members.map((m: TeamMemberWithUser) => {
-                    const isParticipant = !m.userId;
-                    const isInactive = Boolean(m.archivedAt);
-                    const memberRole: MemberRole = isParticipant ? 'participant' : (m.role as MemberRole);
-                    const removeError = removeErrors[m.id];
-                    return (
-                      <div key={m.id}>
-                        <div
-                          style={{
-                            display: 'flex', alignItems: 'center', gap: 10,
-                            padding: '7px 10px', borderRadius: 7,
-                            background: isInactive ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)',
-                            opacity: isInactive ? 0.5 : 1,
-                          }}
-                        >
-                          <div style={{ flexShrink: 0, border: isParticipant ? '1.5px dashed var(--muted-foreground)' : 'none', borderRadius: '50%' }}>
-                            <Badge
-                              identity={{ color: m.color ?? '#8b949e', icon: m.icon ?? '__name_words__' }}
-                              name={m.displayName}
-                              shape="circle"
-                              size={24}
-                            />
-                          </div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                              <span style={{ fontSize: 13, color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.displayName}</span>
-                              {isParticipant && <span style={{ fontSize: 10, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '0px 5px', flexShrink: 0 }}>No login</span>}
-                            </div>
-                            {!isParticipant && <div style={{ fontSize: 11, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>}
-                          </div>
-                          {isAdmin && (
-                            <RoleDropdown
-                              value={memberRole}
-                              onChange={role => {
-                                if (isParticipant || role === 'participant') return;
-                                updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
-                              }}
-                              disabled={isParticipant || m.userId === currentUserId}
-                              hideParticipant={!isParticipant}
-                            />
-                          )}
-                          {isAdmin && (
-                            <div style={{ display: 'flex', gap: 4 }}>
-                              {isInactive ? (
-                                <button
-                                  title="Reactivate member"
-                                  onClick={() => unarchiveMember.mutate(m.id)}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
-                                  onMouseEnter={e => (e.currentTarget.style.color = '#1A97A2')}
-                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
-                                >
-                                  <RefreshCw size={13} />
-                                </button>
-                              ) : (
-                                <button
-                                  title="Inactivate member"
-                                  onClick={() => archiveMember.mutate(m.id)}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
-                                  onMouseEnter={e => (e.currentTarget.style.color = '#F59E0B')}
-                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
-                                >
-                                  <UserMinus size={13} />
-                                </button>
-                              )}
-                              <button
-                                title="Remove from team"
-                                onClick={() => {
-                                  setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; });
-                                  deleteMember.mutate(m.id, {
-                                    onError: (err) => {
-                                      if (err instanceof ApiError && err.code === 'MEMBER_HAS_ASSIGNMENTS') {
-                                        const count = (err.data?.assignmentCount as number) ?? 0;
-                                        setRemoveErrors(prev => ({ ...prev, [m.id]: count }));
-                                      }
-                                    },
-                                  });
-                                }}
-                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
-                                onMouseEnter={e => (e.currentTarget.style.color = '#EF4444')}
-                                onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
-                              >
-                                <Minus size={13} />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                        {removeError !== undefined && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#F59E0B', padding: '4px 10px 4px 44px' }}>
-                            <span>{removeError} assignment{removeError === 1 ? '' : 's'} — can't remove.</span>
-                            <button
-                              onClick={() => {
-                                archiveMember.mutate(m.id, {
-                                  onSuccess: () => setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; }),
-                                });
-                              }}
-                              style={{ fontSize: 12, color: '#F59E0B', background: 'none', border: '1px solid rgba(245,158,11,0.4)', borderRadius: 5, padding: '2px 8px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                            >
-                              Inactivate instead
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Pending invitations */}
-              {isAdmin && invites.length > 0 && (
-                <div>
-                  <label style={labelStyle}>Pending invitations ({invites.length})</label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    {invites.map(inv => (
-                      <div key={inv.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)' }}>
-                        <div style={{ width: 24, height: 24, borderRadius: '50%', border: '1.5px dashed var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                          <Mail size={11} color="var(--muted-foreground)" />
-                        </div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.email}</div>
-                          <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
-                            Sent {new Date(inv.createdAt).toLocaleDateString()} · expires {new Date(inv.expiresAt).toLocaleDateString()}
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => revokeInvite.mutate(inv.id)}
-                          style={{ fontSize: 11, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                        >
-                          Revoke
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Invite link */}
-              {isAdmin && (
-                <div>
-                  <label style={labelStyle}>
-                    <Link2 size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Invite link
-                  </label>
-                  {inviteLink?.token ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <input
-                          readOnly
-                          value={`${window.location.origin}/register?token=${inviteLink.token}`}
-                          style={{ ...inputStyle, color: 'var(--muted-foreground)', flex: 1 }}
-                          onClick={e => (e.target as HTMLInputElement).select()}
-                        />
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(`${window.location.origin}/register?token=${inviteLink.token!}`);
-                            setCopyLinkLabel('copied');
-                            if (copyTimer.current) clearTimeout(copyTimer.current);
-                            copyTimer.current = setTimeout(() => setCopyLinkLabel('copy'), 2000);
-                          }}
-                          style={{
-                            background: copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.12)' : 'var(--muted)',
-                            border: `1px solid ${copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`,
-                            color: copyLinkLabel === 'copied' ? '#1A97A2' : 'var(--muted-foreground)',
-                            borderRadius: 7, padding: '0 14px', cursor: 'pointer',
-                            display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontFamily: 'var(--font-sans)',
-                            transition: 'all 0.15s', flexShrink: 0,
-                          }}
-                        >
-                          {copyLinkLabel === 'copied' ? <Check size={12} /> : <Copy size={12} />}
-                          {copyLinkLabel === 'copied' ? 'Copied!' : 'Copy link'}
-                        </button>
-                      </div>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flex: 1, lineHeight: 1.5 }}>
-                          Anyone with this link can join the team as a member.
-                        </span>
-                        <button
-                          onClick={() => createInviteLink.mutate()}
-                          style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
-                        >
-                          <RefreshCw size={11} /> Regenerate
-                        </button>
-                        <button
-                          onClick={() => revokeInviteLink.mutate()}
-                          style={{ fontSize: 11, color: '#EF4444', background: 'none', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
-                        >
-                          Revoke
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No invite link — generate one to share a reusable join URL.</span>
-                      <button
-                        onClick={() => createInviteLink.mutate()}
-                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
-                      >
-                        Generate
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Footer — hidden when archive confirm is showing */}
-        {!showArchiveConfirm && (
-          <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            padding: '12px 20px', borderTop: '1px solid var(--border)',
-          }}>
-            <div>
-              {mode === 'edit' && (
-                isArchived ? (
-                  <button
-                    onClick={handleRestore}
-                    disabled={busy}
-                    style={{ ...restoreBtnStyle, opacity: busy ? 0.6 : 1 }}
-                  >
-                    <RotateCcw size={13} />
-                    Restore team
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => setShowArchiveConfirm(true)}
-                    style={archiveBtnStyle}
-                  >
-                    <Archive size={13} />
-                    Archive
-                  </button>
-                )
-              )}
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={onClose} style={cancelBtnStyle}>Cancel</button>
-              <button
-                onClick={handleSave}
-                disabled={busy || !name.trim()}
-                style={{
-                  background: teamColor, color: '#fff', fontWeight: 600,
-                  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
-                  border: 'none', opacity: (busy || !name.trim()) ? 0.6 : 1,
-                  fontFamily: 'var(--font-sans)',
-                }}
-              >
-                {busy ? 'Saving…' : primaryLabel}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>,
-    document.body,
-  );
-}
-````
-
-## File: packages/web/src/components/TimelineModal.tsx
-````typescript
-/**
- * TimelineModal — create / edit a timeline.
- *
- * Modes:
- *  - "new":  name, identity, date range, description, notes; template picker seeds statuses
- *  - "edit": same fields; plus Statuses tab (add/edit/delete live statuses)
- */
-
-import { useState } from 'react'
-import { X, Plus, Trash2, Check, Archive, RotateCcw } from 'lucide-react'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import {
-  useCreateTimeline,
-  useUpdateTimeline,
-  useDeleteTimeline,
-  useArchiveTimeline,
-} from '@/hooks/useTeamActivities'
-import {
-  useTimelineStatuses,
-  useCreateTimelineStatus,
-  useUpdateTimelineStatus,
-  useDeleteTimelineStatus,
-} from '@/hooks/useStatusTemplates'
-import { useStatusTemplates } from '@/hooks/useStatusTemplates'
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-import type { components } from '@draba/shared'
-
-type Timeline = components['schemas']['Timeline']
-type Status = components['schemas']['Status']
-
-// ── Prop types ────────────────────────────────────────────────────────────────
-
-interface Props {
-  mode: 'new' | 'edit'
-  teamId: string
-  timeline?: Timeline
-  canAdmin?: boolean
-  onClose: () => void
-  onCreated?: (timeline: Timeline) => void
-  onUnarchive?: (timelineId: string) => void
-}
-
-type Tab = 'settings' | 'statuses'
-
-// ── Inline styles ─────────────────────────────────────────────────────────────
-
-const OVERLAY: React.CSSProperties = {
-  position: 'fixed', inset: 0,
-  background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(2px)',
-  zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
-}
-
-const PANEL: React.CSSProperties = {
-  background: 'var(--card)', border: '1px solid var(--border)',
-  borderRadius: 12, width: 560, maxWidth: '95vw',
-  maxHeight: '90vh', display: 'flex', flexDirection: 'column',
-  boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-}
-
-const HEADER: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: 12,
-  padding: '18px 20px 14px', borderBottom: '1px solid var(--border)',
-  flexShrink: 0,
-}
-
-const TAB_BAR: React.CSSProperties = {
-  display: 'flex', gap: 2, padding: '0 20px',
-  borderBottom: '1px solid var(--border)', flexShrink: 0,
-}
-
-const CONTENT: React.CSSProperties = {
-  flex: 1, overflowY: 'auto', padding: '20px',
-}
-
-const FOOTER: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-  padding: '14px 20px', borderTop: '1px solid var(--border)', flexShrink: 0,
-}
-
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)',
-  textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6,
-}
-
-const INPUT: React.CSSProperties = {
-  width: '100%', boxSizing: 'border-box',
-  fontSize: 13, color: 'var(--foreground)',
-  border: '1px solid var(--border)', borderRadius: 6,
-  padding: '7px 10px', background: 'var(--background)',
-  outline: 'none',
-}
-
-const TEXTAREA: React.CSSProperties = {
-  ...INPUT,
-  resize: 'vertical' as const,
-  minHeight: 68,
-  fontFamily: 'var(--font-sans)',
-  lineHeight: 1.5,
-}
-
-const archiveBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
-  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
-  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-}
-
-const restoreBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
-  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
-  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-}
-
-function tabStyle(active: boolean): React.CSSProperties {
-  return {
-    padding: '8px 14px', fontSize: 12, fontWeight: 500,
-    border: 'none', background: 'none', cursor: 'pointer',
-    borderBottom: active ? '2px solid var(--primary)' : '2px solid transparent',
-    color: active ? 'var(--foreground)' : 'var(--muted-foreground)',
-    fontFamily: 'var(--font-sans)',
-  }
-}
-
-// ── Status row (edit mode) ────────────────────────────────────────────────────
-
-interface StatusRowProps {
-  status: Status
-  canDelete: boolean
-  teamId: string
-  timelineId: string
-  allStatuses: Status[]
-}
-
-function StatusRow({ status, canDelete, teamId, timelineId, allStatuses }: StatusRowProps) {
-  const [editing, setEditing] = useState(false)
-  const [name, setName] = useState(status.name)
-  const [identity, setIdentity] = useState<Identity>({ color: status.color, icon: status.icon ?? '' })
-  const [isClosed, setIsClosed] = useState(status.isClosed)
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [replacementId, setReplacementId] = useState('')
-  const update = useUpdateTimelineStatus(teamId, timelineId)
-  const del = useDeleteTimelineStatus(teamId, timelineId)
-
-  function save() {
-    update.mutate(
-      { id: status.id, name: name.trim() || status.name, color: identity.color, icon: identity.icon || null, isClosed },
-      { onSuccess: () => setEditing(false) },
-    )
-  }
-
-  function doDelete() {
-    del.mutate(
-      { id: status.id, replacementStatusId: replacementId || undefined },
-      { onSuccess: () => setShowDeleteConfirm(false) },
-    )
-  }
-
-  if (showDeleteConfirm) {
-    const others = allStatuses.filter(s => s.id !== status.id)
-    return (
-      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: 12, marginBottom: 6 }}>
-        <div style={{ fontSize: 12, color: 'var(--foreground)', marginBottom: 8 }}>
-          Delete <strong>{status.name}</strong>? Activities using this status will be reassigned.
-        </div>
-        {others.length > 0 && (
-          <div style={{ marginBottom: 8 }}>
-            <label style={{ ...FIELD_LABEL }}>Move activities to</label>
-            <select
-              value={replacementId}
-              onChange={e => setReplacementId(e.target.value)}
-              style={{ ...INPUT, fontSize: 12 }}
-            >
-              <option value="">— No status —</option>
-              {others.map(s => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
-          </div>
-        )}
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => setShowDeleteConfirm(false)} style={{ fontSize: 12, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 5, background: 'none', cursor: 'pointer', color: 'var(--foreground)' }}>Cancel</button>
-          <button onClick={doDelete} style={{ fontSize: 12, padding: '4px 10px', border: 'none', borderRadius: 5, background: 'var(--destructive)', color: 'white', cursor: 'pointer' }}>Delete</button>
-        </div>
-      </div>
-    )
-  }
-
-  if (editing) {
-    return (
-      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginBottom: 4, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <IdentityWidget
-            identity={{ color: identity.color, icon: identity.icon ?? '' }}
-            name={name || status.name}
-            onChange={setIdentity}
-            shape="square"
-          />
-          <input
-            autoFocus
-            value={name}
-            onChange={e => setName(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
-            style={{ ...INPUT, flex: 1 }}
-          />
-          <button onClick={save} disabled={update.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4 }}>
-            <Check width={14} height={14} />
-          </button>
-          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-            <X width={14} height={14} />
-          </button>
-        </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
-          <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
-          Closed status (marks this status as completed/done)
-        </label>
-      </div>
-    )
-  }
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
-      <Badge identity={{ color: status.color, icon: status.icon ?? '__none__' }} name={status.name} shape="square" size={18} />
-      <span style={{ fontSize: 13, flex: 1, cursor: 'pointer', color: 'var(--foreground)' }} onClick={() => setEditing(true)}>
-        {status.name}
-      </span>
-      {status.isClosed && (
-        <span style={{ fontSize: 10, padding: '1px 6px', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--muted-foreground)' }}>closed</span>
-      )}
-      <button onClick={() => setEditing(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, opacity: 0.5 }}>
-        ✎
-      </button>
-      {canDelete && (
-        <button onClick={() => setShowDeleteConfirm(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-          <Trash2 width={13} height={13} />
-        </button>
-      )}
-    </div>
-  )
-}
-
-// ── Add-status form ───────────────────────────────────────────────────────────
-
-interface AddStatusFormProps {
-  teamId: string
-  timelineId: string
-  primaryColor: string
-}
-
-function AddStatusForm({ teamId, timelineId, primaryColor }: AddStatusFormProps) {
-  const [expanding, setExpanding] = useState(false)
-  const [name, setName] = useState('')
-  const [identity, setIdentity] = useState<Identity>({ color: primaryColor, icon: '' })
-  const [isClosed, setIsClosed] = useState(false)
-  const createStatus = useCreateTimelineStatus(teamId, timelineId)
-
-  function handleAdd() {
-    if (!name.trim()) return
-    createStatus.mutate(
-      { name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
-      {
-        onSuccess: () => {
-          setName('')
-          setIdentity({ color: primaryColor, icon: '' })
-          setIsClosed(false)
-          setExpanding(false)
-        },
-      },
-    )
-  }
-
-  function handleCancel() {
-    setExpanding(false)
-    setName('')
-    setIdentity({ color: primaryColor, icon: '' })
-    setIsClosed(false)
-  }
-
-  if (!expanding) {
-    return (
-      <button
-        onClick={() => setExpanding(true)}
-        style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', fontSize: 12, padding: '4px 2px', fontFamily: 'var(--font-sans)' }}
-      >
-        <Plus width={13} height={13} /> Add status
-      </button>
-    )
-  }
-
-  return (
-    <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <IdentityWidget identity={identity} name={name || 'New status'} shape="square" onChange={setIdentity} />
-        <input
-          autoFocus
-          value={name}
-          onChange={e => setName(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') handleCancel() }}
-          placeholder="Status name…"
-          style={{ ...INPUT, flex: 1 }}
-        />
-        <button onClick={handleAdd} disabled={!name.trim() || createStatus.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4, display: 'flex' }}>
-          <Check width={14} height={14} />
-        </button>
-        <button onClick={handleCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-          <X width={14} height={14} />
-        </button>
-      </div>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
-        <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
-        Closed status (marks this status as completed/done)
-      </label>
-    </div>
-  )
-}
-
-// ── Main modal ────────────────────────────────────────────────────────────────
-
-export default function TimelineModal({ mode, teamId, timeline, canAdmin = false, onClose, onCreated, onUnarchive }: Props) {
-  const [activeTab, setActiveTab] = useState<Tab>('settings')
-  const [name, setName] = useState(timeline?.name ?? '')
-  const [description, setDescription] = useState(timeline?.description ?? '')
-  const [notes, setNotes] = useState(timeline?.notes ?? '')
-  const [startDate, setStartDate] = useState(timeline?.startDate ?? '')
-  const [endDate, setEndDate] = useState(timeline?.endDate ?? '')
-  const [identity, setIdentity] = useState<Identity>({ color: timeline?.color ?? '#1A97A2', icon: timeline?.icon ?? '' })
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false)
-
-  const createTimeline = useCreateTimeline(teamId)
-  const updateTimeline = useUpdateTimeline(teamId)
-  const deleteTimeline = useDeleteTimeline(teamId)
-  const archiveTimeline = useArchiveTimeline(teamId)
-
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timeline?.id ?? '')
-  const { data: templates = [] } = useStatusTemplates(teamId)
-
-  const timelineColor = resolveColorHex(identity.color) ?? identity.color ?? '#1A97A2'
-
-  function handleSave() {
-    if (!name.trim()) { setError('Name is required'); return }
-    if (!startDate || !endDate) { setError('Start and end dates are required'); return }
-    if (endDate < startDate) { setError('End date must not be before start date'); return }
-    setSaving(true)
-    setError('')
-
-    if (mode === 'new') {
-      createTimeline.mutate(
-        {
-          name: name.trim(),
-          startDate,
-          endDate,
-          color: identity.color || null,
-          icon: identity.icon || null,
-          description: description.trim() || null,
-          notes: notes.trim() || null,
-          templateId: selectedTemplateId || null,
-        },
-        {
-          onSuccess: (tl) => { setSaving(false); onCreated?.(tl); onClose() },
-          onError: () => { setSaving(false); setError('Failed to create timeline') },
-        },
-      )
-    } else if (timeline) {
-      updateTimeline.mutate(
-        {
-          timelineId: timeline.id,
-          patch: {
-            name: name.trim(),
-            startDate,
-            endDate,
-            color: identity.color || null,
-            icon: identity.icon || null,
-            description: description.trim() || null,
-            notes: notes.trim() || null,
-          },
-        },
-        {
-          onSuccess: () => { setSaving(false); onClose() },
-          onError: () => { setSaving(false); setError('Failed to save timeline') },
-        },
-      )
-    }
-  }
-
-  return (
-    <div style={OVERLAY}>
-      <div style={PANEL} onClick={e => e.stopPropagation()}>
-        {/* Header — identity widget + editable name */}
-        <div style={HEADER}>
-          <IdentityWidget
-            identity={identity}
-            name={name || (mode === 'new' ? 'New timeline' : timeline?.name ?? '')}
-            onChange={setIdentity}
-            shape="square"
-          />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>
-              {mode === 'new' ? 'New Timeline' : 'Edit Timeline'}
-            </div>
-            <InlineEditableTitle
-              value={name}
-              onChange={v => { setName(v); setError('') }}
-              placeholder="Timeline name"
-              autoFocus={mode === 'new'}
-            />
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-            <X width={18} height={18} />
-          </button>
-        </div>
-
-        {/* Tab bar — Statuses tab only in edit mode */}
-        <div style={TAB_BAR}>
-          <button style={tabStyle(activeTab === 'settings')} onClick={() => setActiveTab('settings')}>Settings</button>
-          {mode === 'edit' && (
-            <button style={tabStyle(activeTab === 'statuses')} onClick={() => setActiveTab('statuses')}>
-              Statuses {statuses.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({statuses.length})</span>}
-            </button>
-          )}
-        </div>
-
-        {/* Content */}
-        <div style={CONTENT}>
-          {/* Archive confirmation — replaces tab content */}
-          {showArchiveConfirm && timeline ? (
-            <ConfirmDialog
-              variant="amber"
-              icon={<Archive size={22} color="#F59E0B" />}
-              title="Archive timeline?"
-              body={`${timeline.name} will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.`}
-              confirmLabel="Archive"
-              busy={archiveTimeline.isPending}
-              onCancel={() => setShowArchiveConfirm(false)}
-              onConfirm={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
-            />
-          ) : showDeleteConfirm && timeline ? (
-            <ConfirmDialog
-              variant="red"
-              icon={<Trash2 size={22} color="#EF4444" />}
-              title="Delete timeline?"
-              body={`This permanently deletes ${timeline.name} and all its statuses. Activities are not deleted — they remain in the team.`}
-              confirmLabel="Delete timeline"
-              busy={deleteTimeline.isPending}
-              onCancel={() => setShowDeleteConfirm(false)}
-              onConfirm={() => deleteTimeline.mutate(timeline.id, { onSuccess: onClose })}
-            />
-          ) : activeTab === 'settings' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-              {/* Date range */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <div>
-                  <div style={FIELD_LABEL}>Start date *</div>
-                  <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={INPUT} />
-                </div>
-                <div>
-                  <div style={FIELD_LABEL}>End date *</div>
-                  <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={INPUT} />
-                </div>
-              </div>
-
-              {/* Description */}
-              <div>
-                <div style={FIELD_LABEL}>Description</div>
-                <input
-                  value={description}
-                  onChange={e => setDescription(e.target.value)}
-                  placeholder="Short description of this timeline's purpose…"
-                  style={INPUT}
-                />
-              </div>
-
-              {/* Notes */}
-              <div>
-                <div style={FIELD_LABEL}>Notes</div>
-                <textarea
-                  value={notes}
-                  onChange={e => setNotes(e.target.value)}
-                  placeholder="Internal notes, links, references…"
-                  style={TEXTAREA}
-                />
-              </div>
-
-              {/* Template picker (create mode only) */}
-              {mode === 'new' && templates.length > 0 && (
-                <div>
-                  <div style={FIELD_LABEL}>Status template</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {templates.map(tpl => {
-                      const isSelected = selectedTemplateId === tpl.id || (!selectedTemplateId && tpl === templates[0])
-                      return (
-                        <div
-                          key={tpl.id}
-                          onClick={() => setSelectedTemplateId(tpl.id)}
-                          style={{
-                            border: `1px solid ${isSelected ? timelineColor + '88' : 'var(--border)'}`,
-                            borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
-                            background: isSelected ? timelineColor + '11' : 'var(--muted)',
-                            transition: 'all 0.1s',
-                          }}
-                        >
-                          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--foreground)' }}>{tpl.name}</div>
-                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                            {tpl.items.map(item => (
-                              <span key={item.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: item.color + '22', border: `1px solid ${item.color}66`, color: item.color }}>
-                                {item.name}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Archived banner */}
-              {mode === 'edit' && timeline?.archivedAt && (
-                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 6, padding: '8px 12px' }}>
-                  This timeline is archived. It is hidden from the active list.
-                </div>
-              )}
-
-              {error && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, padding: '8px 12px' }}>
-                  {error}
-                </div>
-              )}
-            </div>
-          ) : (
-            activeTab === 'statuses' && timeline && (
-              <div>
-                <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
-                  Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
-                </div>
-
-                <div style={{ marginBottom: 4 }}>
-                  {statuses.map(s => (
-                    <StatusRow
-                      key={s.id}
-                      status={s}
-                      canDelete={statuses.length > 1}
-                      teamId={teamId}
-                      timelineId={timeline.id}
-                      allStatuses={statuses}
-                    />
-                  ))}
-                </div>
-
-                <AddStatusForm teamId={teamId} timelineId={timeline.id} primaryColor={timelineColor} />
-              </div>
-            )
-          )}
-        </div>
-
-        {/* Footer — hidden when a confirm dialog is showing */}
-        {!showArchiveConfirm && !showDeleteConfirm && (
-          <div style={FOOTER}>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {mode === 'edit' && timeline && canAdmin && !timeline.archivedAt && (
-                <button onClick={() => setShowArchiveConfirm(true)} style={archiveBtnStyle}>
-                  <Archive size={13} />
-                  Archive
-                </button>
-              )}
-              {mode === 'edit' && timeline && canAdmin && timeline.archivedAt && onUnarchive && (
-                <button onClick={() => onUnarchive(timeline.id)} style={restoreBtnStyle}>
-                  <RotateCcw size={13} />
-                  Restore
-                </button>
-              )}
-              {mode === 'edit' && timeline && canAdmin && (
-                <button
-                  onClick={() => setShowDeleteConfirm(true)}
-                  style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                >
-                  Delete
-                </button>
-              )}
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                onClick={onClose}
-                style={{ fontSize: 13, padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', color: 'var(--muted-foreground)' }}
-              >
-                Cancel
-              </button>
-              {activeTab === 'settings' && (
-                <button
-                  onClick={handleSave}
-                  disabled={saving}
-                  style={{ fontSize: 13, fontWeight: 600, padding: '8px 18px', border: 'none', borderRadius: 7, background: timelineColor, color: 'white', cursor: saving ? 'wait' : 'pointer', fontFamily: 'var(--font-sans)' }}
-                >
-                  {saving ? 'Saving…' : mode === 'new' ? 'Create timeline' : 'Save changes'}
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/settings': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/status-templates': { target: apiTarget, changeOrigin: true },
-        '/status-template-items': { target: apiTarget, changeOrigin: true },
-        '/statuses': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/tags': { target: apiTarget, changeOrigin: true },
-        '/saved_filters': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
-````
-
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
 }
 ````
 
@@ -38293,544 +38376,6 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
 }
 ````
 
-## File: packages/web/src/hooks/useTeamActivities.ts
-````typescript
-/**
- * TanStack Query hooks for team-scoped data.
- *
- * All hooks call createAuthFetch to inject the current access token at
- * query-time so stale closures never send an expired token.
- */
-
-import { useCallback } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-import { useWebSocket } from '@/hooks/useWebSocket'
-
-type Activity = components['schemas']['Activity']
-type Team = components['schemas']['Team']
-type Timeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
-type PatchTimelineInput = components['schemas']['PatchTimelineInput']
-
-/** Query key factory — centralises cache key strings. */
-export const keys = {
-  myTeams: () => ['teams'] as const,
-  timelineActivities: (timelineId: string, from?: string, to?: string) =>
-    ['timelines', timelineId, 'activities', { from, to }] as const,
-  teamMembers: (teamId: string) =>
-    ['teams', teamId, 'members'] as const,
-  teamTimelines: (teamId: string) =>
-    ['teams', teamId, 'timelines'] as const,
-}
-
-/** Fetches all teams the authenticated user belongs to. */
-export function useMyTeams(includeArchived = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.myTeams(), { includeArchived }],
-    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
-  })
-}
-
-/** Fetches a single team by ID. */
-export function useTeam(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId],
-    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches all non-archived timelines for a team. */
-export function useTeamTimelines(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamTimelines(teamId),
-    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches activities for a timeline, optionally bounded by date range. */
-export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.timelineActivities(timelineId, from, to),
-    queryFn: async () => {
-      const params = new URLSearchParams()
-      if (from) params.set('from', from)
-      if (to) params.set('to', to)
-      const qs = params.toString()
-      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
-    },
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Fetches the member list for a team. */
-export function useTeamMembers(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamMembers(teamId),
-    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/**
- * Subscribes to the team's WebSocket feed and applies surgical cache updates
- * for activity.created / activity.updated / activity.deleted deltas.
- *
- * Conflict strategy: for activity.updated, incoming deltas are only applied
- * when their updatedAt timestamp is strictly newer than the cached version.
- * This prevents self-echo (our own PATCH broadcast arriving back) and handles
- * the last-writer-wins case where a concurrent remote edit arrives while our
- * mutation is in-flight — the server-returned updatedAt on our onSuccess will
- * always win if our PATCH was truly last.
- */
-export function useTeamActivitySync(
-  teamId: string,
-  accessToken: string | null | undefined,
-) {
-  const client = useQueryClient()
-
-  const handleMessage = useCallback(
-    (msg: { type: string; payload?: unknown }) => {
-      if (!teamId || !msg.payload) return
-
-      if (msg.type === 'activity.created') {
-        const incoming = msg.payload as Activity
-        // Target all timeline-scoped activity cache entries by using the
-        // timelineId from the incoming activity payload.
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            // Guard against duplicate delivery.
-            if (old.some((a) => a.id === incoming.id)) return old
-            return [...old, incoming]
-          },
-        )
-      } else if (msg.type === 'activity.updated') {
-        const incoming = msg.payload as Activity
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            return old.map((a) => {
-              if (a.id !== incoming.id) return a
-              // Skip if the cache already holds the same or a newer version.
-              const cachedMs = new Date(a.updatedAt).getTime()
-              const incomingMs = new Date(incoming.updatedAt).getTime()
-              return incomingMs > cachedMs ? incoming : a
-            })
-          },
-        )
-      } else if (msg.type === 'activity.deleted') {
-        const { id } = msg.payload as { id: string }
-        // activity.deleted payload only has id — invalidate all timeline
-        // activity queries for this team so caches stay consistent.
-        client.invalidateQueries({ queryKey: ['timelines'] })
-        // Optimistically remove from all cached timeline activity lists.
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines'] },
-          (old) => old?.filter((a) => a.id !== id),
-        )
-      }
-    },
-    [client, teamId],
-  )
-
-  useWebSocket({
-    token: accessToken,
-    teamIds: teamId ? [teamId] : [],
-    onMessage: handleMessage,
-  })
-}
-
-interface CreateActivityInput {
-  title: string
-  startAt: string
-  endAt: string
-  description?: string | null
-  color?: string | null
-  icon?: string | null
-  assignedMemberIds?: string[]
-  tagIds?: string[]
-  parentActivityId?: string | null
-  percentComplete?: number | null
-}
-
-interface UpdateActivityInput {
-  activityId: string
-  patch: {
-    title?: string
-    description?: string | null
-    notes?: string | null
-    startAt?: string
-    endAt?: string
-    allDay?: boolean
-    color?: string | null
-    icon?: string | null
-    location?: string | null
-    url?: string | null
-    statusId?: string | null
-    parentActivityId?: string | null
-    percentComplete?: number | null
-    assignedMemberIds?: string[]
-    tagIds?: string[]
-  }
-}
-
-/** Creates an activity in a timeline and inserts it directly into the cache. */
-export function useCreateActivity(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: CreateActivityInput) =>
-      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: (created) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => {
-          if (!old) return old
-          // WS self-echo may also insert this activity; deduplicate by id.
-          if (old.some((a) => a.id === created.id)) return old
-          return [...old, created]
-        },
-      )
-    },
-  })
-}
-
-/** PATCHes an activity and optimistically updates the cache. */
-export function useUpdateActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
-      authFetch<Activity>(`/activities/${activityId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onMutate: async ({ activityId, patch }) => {
-      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
-      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-      )
-      return { snapshot }
-    },
-    onError: (_err, _vars, context) => {
-      if (context?.snapshot) {
-        for (const [key, data] of context.snapshot) {
-          client.setQueryData(key, data)
-        }
-      }
-    },
-    onSuccess: (updated) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
-      )
-    },
-  })
-}
-
-interface CreateTeamInput {
-  name: string
-  description?: string | null
-  notes?: string | null
-  color?: string | null
-  icon?: string | null
-}
-
-interface UpdateTeamInput {
-  teamId: string
-  patch: {
-    name?: string
-    description?: string | null
-    notes?: string | null
-    color?: string | null
-    icon?: string | null
-  }
-}
-
-/** Creates a team and inserts it into the active-teams cache. */
-export function useCreateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: CreateTeamInput) =>
-      authFetch<Team>('/teams', {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      // Invalidate both active and archived team lists.
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** PATCHes a team's mutable fields and refreshes the cache. */
-export function useUpdateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
-      authFetch<Team>(`/teams/${teamId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives a team (soft delete). */
-export function useArchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Restores an archived team. */
-export function useUnarchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives an activity (soft-delete). Removes it from the active-list cache. */
-export function useArchiveActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-/** Deletes an activity and removes it from the cache. */
-export function useDeleteActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
-
-/** Fetches all timelines for a team, optionally including archived ones. */
-export function useTeamTimelinesWithArchived(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
-    queryFn: async () =>
-      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Creates a new timeline for a team. */
-export function useCreateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
-      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** PATCHes a timeline's mutable fields. */
-export function useUpdateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
-      authFetch<Timeline>(`/timelines/${timelineId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Hard-deletes a timeline. */
-export function useDeleteTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Archives a timeline. */
-export function useArchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Restores an archived timeline. */
-export function useUnarchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Fetches the access grant list for a timeline. */
-export function useTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
-    queryFn: async () =>
-      (await authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access`,
-      )) ?? [],
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Grants or updates a member's access to a timeline. */
-export function useGrantTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
-      authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
-        { method: 'PUT', body: JSON.stringify({ role }) },
-      ),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
-
-/** Revokes a member's access to a timeline. */
-export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (memberId: string) =>
-      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
-        method: 'DELETE',
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
-````
-
 ## File: packages/api/internal/api/activity_handler.go
 ````go
 package api
@@ -39649,913 +39194,555 @@ type Invite struct {
 }
 ````
 
-## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
+## File: packages/web/src/hooks/useTeamActivities.ts
 ````typescript
 /**
- * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
+ * TanStack Query hooks for team-scoped data.
  *
- * Field order (top to bottom):
- *   1. Header — Identity widget + Title
- *   2. When — Date pickers (start → end)
- *   3. Description — single-line input
- *   4. Assigned to — bordered card style (matches create panel)
- *   5. Classify — Status (rich dropdown with color dot + icon + name), Tags (stub)
- *   6. Advanced — Parent (stub), Progress (stub), Location, URL
- *   7. Notes — multi-line textarea
- *   8. Footer — Delete button
- *
- * All functional fields save on change/blur via PATCH /activities/:id.
- * liveDragStart / liveDragEnd display live dates during bar drag without triggering saves.
+ * All hooks call createAuthFetch to inject the current access token at
+ * query-time so stale closures never send an expired token.
  */
 
-import { useState, useEffect, useRef } from 'react'
-import { X, Trash2, Archive, ArrowRight, Loader2, ChevronDown, Search } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useUpdateActivity, useDeleteActivity, useArchiveActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useTags } from '@/hooks/useTags'
-import TagInput from '@/components/TagInput'
+import { useCallback } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type { components } from '@draba/shared'
-import type { Member } from '@/types'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+import { useWebSocket } from '@/hooks/useWebSocket'
 
-type ApiActivity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
+type Activity = components['schemas']['Activity']
+type Team = components['schemas']['Team']
+type Timeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
+type PatchTimelineInput = components['schemas']['PatchTimelineInput']
 
-const PANEL_WIDTH = 300
-
-interface Props {
-  event: ApiActivity | null
-  open: boolean
-  members: Member[]
-  teamId: string
-  timelineId: string
-  onClose: () => void
-  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragStart?: string
-  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragEnd?: string
+/** Query key factory — centralises cache key strings. */
+export const keys = {
+  myTeams: () => ['teams'] as const,
+  timelineActivities: (timelineId: string, from?: string, to?: string) =>
+    ['timelines', timelineId, 'activities', { from, to }] as const,
+  teamMembers: (teamId: string) =>
+    ['teams', teamId, 'members'] as const,
+  teamTimelines: (teamId: string) =>
+    ['teams', teamId, 'timelines'] as const,
 }
 
-// ── Small helpers ─────────────────────────────────────────────────────────────
+/** Fetches all teams the authenticated user belongs to. */
+export function useMyTeams(includeArchived = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
 
-function toDateInput(iso: string): string { return iso.slice(0, 10) }
-function toISODate(d: string): string { return `${d}T00:00:00Z` }
-
-const SEC_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 700,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  marginBottom: 6,
+  return useQuery({
+    queryKey: [...keys.myTeams(), { includeArchived }],
+    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
+  })
 }
 
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 3,
-  width: 68,
-  flexShrink: 0,
+/** Fetches a single team by ID. */
+export function useTeam(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId],
+    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
+    enabled: Boolean(teamId),
+  })
 }
 
-const STUB_VALUE: React.CSSProperties = {
-  fontSize: 12,
-  color: 'var(--muted-foreground)',
-  opacity: 0.5,
-  flex: 1,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 4,
-  cursor: 'default',
-  userSelect: 'none',
+/** Fetches all non-archived timelines for a team. */
+export function useTeamTimelines(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamTimelines(teamId),
+    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
+    enabled: Boolean(teamId),
+  })
 }
 
-const DIVIDER: React.CSSProperties = {
-  borderTop: '1px solid var(--border)',
-  margin: '10px 0',
+/** Fetches activities for a timeline, optionally bounded by date range. */
+export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.timelineActivities(timelineId, from, to),
+    queryFn: async () => {
+      const params = new URLSearchParams()
+      if (from) params.set('from', from)
+      if (to) params.set('to', to)
+      const qs = params.toString()
+      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
+    },
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
 }
 
-const INPUT: React.CSSProperties = {
-  width: '100%',
-  boxSizing: 'border-box' as const,
-  fontSize: 12,
-  color: 'var(--foreground)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-  padding: '5px 8px',
-  outline: 'none',
-  background: 'var(--background)',
-  fontFamily: 'var(--font-sans)',
-}
+/** Fetches the member list for a team. */
+export function useTeamMembers(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
 
-// ── Rich status dropdown ──────────────────────────────────────────────────────
-
-interface StatusDropdownProps {
-  statuses: Status[]
-  value: string | null | undefined
-  onChange: (id: string | null) => void
-}
-
-function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
-
-  const selected = statuses.find(s => s.id === value) ?? null
-
-  return (
-    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '4px 8px',
-          border: '1px solid var(--border)',
-          borderRadius: 6,
-          background: 'var(--background)',
-          color: 'var(--foreground)',
-          cursor: 'pointer',
-          fontSize: 12,
-          fontFamily: 'var(--font-sans)',
-          textAlign: 'left',
-        }}
-      >
-        {selected ? (
-          <>
-            <div
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: '50%',
-                background: resolveColorHex(selected.color) ?? selected.color,
-                flexShrink: 0,
-              }}
-            />
-            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selected.name}
-            </span>
-          </>
-        ) : (
-          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
-        )}
-        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {open && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 4px)',
-            left: 0,
-            right: 0,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
-            zIndex: 100,
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            onClick={() => { onChange(null); setOpen(false) }}
-            style={{
-              padding: '6px 10px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              fontStyle: 'italic',
-              cursor: 'pointer',
-              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-          >
-            — No status —
-          </div>
-          {statuses.map(s => (
-            <div
-              key={s.id}
-              onClick={() => { onChange(s.id); setOpen(false) }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '6px 10px',
-                fontSize: 12,
-                cursor: 'pointer',
-                background: s.id === value ? 'var(--muted)' : 'transparent',
-                fontWeight: s.id === value ? 600 : 400,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
-            >
-              <div
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: resolveColorHex(s.color) ?? s.color,
-                  flexShrink: 0,
-                }}
-              />
-              <span style={{ flex: 1 }}>{s.name}</span>
-              {s.isClosed && (
-                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
-                  CLOSED
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Searchable parent activity picker ─────────────────────────────────────────
-
-interface ParentPickerProps {
-  activities: ApiActivity[]
-  value: string | null | undefined
-  onChange: (id: string | null) => void
+  return useQuery({
+    queryKey: keys.teamMembers(teamId),
+    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
+    enabled: Boolean(teamId),
+  })
 }
 
 /**
- * Searchable combobox for choosing a parent activity. Scales past a plain
- * <select> by filtering as you type, shows each activity's identity badge,
- * and ellipsis-truncates long titles so the panel never overflows.
+ * Subscribes to the team's WebSocket feed and applies surgical cache updates
+ * for activity.created / activity.updated / activity.deleted deltas.
+ *
+ * Conflict strategy: for activity.updated, incoming deltas are only applied
+ * when their updatedAt timestamp is strictly newer than the cached version.
+ * This prevents self-echo (our own PATCH broadcast arriving back) and handles
+ * the last-writer-wins case where a concurrent remote edit arrives while our
+ * mutation is in-flight — the server-returned updatedAt on our onSuccess will
+ * always win if our PATCH was truly last.
  */
-function ParentActivityPicker({ activities, value, onChange }: ParentPickerProps) {
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const ref = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
+export function useTeamActivitySync(
+  teamId: string,
+  accessToken: string | null | undefined,
+) {
+  const client = useQueryClient()
 
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQuery('') }
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
+  const handleMessage = useCallback(
+    (msg: { type: string; payload?: unknown }) => {
+      if (!teamId || !msg.payload) return
 
-  // Focus the search field whenever the dropdown opens.
-  useEffect(() => { if (open) inputRef.current?.focus() }, [open])
-
-  const selected = activities.find(a => a.id === value) ?? null
-  const filtered = activities.filter(a => a.title.toLowerCase().includes(query.trim().toLowerCase()))
-
-  function choose(id: string | null) {
-    onChange(id)
-    setOpen(false)
-    setQuery('')
-  }
-
-  return (
-    <div ref={ref} style={{ flex: 1, position: 'relative', minWidth: 0 }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%', display: 'flex', alignItems: 'center', gap: 6,
-          padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 6,
-          background: 'var(--background)', color: 'var(--foreground)', cursor: 'pointer',
-          fontSize: 12, fontFamily: 'var(--font-sans)', textAlign: 'left',
-        }}
-      >
-        {selected ? (
-          <>
-            <Badge identity={{ color: selected.color ?? '#288C9B', icon: selected.icon ?? '__none__' }} name={selected.title} size={16} />
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selected.title}
-            </span>
-          </>
-        ) : (
-          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— None —</span>
-        )}
-        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {open && (
-        <div
-          style={{
-            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
-            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)', zIndex: 100, overflow: 'hidden',
-          }}
-        >
-          {/* Search field */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
-            <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-            <input
-              ref={inputRef}
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              placeholder="Search activities…"
-              style={{
-                flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'none',
-                fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
-              }}
-            />
-          </div>
-
-          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-            <div
-              onClick={() => choose(null)}
-              style={{
-                padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
-                fontStyle: 'italic', cursor: 'pointer',
-                borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              — None —
-            </div>
-            {filtered.map(a => (
-              <div
-                key={a.id}
-                onClick={() => choose(a.id)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
-                  fontSize: 12, cursor: 'pointer',
-                  background: a.id === value ? 'var(--muted)' : 'transparent',
-                  fontWeight: a.id === value ? 600 : 400,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
-              >
-                <Badge identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }} name={a.title} size={16} />
-                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {a.title}
-                </span>
-              </div>
-            ))}
-            {filtered.length === 0 && (
-              <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-                No matching activities
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
+      if (msg.type === 'activity.created') {
+        const incoming = msg.payload as Activity
+        // Target all timeline-scoped activity cache entries by using the
+        // timelineId from the incoming activity payload.
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            // Guard against duplicate delivery.
+            if (old.some((a) => a.id === incoming.id)) return old
+            return [...old, incoming]
+          },
+        )
+      } else if (msg.type === 'activity.updated') {
+        const incoming = msg.payload as Activity
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            return old.map((a) => {
+              if (a.id !== incoming.id) return a
+              // Skip if the cache already holds the same or a newer version.
+              const cachedMs = new Date(a.updatedAt).getTime()
+              const incomingMs = new Date(incoming.updatedAt).getTime()
+              return incomingMs > cachedMs ? incoming : a
+            })
+          },
+        )
+      } else if (msg.type === 'activity.deleted') {
+        const { id } = msg.payload as { id: string }
+        // activity.deleted payload only has id — invalidate all timeline
+        // activity queries for this team so caches stay consistent.
+        client.invalidateQueries({ queryKey: ['timelines'] })
+        // Optimistically remove from all cached timeline activity lists.
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines'] },
+          (old) => old?.filter((a) => a.id !== id),
+        )
+      }
+    },
+    [client, teamId],
   )
+
+  useWebSocket({
+    token: accessToken,
+    teamIds: teamId ? [teamId] : [],
+    onMessage: handleMessage,
+  })
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
+interface CreateActivityInput {
+  title: string
+  startAt: string
+  endAt: string
+  description?: string | null
+  color?: string | null
+  icon?: string | null
+  assignedMemberIds?: string[]
+  tagIds?: string[]
+  parentActivityId?: string | null
+  percentComplete?: number | null
+  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
+  _tempId?: string
+}
 
-export default function ActivityDetailPanel({
-  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
-}: Props) {
-  const updateMutation = useUpdateActivity(timelineId)
-  const deleteMutation = useDeleteActivity(timelineId)
-  const archiveMutation = useArchiveActivity(timelineId)
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
-  const { data: teamTags = [] } = useTags(teamId)
-  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
+interface UpdateActivityInput {
+  activityId: string
+  patch: {
+    title?: string
+    description?: string | null
+    notes?: string | null
+    startAt?: string
+    endAt?: string
+    allDay?: boolean
+    color?: string | null
+    icon?: string | null
+    location?: string | null
+    url?: string | null
+    statusId?: string | null
+    parentActivityId?: string | null
+    percentComplete?: number | null
+    assignedMemberIds?: string[]
+    tagIds?: string[]
+  }
+}
 
-  const [title, setTitle] = useState(event?.title ?? '')
-  const [description, setDescription] = useState(event?.description ?? '')
-  const [notes, setNotes] = useState(event?.notes ?? '')
-  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
-  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: event?.color ?? '#288C9B',
-    icon: event?.icon ?? '__none__',
+/** Creates an activity in a timeline and inserts it directly into the cache. */
+export function useCreateActivity(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
+      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (created, variables) => {
+      const tempId = variables._tempId
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => {
+          if (!old) return [created]
+          const hasReal = old.some((a) => a.id === created.id)
+          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
+          // The WS activity.created self-echo may win the race and append the
+          // real record before this onSuccess runs. In that case we must still
+          // drop the optimistic placeholder, otherwise it lingers as a duplicate
+          // "New Activity" row (and inline edits keep targeting the dead temp id).
+          if (hasReal) {
+            return hasTemp ? old.filter((a) => a.id !== tempId) : old
+          }
+          // Replace optimistic placeholder in-place to avoid a position flash.
+          if (hasTemp) {
+            return old.map((a) => (a.id === tempId ? created : a))
+          }
+          return [...old, created]
+        },
+      )
+    },
   })
-  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
-  const [tagIds, setTagIds] = useState<string[]>((event?.tagIds as string[] | undefined) ?? [])
-  const [location, setLocation] = useState(event?.location ?? '')
-  const [url, setUrl] = useState(event?.url ?? '')
-  const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
-  // Parent and status are mirrored locally so the picker reflects a change
-  // immediately — the `event` prop is a snapshot taken at selection time and
-  // doesn't refresh until the activity is reselected.
-  const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
-  const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
-  // Progress percent renders as a label until clicked; `progressDraft` holds the
-  // in-flight text while editing.
-  const [editingProgress, setEditingProgress] = useState(false)
-  const [progressDraft, setProgressDraft] = useState('')
-  const [confirmDelete, setConfirmDelete] = useState(false)
+}
 
-  // Re-sync when the selected activity changes.
-  useEffect(() => {
-    if (!event) return
-    setTitle(event.title)
-    setDescription(event.description ?? '')
-    setNotes(event.notes ?? '')
-    setStartDate(toDateInput(event.startAt))
-    setEndDate(toDateInput(event.endAt))
-    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
-    setAssignedIds(event.assignedMemberIds ?? [])
-    setTagIds((event.tagIds as string[] | undefined) ?? [])
-    setLocation(event.location ?? '')
-    setUrl(event.url ?? '')
-    setProgressValue(event.percentComplete ?? 0)
-    setParentId(event.parentActivityId ?? null)
-    setStatusId(event.statusId ?? null)
-    setEditingProgress(false)
-    setConfirmDelete(false)
-  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+/** PATCHes an activity and optimistically updates the cache. */
+export function useUpdateActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-  // Sync local date state when the event's dates change (e.g. after a drag commit).
-  const eventStartAt = event?.startAt
-  const eventEndAt = event?.endAt
-  useEffect(() => {
-    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
-    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
-  }, [eventStartAt, eventEndAt])
+  return useMutation({
+    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
+      authFetch<Activity>(`/activities/${activityId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onMutate: async ({ activityId, patch }) => {
+      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
+      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+      )
+      return { snapshot }
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.snapshot) {
+        for (const [key, data] of context.snapshot) {
+          client.setQueryData(key, data)
+        }
+      }
+    },
+    onSuccess: (updated) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
+      )
+    },
+  })
+}
 
-  const saving = updateMutation.isPending
-  const deleting = deleteMutation.isPending
-  const archiving = archiveMutation.isPending
+interface CreateTeamInput {
+  name: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
+}
 
-  // Display dates: live drag overrides take precedence while dragging.
-  const displayStart = liveDragStart ?? startDate
-  const displayEnd = liveDragEnd ?? endDate
-
-  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
-    if (!event) return
-    updateMutation.mutate({ activityId: event.id, patch })
+interface UpdateTeamInput {
+  teamId: string
+  patch: {
+    name?: string
+    description?: string | null
+    notes?: string | null
+    color?: string | null
+    icon?: string | null
   }
+}
 
-  function handleTitleBlur() {
-    if (title.trim() && title !== event?.title) save({ title: title.trim() })
-  }
+/** Creates a team and inserts it into the active-teams cache. */
+export function useCreateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-  function handleDescriptionBlur() {
-    if (description !== (event?.description ?? '')) save({ description: description || null })
-  }
+  return useMutation({
+    mutationFn: (input: CreateTeamInput) =>
+      authFetch<Team>('/teams', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      // Invalidate both active and archived team lists.
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
 
-  function handleNotesBlur() {
-    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
-  }
+/** PATCHes a team's mutable fields and refreshes the cache. */
+export function useUpdateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-  function handleLocationBlur() {
-    if (location !== (event?.location ?? '')) save({ location: location || null })
-  }
+  return useMutation({
+    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
+      authFetch<Team>(`/teams/${teamId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
 
-  function handleUrlBlur() {
-    if (url !== (event?.url ?? '')) save({ url: url || null })
-  }
+/** Archives a team (soft delete). */
+export function useArchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-  function handleStartDateChange(val: string) {
-    setStartDate(val)
-    if (val && val <= endDate) save({ startAt: toISODate(val) })
-  }
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
 
-  function handleEndDateChange(val: string) {
-    setEndDate(val)
-    if (val && val >= startDate) save({ endAt: toISODate(val) })
-  }
+/** Restores an archived team. */
+export function useUnarchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-  function handleIdentityChange(next: Identity) {
-    setIdentity(next)
-    save({ color: next.color, icon: next.icon })
-  }
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
 
-  function toggleAssignee(memberId: string) {
-    const next = assignedIds.includes(memberId)
-      ? assignedIds.filter(id => id !== memberId)
-      : [...assignedIds, memberId]
-    setAssignedIds(next)
-    save({ assignedMemberIds: next })
-  }
+/** Archives an activity (soft-delete). Removes it from the active-list cache. */
+export function useArchiveActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-  function handleTagsChange(ids: string[]) {
-    setTagIds(ids)
-    save({ tagIds: ids } as Parameters<typeof save>[0])
-  }
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
 
-  function handleProgressChange(e: React.ChangeEvent<HTMLInputElement>) {
-    setProgressValue(Number(e.target.value))
-  }
+/** Deletes an activity and removes it from the cache. */
+export function useDeleteActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-  // Clamps to 0–100, rounds to an integer, and saves only on a real change.
-  function commitProgress(val: number) {
-    const clamped = Math.max(0, Math.min(100, Math.round(Number.isFinite(val) ? val : 0)))
-    setProgressValue(clamped)
-    if (clamped !== (event?.percentComplete ?? 0)) {
-      save({ percentComplete: clamped } as Parameters<typeof save>[0])
-    }
-  }
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
 
-  function handleProgressCommit(e: React.ChangeEvent<HTMLInputElement>) {
-    commitProgress(Number(e.target.value))
-  }
+// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
 
-  function startEditProgress() {
-    setProgressDraft(String(progressValue))
-    setEditingProgress(true)
-  }
+/** Fetches all timelines for a team, optionally including archived ones. */
+export function useTeamTimelinesWithArchived(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
 
-  function commitProgressEdit() {
-    commitProgress(progressDraft === '' ? 0 : Number(progressDraft))
-    setEditingProgress(false)
-  }
+  return useQuery({
+    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
+    queryFn: async () =>
+      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
 
-  function handleDelete() {
-    if (!event) return
-    deleteMutation.mutate(event.id, { onSuccess: onClose })
-  }
+/** Creates a new timeline for a team. */
+export function useCreateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-  function handleArchive() {
-    if (!event) return
-    archiveMutation.mutate(event.id, { onSuccess: onClose })
-  }
+  return useMutation({
+    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
+      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
 
-  return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-        {!event ? null : (<>
+/** PATCHes a timeline's mutable fields. */
+export function useUpdateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-        {/* ── Header bar ── */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '0 12px', height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)', flexShrink: 0,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
-            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', color: 'var(--muted-foreground)',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
-        </div>
+  return useMutation({
+    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
+      authFetch<Timeline>(`/timelines/${timelineId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
 
-        {/* ── Scrollable body ── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
+/** Hard-deletes a timeline. */
+export function useDeleteTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-          {/* 1. Identity widget + Title */}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
-            <div style={{ marginTop: 2, flexShrink: 0 }}>
-              <IdentityWidget
-                identity={identity}
-                name={title || event?.title || ''}
-                shape="square"
-                onChange={handleIdentityChange}
-              />
-            </div>
-            <input
-              value={title}
-              onChange={e => setTitle(e.target.value)}
-              onBlur={handleTitleBlur}
-              style={{
-                flex: 1, fontSize: 13, fontWeight: 600,
-                color: 'var(--foreground)', border: '1px solid transparent',
-                borderRadius: 'var(--radius-md)', padding: '5px 6px',
-                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-              }}
-              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-            />
-          </div>
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
 
-          <div style={DIVIDER} />
+/** Archives a timeline. */
+export function useArchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-          {/* 2. When — date pickers only (no allDay checkbox, no date summary) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>When</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input
-                type="date" value={displayStart}
-                onChange={e => handleStartDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-              <input
-                type="date" value={displayEnd} min={startDate}
-                onChange={e => handleEndDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
 
-          <div style={DIVIDER} />
+/** Restores an archived timeline. */
+export function useUnarchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-          {/* 3. Description — below dates, matching create panel */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Description</div>
-            <input
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Optional description…"
-              style={{ ...INPUT, padding: '6px 8px' }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
 
-          <div style={DIVIDER} />
+/** Fetches the access grant list for a timeline. */
+export function useTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
 
-          {/* 4. Assigned to — bordered card style matching create panel */}
-          {members.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={SEC_LABEL}>Assigned to</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {members.map(m => {
-                  const assigned = assignedIds.includes(m.id)
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => toggleAssignee(m.id)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '5px 8px',
-                        border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
-                        borderRadius: 'var(--radius-md)',
-                        background: assigned ? `${m.color}18` : 'var(--background)',
-                        cursor: 'pointer', textAlign: 'left',
-                        transition: 'background 0.1s, border-color 0.1s',
-                      }}
-                    >
-                      <MemberAvatar member={m} size={18} />
-                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                      {assigned && (
-                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          )}
+  return useQuery({
+    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
+    queryFn: async () =>
+      (await authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access`,
+      )) ?? [],
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
 
-          <div style={DIVIDER} />
+/** Grants or updates a member's access to a timeline. */
+export function useGrantTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-          {/* 5. Classify — Status (rich dropdown), Tags (stub) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Classify</div>
+  return useMutation({
+    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
+      authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
+        { method: 'PUT', body: JSON.stringify({ role }) },
+      ),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
 
-            {/* Status picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Status</span>
-              {statuses.length > 0 ? (
-                <StatusDropdown
-                  statuses={statuses}
-                  value={statusId}
-                  onChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
-                />
-              ) : (
-                <div style={{ ...STUB_VALUE }}>
-                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
-                </div>
-              )}
-            </div>
+/** Revokes a member's access to a timeline. */
+export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-            {/* Tags */}
-            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-              <span style={{ ...FIELD_LABEL, paddingTop: 5 }}>Tags</span>
-              <TagInput
-                teamId={teamId}
-                tags={teamTags}
-                selectedTagIds={tagIds}
-                onChange={handleTagsChange}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 6. Advanced (was "Details") — Parent, Progress, Location, URL */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Advanced</div>
-
-            {/* Parent activity picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Parent</span>
-              <ParentActivityPicker
-                activities={allActivities.filter(a => a.id !== event.id)}
-                value={parentId}
-                onChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
-              />
-            </div>
-
-            {/* % Complete slider */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Progress</span>
-              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={progressValue}
-                  onChange={handleProgressChange}
-                  onMouseUp={handleProgressCommit as unknown as React.MouseEventHandler}
-                  onTouchEnd={handleProgressCommit as unknown as React.TouchEventHandler}
-                  style={{ flex: 1, cursor: 'pointer', accentColor: 'var(--primary)' }}
-                />
-                {editingProgress ? (
-                  <input
-                    autoFocus
-                    type="text"
-                    inputMode="numeric"
-                    value={progressDraft}
-                    onChange={e => setProgressDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
-                    onBlur={commitProgressEdit}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') commitProgressEdit()
-                      else if (e.key === 'Escape') setEditingProgress(false)
-                    }}
-                    aria-label="Percent complete"
-                    style={{
-                      width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
-                      marginLeft: 'auto',
-                      color: 'var(--foreground)', border: '1px solid var(--primary)',
-                      borderRadius: 4, padding: '2px 4px', outline: 'none',
-                      background: 'var(--background)', fontFamily: 'var(--font-sans)',
-                    }}
-                  />
-                ) : (
-                  <span
-                    onClick={startEditProgress}
-                    title="Click to edit"
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEditProgress() } }}
-                    style={{
-                      fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
-                      textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
-                      marginLeft: 'auto',
-                      padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    {progressValue}%
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {/* Location (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Location</span>
-              <input
-                value={location}
-                onChange={e => setLocation(e.target.value)}
-                onBlur={handleLocationBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-
-            {/* URL (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>URL</span>
-              <input
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-                onBlur={handleUrlBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 7. Notes — multi-line textarea */}
-          <div style={{ marginBottom: 8 }}>
-            <div style={SEC_LABEL}>Notes</div>
-            <textarea
-              value={notes}
-              onChange={e => setNotes(e.target.value)}
-              onBlur={e => { handleNotesBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Add notes…"
-              rows={4}
-              style={{
-                ...INPUT,
-                padding: '6px 8px',
-                resize: 'vertical',
-                minHeight: 72,
-                lineHeight: 1.5,
-              }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
-
-        </div>
-
-        {/* ── Footer — Archive + Delete buttons ── */}
-        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-          {confirmDelete ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
-                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
-              </p>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  onClick={() => setConfirmDelete(false)}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                    background: 'var(--card)', color: 'var(--foreground)',
-                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                  }}
-                >Cancel</button>
-                <button
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: 'none',
-                    background: 'var(--destructive)', color: 'white',
-                    cursor: deleting ? 'not-allowed' : 'pointer',
-                    fontFamily: 'var(--font-sans)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  }}
-                >
-                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                  Delete
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button
-                onClick={handleArchive}
-                disabled={archiving}
-                style={{
-                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  fontSize: 12, fontWeight: 600, padding: 7,
-                  borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                  background: 'var(--card)', color: 'var(--muted-foreground)',
-                  cursor: archiving ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-sans)',
-                }}
-              >
-                {archiving ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} strokeWidth={2} />}
-                Archive
-              </button>
-              <button
-                onClick={() => setConfirmDelete(true)}
-                style={{
-                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  fontSize: 12, fontWeight: 600, padding: 7,
-                  borderRadius: 'var(--radius-md)', border: 'none',
-                  background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
-                  cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                }}
-              >
-                <Trash2 size={12} strokeWidth={2} />
-                Delete
-              </button>
-            </div>
-          )}
-        </div>
-
-        </>)}
-      </div>
-    </div>
-  )
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
 }
 ````
 
@@ -41783,6 +40970,916 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - Notifications (email, push)
 - Recurring event UI (RRULE editing)
 - Kanban drag-to-change-status (v2; v1 Kanban is read-only)
+````
+
+## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
+````typescript
+/**
+ * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
+ *
+ * Field order (top to bottom):
+ *   1. Header — Identity widget + Title
+ *   2. When — Date pickers (start → end)
+ *   3. Description — single-line input
+ *   4. Assigned to — bordered card style (matches create panel)
+ *   5. Classify — Status (rich dropdown with color dot + icon + name), Tags (stub)
+ *   6. Advanced — Parent (stub), Progress (stub), Location, URL
+ *   7. Notes — multi-line textarea
+ *   8. Footer — Delete button
+ *
+ * All functional fields save on change/blur via PATCH /activities/:id.
+ * liveDragStart / liveDragEnd display live dates during bar drag without triggering saves.
+ */
+
+import { useState, useEffect, useRef } from 'react'
+import { X, Trash2, Archive, ArrowRight, Loader2, ChevronDown, Search } from 'lucide-react'
+import MemberAvatar from '@/components/MemberAvatar'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useUpdateActivity, useDeleteActivity, useArchiveActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useTags } from '@/hooks/useTags'
+import TagInput from '@/components/TagInput'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
+
+const PANEL_WIDTH = 300
+
+interface Props {
+  event: ApiActivity | null
+  open: boolean
+  members: Member[]
+  teamId: string
+  timelineId: string
+  onClose: () => void
+  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragStart?: string
+  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragEnd?: string
+}
+
+// ── Small helpers ─────────────────────────────────────────────────────────────
+
+function toDateInput(iso: string): string { return iso.slice(0, 10) }
+function toISODate(d: string): string { return `${d}T00:00:00Z` }
+
+const SEC_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.08em',
+  marginBottom: 6,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.07em',
+  marginBottom: 3,
+  width: 68,
+  flexShrink: 0,
+}
+
+const STUB_VALUE: React.CSSProperties = {
+  fontSize: 12,
+  color: 'var(--muted-foreground)',
+  opacity: 0.5,
+  flex: 1,
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  cursor: 'default',
+  userSelect: 'none',
+}
+
+const DIVIDER: React.CSSProperties = {
+  borderTop: '1px solid var(--border)',
+  margin: '10px 0',
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box' as const,
+  fontSize: 12,
+  color: 'var(--foreground)',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-md)',
+  padding: '5px 8px',
+  outline: 'none',
+  background: 'var(--background)',
+  fontFamily: 'var(--font-sans)',
+}
+
+// ── Rich status dropdown ──────────────────────────────────────────────────────
+
+interface StatusDropdownProps {
+  statuses: Status[]
+  value: string | null | undefined
+  onChange: (id: string | null) => void
+}
+
+function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  const selected = statuses.find(s => s.id === value) ?? null
+
+  return (
+    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 8px',
+          border: '1px solid var(--border)',
+          borderRadius: 6,
+          background: 'var(--background)',
+          color: 'var(--foreground)',
+          cursor: 'pointer',
+          fontSize: 12,
+          fontFamily: 'var(--font-sans)',
+          textAlign: 'left',
+        }}
+      >
+        {selected ? (
+          <>
+            <div
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: resolveColorHex(selected.color) ?? selected.color,
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected.name}
+            </span>
+          </>
+        ) : (
+          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
+        )}
+        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            right: 0,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
+            zIndex: 100,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            onClick={() => { onChange(null); setOpen(false) }}
+            style={{
+              padding: '6px 10px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              fontStyle: 'italic',
+              cursor: 'pointer',
+              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            — No status —
+          </div>
+          {statuses.map(s => (
+            <div
+              key={s.id}
+              onClick={() => { onChange(s.id); setOpen(false) }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 10px',
+                fontSize: 12,
+                cursor: 'pointer',
+                background: s.id === value ? 'var(--muted)' : 'transparent',
+                fontWeight: s.id === value ? 600 : 400,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
+            >
+              <div
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: resolveColorHex(s.color) ?? s.color,
+                  flexShrink: 0,
+                }}
+              />
+              <span style={{ flex: 1 }}>{s.name}</span>
+              {s.isClosed && (
+                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
+                  CLOSED
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Searchable parent activity picker ─────────────────────────────────────────
+
+interface ParentPickerProps {
+  activities: ApiActivity[]
+  value: string | null | undefined
+  onChange: (id: string | null) => void
+}
+
+/**
+ * Searchable combobox for choosing a parent activity. Scales past a plain
+ * <select> by filtering as you type, shows each activity's identity badge,
+ * and ellipsis-truncates long titles so the panel never overflows.
+ */
+function ParentActivityPicker({ activities, value, onChange }: ParentPickerProps) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQuery('') }
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  // Focus the search field whenever the dropdown opens.
+  useEffect(() => { if (open) inputRef.current?.focus() }, [open])
+
+  const selected = activities.find(a => a.id === value) ?? null
+  const filtered = activities.filter(a => a.title.toLowerCase().includes(query.trim().toLowerCase()))
+
+  function choose(id: string | null) {
+    onChange(id)
+    setOpen(false)
+    setQuery('')
+  }
+
+  return (
+    <div ref={ref} style={{ flex: 1, position: 'relative', minWidth: 0 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', gap: 6,
+          padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 6,
+          background: 'var(--background)', color: 'var(--foreground)', cursor: 'pointer',
+          fontSize: 12, fontFamily: 'var(--font-sans)', textAlign: 'left',
+        }}
+      >
+        {selected ? (
+          <>
+            <Badge identity={{ color: selected.color ?? '#288C9B', icon: selected.icon ?? '__none__' }} name={selected.title} size={16} />
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected.title}
+            </span>
+          </>
+        ) : (
+          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— None —</span>
+        )}
+        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)', zIndex: 100, overflow: 'hidden',
+          }}
+        >
+          {/* Search field */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
+            <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search activities…"
+              style={{
+                flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'none',
+                fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
+              }}
+            />
+          </div>
+
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            <div
+              onClick={() => choose(null)}
+              style={{
+                padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
+                fontStyle: 'italic', cursor: 'pointer',
+                borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              — None —
+            </div>
+            {filtered.map(a => (
+              <div
+                key={a.id}
+                onClick={() => choose(a.id)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
+                  fontSize: 12, cursor: 'pointer',
+                  background: a.id === value ? 'var(--muted)' : 'transparent',
+                  fontWeight: a.id === value ? 600 : 400,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
+              >
+                <Badge identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }} name={a.title} size={16} />
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {a.title}
+                </span>
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+                No matching activities
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export default function ActivityDetailPanel({
+  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
+}: Props) {
+  const updateMutation = useUpdateActivity(timelineId)
+  const deleteMutation = useDeleteActivity(timelineId)
+  const archiveMutation = useArchiveActivity(timelineId)
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
+  const { data: teamTags = [] } = useTags(teamId)
+  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
+
+  const [title, setTitle] = useState(event?.title ?? '')
+  const [description, setDescription] = useState(event?.description ?? '')
+  const [notes, setNotes] = useState(event?.notes ?? '')
+  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
+  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: event?.color ?? '#288C9B',
+    icon: event?.icon ?? '__none__',
+  })
+  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
+  const [tagIds, setTagIds] = useState<string[]>((event?.tagIds as string[] | undefined) ?? [])
+  const [location, setLocation] = useState(event?.location ?? '')
+  const [url, setUrl] = useState(event?.url ?? '')
+  const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
+  // Parent and status are mirrored locally so the picker reflects a change
+  // immediately — the `event` prop is a snapshot taken at selection time and
+  // doesn't refresh until the activity is reselected.
+  const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
+  const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
+  // Progress percent renders as a label until clicked; `progressDraft` holds the
+  // in-flight text while editing.
+  const [editingProgress, setEditingProgress] = useState(false)
+  const [progressDraft, setProgressDraft] = useState('')
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // Re-sync when the selected activity changes.
+  useEffect(() => {
+    if (!event) return
+    setTitle(event.title)
+    setDescription(event.description ?? '')
+    setNotes(event.notes ?? '')
+    setStartDate(toDateInput(event.startAt))
+    setEndDate(toDateInput(event.endAt))
+    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
+    setAssignedIds(event.assignedMemberIds ?? [])
+    setTagIds((event.tagIds as string[] | undefined) ?? [])
+    setLocation(event.location ?? '')
+    setUrl(event.url ?? '')
+    setProgressValue(event.percentComplete ?? 0)
+    setParentId(event.parentActivityId ?? null)
+    setStatusId(event.statusId ?? null)
+    setEditingProgress(false)
+    setConfirmDelete(false)
+  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync local date state when the event's dates change (e.g. after a drag commit).
+  const eventStartAt = event?.startAt
+  const eventEndAt = event?.endAt
+  useEffect(() => {
+    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
+    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
+  }, [eventStartAt, eventEndAt])
+
+  const saving = updateMutation.isPending
+  const deleting = deleteMutation.isPending
+  const archiving = archiveMutation.isPending
+
+  // Display dates: live drag overrides take precedence while dragging.
+  const displayStart = liveDragStart ?? startDate
+  const displayEnd = liveDragEnd ?? endDate
+
+  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
+    if (!event) return
+    updateMutation.mutate({ activityId: event.id, patch })
+  }
+
+  function handleTitleBlur() {
+    if (title.trim() && title !== event?.title) save({ title: title.trim() })
+  }
+
+  function handleDescriptionBlur() {
+    if (description !== (event?.description ?? '')) save({ description: description || null })
+  }
+
+  function handleNotesBlur() {
+    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
+  }
+
+  function handleLocationBlur() {
+    if (location !== (event?.location ?? '')) save({ location: location || null })
+  }
+
+  function handleUrlBlur() {
+    if (url !== (event?.url ?? '')) save({ url: url || null })
+  }
+
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val && val <= endDate) save({ startAt: toISODate(val) })
+  }
+
+  function handleEndDateChange(val: string) {
+    setEndDate(val)
+    if (val && val >= startDate) save({ endAt: toISODate(val) })
+  }
+
+  function handleIdentityChange(next: Identity) {
+    setIdentity(next)
+    save({ color: next.color, icon: next.icon })
+  }
+
+  function toggleAssignee(memberId: string) {
+    const next = assignedIds.includes(memberId)
+      ? assignedIds.filter(id => id !== memberId)
+      : [...assignedIds, memberId]
+    setAssignedIds(next)
+    save({ assignedMemberIds: next })
+  }
+
+  function handleTagsChange(ids: string[]) {
+    setTagIds(ids)
+    save({ tagIds: ids } as Parameters<typeof save>[0])
+  }
+
+  function handleProgressChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setProgressValue(Number(e.target.value))
+  }
+
+  // Clamps to 0–100, rounds to an integer, and saves only on a real change.
+  function commitProgress(val: number) {
+    const clamped = Math.max(0, Math.min(100, Math.round(Number.isFinite(val) ? val : 0)))
+    setProgressValue(clamped)
+    if (clamped !== (event?.percentComplete ?? 0)) {
+      save({ percentComplete: clamped } as Parameters<typeof save>[0])
+    }
+  }
+
+  function handleProgressCommit(e: React.ChangeEvent<HTMLInputElement>) {
+    commitProgress(Number(e.target.value))
+  }
+
+  function startEditProgress() {
+    setProgressDraft(String(progressValue))
+    setEditingProgress(true)
+  }
+
+  function commitProgressEdit() {
+    commitProgress(progressDraft === '' ? 0 : Number(progressDraft))
+    setEditingProgress(false)
+  }
+
+  function handleDelete() {
+    if (!event) return
+    deleteMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  function handleArchive() {
+    if (!event) return
+    archiveMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {!event ? null : (<>
+
+        {/* ── Header bar ── */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0 12px', height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)', flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
+            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', color: 'var(--muted-foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <X size={14} strokeWidth={2} />
+          </button>
+        </div>
+
+        {/* ── Scrollable body ── */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
+
+          {/* 1. Identity widget + Title */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
+            <div style={{ marginTop: 2, flexShrink: 0 }}>
+              <IdentityWidget
+                identity={identity}
+                name={title || event?.title || ''}
+                shape="square"
+                onChange={handleIdentityChange}
+              />
+            </div>
+            <input
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              onBlur={handleTitleBlur}
+              style={{
+                flex: 1, fontSize: 13, fontWeight: 600,
+                color: 'var(--foreground)', border: '1px solid transparent',
+                borderRadius: 'var(--radius-md)', padding: '5px 6px',
+                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
+              }}
+              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
+              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
+            />
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 2. When — date pickers only (no allDay checkbox, no date summary) */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>When</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                type="date" value={displayStart}
+                onChange={e => handleStartDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
+              <input
+                type="date" value={displayEnd} min={startDate}
+                onChange={e => handleEndDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 3. Description — below dates, matching create panel */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Description</div>
+            <input
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
+              placeholder="Optional description…"
+              style={{ ...INPUT, padding: '6px 8px' }}
+              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            />
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 4. Assigned to — bordered card style matching create panel */}
+          {members.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={SEC_LABEL}>Assigned to</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {members.map(m => {
+                  const assigned = assignedIds.includes(m.id)
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => toggleAssignee(m.id)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '5px 8px',
+                        border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
+                        borderRadius: 'var(--radius-md)',
+                        background: assigned ? `${m.color}18` : 'var(--background)',
+                        cursor: 'pointer', textAlign: 'left',
+                        transition: 'background 0.1s, border-color 0.1s',
+                      }}
+                    >
+                      <MemberAvatar member={m} size={18} />
+                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
+                      {assigned && (
+                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          <div style={DIVIDER} />
+
+          {/* 5. Classify — Status (rich dropdown), Tags (stub) */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Classify</div>
+
+            {/* Status picker */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Status</span>
+              {statuses.length > 0 ? (
+                <StatusDropdown
+                  statuses={statuses}
+                  value={statusId}
+                  onChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
+                />
+              ) : (
+                <div style={{ ...STUB_VALUE }}>
+                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
+                </div>
+              )}
+            </div>
+
+            {/* Tags */}
+            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+              <span style={{ ...FIELD_LABEL, paddingTop: 5 }}>Tags</span>
+              <TagInput
+                teamId={teamId}
+                tags={teamTags}
+                selectedTagIds={tagIds}
+                onChange={handleTagsChange}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 6. Advanced (was "Details") — Parent, Progress, Location, URL */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Advanced</div>
+
+            {/* Parent activity picker */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Parent</span>
+              <ParentActivityPicker
+                activities={allActivities.filter(a => a.id !== event.id)}
+                value={parentId}
+                onChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
+              />
+            </div>
+
+            {/* % Complete slider */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Progress</span>
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={progressValue}
+                  onChange={handleProgressChange}
+                  onMouseUp={handleProgressCommit as unknown as React.MouseEventHandler}
+                  onTouchEnd={handleProgressCommit as unknown as React.TouchEventHandler}
+                  style={{ flex: 1, cursor: 'pointer', accentColor: 'var(--primary)' }}
+                />
+                {editingProgress ? (
+                  <input
+                    autoFocus
+                    type="text"
+                    inputMode="numeric"
+                    value={progressDraft}
+                    onChange={e => setProgressDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
+                    onBlur={commitProgressEdit}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') commitProgressEdit()
+                      else if (e.key === 'Escape') setEditingProgress(false)
+                    }}
+                    aria-label="Percent complete"
+                    style={{
+                      width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
+                      marginLeft: 'auto',
+                      color: 'var(--foreground)', border: '1px solid var(--primary)',
+                      borderRadius: 4, padding: '2px 4px', outline: 'none',
+                      background: 'var(--background)', fontFamily: 'var(--font-sans)',
+                    }}
+                  />
+                ) : (
+                  <span
+                    onClick={startEditProgress}
+                    title="Click to edit"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEditProgress() } }}
+                    style={{
+                      fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
+                      textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
+                      marginLeft: 'auto',
+                      padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    {progressValue}%
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Location (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Location</span>
+              <input
+                value={location}
+                onChange={e => setLocation(e.target.value)}
+                onBlur={handleLocationBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+
+            {/* URL (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <span style={FIELD_LABEL}>URL</span>
+              <input
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                onBlur={handleUrlBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 7. Notes — multi-line textarea */}
+          <div style={{ marginBottom: 8 }}>
+            <div style={SEC_LABEL}>Notes</div>
+            <textarea
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+              onBlur={e => { handleNotesBlur(); e.target.style.borderColor = 'var(--border)' }}
+              placeholder="Add notes…"
+              rows={4}
+              style={{
+                ...INPUT,
+                padding: '6px 8px',
+                resize: 'vertical',
+                minHeight: 72,
+                lineHeight: 1.5,
+              }}
+              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            />
+          </div>
+
+        </div>
+
+        {/* ── Footer — Archive + Delete buttons ── */}
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+          {confirmDelete ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
+                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
+              </p>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                    background: 'var(--card)', color: 'var(--foreground)',
+                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                  }}
+                >Cancel</button>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: 'none',
+                    background: 'var(--destructive)', color: 'white',
+                    cursor: deleting ? 'not-allowed' : 'pointer',
+                    fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  }}
+                >
+                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                onClick={handleArchive}
+                disabled={archiving}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  fontSize: 12, fontWeight: 600, padding: 7,
+                  borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                  background: 'var(--card)', color: 'var(--muted-foreground)',
+                  cursor: archiving ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-sans)',
+                }}
+              >
+                {archiving ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} strokeWidth={2} />}
+                Archive
+              </button>
+              <button
+                onClick={() => setConfirmDelete(true)}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  fontSize: 12, fontWeight: 600, padding: 7,
+                  borderRadius: 'var(--radius-md)', border: 'none',
+                  background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
+                  cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                }}
+              >
+                <Trash2 size={12} strokeWidth={2} />
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
+
+        </>)}
+      </div>
+    </div>
+  )
+}
 ````
 
 ## File: packages/shared/src/index.ts
