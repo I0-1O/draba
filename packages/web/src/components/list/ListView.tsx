@@ -15,6 +15,7 @@ import { createPortal } from 'react-dom';
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   useRef,
   useCallback,
   useMemo,
@@ -81,12 +82,12 @@ interface ColMeta {
 }
 
 const COL_CATALOG: ColMeta[] = [
-  { id: 'colorBar',    label: '',             defaultVisible: true,  defaultWidth: 24,  editable: false, editType: 'none', noMenu: true },
-  { id: 'identity',    label: 'Identity',     defaultVisible: true,  defaultWidth: 52,  editable: true,  editType: 'identity' },
+  { id: 'colorBar',    label: '',             defaultVisible: true,  defaultWidth: 18,  editable: false, editType: 'none', noMenu: true },
+  { id: 'identity',    label: '',             defaultVisible: true,  defaultWidth: 52,  editable: true,  editType: 'identity' },
   { id: 'title',       label: 'Title',        defaultVisible: true,  defaultWidth: 280, editable: true,  editType: 'text' },
   { id: 'startAt',     label: 'Start',        defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
   { id: 'endAt',       label: 'End',          defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
-  { id: 'duration',    label: 'Duration',     defaultVisible: true,  defaultWidth: 90,  editable: false, editType: 'none' },
+  { id: 'duration',    label: 'Duration',     defaultVisible: false, defaultWidth: 90,  editable: false, editType: 'none' },
   { id: 'status',      label: 'Status',       defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'status' },
   { id: 'assignees',   label: 'Assigned To',  defaultVisible: true,  defaultWidth: 140, editable: true,  editType: 'assignees' },
   { id: 'tags',        label: 'Tags',         defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'tags' },
@@ -206,8 +207,8 @@ function SortableColHeader({ colId, children, style, onSort, sortDir, resizeHand
           <GripVertical size={12} />
         </span>
         <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{children}</span>
-        {sortDir === 'asc' && <span style={{ opacity: 0.7, flexShrink: 0 }}>↑</span>}
-        {sortDir === 'desc' && <span style={{ opacity: 0.7, flexShrink: 0 }}>↓</span>}
+        {sortDir === 'asc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▲</span>}
+        {sortDir === 'desc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▼</span>}
       </div>
       {/* Resize handle — absolutely positioned on right edge */}
       {resizeHandler && (
@@ -576,6 +577,18 @@ function popoverPos(rect: DOMRect, w: number, h: number): { top: number; left: n
   };
 }
 
+// ── Sort helpers ───────────────────────────────────────────────────────────────
+
+function sortByToColId(s: ListSortBy): string {
+  switch (s) {
+    case 'startDate': return 'startAt';
+    case 'endDate':   return 'endAt';
+    case 'title':     return 'title';
+    case 'status':    return 'status';
+    case 'progress':  return 'progress';
+  }
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export default function ListView({
@@ -639,7 +652,12 @@ export default function ListView({
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(DEFAULT_VISIBILITY);
   const [columnOrder, setColumnOrder] = useState<ColumnOrderState>(DEFAULT_COLUMN_ORDER);
   const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(DEFAULT_WIDTHS);
-  const [sorting, setSorting] = useState<SortingState>([]);
+  const [sorting, setSorting] = useState<SortingState>(() => [{ id: sortByToColId(sortBy), desc: false }]);
+
+  // Sync sort column when the toolbar's Sort By control changes
+  useEffect(() => {
+    setSorting([{ id: sortByToColId(sortBy), desc: false }]);
+  }, [sortBy]);
 
   // Apply saved column prefs once after they load
   useEffect(() => {
@@ -728,9 +746,11 @@ export default function ListView({
         id: meta.id,
         header: meta.label,
         size: DEFAULT_WIDTHS[meta.id] ?? 120,
-        minSize: 40,
-        maxSize: 800,
-        enableResizing: true,
+        // colorBar is a fixed-width structural column — lock it so TanStack's
+        // min-size enforcement never stretches it beyond its visual purpose.
+        minSize: meta.id === 'colorBar' ? 18 : 40,
+        maxSize: meta.id === 'colorBar' ? 18 : 800,
+        enableResizing: meta.id !== 'colorBar',
         enableSorting: meta.editType !== 'none' || meta.id === 'duration',
       })),
     [],
@@ -1036,7 +1056,9 @@ export default function ListView({
     if (idx >= 0) setSelectedRowIdx(idx);
   }, [selectedActivityId, activityRows]);
 
-  useEffect(() => {
+  // useLayoutEffect fires synchronously after DOM commit so the focus is set
+  // before any paint — no window in which another element can steal focus.
+  useLayoutEffect(() => {
     if (!editingCell || !editInputRef.current) return;
     const inp = editInputRef.current;
     inp.focus();
@@ -1387,7 +1409,7 @@ export default function ListView({
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  const rowH = 40; // always comfortable
+  const rowH = 48; // always comfortable
 
   const visibleHeaders = table.getHeaderGroups()[0]?.headers ?? [];
 
@@ -1441,6 +1463,9 @@ export default function ListView({
             background: 'var(--card)',
             borderBottom: '1px solid var(--border)',
             flexShrink: 0,
+            position: 'sticky',
+            top: 0,
+            zIndex: 10,
           }}
         >
           <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
@@ -1513,11 +1538,11 @@ export default function ListView({
                       <th
                         key={colId}
                         style={{
-                          width: 24,
+                          width: 18,
                           position: 'sticky',
                           left: pinnedLeft[colId] ?? 0,
                           top: 0,
-                          zIndex: 20,
+                          zIndex: 4, // below TopBar's stacking context (z-index:10) so dropdowns show above headers
                           background: 'var(--card)',
                           borderBottom: '2px solid var(--border)',
                           padding: 0,
@@ -1554,7 +1579,7 @@ export default function ListView({
                         width: header.getSize(),
                         left: isPinned ? pinnedLeft[colId] : undefined,
                         position: 'sticky',
-                        zIndex: isPinned ? 20 : 10,
+                        zIndex: isPinned ? 4 : 3, // below TopBar's z-index:10 stacking context
                         boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
                       }}
                       sortDir={meta?.editType !== 'none' ? sortDir : false}
@@ -1565,7 +1590,7 @@ export default function ListView({
                           return [];
                         });
                       } : undefined}
-                      resizeHandler={header.getResizeHandler() as unknown as (e: React.MouseEvent | React.TouchEvent) => void}
+                      resizeHandler={colId !== 'identity' ? (header.getResizeHandler() as unknown as (e: React.MouseEvent | React.TouchEvent) => void) : undefined}
                       isResizing={header.column.getIsResizing()}
                     >
                       {header.column.columnDef.header as string}
@@ -1680,7 +1705,7 @@ export default function ListView({
                     width: header.getSize(),
                     maxWidth: header.getSize(),
                     padding: '0 8px',
-                    borderBottom: '1px solid var(--border)',
+                    borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
                     fontSize: 12,
                     color: 'var(--foreground)',
                     overflow: 'hidden',
@@ -1688,7 +1713,7 @@ export default function ListView({
                     textOverflow: 'ellipsis',
                     position: isPinned ? 'sticky' : undefined,
                     left: isPinned ? pinnedLeft[colId] : undefined,
-                    zIndex: isPinned ? 5 : undefined,
+                    zIndex: isPinned ? 2 : undefined,
                     background: isPinned
                       ? (isDetailOpen ? 'var(--muted)' : isSelected ? 'color-mix(in srgb, var(--primary) 8%, var(--background))' : 'var(--background)')
                       : undefined,
@@ -1750,19 +1775,18 @@ export default function ListView({
                       <td
                         key={colId}
                         style={{
-                          width: 24,
-                          maxWidth: 24,
+                          width: 18,
+                          maxWidth: 18,
                           padding: 0,
-                          borderBottom: '1px solid var(--border)',
+                          borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
                           position: 'sticky',
                           left: pinnedLeft[colId] ?? 0,
-                          zIndex: 5,
-                          background: accentColor
-                            ?? (isDetailOpen
+                          zIndex: 2, // pinned body cell — below header z-index (4)
+                          background: isDetailOpen
                               ? 'var(--muted)'
                               : isSelected
                               ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
-                              : 'var(--background)'),
+                              : 'var(--background)',
                           cursor: 'default',
                         }}
                         onClick={e => {
@@ -1818,7 +1842,7 @@ export default function ListView({
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                           <Badge
                             identity={{
-                              color: resolveColorHex(activity.color ?? null) ?? '#288C9B',
+                              color: getRowAccentColor(activity) ?? resolveColorHex(activity.color ?? null) ?? '#288C9B',
                               icon: activity.icon ?? '__name_2__',
                             }}
                             name={activity.title}

@@ -48,7 +48,7 @@ export default function TopBar({
   const { findBarOpen, setFindBarOpen } = useFind();
 
   return (
-    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-10">
+    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-40">
       {/* Left zone: view switcher */}
       <div className="flex items-center justify-start shrink-0">
         <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
