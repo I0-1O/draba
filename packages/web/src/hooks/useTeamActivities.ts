@@ -179,6 +179,8 @@ interface CreateActivityInput {
   tagIds?: string[]
   parentActivityId?: string | null
   percentComplete?: number | null
+  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
+  _tempId?: string
 }
 
 interface UpdateActivityInput {
@@ -209,18 +211,30 @@ export function useCreateActivity(teamId: string, timelineId: string) {
   const client = useQueryClient()
 
   return useMutation({
-    mutationFn: (input: CreateActivityInput) =>
+    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
       authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
         method: 'POST',
         body: JSON.stringify(input),
       }),
-    onSuccess: (created) => {
+    onSuccess: (created, variables) => {
+      const tempId = variables._tempId
       client.setQueriesData<Activity[]>(
         { queryKey: ['timelines', timelineId, 'activities'] },
         (old) => {
-          if (!old) return old
-          // WS self-echo may also insert this activity; deduplicate by id.
-          if (old.some((a) => a.id === created.id)) return old
+          if (!old) return [created]
+          const hasReal = old.some((a) => a.id === created.id)
+          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
+          // The WS activity.created self-echo may win the race and append the
+          // real record before this onSuccess runs. In that case we must still
+          // drop the optimistic placeholder, otherwise it lingers as a duplicate
+          // "New Activity" row (and inline edits keep targeting the dead temp id).
+          if (hasReal) {
+            return hasTemp ? old.filter((a) => a.id !== tempId) : old
+          }
+          // Replace optimistic placeholder in-place to avoid a position flash.
+          if (hasTemp) {
+            return old.map((a) => (a.id === tempId ? created : a))
+          }
           return [...old, created]
         },
       )

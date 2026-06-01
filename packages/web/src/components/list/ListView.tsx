@@ -47,6 +47,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { ChevronRight, ChevronDown, GripVertical, Search, Trash2, Archive, Check } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useTimelineActivities, useTeamMembers, useUpdateActivity, useCreateActivity, useDeleteActivity, useArchiveActivity } from '@/hooks/useTeamActivities';
 import { usePreferenceMap, useUpsertPreference, usePreferences } from '@/hooks/usePreferences';
 import { useFilter } from '@/contexts/FilterContext';
@@ -693,6 +694,7 @@ export default function ListView({
   const { debouncedQuery, registerMatches, matchedIds, activeMatchId } = useFind();
 
   // ── Data fetching ──────────────────────────────────────────────────────────
+  const queryClient = useQueryClient();
   const { data: rawActivities = [] } = useTimelineActivities(teamId, timelineId);
   const { data: rawMembers = [] } = useTeamMembers(teamId);
   const update = useUpdateActivity(timelineId);
@@ -1130,6 +1132,9 @@ export default function ListView({
     value: string;
   } | null>(null);
   const editInputRef = useRef<HTMLInputElement | null>(null);
+  // Tracks which cell is currently open so the layout effect only focuses/selects
+  // on initial open, not on every value change while typing.
+  const editCellKeyRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // When a new activity is selected externally, sync row idx
@@ -1141,9 +1146,26 @@ export default function ListView({
 
   // useLayoutEffect fires synchronously after DOM commit so the focus is set
   // before any paint — no window in which another element can steal focus.
+  // Guard: only focus/select when the *cell* changes (new rowIdx:colIdx), not
+  // when the value changes while the user is typing — otherwise inp.select()
+  // would re-select-all after every keystroke, leaving only the last character.
   useLayoutEffect(() => {
-    if (!editingCell || !editInputRef.current) return;
+    if (!editingCell) {
+      editCellKeyRef.current = null;
+      return;
+    }
+    // Include the row's activity id in the key so that when an optimistic row
+    // (optimistic_…) is swapped for its real record at the same index, React
+    // remounts the <tr> (keyed by activity.id) and destroys the focused input —
+    // the changed id forces us to re-focus the freshly mounted input rather than
+    // skip it as a value-only change.
+    const rowId = activityRows[editingCell.rowIdx]?.activity.id ?? '';
+    const cellKey = `${rowId}:${editingCell.colIdx}`;
+    if (editCellKeyRef.current === cellKey) return; // value-only change — skip
+    editCellKeyRef.current = cellKey;
+
     const inp = editInputRef.current;
+    if (!inp) return;
     inp.focus();
     inp.scrollIntoView({ block: 'nearest' });
     const colId = visibleColIds[editingCell.colIdx];
@@ -1158,7 +1180,7 @@ export default function ListView({
     } else {
       inp.select();
     }
-  }, [editingCell]); // visibleColIds intentionally excluded — always current in this render cycle
+  }, [editingCell, activityRows]); // visibleColIds intentionally excluded — always current in this render cycle
 
   // Visible column ids, in the SAME order the cells are rendered.
   //
@@ -1181,6 +1203,14 @@ export default function ListView({
       const row = activityRows[rowIdx];
       if (!row) return;
       const a = row.activity;
+
+      // Optimistic row not yet confirmed by server — queue title and return.
+      if (a.id.startsWith('optimistic_')) {
+        if (colId === 'title' && value.trim()) {
+          pendingTitleAfterCreate.current = value.trim();
+        }
+        return;
+      }
 
       const patch: Partial<ApiActivity> & { notes?: string | null } = {};
       if (colId === 'title' && value.trim() !== '') patch.title = value.trim();
@@ -1357,18 +1387,69 @@ export default function ListView({
     [editingCell, selectedRowIdx, selectedColIdx, activityRows, visibleColIds, enterEdit],
   );
 
-  // When triggerNewRow increments, create a new "New Activity" row and queue title edit
+  // When triggerNewRow increments, optimistically insert a row and focus the title input
+  // immediately — no network round-trip before the UI responds.
   useEffect(() => {
     if (!triggerNewRow || triggerNewRow === prevTriggerNewRow.current) return;
     prevTriggerNewRow.current = triggerNewRow;
     const today = new Date().toISOString().slice(0, 10);
+    const startAt = `${today}T00:00:00Z`;
+    const now = new Date().toISOString();
+    const tempId = `optimistic_${Date.now()}`;
+    const optimisticActivity: ApiActivity = {
+      id: tempId,
+      timelineId,
+      title: 'New Activity',
+      startAt,
+      endAt: startAt,
+      allDay: false,
+      createdBy: '',
+      createdAt: now,
+      updatedAt: now,
+      description: null,
+      notes: null,
+      icon: null,
+      color: null,
+      statusId: null,
+      parentActivityId: null,
+      percentComplete: null,
+      location: null,
+      url: null,
+      archivedAt: null,
+      assignedMemberIds: [],
+      tagIds: [],
+    };
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => (old ? [...old, optimisticActivity] : [optimisticActivity]),
+    );
+    pendingEditActivityId.current = tempId;
     create.mutate(
-      { title: 'New Activity', startAt: `${today}T00:00:00Z`, endAt: `${today}T00:00:00Z` },
-      { onSuccess: (created) => { pendingEditActivityId.current = created.id; } },
+      { title: 'New Activity', startAt, endAt: startAt, _tempId: tempId },
+      {
+        onSuccess: (created) => {
+          if (pendingTitleAfterCreate.current !== null) {
+            const queued = pendingTitleAfterCreate.current;
+            pendingTitleAfterCreate.current = null;
+            if (queued && queued !== 'New Activity') {
+              update.mutate({ activityId: created.id, patch: { title: queued } });
+            }
+          }
+        },
+        onError: () => {
+          queryClient.setQueriesData<ApiActivity[]>(
+            { queryKey: ['timelines', timelineId, 'activities'] },
+            (old) => (old ? old.filter(a => a.id !== tempId) : []),
+          );
+          // Discard any queued title so it can't leak into the next create.
+          pendingTitleAfterCreate.current = null;
+          setEditingCell(null);
+        },
+      },
     );
   }, [triggerNewRow]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // After a new activity appears in activityRows, enter title-edit mode on it
+  // After an activity (including an optimistic one) appears in activityRows, enter title-edit mode on it.
   useEffect(() => {
     if (!pendingEditActivityId.current) return;
     const rowIdx = activityRows.findIndex(r => r.activity.id === pendingEditActivityId.current);
@@ -1473,10 +1554,12 @@ export default function ListView({
     setContextMenuPos(null);
   }, []);
 
-  // Holds the ID of a newly created activity that should enter title-edit mode
+  // Holds the ID of a newly created activity (or optimistic temp ID) waiting to enter title-edit mode
   const pendingEditActivityId = useRef<string | null>(null);
   // Guards against re-firing triggerNewRow on re-renders
   const prevTriggerNewRow = useRef<number>(0);
+  // Title typed while the row is still optimistic — flushed to the server once the real ID arrives
+  const pendingTitleAfterCreate = useRef<string | null>(null);
 
   // ── Multi-select delete / archive ─────────────────────────────────────────
 
