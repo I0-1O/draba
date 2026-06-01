@@ -89,6 +89,20 @@ func (r *ActivityRepo) Delete(id string) error {
 	return nil
 }
 
+// ClearParentRefs clears parent_activity_id on all activities that reference id
+// as their parent. Called before deleting or archiving the parent so children
+// do not retain a dangling reference.
+func (r *ActivityRepo) ClearParentRefs(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE activities SET parent_activity_id = NULL, updated_at = ? WHERE parent_activity_id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("clearing parent refs for %s: %w", id, err)
+	}
+	return nil
+}
+
 // SetArchived sets or clears archived_at on an activity. Pass a non-nil time
 // to archive; pass nil to unarchive.
 func (r *ActivityRepo) SetArchived(id string, at *time.Time) error {

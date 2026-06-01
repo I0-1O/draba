@@ -46,8 +46,8 @@ import {
   arrayMove,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { ChevronRight, ChevronDown, GripVertical, Search, Trash2 } from 'lucide-react';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity, useCreateActivity, useDeleteActivity } from '@/hooks/useTeamActivities';
+import { ChevronRight, ChevronDown, GripVertical, Search, Trash2, Archive, Check } from 'lucide-react';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity, useCreateActivity, useDeleteActivity, useArchiveActivity } from '@/hooks/useTeamActivities';
 import { usePreferenceMap, useUpsertPreference, usePreferences } from '@/hooks/usePreferences';
 import { useFilter } from '@/contexts/FilterContext';
 import { useFind } from '@/contexts/FindContext';
@@ -563,6 +563,88 @@ function ParentPicker({
   );
 }
 
+// ── Row context menu ───────────────────────────────────────────────────────────
+
+function ContextMenu({
+  pos,
+  onArchive,
+  onDelete,
+  onClose,
+}: {
+  pos: { top: number; left: number };
+  onArchive: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    function keyHandler(e: globalThis.KeyboardEvent) {
+      if (e.key === 'Escape') onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('keydown', keyHandler);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('keydown', keyHandler);
+    };
+  }, []);
+
+  // Clamp so menu doesn't overflow viewport
+  const menuW = 160;
+  const menuH = 80;
+  const left = Math.min(pos.left, window.innerWidth - menuW - 8);
+  const top = pos.top + menuH > window.innerHeight ? pos.top - menuH : pos.top;
+
+  const itemStyle: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '7px 12px', fontSize: 12, cursor: 'pointer',
+    color: 'var(--foreground)', background: 'transparent',
+    border: 'none', width: '100%', textAlign: 'left',
+    fontFamily: 'var(--font-sans)',
+  };
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: 'fixed', top, left,
+        zIndex: 9999,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: menuW,
+        padding: '4px 0',
+      }}
+    >
+      <button
+        style={itemStyle}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        onClick={onArchive}
+      >
+        <Archive size={13} strokeWidth={2} style={{ flexShrink: 0 }} />
+        Archive
+      </button>
+      <button
+        style={{ ...itemStyle, color: 'var(--destructive)' }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        onClick={onDelete}
+      >
+        <Trash2 size={13} strokeWidth={2} style={{ flexShrink: 0 }} />
+        Delete
+      </button>
+    </div>
+  );
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /** Position a popover below a cell, flipping above if there isn't enough space below. */
@@ -616,6 +698,7 @@ export default function ListView({
   const update = useUpdateActivity(timelineId);
   const create = useCreateActivity(teamId, timelineId);
   const deleteAct = useDeleteActivity(timelineId);
+  const archiveAct = useArchiveActivity(timelineId);
 
   useEffect(() => {
     if (rawMembers.length > 0 && onMembersLoaded) {
@@ -1373,19 +1456,47 @@ export default function ListView({
   const [selectedActivityIds, setSelectedActivityIds] = useState<Set<string>>(new Set());
   const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
 
+  // Toast notification
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((msg: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 2600);
+  }, []);
+
+  // Right-click context menu
+  const [contextMenuFor, setContextMenuFor] = useState<string | null>(null);
+  const [contextMenuPos, setContextMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const closeContextMenu = useCallback(() => {
+    setContextMenuFor(null);
+    setContextMenuPos(null);
+  }, []);
+
   // Holds the ID of a newly created activity that should enter title-edit mode
   const pendingEditActivityId = useRef<string | null>(null);
   // Guards against re-firing triggerNewRow on re-renders
   const prevTriggerNewRow = useRef<number>(0);
 
-  // ── Multi-select delete ────────────────────────────────────────────────────
+  // ── Multi-select delete / archive ─────────────────────────────────────────
 
   const handleDeleteSelected = useCallback(() => {
-    for (const id of Array.from(selectedActivityIds)) {
+    const ids = Array.from(selectedActivityIds);
+    for (const id of ids) {
       deleteAct.mutate(id);
     }
     setSelectedActivityIds(new Set());
-  }, [selectedActivityIds, deleteAct]); // eslint-disable-line react-hooks/exhaustive-deps
+    showToast(`${ids.length} ${ids.length === 1 ? 'activity' : 'activities'} deleted`);
+  }, [selectedActivityIds, deleteAct, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleArchiveSelected = useCallback(() => {
+    const ids = Array.from(selectedActivityIds);
+    for (const id of ids) {
+      archiveAct.mutate(id);
+    }
+    setSelectedActivityIds(new Set());
+    showToast(`${ids.length} ${ids.length === 1 ? 'activity' : 'activities'} archived`);
+  }, [selectedActivityIds, archiveAct, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── DnD column reorder ─────────────────────────────────────────────────────
 
@@ -1471,6 +1582,18 @@ export default function ListView({
           <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
             {selectedActivityIds.size} selected
           </span>
+          <button
+            onClick={handleArchiveSelected}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
+              background: 'var(--card)', color: 'var(--foreground)',
+              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
+            }}
+          >
+            <Archive size={12} />
+            Archive
+          </button>
           <button
             onClick={handleDeleteSelected}
             style={{
@@ -1690,6 +1813,11 @@ export default function ListView({
                   setSelectedRowIdx(actRowIdx);
                   onSelectActivity?.(activity.id);
                   // intentionally no onSelectApiActivity — edits happen inline
+                }}
+                onContextMenu={e => {
+                  e.preventDefault();
+                  setContextMenuFor(activity.id);
+                  setContextMenuPos({ top: e.clientY, left: e.clientX });
                 }}
               >
                 {visibleHeaders.map((header, colIdx) => {
@@ -2270,6 +2398,54 @@ export default function ListView({
           document.body,
         );
       })()}
+
+      {/* Row context menu portal */}
+      {contextMenuFor && contextMenuPos && createPortal(
+        <ContextMenu
+          pos={contextMenuPos}
+          onArchive={() => {
+            archiveAct.mutate(contextMenuFor, {
+              onSuccess: () => showToast('Activity archived'),
+            });
+            closeContextMenu();
+          }}
+          onDelete={() => {
+            deleteAct.mutate(contextMenuFor, {
+              onSuccess: () => showToast('Activity deleted'),
+            });
+            closeContextMenu();
+            if (contextMenuFor === selectedActivityId) onSelectActivity?.(null);
+          }}
+          onClose={closeContextMenu}
+        />,
+        document.body,
+      )}
+
+      {/* Toast notification */}
+      {toast && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: 20,
+            right: 20,
+            zIndex: 9999,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            padding: '8px 14px',
+            fontSize: 12,
+            color: 'var(--foreground)',
+            boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            pointerEvents: 'none',
+          }}
+        >
+          <Check size={13} strokeWidth={2.5} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+          {toast}
+        </div>
+      )}
     </div>
   );
 }

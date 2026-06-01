@@ -417,6 +417,10 @@ func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, arch
 	if archive {
 		now := time.Now().UTC()
 		at = &now
+		if err := s.activities.ClearParentRefs(activityID); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+			return
+		}
 	}
 	if err := s.activities.SetArchived(activityID, at); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
@@ -470,6 +474,10 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.activities.ClearParentRefs(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
 	if err := s.activities.Delete(activityID); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
 		return

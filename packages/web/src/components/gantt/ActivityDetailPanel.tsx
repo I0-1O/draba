@@ -16,13 +16,13 @@
  */
 
 import { useState, useEffect, useRef } from 'react'
-import { X, Trash2, ArrowRight, Loader2, ChevronDown, Search } from 'lucide-react'
+import { X, Trash2, Archive, ArrowRight, Loader2, ChevronDown, Search } from 'lucide-react'
 import MemberAvatar from '@/components/MemberAvatar'
 import { IdentityWidget } from '@/components/identity/IdentityWidget'
 import { Badge } from '@/components/identity/Badge'
 import { resolveColorHex } from '@/components/identity/identity-constants'
 import type { Identity } from '@/components/identity/identity-constants'
-import { useUpdateActivity, useDeleteActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
+import { useUpdateActivity, useDeleteActivity, useArchiveActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
 import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
 import { useTags } from '@/hooks/useTags'
 import TagInput from '@/components/TagInput'
@@ -372,6 +372,7 @@ export default function ActivityDetailPanel({
 }: Props) {
   const updateMutation = useUpdateActivity(timelineId)
   const deleteMutation = useDeleteActivity(timelineId)
+  const archiveMutation = useArchiveActivity(timelineId)
   const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
   const { data: teamTags = [] } = useTags(teamId)
   const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
@@ -431,6 +432,7 @@ export default function ActivityDetailPanel({
 
   const saving = updateMutation.isPending
   const deleting = deleteMutation.isPending
+  const archiving = archiveMutation.isPending
 
   // Display dates: live drag overrides take precedence while dragging.
   const displayStart = liveDragStart ?? startDate
@@ -519,6 +521,11 @@ export default function ActivityDetailPanel({
   function handleDelete() {
     if (!event) return
     deleteMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  function handleArchive() {
+    if (!event) return
+    archiveMutation.mutate(event.id, { onSuccess: onClose })
   }
 
   return (
@@ -824,7 +831,7 @@ export default function ActivityDetailPanel({
 
         </div>
 
-        {/* ── Footer — Delete button ── */}
+        {/* ── Footer — Archive + Delete buttons ── */}
         <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
           {confirmDelete ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -860,19 +867,35 @@ export default function ActivityDetailPanel({
               </div>
             </div>
           ) : (
-            <button
-              onClick={() => setConfirmDelete(true)}
-              style={{
-                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                fontSize: 12, fontWeight: 600, padding: 7,
-                borderRadius: 'var(--radius-md)', border: 'none',
-                background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
-                cursor: 'pointer', fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <Trash2 size={12} strokeWidth={2} />
-              Delete activity
-            </button>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                onClick={handleArchive}
+                disabled={archiving}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  fontSize: 12, fontWeight: 600, padding: 7,
+                  borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                  background: 'var(--card)', color: 'var(--muted-foreground)',
+                  cursor: archiving ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-sans)',
+                }}
+              >
+                {archiving ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} strokeWidth={2} />}
+                Archive
+              </button>
+              <button
+                onClick={() => setConfirmDelete(true)}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  fontSize: 12, fontWeight: 600, padding: 7,
+                  borderRadius: 'var(--radius-md)', border: 'none',
+                  background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
+                  cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                }}
+              >
+                <Trash2 size={12} strokeWidth={2} />
+                Delete
+              </button>
+            </div>
           )}
         </div>
 

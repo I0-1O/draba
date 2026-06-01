@@ -68,6 +68,108 @@ func TestArchiveActivity_HiddenByDefaultRestorableWithFlag(t *testing.T) {
 	require.Len(t, afterUnarchive, 1)
 }
 
+func TestDeleteActivity_ClearsParentRefs(t *testing.T) {
+	srv, token, teamID, timelineID := activityTestSetup(t)
+
+	// Create parent activity.
+	wp := httptest.NewRecorder()
+	srv.ServeHTTP(wp, authReq(http.MethodPost, activityURL(teamID, timelineID), map[string]any{
+		"title":   "Parent",
+		"startAt": "2026-05-05T09:00:00Z",
+		"endAt":   "2026-05-05T10:00:00Z",
+	}, token))
+	require.Equal(t, http.StatusCreated, wp.Code)
+	var parent map[string]any
+	require.NoError(t, json.NewDecoder(wp.Body).Decode(&parent))
+	parentID := parent["id"].(string)
+
+	// Create child referencing parent.
+	wc := httptest.NewRecorder()
+	srv.ServeHTTP(wc, authReq(http.MethodPost, activityURL(teamID, timelineID), map[string]any{
+		"title":            "Child",
+		"startAt":          "2026-05-05T09:00:00Z",
+		"endAt":            "2026-05-05T10:00:00Z",
+		"parentActivityId": parentID,
+	}, token))
+	require.Equal(t, http.StatusCreated, wc.Code)
+	var child map[string]any
+	require.NoError(t, json.NewDecoder(wc.Body).Decode(&child))
+	childID := child["id"].(string)
+
+	// Delete parent.
+	wd := httptest.NewRecorder()
+	srv.ServeHTTP(wd, authReq(http.MethodDelete, "/activities/"+parentID, nil, token))
+	require.Equal(t, http.StatusNoContent, wd.Code)
+
+	// Patch child to read its current state (use PATCH with no-op to get current data).
+	// Actually use PATCH to get current value — but we don't have a GET /activities/:id.
+	// List activities and find the child.
+	wl := httptest.NewRecorder()
+	srv.ServeHTTP(wl, authReq(http.MethodGet, activityURL(teamID, timelineID), nil, token))
+	require.Equal(t, http.StatusOK, wl.Code)
+	var acts []map[string]any
+	require.NoError(t, json.NewDecoder(wl.Body).Decode(&acts))
+	var found map[string]any
+	for _, a := range acts {
+		if a["id"] == childID {
+			found = a
+			break
+		}
+	}
+	require.NotNil(t, found, "child activity still exists")
+	assert.Nil(t, found["parentActivityId"], "parent ref cleared after parent delete")
+}
+
+func TestArchiveActivity_ClearsParentRefs(t *testing.T) {
+	srv, token, teamID, timelineID := activityTestSetup(t)
+
+	// Create parent activity.
+	wp := httptest.NewRecorder()
+	srv.ServeHTTP(wp, authReq(http.MethodPost, activityURL(teamID, timelineID), map[string]any{
+		"title":   "Parent",
+		"startAt": "2026-05-05T09:00:00Z",
+		"endAt":   "2026-05-05T10:00:00Z",
+	}, token))
+	require.Equal(t, http.StatusCreated, wp.Code)
+	var parent map[string]any
+	require.NoError(t, json.NewDecoder(wp.Body).Decode(&parent))
+	parentID := parent["id"].(string)
+
+	// Create child referencing parent.
+	wc := httptest.NewRecorder()
+	srv.ServeHTTP(wc, authReq(http.MethodPost, activityURL(teamID, timelineID), map[string]any{
+		"title":            "Child",
+		"startAt":          "2026-05-05T09:00:00Z",
+		"endAt":            "2026-05-05T10:00:00Z",
+		"parentActivityId": parentID,
+	}, token))
+	require.Equal(t, http.StatusCreated, wc.Code)
+	var child map[string]any
+	require.NoError(t, json.NewDecoder(wc.Body).Decode(&child))
+	childID := child["id"].(string)
+
+	// Archive parent.
+	wa := httptest.NewRecorder()
+	srv.ServeHTTP(wa, authReq(http.MethodPost, "/activities/"+parentID+"/archive", nil, token))
+	require.Equal(t, http.StatusOK, wa.Code)
+
+	// List activities (excludes archived by default) and check child has no parent ref.
+	wl := httptest.NewRecorder()
+	srv.ServeHTTP(wl, authReq(http.MethodGet, activityURL(teamID, timelineID), nil, token))
+	require.Equal(t, http.StatusOK, wl.Code)
+	var acts []map[string]any
+	require.NoError(t, json.NewDecoder(wl.Body).Decode(&acts))
+	var found map[string]any
+	for _, a := range acts {
+		if a["id"] == childID {
+			found = a
+			break
+		}
+	}
+	require.NotNil(t, found, "child activity still exists")
+	assert.Nil(t, found["parentActivityId"], "parent ref cleared after parent archive")
+}
+
 func TestArchiveTimeline_HiddenByDefault(t *testing.T) {
 	srv, token, teamID := timelineTestSetup(t)
 
